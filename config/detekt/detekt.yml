@@ -1,0 +1,35 @@
+complexity:
+  LongMethod:
+    threshold: 50
+  LongParameterList:
+    functionThreshold: 8
+    constructorThreshold: 10
+  ComplexMethod:
+    threshold: 15
+  LargeClass:
+    threshold: 800
+  TooManyFunctions:
+    threshold: 30
+
+style:
+  MaxLineLength:
+    maxLineLength: 120
+  MagicNumber:
+    active: false
+  ReturnCount:
+    max: 3
+  NestedBlockDepth:
+    max: 4
+
+naming:
+  FunctionNaming:
+    functionPattern: '[a-z][a-zA-Z0-9]*'
+    ignoreAnnotated: ['Composable']
+
+exceptions:
+  TooGenericExceptionCaught:
+    active: false
+  SwallowedException:
+    active: true
+  EmptyCatchBlock:
+    active: true

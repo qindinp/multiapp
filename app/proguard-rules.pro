@@ -1,0 +1,4 @@
+-keep class dagger.hilt.** { *; }
+-keep class com.multiapp.core.model.** { *; }
+-keep class org.lsposed.lsplant.** { *; }
+-keep class com.bytedance.shadowhook.** { *; }

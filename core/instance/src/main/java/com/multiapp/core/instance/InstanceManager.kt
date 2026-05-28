@@ -1,0 +1,297 @@
+package com.multiapp.core.instance
+
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import com.multiapp.core.identity.DeviceIdentityPool
+import com.multiapp.core.identity.IdentityConfig
+import com.multiapp.core.installer.StubInstaller
+import com.multiapp.core.manifest.ComponentExtractor
+import com.multiapp.core.manifest.DeviceIdentityConfig
+import com.multiapp.core.manifest.ManifestParser
+import com.multiapp.core.manifest.StubConfig
+import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.stub.StubBuilder
+import com.google.gson.Gson
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
+import timber.log.Timber
+import java.io.File
+import javax.inject.Inject
+import javax.inject.Singleton
+
+/**
+ * 实例生命周期管理
+ * 创建、启动、停止、删除分身实例
+ */
+@Singleton
+class InstanceManager @Inject constructor(
+    private val instanceDatabase: InstanceDatabase,
+    private val stubBuilder: StubBuilder,
+    private val stubInstaller: StubInstaller,
+    @ApplicationContext private val context: Context
+) {
+    private val _instances = MutableStateFlow<List<InstanceInfo>>(emptyList())
+    val instances: StateFlow<List<InstanceInfo>> = _instances.asStateFlow()
+
+    private val gson = Gson()
+    private val parser = ManifestParser()
+    private val extractor = ComponentExtractor()
+
+    /**
+     * 创建分身实例
+     *
+     * 流程:
+     * 1. 生成 instanceId
+     * 2. 用 DeviceIdentityPool 生成设备身份
+     * 3. 用 ManifestParser 解析原始 APK
+     * 4. 用 ComponentExtractor 提取 launcher Activity
+     * 5. 构建 StubConfig
+     * 6. 用 StubBuilder.build() 构建 Stub APK
+     * 7. 用 StubInstaller.install() 安装
+     * 8. 创建 InstanceEntity 保存到数据库
+     * 9. 更新 _instances StateFlow
+     *
+     * @param app 要创建分身的虚拟应用
+     * @return 新创建实例的 instanceId
+     * @throws RuntimeException 如果安装失败
+     * @throws IllegalArgumentException 如果原始 APK 不存在或无 launcher Activity
+     */
+    suspend fun createInstance(app: VirtualApp): String = withContext(Dispatchers.IO) {
+        Timber.d("InstanceManager: creating instance for ${app.packageName}")
+        val instanceId = "stub_${System.currentTimeMillis()}"
+
+        // 1. 生成设备身份 (DeviceIdentityPool 是 object 单例，直接调用)
+        val identity = DeviceIdentityPool.generateIdentity(instanceId, app.packageName)
+        Timber.d("InstanceManager: generated identity, stubPackage=${identity.stubPackageName}")
+
+        // 2. 解析原始 APK manifest
+        val originApkFile = File(app.apkPath)
+        require(originApkFile.exists()) { "Origin APK not found: ${app.apkPath}" }
+        val manifest = parser.parse(originApkFile)
+        Timber.d("InstanceManager: parsed manifest, ${manifest.activities.size} activities")
+
+        // 3. 提取 launcher Activity
+        val launcherActivity = extractor.extractLauncherActivity(manifest)
+            ?: error("No launcher activity found in ${app.packageName}")
+        Timber.d("InstanceManager: launcher activity = ${launcherActivity.name}")
+
+        // 4. 将 IdentityConfig 转换为 StubConfig 所需的 DeviceIdentityConfig
+        val deviceIdentityConfig = DeviceIdentityConfig(
+            imei = identity.imei,
+            androidId = identity.androidId,
+            macAddress = identity.macAddress,
+            serial = identity.serial,
+            buildModel = identity.buildModel,
+            buildManufacturer = identity.buildManufacturer,
+            buildFingerprint = identity.buildFingerprint,
+            buildBrand = identity.buildBrand,
+            buildDevice = identity.buildDevice,
+            buildProduct = identity.buildProduct,
+            versionRelease = identity.versionRelease,
+            sdkInt = identity.sdkInt
+        )
+
+        // 5. DEX Patch (可选 — 对加固 APK 执行检测代码删除)
+        val patchedDexPaths = runDexPatch(originApkFile, instanceId)
+
+        // 6. 构建 StubConfig (originalSignatures 存放 originApk 路径)
+        val stubConfig = StubConfig(
+            instanceId = instanceId,
+            stubPackageName = identity.stubPackageName,
+            originalPackageName = app.packageName,
+            launchActivity = launcherActivity.name,
+            originalSignatures = listOf(app.apkPath),
+            authorityMap = identity.authorityMap,
+            deviceIdentity = deviceIdentityConfig,
+            patchedDexPaths = patchedDexPaths
+        )
+
+        // 7. 构建 Stub APK
+        val stubApk = stubBuilder.build(stubConfig)
+        Timber.d("InstanceManager: stub APK built at ${stubApk.absolutePath}")
+
+        // 8. 安装 Stub
+        val installResult = stubInstaller.install(stubApk)
+        when (installResult) {
+            is StubInstaller.InstallResult.Success -> {
+                Timber.d("InstanceManager: stub installed successfully")
+            }
+            is StubInstaller.InstallResult.Error -> {
+                Timber.e("InstanceManager: stub install failed: ${installResult.message}")
+                throw RuntimeException("Stub install failed: ${installResult.message}")
+            }
+        }
+
+        // 9. 保存实例信息到数据库
+        val identityJson = gson.toJson(identity)
+        val now = System.currentTimeMillis()
+        val entity = InstanceEntity(
+            instanceId = instanceId,
+            originalPackageName = app.packageName,
+            stubPackageName = identity.stubPackageName,
+            identityJson = identityJson,
+            createdAt = now,
+            status = InstanceStatus.READY.name
+        )
+        instanceDatabase.instanceDao().insert(entity)
+        Timber.d("InstanceManager: instance saved to database")
+
+        // 10. 更新 StateFlow
+        val info = InstanceInfo(
+            instanceId = instanceId,
+            originalPackageName = app.packageName,
+            stubPackageName = identity.stubPackageName,
+            identity = identity,
+            createdAt = now,
+            status = InstanceStatus.READY
+        )
+        _instances.value = _instances.value + info
+
+        Timber.d("InstanceManager: instance created successfully, id=$instanceId")
+        instanceId
+    }
+
+    /**
+     * 删除分身实例
+     *
+     * 流程:
+     * 1. 从数据库查找实例
+     * 2. 通过 Intent 卸载 Stub 包
+     * 3. 从数据库删除记录
+     * 4. 更新 _instances StateFlow
+     *
+     * @param instanceId 要删除的实例 ID
+     * @throws IllegalArgumentException 如果实例不存在
+     */
+    suspend fun deleteInstance(instanceId: String) = withContext(Dispatchers.IO) {
+        Timber.d("InstanceManager: deleting $instanceId")
+
+        // 1. 从数据库查找实例
+        val entity = instanceDatabase.instanceDao().getById(instanceId)
+            ?: throw IllegalArgumentException("Instance not found: $instanceId")
+
+        // 2. 卸载 Stub 包
+        try {
+            val intent = Intent(Intent.ACTION_DELETE).apply {
+                data = Uri.parse("package:${entity.stubPackageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            Timber.d("InstanceManager: uninstall initiated for ${entity.stubPackageName}")
+        } catch (e: Exception) {
+            Timber.e(e, "InstanceManager: failed to uninstall ${entity.stubPackageName}")
+            // 卸载失败不阻断流程，仍需清理数据库记录
+        }
+
+        // 3. 从数据库删除
+        instanceDatabase.instanceDao().deleteById(instanceId)
+        Timber.d("InstanceManager: instance removed from database")
+
+        // 4. 更新 StateFlow
+        _instances.value = _instances.value.filter { it.instanceId != instanceId }
+
+        Timber.d("InstanceManager: instance deleted successfully, id=$instanceId")
+    }
+
+    /**
+     * 从数据库加载所有实例
+     *
+     * 读取 InstanceEntity 列表，反序列化 IdentityConfig，
+     * 转换为 InstanceInfo 并更新 StateFlow。
+     */
+    suspend fun loadInstances() = withContext(Dispatchers.IO) {
+        Timber.d("InstanceManager: loading instances from database")
+
+        val entities = instanceDatabase.instanceDao().observeAll().first()
+        val infos = entities.mapNotNull { entity ->
+            try {
+                val identity = gson.fromJson(entity.identityJson, IdentityConfig::class.java)
+                InstanceInfo(
+                    instanceId = entity.instanceId,
+                    originalPackageName = entity.originalPackageName,
+                    stubPackageName = entity.stubPackageName,
+                    identity = identity,
+                    createdAt = entity.createdAt,
+                    status = try {
+                        InstanceStatus.valueOf(entity.status)
+                    } catch (_: Exception) {
+                        InstanceStatus.ERROR
+                    }
+                )
+            } catch (e: Exception) {
+                Timber.e(e, "InstanceManager: failed to parse instance ${entity.instanceId}")
+                null
+            }
+        }
+
+        _instances.value = infos
+        Timber.d("InstanceManager: loaded ${infos.size} instances")
+    }
+
+    /**
+     * 对原始 APK 执行 DEX Patch (可选)
+     *
+     * 使用 dexlib2 删除加固壳的检测方法。
+     * 失败不阻断流程 — 返回空列表表示跳过 patch。
+     */
+    private fun runDexPatch(originApk: File, instanceId: String): List<String> {
+        return try {
+            val patcher = com.multiapp.core.hook.dexpatch.DexPatcher()
+            val workDir = File(System.getProperty("java.io.tmpdir"), "multiapp_dexpatch_$instanceId")
+            workDir.mkdirs()
+
+            // 从原始 APK 解压 DEX 文件
+            val dexFiles = mutableListOf<File>()
+            java.util.zip.ZipFile(originApk).use { zip ->
+                zip.entries().asSequence()
+                    .filter { it.name.endsWith(".dex") }
+                    .forEach { entry ->
+                        val dexFile = File(workDir, entry.name)
+                        zip.getInputStream(entry).use { input ->
+                            dexFile.outputStream().use { out -> input.copyTo(out) }
+                        }
+                        dexFiles.add(dexFile)
+                    }
+            }
+
+            if (dexFiles.isEmpty()) {
+                Timber.w("InstanceManager: no DEX files found in origin APK")
+                return emptyList()
+            }
+
+            // 执行 patch (默认使用 universal 特征库)
+            val report = patcher.patch(dexFiles, "universal")
+            Timber.d("InstanceManager: DEX patch result: ${report.patchedMethodCount} methods patched")
+
+            if (report.isSuccess && report.patchedMethodCount > 0) {
+                dexFiles.map { it.absolutePath }
+            } else {
+                // patch 失败或无方法被修补，清理临时文件
+                workDir.deleteRecursively()
+                emptyList()
+            }
+        } catch (e: Exception) {
+            Timber.e(e, "InstanceManager: DEX patch failed, skipping")
+            emptyList()
+        }
+    }
+}
+
+data class InstanceInfo(
+    val instanceId: String,
+    val originalPackageName: String,
+    val stubPackageName: String,
+    val identity: IdentityConfig,
+    val createdAt: Long,
+    val status: InstanceStatus
+)
+
+enum class InstanceStatus {
+    CREATING, READY, RUNNING, ERROR
+}

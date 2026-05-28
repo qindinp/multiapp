@@ -1,0 +1,30 @@
+# Built outputs
+*.iml
+.gradle/
+/local.properties
+/.idea/
+**/build/
+/captures
+.externalNativeBuild/
+.cxx/
+
+# Gradle
+.gradle
+/gradle/wrapper/gradle-wrapper.jar
+
+# Android
+*.apk
+*.ap_
+*.dex
+*.class
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+*.swp
+*~
+.idea/
+*.iml
