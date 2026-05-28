@@ -90,12 +90,72 @@ multiapp/
 | ActivityManager | 3 | `getRunningAppProcesses()` 返回值伪装 |
 | Native 库 | 1 | `dlopen` 路径重定向 |
 
+## 加固应用绕过原理 (以 360 加固为例)
+
+整个过程**不需要 root、不需要脱壳、不需要虚拟机**。壳和 MultiApp 的代码跑在同一个进程、同一个地址空间里，改的是自己进程的内存，不涉及跨进程注入。
+
+```
+系统启动 Stub 进程
+        │
+        ▼
+AppComponentFactory.instantiateApplication()
+  ← 此时 Application 尚未创建，ApplicationInfo 已设置
+        │
+        ▼
+┌─ Step 1: Native 层拦截 (shadowhook) ─────────────┐
+│  PLT/GOT Hook 拦截 libc 函数:                      │
+│  • open() / fopen() — APK 路径重定向到原始 APK     │
+│  • read() — 过滤 /proc/self/maps 中 hook 框架痕迹  │
+│  • ptrace() — 返回"未被调试"                        │
+│  目标: 让壳的 libsec.so 所有环境检测全部通过         │
+└───────────────────────────────────────────────────┘
+        │
+        ▼
+┌─ Step 2: 替换 ClassLoader + LoadedApk ────────────┐
+│  修改 ActivityThread.mPackages                     │
+│  ClassLoader → 原始 APK 的 ClassLoader             │
+│  Resources   → 原始 APK 的 Resources               │
+│  系统认为进程就是目标 app                           │
+└───────────────────────────────────────────────────┘
+        │
+        ▼
+┌─ Step 3: Java 层身份伪装 (LSPlant) ───────────────┐
+│  • Build.MODEL / FINGERPRINT / MANUFACTURER        │
+│  • Settings.Secure.ANDROID_ID                      │
+│  • TelephonyManager.getDeviceId() / getImei()      │
+│  • WifiInfo.getMacAddress() / Build.getSerial()    │
+│  • Binder 拦截 → 返回原始 APK 签名                  │
+└───────────────────────────────────────────────────┘
+        │
+        ▼
+重置 appComponentFactory 为默认值 (防壳检测异常)
+        │
+        ▼
+系统继续创建 Application → 360 壳正常执行
+        │
+        ├─ System.loadLibrary("sec") → 加载 native 库 ✓
+        ├─ JNI 解密 DEX → 壳解密流程正常 ✓
+        ├─ 环境检测:
+        │    ptrace() → "未被调试" ✓
+        │    /proc/self/maps → 无 hook 痕迹 ✓
+        │    APK 路径 → 指向原始 APK ✓
+        │    Build.MODEL → 真实设备信息 ✓
+        │    签名验证 → 原始签名 ✓
+        │    全部通过 ✓
+        │
+        ▼
+壳解密完成 → 原始 app 代码正常运行
+```
+
+**关键点**: 所有拦截在 `instantiateApplication()` 中一步完成，时序上**早于**壳的任何初始化代码。壳运行时，拦截层已经就位，壳拿到的全是伪装后的数据。
+
 ## 技术栈
 
 - **语言**: Kotlin (Jetpack Compose + Material 3)
 - **DI**: Hilt
 - **数据库**: Room
-- **Hook**: LSPlant (ART method hooking)
+- **Native Hook**: shadowhook (PLT/GOT 拦截)
+- **Java Hook**: LSPlant (ART method hooking)
 - **DEX 操作**: dexlib2 2.5.2
 - **构建**: Gradle Kotlin DSL, KSP
 - **最低版本**: Android 10 (API 28)
