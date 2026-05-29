@@ -51,8 +51,8 @@ class BinaryDiffEngine @Inject constructor() {
         }
 
         return try {
-            val zipA = ZipFile(fileA)
-            val zipB = ZipFile(fileB)
+            ZipFile(fileA).use { zipA ->
+            ZipFile(fileB).use { zipB ->
 
             val entriesA = zipA.entries().toList().map { it.name to it }.toMap()
             val entriesB = zipB.entries().toList().map { it.name to it }.toMap()
@@ -98,9 +98,6 @@ class BinaryDiffEngine @Inject constructor() {
             val certDiff = diffCertificates(apkPathA, apkPathB)
             val manifestDiff = diffManifest(zipA, zipB)
 
-            zipA.close()
-            zipB.close()
-
             val similarityScore = calculateSimilarity(
                 allNames.size, addedFiles.size, removedFiles.size, changedCount
             )
@@ -130,6 +127,8 @@ class BinaryDiffEngine @Inject constructor() {
                     "modified=${modifiedFiles.size} | similarity=${"%.1f".format(similarityScore * 100)}%"
             )
             report
+            } // zipB.use
+            } // zipA.use
         } catch (e: Exception) {
             Timber.tag(TAG).e(e, "Diff failed: $apkPathA vs $apkPathB")
             null
@@ -324,23 +323,24 @@ class BinaryDiffEngine @Inject constructor() {
 
     private fun extractCertHash(apkPath: String): String {
         return try {
-            val zip = ZipFile(File(apkPath))
-            val certEntry = zip.entries().asSequence().firstOrNull {
-                it.name.startsWith("META-INF/") &&
-                    (it.name.endsWith(".RSA") || it.name.endsWith(".DSA") || it.name.endsWith(".EC"))
-            }
-            if (certEntry != null) {
-                val md = MessageDigest.getInstance("SHA-256")
-                zip.getInputStream(certEntry).use { stream ->
-                    val buffer = ByteArray(8192)
-                    var read: Int
-                    while (stream.read(buffer).also { read = it } != -1) {
-                        md.update(buffer, 0, read)
-                    }
+            ZipFile(File(apkPath)).use { zip ->
+                val certEntry = zip.entries().asSequence().firstOrNull {
+                    it.name.startsWith("META-INF/") &&
+                        (it.name.endsWith(".RSA") || it.name.endsWith(".DSA") || it.name.endsWith(".EC"))
                 }
-                md.digest().joinToString("") { "%02x".format(it) }
-            } else {
-                "no_certificate"
+                if (certEntry != null) {
+                    val md = MessageDigest.getInstance("SHA-256")
+                    zip.getInputStream(certEntry).use { stream ->
+                        val buffer = ByteArray(8192)
+                        var read: Int
+                        while (stream.read(buffer).also { read = it } != -1) {
+                            md.update(buffer, 0, read)
+                        }
+                    }
+                    md.digest().joinToString("") { "%02x".format(it) }
+                } else {
+                    "no_certificate"
+                }
             }
         } catch (e: Exception) {
             "error:${e.message}"

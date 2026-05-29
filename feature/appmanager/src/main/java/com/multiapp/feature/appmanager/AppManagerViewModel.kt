@@ -5,9 +5,12 @@ import androidx.lifecycle.viewModelScope
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceManager
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import javax.inject.Inject
@@ -33,6 +36,8 @@ class AppManagerViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(AppManagerUiState())
     val uiState: StateFlow<AppManagerUiState> = _uiState.asStateFlow()
 
+    private var loadJob: Job? = null
+
     init {
         loadInstances()
     }
@@ -46,22 +51,18 @@ class AppManagerViewModel @Inject constructor(
     }
 
     private fun loadInstances() {
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true, error = null)
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, error = null) }
             try {
                 instanceManager.loadInstances()
                 instanceManager.instances.collect { instances ->
-                    _uiState.value = _uiState.value.copy(
-                        instances = instances,
-                        isLoading = false
-                    )
+                    _uiState.update { it.copy(instances = instances, isLoading = false) }
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 Timber.e(e, "Failed to load instances")
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    error = e.message
-                )
+                _uiState.update { it.copy(isLoading = false, error = e.message) }
             }
         }
     }
@@ -71,16 +72,16 @@ class AppManagerViewModel @Inject constructor(
             try {
                 instanceManager.deleteInstance(instanceId)
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 Timber.e(e, "Failed to delete instance")
-                _uiState.value = _uiState.value.copy(error = e.message)
+                _uiState.update { it.copy(error = e.message) }
             }
         }
     }
 
     private fun toggleExpand(instanceId: String) {
-        val current = _uiState.value.expandedInstanceId
-        _uiState.value = _uiState.value.copy(
-            expandedInstanceId = if (current == instanceId) null else instanceId
-        )
+        _uiState.update { state ->
+            state.copy(expandedInstanceId = if (state.expandedInstanceId == instanceId) null else instanceId)
+        }
     }
 }

@@ -1,5 +1,6 @@
 package com.multiapp.core.identity
 
+import com.multiapp.core.common.invokeMethod
 import com.multiapp.core.hook.HookEngine
 import timber.log.Timber
 import java.io.BufferedReader
@@ -19,29 +20,28 @@ import java.io.FileReader
  */
 class ProcFsHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "ProcFsHook: apply called for instance=%s, stub=%s",
             config.instanceId,
             config.stubPackageName
         )
-        applyInternal(config)
+        applyInternal(config, hookEngine)
     }
 
     companion object {
 
         private const val TAG = "ProcFsHook"
 
-        fun apply(config: IdentityConfig) {
+        fun apply(config: IdentityConfig, hookEngine: HookEngine) {
             Timber.d(
                 "ProcFsHook: companion apply called for instance=%s",
                 config.instanceId
             )
-            applyInternal(config)
+            applyInternal(config, hookEngine)
         }
 
-        private fun applyInternal(config: IdentityConfig) {
-            val hookEngine = HookEngine()
+        private fun applyInternal(config: IdentityConfig, hookEngine: HookEngine) {
             val originalPkg = config.originalPackageName
             val stubPkg = config.stubPackageName
 
@@ -122,12 +122,22 @@ class ProcFsHook : HookPoint {
         ) {
             // Hook BufferedReader.readLine() to filter /proc/self/maps content
             try {
-                val method = BufferedReader::class.java.getDeclaredMethod("readLine")
+                val readLineMethod = BufferedReader::class.java.getDeclaredMethod("readLine")
                 hookEngine.hookMethod(
-                    method = method,
+                    method = readLineMethod,
                     afterCallback = { receiver, _, result ->
                         if (result is String && isMapsReader(receiver)) {
-                            filterMapsLine(result, stubPkg)
+                            if (shouldFilterLine(result, stubPkg)) {
+                                // Skip filtered line by reading the next one
+                                // Use invokeMethod to call readLine() again on the same reader
+                                try {
+                                    receiver?.invokeMethod("readLine") ?: result
+                                } catch (_: Exception) {
+                                    result // fallback to original if re-read fails
+                                }
+                            } else {
+                                result
+                            }
                         } else {
                             result
                         }
@@ -166,13 +176,13 @@ class ProcFsHook : HookPoint {
          * Filter a line from /proc/self/maps to remove entries that reveal
          * the stub APK path or injection-related libraries.
          *
-         * Returns null to skip the line, or the original line if it's safe.
+         * Returns true if the line should be filtered out.
          */
-        private fun filterMapsLine(line: String, stubPkg: String): String? {
+        private fun shouldFilterLine(line: String, stubPkg: String): Boolean {
             // Filter out lines containing the stub package path
             if (line.contains(stubPkg)) {
                 Timber.tag(TAG).d("Filtering maps line containing stub package")
-                return null
+                return true
             }
 
             // Filter out lines containing known injection libraries
@@ -190,11 +200,11 @@ class ProcFsHook : HookPoint {
             for (signature in injectionSignatures) {
                 if (lowerLine.contains(signature)) {
                     Timber.tag(TAG).d("Filtering maps line containing injection signature: %s", signature)
-                    return null
+                    return true
                 }
             }
 
-            return line
+            return false
         }
     }
 }

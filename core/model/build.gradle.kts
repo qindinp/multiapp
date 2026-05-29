@@ -7,6 +7,11 @@ android {
     namespace = "com.multiapp.core.model"
     compileSdk = 36
     defaultConfig { minSdk = 28 }
+    buildTypes {
+        release {
+            consumerProguardFiles("proguard-rules.pro")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17

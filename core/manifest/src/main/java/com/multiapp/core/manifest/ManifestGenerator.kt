@@ -7,6 +7,7 @@ package com.multiapp.core.manifest
 class ManifestGenerator {
 
     private val authorityRewriter = AuthorityRewriter()
+    private val binaryEncoder = BinaryXmlEncoder()
 
     fun generate(
         stubPackageName: String,
@@ -80,8 +81,7 @@ class ManifestGenerator {
         launcherActivity: ManifestParser.ComponentInfo,
         config: StubConfig
     ): ByteArray {
-        return generate(stubPackageName, manifest, launcherActivity, config)
-            .toByteArray(Charsets.UTF_8)
+        return binaryEncoder.encodeFromManifest(stubPackageName, manifest, launcherActivity, config)
     }
 
     private fun appendComponent(

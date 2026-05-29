@@ -32,13 +32,13 @@ class IdentitySpoofingEngine @Inject constructor(
         private val VERSION_INT_FIELDS = listOf("SDK_INT", "PREVIEW_SDK_INT")
     }
 
-    private var initialized = false
+    @Volatile private var initialized = false
     private val identityCache = ConcurrentHashMap<String, String>()
-    private val spoofedInstances = mutableMapOf<String, SpoofState>()
+    private val spoofedInstances = ConcurrentHashMap<String, SpoofState>()
     private var originalBuildValues: Map<String, Any?> = emptyMap()
     private var originalVersionValues: Map<String, Any?> = emptyMap()
     private var originalSerial: String? = null
-    private var isGlobalSpoofApplied = false
+    @Volatile private var isGlobalSpoofApplied = false
 
     fun initialize() {
         if (initialized) return
@@ -168,7 +168,9 @@ class IdentitySpoofingEngine @Inject constructor(
                     deviceIdField.isAccessible = true
                     Timber.tag(TAG).d("Found TelephonyManager.mImei field for injection")
                 }
-            } catch (_: Exception) { }
+            } catch (e: Exception) {
+                Timber.tag(TAG).d("TelephonyManager.mImei field not accessible: ${e.message}")
+            }
             Timber.tag(TAG).d("Telephony spoofed for instance $instanceId: IMEI=$imei")
         } catch (e: Exception) {
             Timber.tag(TAG).e(e, "Failed to spoof telephony for instance $instanceId")

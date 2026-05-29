@@ -151,13 +151,17 @@ object CrashReporter {
     /**
      * Get crash reports for a specific instance.
      */
-    fun getCrashReport(instanceId: String): List<CrashReport> =
-        reports[instanceId]?.toList() ?: emptyList()
+    fun getCrashReport(instanceId: String): List<CrashReport> {
+        val list = reports[instanceId] ?: return emptyList()
+        return synchronized(list) { list.toList() }
+    }
 
     /**
      * Get the total count of all reports across all instances.
      */
-    fun getTotalReportCount(): Int = reports.values.sumOf { it.size }
+    fun getTotalReportCount(): Int = reports.values.sumOf { list ->
+        synchronized(list) { list.size }
+    }
 
     /**
      * Clear all reports from memory and disk.
@@ -191,8 +195,9 @@ object CrashReporter {
         sb.appendLine()
 
         reports.forEach { (instanceId, reportList) ->
-            sb.appendLine("--- Instance: $instanceId (${reportList.size} reports) ---")
-            reportList.forEach { report ->
+            val snapshot = synchronized(reportList) { reportList.toList() }
+            sb.appendLine("--- Instance: $instanceId (${snapshot.size} reports) ---")
+            snapshot.forEach { report ->
                 sb.appendLine("  [${report.severity}] ${report.tag}")
                 sb.appendLine("  Time: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(report.timestamp))}")
                 sb.appendLine("  Message: ${report.message}")

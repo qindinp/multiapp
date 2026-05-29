@@ -3,6 +3,8 @@ package com.multiapp.core.hook
 import timber.log.Timber
 import java.lang.reflect.Executable
 import java.lang.reflect.Method
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -29,18 +31,29 @@ class HookEngine @Inject constructor() {
 
     companion object {
         private const val TAG = "HookEngine"
+
+        // LSPlant is a global singleton — track init state statically
+        // so all HookEngine instances share the same state
+        @Volatile
+        private var lsplantInitializedGlobal = false
+
+        // Lock for synchronized initialization
+        private val initLock = Any()
     }
 
-    // Track installed hooks for cleanup
-    private val installedHooks = mutableListOf<HookInfo>()
+    // Track installed hooks for cleanup (thread-safe)
+    private val installedHooks = Collections.synchronizedList(mutableListOf<HookInfo>())
 
-    // LSPlant state
-    private var lsplantInitialized = false
-    private val lsplantHooks = mutableMapOf<Executable, Any>() // Executable -> LSPlant.Unhook
+    // LSPlant state (delegates to global static)
+    private val lsplantInitialized: Boolean get() = lsplantInitializedGlobal
+    private val lsplantHooks = ConcurrentHashMap<Executable, Any>() // Executable -> LSPlant.Unhook
 
     fun initLsplant(classLoader: ClassLoader): Boolean {
-        if (lsplantInitialized) return true
-        return initLsWithRetry(classLoader)
+        if (lsplantInitializedGlobal) return true
+        return synchronized(initLock) {
+            if (lsplantInitializedGlobal) return true
+            initLsWithRetry(classLoader)
+        }
     }
 
     private fun initLsWithRetry(classLoader: ClassLoader, maxRetries: Int = 3): Boolean {
@@ -50,7 +63,7 @@ class HookEngine @Inject constructor() {
                 val lsplantClass = Class.forName("io.github.lsplant.LSPlant")
                 val initMethod = lsplantClass.getMethod("init", ClassLoader::class.java)
                 val result = initMethod.invoke(null, classLoader) as Boolean
-                lsplantInitialized = result
+                lsplantInitializedGlobal = result
                 if (result) {
                     Timber.tag(TAG).i("LSPlant initialized successfully")
                     return true
@@ -77,6 +90,11 @@ class HookEngine @Inject constructor() {
         if (!lsplantInitialized) {
             Timber.tag(TAG).w("LSPlant not initialized — cannot hook ${method.name}")
             return false
+        }
+
+        if (lsplantHooks.containsKey(method)) {
+            Timber.tag(TAG).d("Already hooked: ${method.declaringClass.name}.${method.name}")
+            return true
         }
 
         return try {

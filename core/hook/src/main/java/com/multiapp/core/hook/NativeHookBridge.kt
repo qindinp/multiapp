@@ -6,10 +6,13 @@ import com.multiapp.core.common.findField
 import com.multiapp.core.common.runSafe
 import com.multiapp.core.model.VirtualConstants
 import timber.log.Timber
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantReadWriteLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -43,26 +46,59 @@ class NativeHookBridge @Inject constructor() {
                 Timber.tag(TAG).w("libmultiapp-native.so not available: ${e.message}"); false
             }
         }
+
+        /**
+         * LoaderFactory 专用: 一次性完成 shadowhook 初始化 + /proc/self 伪装 + 属性伪装
+         * 不需要 NativeHookBridge 实例，全部通过 static JNI 完成
+         *
+         * @param packageName 原始 app 包名 (用于 /proc/self/cmdline 伪装)
+         * @param properties 系统属性伪装 (ro.product.model 等)
+         * @return true 如果 native hooks 初始化成功
+         */
+        fun setupForLoader(packageName: String, properties: Map<String, String>): Boolean {
+            if (!nativeLibLoaded) {
+                Timber.tag(TAG).w("setupForLoader: native lib not loaded")
+                return false
+            }
+            return try {
+                val propKeys = properties.keys.toTypedArray()
+                val propValues = properties.values.toTypedArray()
+                nativeSetupForLoader(packageName, propKeys, propValues)
+            } catch (e: Exception) {
+                Timber.tag(TAG).e(e, "setupForLoader failed")
+                false
+            }
+        }
+
+        // Static JNI — 一次性完成 shadowhook 初始化 + /proc/self + 属性伪装
+        @JvmStatic private external fun nativeSetupForLoader(
+            packageName: String, propKeys: Array<String>, propValues: Array<String>
+        ): Boolean
     }
 
     private val pathRedirections = ConcurrentHashMap<String, String>()
     private val pathTrie = PathTrie()
-    private val pathCache = ConcurrentHashMap<String, String>()
+    private val pathCache = object : LinkedHashMap<String, String>(256, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 500
+    }
     private var spoofedPackageName: String? = null
     private var spoofedPid: Int = -1
     private var spoofedProcessName: String? = null
     private val propertyOverrides = ConcurrentHashMap<String, String>()
     private val hiddenPaths = ConcurrentHashMap.newKeySet<String>()
     private val fakeFileContent = ConcurrentHashMap<String, ByteArray>()
-    private var initialized = false
-    private var nativeHooksAvailable = false
+    @Volatile private var initialized = false
+    @Volatile private var nativeHooksAvailable = false
     private var appContext: android.content.Context? = null
 
     fun initialize() {
         if (initialized) return
-        initialized = true
-        Timber.tag(TAG).i("NativeHookBridge initialized")
-        hookRuntimeNativeLoad()
+        synchronized(this) {
+            if (initialized) return
+            Timber.tag(TAG).i("NativeHookBridge initialized")
+            hookRuntimeNativeLoad()
+            initialized = true
+        }
     }
 
     fun hookRuntimeNativeLoad() {
@@ -78,13 +114,29 @@ class NativeHookBridge @Inject constructor() {
     private fun rebuildPrefixIndex() {
         pathTrie.clear()
         for ((from, to) in pathRedirections) pathTrie.insert(from, to)
-        pathCache.clear()
+        synchronized(pathCache) { pathCache.clear() }
     }
 
     fun addPathRedirection(fromPrefix: String, toPrefix: String) {
         pathRedirections[fromPrefix] = toPrefix; rebuildPrefixIndex()
         Timber.tag(TAG).d("Path redirect: $fromPrefix -> $toPrefix")
         if (nativeHooksAvailable) nativeAddPathRedirection(fromPrefix, toPrefix)
+    }
+
+    /**
+     * 批量添加路径重定向，只重建一次前缀索引。
+     * 适用于 setupAppRedirections / setupExternalStorageRedirections 等批量场景。
+     * 单条规则仍使用 [addPathRedirection]。
+     */
+    fun addPathRedirections(redirections: Map<String, String>) {
+        redirections.forEach { (from, to) ->
+            pathRedirections[from] = to
+        }
+        rebuildPrefixIndex()
+        redirections.forEach { (from, to) ->
+            Timber.tag(TAG).d("Path redirect: $from -> $to")
+            if (nativeHooksAvailable) nativeAddPathRedirection(from, to)
+        }
     }
 
     fun removePathRedirection(fromPrefix: String) {
@@ -99,21 +151,25 @@ class NativeHookBridge @Inject constructor() {
     }
 
     fun setupAppRedirections(guestPackageName: String, instanceId: String, sandboxDataDir: String) {
-        addPathRedirection("/data/data/$guestPackageName/", "$sandboxDataDir/")
-        addPathRedirection("/data/user/0/$guestPackageName/", "$sandboxDataDir/")
-        addPathRedirection("/storage/emulated/0/Android/data/$guestPackageName/", "$sandboxDataDir/external_data/")
-        addPathRedirection("/sdcard/Android/data/$guestPackageName/", "$sandboxDataDir/external_data/")
-        addPathRedirection("/storage/emulated/0/Android/obb/$guestPackageName/", "$sandboxDataDir/obb/")
+        addPathRedirections(mapOf(
+            "/data/data/$guestPackageName/" to "$sandboxDataDir/",
+            "/data/user/0/$guestPackageName/" to "$sandboxDataDir/",
+            "/storage/emulated/0/Android/data/$guestPackageName/" to "$sandboxDataDir/external_data/",
+            "/sdcard/Android/data/$guestPackageName/" to "$sandboxDataDir/external_data/",
+            "/storage/emulated/0/Android/obb/$guestPackageName/" to "$sandboxDataDir/obb/"
+        ))
         Timber.tag(TAG).d("App redirections set for $guestPackageName ($instanceId)")
     }
 
     fun setupExternalStorageRedirections(instanceId: String, virtualSdcardDir: String) {
-        addPathRedirection("/sdcard/", "$virtualSdcardDir/")
-        addPathRedirection("/storage/emulated/0/", "$virtualSdcardDir/")
-        addPathRedirection("/mnt/sdcard/", "$virtualSdcardDir/")
-        addPathRedirection("/storage/self/primary/", "$virtualSdcardDir/")
-        addPathRedirection("/storage/emulated/0", virtualSdcardDir)
-        addPathRedirection("/sdcard", virtualSdcardDir)
+        addPathRedirections(mapOf(
+            "/sdcard/" to "$virtualSdcardDir/",
+            "/storage/emulated/0/" to "$virtualSdcardDir/",
+            "/mnt/sdcard/" to "$virtualSdcardDir/",
+            "/storage/self/primary/" to "$virtualSdcardDir/",
+            "/storage/emulated/0" to virtualSdcardDir,
+            "/sdcard" to virtualSdcardDir
+        ))
         Timber.tag(TAG).d("External storage redirections set for $instanceId -> $virtualSdcardDir")
     }
 
@@ -153,10 +209,12 @@ class NativeHookBridge @Inject constructor() {
 
     fun translatePath(originalPath: String): String {
         if (hiddenPaths.contains(originalPath)) return "/dev/null"
-        pathCache[originalPath]?.let { return it }
-        val result = pathTrie.translate(originalPath) ?: originalPath
-        pathCache[originalPath] = result
-        return result
+        synchronized(pathCache) {
+            pathCache[originalPath]?.let { return it }
+            val result = pathTrie.translate(originalPath) ?: originalPath
+            pathCache[originalPath] = result
+            return result
+        }
     }
 
     fun isPathHidden(path: String): Boolean = hiddenPaths.contains(path)
@@ -208,7 +266,11 @@ class NativeHookBridge @Inject constructor() {
             "dobby", "bhook", "xhook", "substrate", "xposed",
             "libnextvm", "LSPosed", "edxposed", "riru", "zygisk", "magisk", "/data/adb"
         )
-        return originalMaps.lines().filter { line -> linesToHide.none { line.contains(it, ignoreCase = true) } }.joinToString("\n")
+        val lowerLinesToHide = linesToHide.map { it.lowercase() }
+        return originalMaps.lines().filter { line ->
+            val lower = line.lowercase()
+            lowerLinesToHide.none { lower.contains(it) }
+        }.joinToString("\n")
     }
 
     private external fun nativeInit(): Boolean
@@ -237,23 +299,50 @@ class NativeHookBridge @Inject constructor() {
             var prefixLength: Int = 0
         }
         private val root = Node()
+        private val lock = ReentrantReadWriteLock()
+
         fun insert(prefix: String, replacement: String) {
-            var node = root
-            for (ch in prefix) node = node.children.getOrPut(ch) { Node() }
-            node.replacement = replacement; node.prefixLength = prefix.length
-        }
-        fun translate(path: String): String? {
-            var node = root; var bestReplacement: String? = null; var bestPrefixLength = 0
-            for (ch in path) {
-                val child = node.children[ch] ?: break
-                node = child
-                if (node.replacement != null && node.prefixLength > bestPrefixLength) {
-                    bestReplacement = node.replacement; bestPrefixLength = node.prefixLength
-                }
+            val writeLock = lock.writeLock()
+            writeLock.lock()
+            try {
+                var node = root
+                for (ch in prefix) node = node.children.getOrPut(ch) { Node() }
+                node.replacement = replacement; node.prefixLength = prefix.length
+            } finally {
+                writeLock.unlock()
             }
-            return bestReplacement?.let { it + path.substring(bestPrefixLength) }
         }
-        fun clear() { root.children.clear() }
+
+        fun translate(path: String): String? {
+            val readLock = lock.readLock()
+            readLock.lock()
+            try {
+                var node = root
+                var bestReplacement: String? = null
+                var bestPrefixLength = 0
+                for (ch in path) {
+                    val child = node.children[ch] ?: break
+                    node = child
+                    if (node.replacement != null && node.prefixLength > bestPrefixLength) {
+                        bestReplacement = node.replacement
+                        bestPrefixLength = node.prefixLength
+                    }
+                }
+                return bestReplacement?.let { it + path.substring(bestPrefixLength) }
+            } finally {
+                readLock.unlock()
+            }
+        }
+
+        fun clear() {
+            val writeLock = lock.writeLock()
+            writeLock.lock()
+            try {
+                root.children.clear()
+            } finally {
+                writeLock.unlock()
+            }
+        }
     }
 }
 
@@ -262,12 +351,10 @@ class FileAccessInterceptor(private val bridge: NativeHookBridge) {
 
     fun interceptFile(originalPath: String): File = File(bridge.translatePath(originalPath))
 
-    fun interceptFileInputStream(originalPath: String): FileInputStream {
+    fun interceptFileInputStream(originalPath: String): InputStream {
         val fakeContent = bridge.getFakeContent(originalPath)
         if (fakeContent != null) {
-            val tempFile = File.createTempFile("multiapp_fake_", ".tmp")
-            tempFile.deleteOnExit(); tempFile.writeBytes(fakeContent)
-            return FileInputStream(tempFile)
+            return ByteArrayInputStream(fakeContent)
         }
         return FileInputStream(bridge.translatePath(originalPath))
     }

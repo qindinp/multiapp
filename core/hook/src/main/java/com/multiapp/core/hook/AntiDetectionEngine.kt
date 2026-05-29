@@ -41,9 +41,9 @@ class AntiDetectionEngine @Inject constructor(
     private val virtualEnvBypass = VirtualEnvironmentBypass(nativeHookBridge)
     private val integrityBypass = IntegrityCheckBypass(nativeHookBridge)
 
-    private var initialized = false
+    @Volatile private var initialized = false
     private val instanceLevels = ConcurrentHashMap<String, DetectionLevel>()
-    private var isActive = false
+    @Volatile private var isActive = false
 
     fun initialize() {
         if (initialized) return

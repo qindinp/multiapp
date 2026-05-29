@@ -5,197 +5,163 @@ import android.content.pm.PackageManager
 import android.content.pm.Signature
 import com.multiapp.core.hook.HookEngine
 import timber.log.Timber
+import java.util.jar.JarFile
 
 /**
  * Signature bypass hook.
  *
- * Phase 4: Bypasses APK signature verification so the cloned app (repackaged
+ * Bypasses APK signature verification so the cloned app (repackaged
  * with a different signing key) can pass PackageManager signature checks.
  *
- * Inspired by LSPatch SigBypass approach:
  * - Hook PackageManager.getPackageInfo() to restore original signatures
- * - Hook PackageInfo.signatures field access
- * - Proxy PackageInfo.CREATOR to intercept Parcelable deserialization
+ * - Read original signatures from the embedded origin.apk at init time
+ * - Hook SigningInfo fields for API 28+
  */
-class SignatureBypass : HookPoint {
+class SignatureBypass(
+    private val hookEngine: HookEngine,
+    private val originApkPath: String? = null
+) : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    // 缓存从 origin.apk 读取的原始签名
+    private var cachedSignatures: Array<Signature>? = null
+
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "SignatureBypass: apply called for instance=%s, pkg=%s",
             config.instanceId,
             config.originalPackageName
         )
-        applyInternal(config)
+
+        // 从 origin.apk 预读签名
+        if (originApkPath != null) {
+            cachedSignatures = readSignaturesFromApk(originApkPath)
+            Timber.tag(TAG).i(
+                "Pre-cached %d signatures from origin.apk",
+                cachedSignatures?.size ?: 0
+            )
+        }
+
+        hookGetPackageInfoSignatures(hookEngine, config.originalPackageName)
+        hookGetPackageInfoWithFlags(hookEngine, config.originalPackageName)
+
+        Timber.tag(TAG).i("SignatureBypass installed for pkg=%s", config.originalPackageName)
     }
 
     companion object {
-
         private const val TAG = "SignatureBypass"
+    }
 
-        fun apply(config: IdentityConfig) {
-            Timber.d(
-                "SignatureBypass: companion apply called for instance=%s",
-                config.instanceId
+    private fun hookGetPackageInfoSignatures(
+        hookEngine: HookEngine,
+        originalPkg: String
+    ) {
+        try {
+            val method = PackageManager::class.java.getDeclaredMethod(
+                "getPackageInfo",
+                String::class.java,
+                Int::class.javaPrimitiveType
             )
-            applyInternal(config)
-        }
-
-        private fun applyInternal(config: IdentityConfig) {
-            val hookEngine = HookEngine()
-            val originalPkg = config.originalPackageName
-
-            hookGetPackageInfoSignatures(hookEngine, originalPkg)
-            hookGetPackageInfoWithFlags(hookEngine, originalPkg)
-
-            Timber.tag(TAG).i("SignatureBypass installed for pkg=%s", originalPkg)
-        }
-
-        /**
-         * Hook PackageManager.getPackageInfo(String, int) to intercept
-         * signature retrieval and replace with original APK signatures.
-         *
-         * When the target app calls getPackageInfo with GET_SIGNATURES or
-         * GET_SIGNING_CERTIFICATES, we intercept the result and replace
-         * the signatures with the original app's signatures.
-         */
-        private fun hookGetPackageInfoSignatures(
-            hookEngine: HookEngine,
-            originalPkg: String
-        ) {
-            try {
-                // Hook getPackageInfo(String, int) — pre-API 28
-                val method = PackageManager::class.java.getDeclaredMethod(
-                    "getPackageInfo",
-                    String::class.java,
-                    Int::class.javaPrimitiveType
-                )
-                hookEngine.hookMethod(
-                    method = method,
-                    afterCallback = { _, args, result ->
-                        interceptPackageInfo(result, args, originalPkg)
-                    }
-                )
-                Timber.tag(TAG).d("Hooked PackageManager.getPackageInfo(String, int)")
-            } catch (e: Exception) {
-                Timber.tag(TAG).e(e, "Failed to hook getPackageInfo(String, int)")
-            }
-        }
-
-        /**
-         * Hook PackageManager.getPackageInfo(String, PackageManager.PackageInfoFlags)
-         * for API 33+ where flags parameter changed to PackageInfoFlags.
-         */
-        private fun hookGetPackageInfoWithFlags(
-            hookEngine: HookEngine,
-            originalPkg: String
-        ) {
-            try {
-                val flagsClass = Class.forName(
-                    "android.content.pm.PackageManager\$PackageInfoFlags"
-                )
-                val method = PackageManager::class.java.getDeclaredMethod(
-                    "getPackageInfo",
-                    String::class.java,
-                    flagsClass
-                )
-                hookEngine.hookMethod(
-                    method = method,
-                    afterCallback = { _, args, result ->
-                        interceptPackageInfo(result, args, originalPkg)
-                    }
-                )
-                Timber.tag(TAG).d("Hooked PackageManager.getPackageInfo(String, PackageInfoFlags)")
-            } catch (e: ClassNotFoundException) {
-                Timber.tag(TAG).d("PackageInfoFlags class not found (pre-API 33), skipping")
-            } catch (e: Exception) {
-                Timber.tag(TAG).e(e, "Failed to hook getPackageInfo with PackageInfoFlags")
-            }
-        }
-
-        /**
-         * Intercept a PackageInfo result and rewrite its signatures.
-         *
-         * If the query was for the original package, we read the real signatures
-         * from the original APK and inject them into the returned PackageInfo.
-         */
-        private fun interceptPackageInfo(
-            result: Any?,
-            args: Array<Any?>,
-            originalPkg: String
-        ): Any? {
-            if (result !is PackageInfo) return result
-
-            val queriedPkg = args.firstOrNull() as? String ?: return result
-
-            // Only intercept queries for the original package or our stub
-            if (queriedPkg != originalPkg) return result
-
-            try {
-                // Read the original APK signatures from the actual installed package
-                val originalSignatures = readOriginalSignatures(originalPkg)
-                if (originalSignatures != null) {
-                    // Replace signatures in the returned PackageInfo
-                    result.signatures = originalSignatures
-                    Timber.tag(TAG).d(
-                        "Replaced signatures for package %s (%d signatures)",
-                        queriedPkg, originalSignatures.size
-                    )
+            hookEngine.hookMethod(
+                method = method,
+                afterCallback = { _, args, result ->
+                    interceptPackageInfo(result, args, originalPkg)
                 }
+            )
+            Timber.tag(TAG).d("Hooked PackageManager.getPackageInfo(String, int)")
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Failed to hook getPackageInfo(String, int)")
+        }
+    }
 
-                // Also patch signingInfo for API 28+
-                try {
-                    val signingInfoField = PackageInfo::class.java
-                        .getDeclaredField("signingInfo")
-                    signingInfoField.isAccessible = true
-                    val signingInfo = signingInfoField.get(result)
-                    if (signingInfo != null) {
-                        val apkSignaturesField = signingInfo::class.java
-                            .getDeclaredField("mApkContentsSigners")
-                        apkSignaturesField.isAccessible = true
-                        if (originalSignatures != null) {
-                            apkSignaturesField.set(signingInfo, originalSignatures)
-                        }
-                    }
-                } catch (_: Exception) {
-                    // signingInfo field may not exist on older APIs
+    private fun hookGetPackageInfoWithFlags(
+        hookEngine: HookEngine,
+        originalPkg: String
+    ) {
+        try {
+            val flagsClass = Class.forName(
+                "android.content.pm.PackageManager\$PackageInfoFlags"
+            )
+            val method = PackageManager::class.java.getDeclaredMethod(
+                "getPackageInfo",
+                String::class.java,
+                flagsClass
+            )
+            hookEngine.hookMethod(
+                method = method,
+                afterCallback = { _, args, result ->
+                    interceptPackageInfo(result, args, originalPkg)
                 }
-            } catch (e: Exception) {
-                Timber.tag(TAG).e(e, "Failed to intercept signatures for %s", queriedPkg)
-            }
+            )
+            Timber.tag(TAG).d("Hooked PackageManager.getPackageInfo(String, PackageInfoFlags)")
+        } catch (e: ClassNotFoundException) {
+            Timber.tag(TAG).d("PackageInfoFlags class not found (pre-API 33), skipping")
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Failed to hook getPackageInfo with PackageInfoFlags")
+        }
+    }
 
-            return result
+    private fun interceptPackageInfo(
+        result: Any?,
+        args: Array<Any?>,
+        originalPkg: String
+    ): Any? {
+        if (result !is PackageInfo) return result
+        val queriedPkg = args.firstOrNull() as? String ?: return result
+        if (queriedPkg != originalPkg) return result
+
+        val sigs = cachedSignatures ?: return result
+
+        try {
+            result.signatures = sigs
+            Timber.tag(TAG).d(
+                "Replaced signatures for package %s (%d signatures)",
+                queriedPkg, sigs.size
+            )
+
+            try {
+                val signingInfoField = PackageInfo::class.java
+                    .getDeclaredField("signingInfo")
+                signingInfoField.isAccessible = true
+                val signingInfo = signingInfoField.get(result)
+                if (signingInfo != null) {
+                    val apkSignaturesField = signingInfo::class.java
+                        .getDeclaredField("mApkContentsSigners")
+                    apkSignaturesField.isAccessible = true
+                    apkSignaturesField.set(signingInfo, sigs)
+                }
+            } catch (_: Exception) {
+                // signingInfo field may not exist on older APIs
+            }
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Failed to intercept signatures for %s", queriedPkg)
         }
 
-        /**
-         * Read the original APK signatures by querying the actual installed package.
-         * This uses the system PackageManager which bypasses our hooks.
-         */
-        private fun readOriginalSignatures(originalPkg: String): Array<Signature>? {
-            return try {
-                // Use hidden API to get the real package info directly
-                val pmClass = Class.forName("android.app.ActivityThread")
-                val currentActivityThread = pmClass.getDeclaredMethod("currentActivityThread")
-                    .invoke(null)
-                val context = currentActivityThread?.let {
-                    it::class.java.getDeclaredMethod("getSystemContext").invoke(it)
-                } as? android.content.Context ?: return null
+        return result
+    }
 
-                val pm = context.packageManager
-                // Call the original method directly via reflection to avoid our hook
-                val realMethod = PackageManager::class.java.getDeclaredMethod(
-                    "getPackageInfo",
-                    String::class.java,
-                    Int::class.javaPrimitiveType
-                )
-                val realPkgInfo = realMethod.invoke(
-                    pm, originalPkg, PackageManager.GET_SIGNATURES
-                ) as? PackageInfo
+    /**
+     * 从 APK 文件直接读取签名证书
+     *
+     * 通过 JarFile 读取 AndroidManifest.xml 的签名证书。
+     * APK 本质上是 JAR/ZIP，签名证书嵌入在 META-INF/ 中。
+     */
+    private fun readSignaturesFromApk(apkPath: String): Array<Signature>? {
+        return try {
+            JarFile(apkPath).use { jar ->
+                val manifestEntry = jar.getJarEntry("AndroidManifest.xml")
+                    ?: return null
+                val certs = manifestEntry.certificates ?: return null
+                if (certs.isNullOrEmpty()) return null
 
-                realPkgInfo?.signatures
-            } catch (e: Exception) {
-                Timber.tag(TAG).e(e, "Failed to read original signatures")
-                null
+                val signatures = Array(certs.size) { i ->
+                    Signature(certs[i].encoded)
+                }
+                Timber.tag(TAG).d("Read ${signatures.size} signatures from $apkPath")
+                signatures
             }
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Failed to read signatures from $apkPath")
+            null
         }
     }
 }

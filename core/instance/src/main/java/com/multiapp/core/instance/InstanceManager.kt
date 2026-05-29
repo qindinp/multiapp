@@ -19,9 +19,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 import timber.log.Timber
 import java.io.File
+import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -34,14 +36,14 @@ class InstanceManager @Inject constructor(
     private val instanceDatabase: InstanceDatabase,
     private val stubBuilder: StubBuilder,
     private val stubInstaller: StubInstaller,
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val parser: ManifestParser = ManifestParser(),
+    private val extractor: ComponentExtractor = ComponentExtractor()
 ) {
     private val _instances = MutableStateFlow<List<InstanceInfo>>(emptyList())
     val instances: StateFlow<List<InstanceInfo>> = _instances.asStateFlow()
 
     private val gson = Gson()
-    private val parser = ManifestParser()
-    private val extractor = ComponentExtractor()
 
     /**
      * 创建分身实例
@@ -64,7 +66,7 @@ class InstanceManager @Inject constructor(
      */
     suspend fun createInstance(app: VirtualApp): String = withContext(Dispatchers.IO) {
         Timber.d("InstanceManager: creating instance for ${app.packageName}")
-        val instanceId = "stub_${System.currentTimeMillis()}"
+        val instanceId = "stub_${UUID.randomUUID().toString().replace("-", "")}"
 
         // 1. 生成设备身份 (DeviceIdentityPool 是 object 单例，直接调用)
         val identity = DeviceIdentityPool.generateIdentity(instanceId, app.packageName)
@@ -116,7 +118,8 @@ class InstanceManager @Inject constructor(
         val stubApk = stubBuilder.build(stubConfig)
         Timber.d("InstanceManager: stub APK built at ${stubApk.absolutePath}")
 
-        // 8. 安装 Stub
+        // 8. 安装 Stub (智能降级: Session API → 系统安装器 Intent)
+        // 如果没有安装权限，会自动降级到系统安装器，用户手动点确认即可
         val installResult = stubInstaller.install(stubApk)
         when (installResult) {
             is StubInstaller.InstallResult.Success -> {
@@ -151,7 +154,7 @@ class InstanceManager @Inject constructor(
             createdAt = now,
             status = InstanceStatus.READY
         )
-        _instances.value = _instances.value + info
+        _instances.update { it + info }
 
         Timber.d("InstanceManager: instance created successfully, id=$instanceId")
         instanceId
@@ -194,7 +197,7 @@ class InstanceManager @Inject constructor(
         Timber.d("InstanceManager: instance removed from database")
 
         // 4. 更新 StateFlow
-        _instances.value = _instances.value.filter { it.instanceId != instanceId }
+        _instances.update { list -> list.filter { it.instanceId != instanceId } }
 
         Timber.d("InstanceManager: instance deleted successfully, id=$instanceId")
     }

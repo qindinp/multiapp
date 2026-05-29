@@ -9,11 +9,20 @@ android {
     namespace = "com.multiapp.core.instance"
     compileSdk = 36
     defaultConfig { minSdk = 28 }
+    buildTypes {
+        release {
+            consumerProguardFiles("proguard-rules.pro")
+        }
+    }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

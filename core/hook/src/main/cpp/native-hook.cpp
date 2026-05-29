@@ -1056,4 +1056,114 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallRuntimeLoadHook(
     return installNativeLoadHook(env) ? JNI_TRUE : JNI_FALSE;
 }
 
+// ==================== LoaderFactory Static JNI Methods ====================
+
+/**
+ * LoaderFactory 专用: 一次性完成 shadowhook 初始化 + /proc/self 伪装 + 属性伪装
+ * Static JNI — 不需要 NativeHookBridge 实例
+ *
+ * 时序: 必须在 instantiateApplication() 中、ClassLoader 替换前调用
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
+    JNIEnv* env, jclass clazz, jstring packageName, jobjectArray propKeys, jobjectArray propValues)
+{
+    (void)clazz;
+
+    // 1. 初始化 shadowhook + 安装 PLT/GOT Hook
+    {
+        std::unique_lock<std::shared_mutex> lock(g_mutex);
+        if (!g_initialized) {
+            LOGI("nativeSetupForLoader: initializing shadowhook...");
+            shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
+            g_hooks_installed = install_shadowhook_hooks();
+            g_initialized = true;
+            if (g_hooks_installed) {
+                LOGI("nativeSetupForLoader: PLT/GOT hooks installed");
+            } else {
+                LOGW("nativeSetupForLoader: hook installation failed");
+            }
+        }
+    }
+
+    // 2. 配置 /proc/self 伪装
+    if (packageName != nullptr) {
+        const char* pkg = env->GetStringUTFChars(packageName, nullptr);
+        if (pkg) {
+            std::unique_lock<std::shared_mutex> lock(g_mutex);
+            g_spoofed_pid = getpid();
+            g_spoofed_package_name = std::string(pkg);
+            LOGI("nativeSetupForLoader: /proc/self spoofed to '%s'", pkg);
+            env->ReleaseStringUTFChars(packageName, pkg);
+        }
+    }
+
+    // 3. 配置系统属性伪装
+    if (propKeys != nullptr && propValues != nullptr) {
+        int count = env->GetArrayLength(propKeys);
+        int valCount = env->GetArrayLength(propValues);
+        if (count == valCount) {
+            std::unique_lock<std::shared_mutex> lock(g_mutex);
+            for (int i = 0; i < count; i++) {
+                auto key = (jstring)env->GetObjectArrayElement(propKeys, i);
+                auto value = (jstring)env->GetObjectArrayElement(propValues, i);
+                if (key && value) {
+                    const char* k = env->GetStringUTFChars(key, nullptr);
+                    const char* v = env->GetStringUTFChars(value, nullptr);
+                    if (k && v) {
+                        g_property_spoofs[std::string(k)] = std::string(v);
+                        LOGD("nativeSetupForLoader: property %s -> %s", k, v);
+                    }
+                    if (k) env->ReleaseStringUTFChars(key, k);
+                    if (v) env->ReleaseStringUTFChars(value, v);
+                }
+                env->DeleteLocalRef(key);
+                env->DeleteLocalRef(value);
+            }
+            LOGI("nativeSetupForLoader: %d properties configured", count);
+        }
+    }
+
+    return g_hooks_installed ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * LoaderFactory 专用: 配置 /proc/self 伪装 (static JNI)
+ */
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofProcSelfStatic(
+    JNIEnv* env, jclass clazz, jint pid, jstring packageName)
+{
+    (void)clazz;
+    const char* pkg = env->GetStringUTFChars(packageName, nullptr);
+    if (pkg) {
+        std::unique_lock<std::shared_mutex> lock(g_mutex);
+        g_spoofed_pid = pid;
+        g_spoofed_package_name = std::string(pkg);
+        LOGI("nativeSpoofProcSelfStatic: pid=%d, pkg=%s", pid, pkg);
+        env->ReleaseStringUTFChars(packageName, pkg);
+    }
+}
+
+/**
+ * LoaderFactory 专用: 配置系统属性伪装 (static JNI)
+ */
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofSystemPropertyStatic(
+    JNIEnv* env, jclass clazz, jstring key, jstring value)
+{
+    (void)clazz;
+    const char* k = env->GetStringUTFChars(key, nullptr);
+    const char* v = env->GetStringUTFChars(value, nullptr);
+
+    if (k && v) {
+        std::unique_lock<std::shared_mutex> lock(g_mutex);
+        g_property_spoofs[std::string(k)] = std::string(v);
+        LOGI("nativeSpoofSystemPropertyStatic: %s -> %s", k, v);
+    }
+
+    if (k) env->ReleaseStringUTFChars(key, k);
+    if (v) env->ReleaseStringUTFChars(value, v);
+}
+
 } // extern "C"

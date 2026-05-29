@@ -7,12 +7,13 @@ import java.io.File
 import java.io.StringReader
 import javax.xml.parsers.DocumentBuilderFactory
 import org.xml.sax.InputSource
+import javax.inject.Inject
 
 /**
  * 解析原始 APK 的二进制 AndroidManifest.xml
  * 使用 net.dongliu:apk-parser 库
  */
-class ManifestParser {
+class ManifestParser @Inject constructor() {
 
     data class ParsedManifest(
         val packageName: String,
@@ -60,7 +61,8 @@ class ManifestParser {
                 ?.takeIf { it.isNotEmpty() }
 
             val permissions = extractPermissions(manifestEl)
-            val activities = extractComponents(applicationEl, "activity")
+            val activities = extractComponents(applicationEl, "activity") +
+                extractComponents(applicationEl, "activity-alias")
             val services = extractComponents(applicationEl, "service")
             val receivers = extractComponents(applicationEl, "receiver")
             val providers = extractProviders(applicationEl)

@@ -26,18 +26,26 @@ object PackerDetectionBypass {
      * Apply packer-specific + universal bypass hooks.
      *
      * @param hookEngine The LSPlant-backed hook engine
-     * @param packerType One of "360 Jiagu", "360", "Tencent Jiagu", "Tencent",
-     *                   "iJiami", "Bangcle", or "universal" (universal-only)
+     * @param apkPath    Path to the APK file for auto-detection (optional)
+     * @param packerType Explicit packer type. If null and [apkPath] is provided,
+     *                   auto-detect via [PackerDetector]. If both are null, apply
+     *                   universal-only bypass.
+     *                   Accepted values: "360 Jiagu", "360", "Tencent Jiagu",
+     *                   "Tencent", "iJiami", "Bangcle", "universal"
      */
-    fun apply(hookEngine: HookEngine, packerType: String) {
-        Timber.tag(TAG).i("Applying packer detection bypass for: $packerType")
+    fun apply(hookEngine: HookEngine, packerType: String? = null, apkPath: String? = null) {
+        val detectedType = packerType
+            ?: apkPath?.let { PackerDetector.detect(it) }
+            ?: "universal"
 
-        when (packerType) {
+        Timber.tag(TAG).i("Applying packer detection bypass for: $detectedType")
+
+        when (detectedType) {
             "360 Jiagu", "360" -> bypass360Jiagu(hookEngine)
             "Tencent Jiagu", "Tencent" -> bypassTencentJiagu(hookEngine)
             "iJiami" -> bypassIJiami(hookEngine)
             "Bangcle" -> bypassBangcle(hookEngine)
-            "universal" -> { /* universal hooks only */ }
+            "universal", "unknown" -> { /* universal hooks only */ }
         }
 
         bypassUniversalChecks(hookEngine)

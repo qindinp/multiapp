@@ -35,6 +35,8 @@ object AppModule {
             context,
             InstanceDatabase::class.java,
             "multiapp_instances.db"
-        ).build()
+        ).addMigrations(InstanceDatabase.MIGRATION_1_2)
+         .fallbackToDestructiveMigration()
+         .build()
     }
 }

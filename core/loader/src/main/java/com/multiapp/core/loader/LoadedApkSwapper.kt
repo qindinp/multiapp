@@ -13,7 +13,11 @@ import java.lang.ref.WeakReference
  */
 object LoadedApkSwapper {
 
-    fun swap(activityThread: Any, originApk: File, config: StubConfig) {
+    /**
+     * 替换 LoadedApk 并返回新的 ClassLoader (原始 APK 的)
+     * LoaderFactory 需要用它来初始化 LSPlant
+     */
+    fun swap(activityThread: Any, originApk: File, config: StubConfig): ClassLoader {
         Timber.d("LoadedApkSwapper: swapping to ${originApk.absolutePath}")
 
         // 1. 获取 mBoundApplication.appInfo
@@ -21,10 +25,12 @@ object LoadedApkSwapper {
             .getDeclaredField("mBoundApplication")
             .apply { isAccessible = true }
             .get(activityThread)
+            ?: throw IllegalStateException("mBoundApplication is null")
         val appInfo = mBound.javaClass
             .getDeclaredField("appInfo")
             .apply { isAccessible = true }
-            .get(mBound) as ApplicationInfo
+            .get(mBound) as? ApplicationInfo
+            ?: throw IllegalStateException("appInfo is null or not ApplicationInfo")
 
         // 2. 修改 sourceDir 指向原始 APK
         appInfo.sourceDir = originApk.absolutePath
@@ -36,7 +42,8 @@ object LoadedApkSwapper {
         val mPackages = activityThread.javaClass
             .getDeclaredField("mPackages")
             .apply { isAccessible = true }
-            .get(activityThread) as MutableMap<String, Any>
+            .get(activityThread) as? MutableMap<String, Any>
+            ?: throw IllegalStateException("mPackages is null or not a Map")
         mPackages.remove(config.stubPackageName)
         Timber.d("LoadedApkSwapper: removed old LoadedApk for ${config.stubPackageName}")
 
@@ -46,5 +53,15 @@ object LoadedApkSwapper {
             .invoke(activityThread, appInfo)
         mPackages[config.stubPackageName] = WeakReference(newLoadedApk)
         Timber.d("LoadedApkSwapper: installed new LoadedApk for ${config.stubPackageName}")
+
+        // 5. 提取新 ClassLoader 供 LSPlant 初始化使用
+        val classLoader = newLoadedApk.javaClass
+            .getDeclaredField("mClassLoader")
+            .apply { isAccessible = true }
+            .get(newLoadedApk) as? ClassLoader
+            ?: throw IllegalStateException("mClassLoader is null or not a ClassLoader")
+        Timber.d("LoadedApkSwapper: new ClassLoader = ${classLoader.javaClass.name}")
+
+        return classLoader
     }
 }

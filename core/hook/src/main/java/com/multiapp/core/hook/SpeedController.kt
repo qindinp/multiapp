@@ -37,6 +37,9 @@ class SpeedController @Inject constructor(
         private const val TAG = "SpeedCtrl"
     }
 
+    // Lock for synchronized operations on speed configs
+    private val lock = Any()
+
     // ─── Per-instance state ────────────────────────────────────────
 
     /** Active speed configurations keyed by instanceId. */
@@ -95,34 +98,36 @@ class SpeedController @Inject constructor(
     fun setSpeedMultiplier(instanceId: String, multiplier: Double) {
         require(multiplier > 0.0) { "Speed multiplier must be positive, got $multiplier" }
 
-        val now = System.currentTimeMillis()
-        val oldConfig = configs[instanceId]
+        synchronized(lock) {
+            val now = System.currentTimeMillis()
+            val oldConfig = configs[instanceId]
 
-        // If changing speed mid-session, snapshot the accumulated virtual elapsed
-        if (oldConfig != null && oldConfig.multiplier != multiplier) {
-            val oldAnchor = anchorRealTime[instanceId] ?: now
-            val realElapsed = now - oldAnchor
-            val oldVirtualElapsed = (realElapsed * oldConfig.multiplier).toLong()
-            val currentAccumulated = virtualElapsedAccumulator[instanceId] ?: 0L
-            virtualElapsedAccumulator[instanceId] = currentAccumulated + oldVirtualElapsed
-        }
+            // If changing speed mid-session, snapshot the accumulated virtual elapsed
+            if (oldConfig != null && oldConfig.multiplier != multiplier) {
+                val oldAnchor = anchorRealTime[instanceId] ?: now
+                val realElapsed = now - oldAnchor
+                val oldVirtualElapsed = (realElapsed * oldConfig.multiplier).toLong()
+                val currentAccumulated = virtualElapsedAccumulator[instanceId] ?: 0L
+                virtualElapsedAccumulator[instanceId] = currentAccumulated + oldVirtualElapsed
+            }
 
-        val config = SpeedConfig(multiplier = multiplier)
-        configs[instanceId] = config
-        anchorRealTime[instanceId] = now
+            val config = SpeedConfig(multiplier = multiplier)
+            configs[instanceId] = config
+            anchorRealTime[instanceId] = now
 
-        if (oldConfig == null) {
-            virtualElapsedAccumulator.putIfAbsent(instanceId, 0L)
-        }
+            if (oldConfig == null) {
+                virtualElapsedAccumulator.putIfAbsent(instanceId, 0L)
+            }
 
-        Timber.tag(TAG).i(
-            "Speed configured for $instanceId: " +
-                "multiplier=${multiplier}x (${config.levelLabel})"
-        )
+            Timber.tag(TAG).i(
+                "Speed configured for $instanceId: " +
+                    "multiplier=${multiplier}x (${config.levelLabel})"
+            )
 
-        // Install hooks on first config
-        if (!hooksInstalled) {
-            installSpeedHooks()
+            // Install hooks on first config
+            if (!hooksInstalled) {
+                installSpeedHooks()
+            }
         }
     }
 

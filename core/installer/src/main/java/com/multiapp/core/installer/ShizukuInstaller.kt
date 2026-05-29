@@ -31,7 +31,7 @@ class ShizukuInstaller(private val context: Context) {
      */
     fun install(stubApk: File): StubInstaller.InstallResult {
         Timber.d("ShizukuInstaller: installing ${stubApk.name}")
-        // Phase 9 实现: pm install 命令
-        throw NotImplementedError("Phase 9: ShizukuInstaller.install()")
+        // Shizuku 功能尚未实现，返回错误而不是崩溃
+        return StubInstaller.InstallResult.Error("Shizuku installation is not yet supported")
     }
 }

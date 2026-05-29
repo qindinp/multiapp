@@ -72,10 +72,10 @@ fun Class<*>.getStaticField(name: String): Any? = try {
  * Reflection helper: Set a static field value on a class.
  */
 fun Class<*>.setStaticField(name: String, value: Any?): Boolean = try {
-    val field = findField(this, name)
-    field?.isAccessible = true
+    val field = findField(this, name) ?: return false
+    field.isAccessible = true
     // Remove final modifier if needed
-    removeFinalModifier(field!!)
+    removeFinalModifier(field)
     field.set(null, value)
     true
 } catch (e: Exception) {
@@ -100,6 +100,24 @@ fun Any.invokeMethod(
 }
 
 /**
+ * Reflection helper: Invoke a method on any object, using the given ClassLoader
+ * to resolve parameter types. Useful in multi-ClassLoader environments.
+ */
+fun Any.invokeMethod(
+    name: String,
+    classLoader: ClassLoader,
+    parameterTypes: Array<Class<*>> = emptyArray(),
+    vararg args: Any?
+): Any? = try {
+    val method = findMethod(javaClass, name, parameterTypes, classLoader)
+    method?.isAccessible = true
+    method?.invoke(this, *args)
+} catch (e: Exception) {
+    Timber.tag("Reflect").e(e, "Failed to invoke method: $name with ClassLoader")
+    null
+}
+
+/**
  * Reflection helper: Invoke a static method on a class.
  */
 fun Class<*>.invokeStaticMethod(
@@ -112,6 +130,26 @@ fun Class<*>.invokeStaticMethod(
     method?.invoke(null, *args)
 } catch (e: Exception) {
     Timber.tag("Reflect").e(e, "Failed to invoke static method: $name on ${this.name}")
+    null
+}
+
+/**
+ * Reflection helper: Load a class by name using the given ClassLoader and invoke a method on it.
+ * Useful in multi-ClassLoader environments where Class.forName() may resolve the wrong class.
+ */
+fun invokeMethod(
+    className: String,
+    methodName: String,
+    classLoader: ClassLoader,
+    parameterTypes: Array<Class<*>> = emptyArray(),
+    vararg args: Any?
+): Any? = try {
+    val clazz = Class.forName(className, true, classLoader)
+    val method = findMethod(clazz, methodName, parameterTypes, classLoader)
+    method?.isAccessible = true
+    method?.invoke(null, *args)
+} catch (e: Exception) {
+    Timber.tag("Reflect").e(e, "Failed to invoke method: $methodName on $className")
     null
 }
 
@@ -206,6 +244,51 @@ fun findMethod(clazz: Class<*>, name: String, parameterTypes: Array<Class<*>>): 
             }
         } catch (e: Exception) {
             Timber.tag("ReflectionUtils").w(e, "HiddenApiBypass findMethod failed for '$name'")
+        }
+    }
+    return null
+}
+
+/**
+ * Find a method in a class or its superclasses, using the given ClassLoader to resolve types.
+ * Falls back to HiddenApiBypass on Android 9+ when standard reflection is blocked.
+ */
+fun findMethod(clazz: Class<*>, name: String, parameterTypes: Array<Class<*>>, classLoader: ClassLoader): Method? {
+    // Standard reflection first
+    var current: Class<*>? = clazz
+    while (current != null) {
+        try {
+            return current.getDeclaredMethod(name, *parameterTypes)
+        } catch (_: NoSuchMethodException) {
+            current = current.superclass
+        }
+    }
+
+    // Fallback: HiddenApiBypass (Android 9+)
+    if (Build.VERSION.SDK_INT >= 28) {
+        try {
+            if (parameterTypes.isNotEmpty()) {
+                val method = HiddenApiBypass.getDeclaredMethod(clazz, name, *parameterTypes)
+                if (method is Method) {
+                    Timber.tag("ReflectionUtils").d("Found method '$name' via HiddenApiBypass.getDeclaredMethod (ClassLoader)")
+                    return method
+                }
+            }
+            var searchClass: Class<*>? = clazz
+            while (searchClass != null) {
+                val methods: List<*>? = HiddenApiBypass.getDeclaredMethods(searchClass)
+                if (methods != null) {
+                    for (m in methods) {
+                        if (m is Method && m.name == name && m.parameterTypes.contentEquals(parameterTypes)) {
+                            Timber.tag("ReflectionUtils").d("Found method '$name' via HiddenApiBypass in ${searchClass.name} (ClassLoader)")
+                            return m
+                        }
+                    }
+                }
+                searchClass = searchClass.superclass
+            }
+        } catch (e: Exception) {
+            Timber.tag("ReflectionUtils").w(e, "HiddenApiBypass findMethod failed for '$name' (ClassLoader)")
         }
     }
     return null

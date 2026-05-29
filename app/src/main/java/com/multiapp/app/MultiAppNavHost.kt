@@ -5,10 +5,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.List
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -22,16 +26,16 @@ import com.multiapp.feature.settings.SettingsScreen
 private data class NavItem(
     val route: String,
     val label: String,
-    val icon: ImageVector
+    val selectedIcon: ImageVector,
+    val unselectedIcon: ImageVector
 )
 
 private val navItems = listOf(
-    NavItem("launcher", "首页", Icons.Default.Home),
-    NavItem("appmanager", "管理", Icons.Default.List),
-    NavItem("settings", "设置", Icons.Default.Settings)
+    NavItem("launcher", "首页", Icons.Filled.Home, Icons.Outlined.Home),
+    NavItem("appmanager", "管理", Icons.Filled.List, Icons.Outlined.List),
+    NavItem("settings", "设置", Icons.Filled.Settings, Icons.Outlined.Settings)
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MultiAppNavHost() {
     val navController = rememberNavController()
@@ -39,8 +43,12 @@ fun MultiAppNavHost() {
     val currentDestination = navBackStackEntry?.destination
 
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
-            NavigationBar {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = NavigationBarDefaults.Elevation
+            ) {
                 navItems.forEach { item ->
                     val selected = currentDestination?.hierarchy?.any {
                         it.route == item.route
@@ -57,8 +65,25 @@ fun MultiAppNavHost() {
                                 restoreState = true
                             }
                         },
-                        icon = { Icon(item.icon, contentDescription = item.label) },
-                        label = { Text(item.label) }
+                        icon = {
+                            Icon(
+                                if (selected) item.selectedIcon else item.unselectedIcon,
+                                contentDescription = item.label
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = item.label,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                            )
+                        },
+                        colors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = MaterialTheme.colorScheme.primary,
+                            selectedTextColor = MaterialTheme.colorScheme.primary,
+                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            indicatorColor = MaterialTheme.colorScheme.primaryContainer
+                        )
                     )
                 }
             }

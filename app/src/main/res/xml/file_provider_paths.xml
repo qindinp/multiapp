@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Stub APK output directory -->
+    <files-path name="stubs" path="stubs/" />
+    <!-- Cache directory for origin APK extraction -->
+    <cache-path name="cache" path="." />
+    <!-- External files directory -->
+    <external-files-path name="external_files" path="." />
+</paths>

@@ -20,29 +20,28 @@ import java.io.File
  */
 class FileSystemHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "FileSystemHook: apply called for instance=%s, stub=%s",
             config.instanceId,
             config.stubPackageName
         )
-        applyInternal(config)
+        applyInternal(config, hookEngine)
     }
 
     companion object {
 
         private const val TAG = "FileSystemHook"
 
-        fun apply(config: IdentityConfig) {
+        fun apply(config: IdentityConfig, hookEngine: HookEngine) {
             Timber.d(
                 "FileSystemHook: companion apply called for instance=%s",
                 config.instanceId
             )
-            applyInternal(config)
+            applyInternal(config, hookEngine)
         }
 
-        private fun applyInternal(config: IdentityConfig) {
-            val hookEngine = HookEngine()
+        private fun applyInternal(config: IdentityConfig, hookEngine: HookEngine) {
             val originalPkg = config.originalPackageName
             val stubPkg = config.stubPackageName
 

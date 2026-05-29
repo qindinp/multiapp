@@ -5,16 +5,7 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
-android {
-    namespace = "com.multiapp.core.stub"
-    compileSdk = 36
-    defaultConfig { minSdk = 28 }
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-    kotlinOptions { jvmTarget = "17" }
-}
+// ─── loader DEX 生成 ───────────────────────────────────────────────
 
 dependencies {
     implementation(project(":core:model"))
@@ -31,10 +22,152 @@ dependencies {
     implementation(libs.gson)
     implementation(libs.apksig)
     implementation(libs.apkparser)
+}
 
-    testImplementation(libs.junit5.api)
-    testRuntimeOnly(libs.junit5.engine)
-    testImplementation(libs.coroutines.test)
-    testImplementation(libs.mockk)
-    testImplementation(libs.kotlin.test)
+android {
+    namespace = "com.multiapp.core.stub"
+    compileSdk = 36
+    defaultConfig { minSdk = 28 }
+    buildTypes {
+        release {
+            consumerProguardFiles("proguard-rules.pro")
+        }
+    }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+}
+
+// 声明一个 configuration 来获取 :core:loader 的运行时 classpath
+val loaderRuntimeFiles by configurations.creating {
+    isCanBeConsumed = false
+    isCanBeResolved = true
+}
+
+dependencies {
+    // 这些是 :core:loader 的外部依赖，用于 loader.dex 编译
+    loaderRuntimeFiles(libs.gson)
+    loaderRuntimeFiles(libs.apksig)
+    loaderRuntimeFiles(libs.apkparser)
+    loaderRuntimeFiles(libs.timber)
+    loaderRuntimeFiles(libs.coroutines.core)
+    loaderRuntimeFiles(libs.coroutines.android)
+}
+
+val generateLoaderDex by tasks.registering {
+    description = "Compile :core:loader classes into a DEX for StubBuilder"
+    group = "build"
+
+    val assetsDir = file("src/main/assets")
+    val dexFile = File(assetsDir, "loader.dex")
+
+    dependsOn(":core:model:assembleDebug")
+    dependsOn(":core:common:assembleDebug")
+    dependsOn(":core:hook:assembleDebug")
+    dependsOn(":core:identity:assembleDebug")
+    dependsOn(":core:manifest:assembleDebug")
+    dependsOn(":core:loader:assembleDebug")
+
+    doLast {
+        assetsDir.mkdirs()
+        val stagingDir = File(temporaryDir, "staging")
+        stagingDir.mkdirs()
+
+        // 1. 收集所有 core 模块的编译类文件
+        val coreModules = listOf("model", "common", "hook", "identity", "manifest", "loader")
+        for (mod in coreModules) {
+            val classesDir = rootProject.file("core/$mod/build/intermediates/classes/debug")
+            if (classesDir.isDirectory) {
+                classesDir.copyRecursively(stagingDir, overwrite = true)
+            }
+        }
+
+        // 2. 收集外部依赖 (通过 configuration 获取 JAR/AAR)
+        val depsDir = File(temporaryDir, "deps")
+        depsDir.mkdirs()
+        var depClassCount = 0
+        try {
+            val files = loaderRuntimeFiles.resolvedConfiguration.resolvedArtifacts
+            for (artifact in files) {
+                val f = artifact.file
+                logger.lifecycle("generateLoaderDex: processing dep ${f.name} (${f.length()} bytes)")
+                when (f.extension) {
+                    "jar" -> {
+                        copy { from(zipTree(f)); into(stagingDir); exclude("META-INF/**") }
+                    }
+                    "aar" -> {
+                        copy {
+                            from(zipTree(f)) { include("classes.jar") }
+                            into(depsDir)
+                        }
+                        val aarJar = File(depsDir, "classes.jar")
+                        if (aarJar.exists()) {
+                            copy { from(zipTree(aarJar)); into(stagingDir); exclude("META-INF/**") }
+                            aarJar.delete()
+                        }
+                    }
+                }
+            }
+            depClassCount = stagingDir.walk().filter { it.extension == "class" }.count() - coreModules.sumOf { mod ->
+                val dir = rootProject.file("core/$mod/build/intermediates/classes/debug")
+                if (dir.isDirectory) dir.walk().filter { it.extension == "class" }.count() else 0
+            }
+            logger.lifecycle("generateLoaderDex: resolved ${files.size} dependency artifacts, ~$depClassCount dep classes")
+        } catch (e: Exception) {
+            logger.warn("generateLoaderDex: failed to resolve deps: ${e.message}")
+            e.printStackTrace()
+        }
+        // depsDir.deleteRecursively()  // keep for debugging
+
+        // 3. 查找 d8
+        val sdkDir = rootProject.findProperty("sdk.dir")?.toString()
+            ?.replace("\\:", ":")
+            ?: System.getenv("ANDROID_HOME")
+            ?: System.getenv("ANDROID_SDK_ROOT")
+            ?: run {
+                val lp = rootProject.file("local.properties")
+                if (lp.exists()) {
+                    lp.readLines()
+                        .firstOrNull { it.startsWith("sdk.dir=") }
+                        ?.substringAfter("sdk.dir=")
+                        ?.replace("\\:", ":")
+                } else null
+            }
+            ?: error("Android SDK not found")
+
+        val d8Exe = if (System.getProperty("os.name").lowercase().contains("windows"))
+            "d8.bat" else "d8"
+        val d8Path = File(sdkDir, "build-tools/36.0.0/$d8Exe").absolutePath
+        check(File(d8Path).exists()) { "d8 not found at $d8Path" }
+
+        // 4. 用 d8 一步编译所有 class 为 DEX
+        val classFiles = stagingDir.walk()
+            .filter { it.extension == "class" }
+            .map { it.absolutePath }
+            .toList()
+        logger.lifecycle("generateLoaderDex: compiling ${classFiles.size} class files")
+        val argFile = File(temporaryDir, "classes.txt")
+        argFile.writeText(classFiles.joinToString("\n"))
+
+        exec {
+            commandLine(d8Path, "--min-api", "28", "--output", assetsDir.absolutePath, "@${argFile.absolutePath}")
+        }
+        argFile.delete()
+        stagingDir.deleteRecursively()
+
+        // 重命名 classes.dex → loader.dex
+        val d8Output = File(assetsDir, "classes.dex")
+        check(d8Output.exists()) { "d8 failed to produce classes.dex" }
+        dexFile.delete()  // Windows: renameTo fails if target exists
+        d8Output.renameTo(dexFile)
+        check(dexFile.exists()) { "Failed to rename classes.dex to loader.dex" }
+        logger.lifecycle("generateLoaderDex: ${dexFile.absolutePath} (${dexFile.length()} bytes)")
+    }
+}
+
+// 每次编译前自动生成 loader.dex
+tasks.configureEach {
+    if (name.startsWith("assemble")) dependsOn(generateLoaderDex)
 }

@@ -34,6 +34,9 @@ class TimePrisonManager @Inject constructor(
         private const val TAG = "TimePrison"
     }
 
+    // Lock for synchronized operations on configs + activatedAt pairs
+    private val lock = Any()
+
     // ─── Per-instance state ────────────────────────────────────────
 
     /** Active time prison configurations keyed by instanceId. */
@@ -60,8 +63,10 @@ class TimePrisonManager @Inject constructor(
      * @param config     The time strategy and parameters
      */
     fun configureTimePrison(instanceId: String, config: TimePrisonConfig) {
-        configs[instanceId] = config
-        activatedAt[instanceId] = System.currentTimeMillis()
+        synchronized(lock) {
+            configs[instanceId] = config
+            activatedAt[instanceId] = System.currentTimeMillis()
+        }
 
         Timber.tag(TAG).i(
             "Time prison configured for $instanceId: " +
@@ -180,8 +185,10 @@ class TimePrisonManager @Inject constructor(
      * Remove the time prison for an instance.
      */
     fun removeTimePrison(instanceId: String) {
-        configs.remove(instanceId)
-        activatedAt.remove(instanceId)
+        synchronized(lock) {
+            configs.remove(instanceId)
+            activatedAt.remove(instanceId)
+        }
         Timber.tag(TAG).d("Time prison removed for $instanceId")
     }
 
@@ -189,8 +196,10 @@ class TimePrisonManager @Inject constructor(
      * Remove all time prisons.
      */
     fun removeAll() {
-        configs.clear()
-        activatedAt.clear()
+        synchronized(lock) {
+            configs.clear()
+            activatedAt.clear()
+        }
         Timber.tag(TAG).i("All time prisons removed")
     }
 

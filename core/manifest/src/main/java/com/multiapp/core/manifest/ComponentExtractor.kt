@@ -1,9 +1,11 @@
 package com.multiapp.core.manifest
 
+import javax.inject.Inject
+
 /**
  * 从解析后的 Manifest 中提取所有组件声明
  */
-class ComponentExtractor {
+class ComponentExtractor @Inject constructor() {
 
     fun extractLauncherActivity(manifest: ManifestParser.ParsedManifest): ManifestParser.ComponentInfo? {
         return manifest.activities.find { activity ->
