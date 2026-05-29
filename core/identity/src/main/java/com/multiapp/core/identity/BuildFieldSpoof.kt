@@ -17,14 +17,14 @@ import timber.log.Timber
  */
 class BuildFieldSpoof : HookPoint {
 
-    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+    override fun apply(config: IdentityConfig) {
         Timber.d(
             "BuildFieldSpoof: apply called for instance=%s, model=%s, manufacturer=%s",
             config.instanceId,
             config.buildModel,
             config.buildManufacturer
         )
-        applyInternal(config, hookEngine)
+        applyInternal(config)
     }
 
     companion object {
@@ -50,15 +50,16 @@ class BuildFieldSpoof : HookPoint {
         @JvmStatic
         external fun nativeSetStaticFieldValue(className: String, fieldName: String, value: Any)
 
-        fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+        fun apply(config: IdentityConfig) {
             Timber.d(
                 "BuildFieldSpoof: companion apply called for instance=%s",
                 config.instanceId
             )
-            applyInternal(config, hookEngine)
+            applyInternal(config)
         }
 
-        private fun applyInternal(config: IdentityConfig, hookEngine: HookEngine) {
+        private fun applyInternal(config: IdentityConfig) {
+            val hookEngine = HookEngine.getInstance()
 
             // Spoof Build object fields
             spoofBuildStringFields(hookEngine, config)
@@ -90,12 +91,11 @@ class BuildFieldSpoof : HookPoint {
             )
 
             for ((fieldName, value) in fieldMap) {
-                var success = try {
-                    hookEngine.hookStaticField("android.os.Build", fieldName, value)
-                } catch (e: Exception) {
-                    Timber.tag(TAG).w(e, "hookStaticField failed for Build.$fieldName")
-                    false
-                }
+                var success = hookEngine.hookStaticField(
+                    "android.os.Build",
+                    fieldName,
+                    value
+                )
 
                 if (!success) {
                     // Fallback to native JNI method
@@ -125,12 +125,11 @@ class BuildFieldSpoof : HookPoint {
             config: IdentityConfig
         ) {
             // RELEASE is a String field
-            var success = try {
-                hookEngine.hookStaticField("android.os.Build\$VERSION", "RELEASE", config.versionRelease)
-            } catch (e: Exception) {
-                Timber.tag(TAG).w(e, "hookStaticField failed for Build.VERSION.RELEASE")
-                false
-            }
+            var success = hookEngine.hookStaticField(
+                "android.os.Build\$VERSION",
+                "RELEASE",
+                config.versionRelease
+            )
             if (!success) {
                 success = tryNativeSetField(
                     "android.os.Build\$VERSION", "RELEASE", config.versionRelease
@@ -144,12 +143,11 @@ class BuildFieldSpoof : HookPoint {
             Timber.tag(TAG).d("Build.VERSION.RELEASE = %s (success=%b)", config.versionRelease, success)
 
             // SDK_INT is an int field
-            success = try {
-                hookEngine.hookStaticField("android.os.Build\$VERSION", "SDK_INT", config.sdkInt)
-            } catch (e: Exception) {
-                Timber.tag(TAG).w(e, "hookStaticField failed for Build.VERSION.SDK_INT")
-                false
-            }
+            success = hookEngine.hookStaticField(
+                "android.os.Build\$VERSION",
+                "SDK_INT",
+                config.sdkInt
+            )
             if (!success) {
                 success = tryNativeSetField(
                     "android.os.Build\$VERSION", "SDK_INT", config.sdkInt

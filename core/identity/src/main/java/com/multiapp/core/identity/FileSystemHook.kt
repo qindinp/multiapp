@@ -20,28 +20,29 @@ import java.io.File
  */
 class FileSystemHook : HookPoint {
 
-    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+    override fun apply(config: IdentityConfig) {
         Timber.d(
             "FileSystemHook: apply called for instance=%s, stub=%s",
             config.instanceId,
             config.stubPackageName
         )
-        applyInternal(config, hookEngine)
+        applyInternal(config)
     }
 
     companion object {
 
         private const val TAG = "FileSystemHook"
 
-        fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+        fun apply(config: IdentityConfig) {
             Timber.d(
                 "FileSystemHook: companion apply called for instance=%s",
                 config.instanceId
             )
-            applyInternal(config, hookEngine)
+            applyInternal(config)
         }
 
-        private fun applyInternal(config: IdentityConfig, hookEngine: HookEngine) {
+        private fun applyInternal(config: IdentityConfig) {
+            val hookEngine = HookEngine.getInstance()
             val originalPkg = config.originalPackageName
             val stubPkg = config.stubPackageName
 
@@ -163,22 +164,21 @@ class FileSystemHook : HookPoint {
         /**
          * Rewrite a file path string, replacing occurrences of the original
          * package name with the stub package name in data directory paths.
+         *
+         * 覆盖范围: /data/、/storage/、/sdcard/、/mnt/ 下所有包含原始包名的路径
          */
         private fun rewritePath(path: String, originalPkg: String, stubPkg: String): String {
-            // Only rewrite paths under /data/ that contain the original package name
-            if (!path.contains("/data/")) return path
             if (!path.contains(originalPkg)) return path
 
-            return path.replace(
-                "/data/data/$originalPkg/",
-                "/data/data/$stubPkg/"
-            ).replace(
-                "/data/user/0/$originalPkg/",
-                "/data/user/0/$stubPkg/"
-            ).replace(
-                "/data/user/10/$originalPkg/",
-                "/data/user/10/$stubPkg/"
-            )
+            return path
+                .replace("/data/data/$originalPkg/", "/data/data/$stubPkg/")
+                .replace("/data/user/0/$originalPkg/", "/data/user/0/$stubPkg/")
+                .replace("/data/user/10/$originalPkg/", "/data/user/10/$stubPkg/")
+                .replace("/storage/emulated/0/Android/data/$originalPkg/", "/storage/emulated/0/Android/data/$stubPkg/")
+                .replace("/storage/emulated/0/Android/obb/$originalPkg/", "/storage/emulated/0/Android/obb/$stubPkg/")
+                .replace("/sdcard/Android/data/$originalPkg/", "/sdcard/Android/data/$stubPkg/")
+                .replace("/sdcard/Android/obb/$originalPkg/", "/sdcard/Android/obb/$stubPkg/")
+                .replace("/mnt/sdcard/Android/data/$originalPkg/", "/mnt/sdcard/Android/data/$stubPkg/")
         }
 
         /**

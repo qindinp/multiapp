@@ -21,29 +21,30 @@ import timber.log.Timber
  */
 class PackageIdentityHook : HookPoint {
 
-    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+    override fun apply(config: IdentityConfig) {
         Timber.d(
             "PackageIdentityHook: apply called for instance=%s, stub=%s, original=%s",
             config.instanceId,
             config.stubPackageName,
             config.originalPackageName
         )
-        applyInternal(config, hookEngine)
+        applyInternal(config)
     }
 
     companion object {
 
         private const val TAG = "PackageIdentityHook"
 
-        fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+        fun apply(config: IdentityConfig) {
             Timber.d(
                 "PackageIdentityHook: companion apply called for instance=%s",
                 config.instanceId
             )
-            applyInternal(config, hookEngine)
+            applyInternal(config)
         }
 
-        private fun applyInternal(config: IdentityConfig, hookEngine: HookEngine) {
+        private fun applyInternal(config: IdentityConfig) {
+            val hookEngine = HookEngine.getInstance()
             val originalPkg = config.originalPackageName
             val stubPkg = config.stubPackageName
 

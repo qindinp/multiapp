@@ -18,32 +18,35 @@ import java.io.File
  */
 class DlopenHook : HookPoint {
 
-    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+    override fun apply(config: IdentityConfig) {
         Timber.d(
             "DlopenHook: apply called for instance=%s, stub=%s",
             config.instanceId,
             config.stubPackageName
         )
-        applyInternal(config, hookEngine)
+        applyInternal(config)
     }
 
     companion object {
 
         private const val TAG = "DlopenHook"
 
-        fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+        fun apply(config: IdentityConfig) {
             Timber.d(
                 "DlopenHook: companion apply called for instance=%s",
                 config.instanceId
             )
-            applyInternal(config, hookEngine)
+            applyInternal(config)
         }
 
-        private fun applyInternal(config: IdentityConfig, hookEngine: HookEngine) {
+        private fun applyInternal(config: IdentityConfig) {
+            val hookEngine = HookEngine.getInstance()
             val originalPkg = config.originalPackageName
             val stubPkg = config.stubPackageName
 
-            hookSystemLoadLibrary(hookEngine, originalPkg, stubPkg)
+            // 只 hook Runtime.nativeLoad，不 hook System.loadLibrary
+            // hook System.loadLibrary 的 beforeCallback 返回后仍会执行原始方法
+            // nativeLoad 是更底层的入口，可以直接改路径
             hookRuntimeNativeLoad(hookEngine, originalPkg, stubPkg)
 
             Timber.tag(TAG).i(

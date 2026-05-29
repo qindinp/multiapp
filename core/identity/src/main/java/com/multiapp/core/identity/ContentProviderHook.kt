@@ -22,28 +22,29 @@ import timber.log.Timber
  */
 class ContentProviderHook : HookPoint {
 
-    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+    override fun apply(config: IdentityConfig) {
         Timber.d(
             "ContentProviderHook: apply called for instance=%s, authorityMap=%s",
             config.instanceId,
             config.authorityMap.keys.joinToString()
         )
-        applyInternal(config, hookEngine)
+        applyInternal(config)
     }
 
     companion object {
 
         private const val TAG = "ContentProviderHook"
 
-        fun apply(config: IdentityConfig, hookEngine: HookEngine) {
+        fun apply(config: IdentityConfig) {
             Timber.d(
                 "ContentProviderHook: companion apply called for instance=%s",
                 config.instanceId
             )
-            applyInternal(config, hookEngine)
+            applyInternal(config)
         }
 
-        private fun applyInternal(config: IdentityConfig, hookEngine: HookEngine) {
+        private fun applyInternal(config: IdentityConfig) {
+            val hookEngine = HookEngine.getInstance()
             val authorityMap = config.authorityMap
 
             hookContentResolverQuery(hookEngine, authorityMap)
