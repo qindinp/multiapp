@@ -168,6 +168,12 @@ val generateLoaderDex by tasks.registering {
 }
 
 // 每次编译前自动生成 loader.dex
+// 必须在 mergeDebugAssets 之前完成，否则 assets 不会被合并到 APK
 tasks.configureEach {
-    if (name.startsWith("assemble")) dependsOn(generateLoaderDex)
+    if (name.startsWith("merge") && name.endsWith("Assets")) {
+        dependsOn(generateLoaderDex)
+    }
+    if (name.startsWith("assemble")) {
+        dependsOn(generateLoaderDex)
+    }
 }
