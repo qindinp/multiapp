@@ -74,72 +74,80 @@ class BinaryXmlEncoder {
         launcherActivity: ManifestParser.ComponentInfo,
         config: StubConfig
     ): ByteArray {
-        val pool = mutableListOf<String>()
-        val nodes = mutableListOf<Node>()
+        // 属性名必须在 StringPool 前面，与 ResourceMap 对应
+        val attrNames = mutableListOf<String>()
+        val otherStrings = mutableListOf<String>()
 
-        fun str(s: String): Int {
-            val idx = pool.indexOf(s)
+        fun attrStr(s: String): Int {
+            val idx = attrNames.indexOf(s)
             if (idx >= 0) return idx
-            pool.add(s)
-            return pool.size - 1
+            attrNames.add(s)
+            return attrNames.size - 1
+        }
+        fun otherStr(s: String): Int {
+            val idx = otherStrings.indexOf(s)
+            if (idx >= 0) return idx
+            otherStrings.add(s)
+            return otherStrings.size - 1
         }
 
-        // Pre-register ALL strings used in attributes and elements
-        str("android")
-        str(ANDROID_NS_URI)
-        str("manifest")
-        str(stubPackageName)
-        str("package")
-        str("versionCode")
-        str("versionName")
-        str("1.0")
+        // 属性名索引 (ResourceMap 对应)
+        val IDX_VERSION_CODE = attrStr("versionCode")
+        val IDX_VERSION_NAME = attrStr("versionName")
+        val IDX_MIN_SDK = attrStr("minSdkVersion")
+        val IDX_TARGET_SDK = attrStr("targetSdkVersion")
+        val IDX_NAME = attrStr("name")
+        val IDX_LABEL = attrStr("label")
+        val IDX_ICON = attrStr("icon")
+        val IDX_EXPORTED = attrStr("exported")
+        val IDX_PROCESS = attrStr("process")
+        val IDX_AUTHORITIES = attrStr("authorities")
+        val IDX_APP_COMP_FACTORY = attrStr("appComponentFactory")
+        val IDX_PERMISSION = attrStr("permission")
 
-        str("uses-sdk")
-        str("minSdkVersion")
-        str("targetSdkVersion")
-        str("28")   // minSdkVersion raw string
-        str("36")   // targetSdkVersion raw string
+        // 其他字符串
+        val NS_URI = otherStr(ANDROID_NS_URI)
+        val PKG = otherStr(stubPackageName)
+        val MANIFEST = otherStr("manifest")
+        val PACKAGE = otherStr("package")
+        val USES_SDK = otherStr("uses-sdk")
+        val MIN_VAL = otherStr("28")
+        val TARGET_VAL = otherStr("36")
+        val USES_PERM = otherStr("uses-permission")
+        val APPLICATION = otherStr("application")
+        val COMP_FACTORY_VAL = otherStr("com.multiapp.core.loader.LoaderFactory")
+        val ACTIVITY = otherStr("activity")
+        val INTENT_FILTER = otherStr("intent-filter")
+        val ACTION = otherStr("action")
+        val CATEGORY = otherStr("category")
+        val MAIN_ACTION = otherStr("android.intent.action.MAIN")
+        val LAUNCHER_CAT = otherStr("android.intent.category.LAUNCHER")
+        val TRUE_VAL = otherStr("true")
+        val FALSE_VAL = otherStr("false")
+        val VERSION_NAME_VAL = otherStr("1.0")
+        val ICON_VAL = otherStr("@mipmap/ic_launcher")
+        val SERVICE = otherStr("service")
+        val RECEIVER = otherStr("receiver")
+        val PROVIDER = otherStr("provider")
+        val ANDROID = otherStr("android")
+        val EMPTY = otherStr("")
 
-        str("uses-permission")
-        for (p in manifest.permissions) str(p)
-
-        str("application")
-        str("appComponentFactory")
-        str("com.multiapp.core.loader.LoaderFactory")
-        str("label")
-        str(config.stubPackageName)
-        str("icon")
-        str("@mipmap/ic_launcher")
-
-        str("activity")
-        str("intent-filter")
-        str("action")
-        str("category")
-        str("android.intent.action.MAIN")
-        str("android.intent.category.LAUNCHER")
-        str("name")
-        str("exported")
-        str("true")
-        str("false")
-        str("process")
-
-        str(launcherActivity.name)
-
-        for (a in manifest.activities) {
-            if (a.name != launcherActivity.name) str(a.name)
-            a.process?.let { str(it) }
-        }
-        str("service")
-        for (s in manifest.services) { str(s.name); s.process?.let { str(it) } }
-        str("receiver")
-        for (r in manifest.receivers) { str(r.name); r.process?.let { str(it) } }
-
-        str("provider")
-        str("authorities")
-        str("") // empty string for null authorities
+        // 动态字符串
+        for (p in manifest.permissions) otherStr(p)
+        otherStr(launcherActivity.name)
+        for (a in manifest.activities) { if (a.name != launcherActivity.name) otherStr(a.name); a.process?.let { otherStr(it) } }
+        for (s in manifest.services) { otherStr(s.name); s.process?.let { otherStr(it) } }
+        for (r in manifest.receivers) { otherStr(r.name); r.process?.let { otherStr(it) } }
         val authorityRewriter = AuthorityRewriter()
         val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId)
-        for (p in rewrittenProviders) { str(p.name); p.authorities?.let { str(it) } }
+        for (p in rewrittenProviders) { otherStr(p.name); p.authorities?.let { otherStr(it) } }
+
+        // 合并: 属性名在前，其他在后
+        val pool = attrNames + otherStrings
+        val otherOffset = attrNames.size
+        fun otherIdx(localIdx: Int) = otherOffset + localIdx
+
+        val nodes = mutableListOf<Node>()
 
         // Build node tree
         nodes.add(Node.NsStart("android", ANDROID_NS_URI))
@@ -203,7 +211,7 @@ class BinaryXmlEncoder {
         nodes.add(Node.ElemEnd(null, "manifest"))
         nodes.add(Node.NsEnd("android", ANDROID_NS_URI))
 
-        return encodeBinary(pool, nodes)
+        return encodeBinary(pool, attrNames.size, nodes)
     }
 
     private fun addComponentNode(nodes: MutableList<Node>, tag: String, name: String, exported: Boolean, process: String?) {
@@ -221,9 +229,9 @@ class BinaryXmlEncoder {
      * 使用 ByteBuffer (little-endian) 编码所有数据，包括 XML body。
      * DataOutputStream 是 big-endian，不能用于 Android 二进制 XML。
      */
-    private fun encodeBinary(pool: List<String>, nodes: List<Node>): ByteArray {
+    private fun encodeBinary(pool: List<String>, attrNameCount: Int, nodes: List<Node>): ByteArray {
         val strPoolBytes = encodeStringPool(pool)
-        val resMapBytes = encodeResourceMap(pool)
+        val resMapBytes = encodeResourceMap(pool.take(attrNameCount))
         val idx = pool.withIndex().associate { (i, s) -> s to i }
 
         // Pre-calculate body size
