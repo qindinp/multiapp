@@ -10,11 +10,12 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
+
 /**
  * NativeHookBridge — Native 层 hook 引擎
  *
  * 不使用 Hilt @Singleton/@Inject，因为 LoaderFactory 在 AppComponentFactory 阶段
- * 直接构造实例，此时 Hilt 尚未初始化。
+ * 直接构造实例，此时 Hilt 尚未初始化。统一用 getInstance() 获取全局单例。
  */
 class NativeHookBridge {
 
@@ -37,6 +38,23 @@ class NativeHookBridge {
         )
 
         @Volatile private var nativeLibLoaded = false
+
+        /**
+         * 全局单例
+         */
+        @Volatile
+        private var instance: NativeHookBridge? = null
+
+        fun getInstance(): NativeHookBridge {
+            return instance ?: synchronized(this) {
+                instance ?: NativeHookBridge().also { instance = it }
+            }
+        }
+
+        fun resetInstance() {
+            instance?.cleanup()
+            instance = null
+        }
 
         init {
             nativeLibLoaded = try {
@@ -187,18 +205,24 @@ class NativeHookBridge {
         Timber.tag(TAG).i("Native hook bridge cleaned up")
     }
 
-    fun initNativeHooks(context: android.content.Context? = null): Boolean {
+    fun initNativeHooks(context: android.content.Context? = null, hostDataDir: String? = null): Boolean {
         if (initialized) return true
         appContext = context?.applicationContext
         nativeHooksAvailable = tryLoadNativeLibrary()
         if (nativeHooksAvailable) {
             try {
                 nativeInit()
-                appContext?.let { ctx ->
-                    try {
-                        nativeSetHostDataPrefix(ctx.dataDir.absolutePath)
-                        nativeSetVirtualDataRoot(ctx.getDir("virtual", android.content.Context.MODE_PRIVATE).absolutePath)
-                    } catch (e: Exception) { Timber.tag(TAG).w("Failed to set native data paths: ${e.message}") }
+                val effectiveDataDir = hostDataDir
+                    ?: appContext?.let { ctx ->
+                        try {
+                            nativeSetVirtualDataRoot(ctx.getDir("virtual", android.content.Context.MODE_PRIVATE).absolutePath)
+                            ctx.dataDir.absolutePath
+                        } catch (e: Exception) { Timber.tag(TAG).w("Failed to get dataDir from context: ${e.message}"); null }
+                    }
+                if (effectiveDataDir != null) {
+                    nativeSetHostDataPrefix(effectiveDataDir)
+                } else {
+                    Timber.tag(TAG).w("No dataDir available — native path redirection may not work")
                 }
             } catch (e: Exception) { Timber.tag(TAG).e(e, "Native hook init failed"); nativeHooksAvailable = false }
         }
