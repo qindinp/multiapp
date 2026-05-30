@@ -930,7 +930,11 @@ class StubBuilderTest {
             // Use spyk to force getLoaderDex to throw (since loader.dex actually exists on disk)
             val spyBuilder = spyk(stubBuilder)
             every { spyBuilder["getLoaderDex"]() } throws IllegalStateException("loader.dex not found")
-            every { spyBuilder.signApk(any(), any()) } just Runs
+            every { spyBuilder.signApk(any(), any()) } answers {
+            val output = secondArg<java.io.File>()
+            output.parentFile?.mkdirs()
+            output.createNewFile()
+        }
 
             val error = assertFailsWith<IllegalStateException> {
                 spyBuilder.build(config)
@@ -1018,7 +1022,11 @@ class StubBuilderTest {
         val loaderDexContent = "mock-loader-dex-content".toByteArray()
         every { spyBuilder["getLoaderDex"]() } returns loaderDexContent
 
-        every { spyBuilder.copySigningBlock(any(), any()) } just Runs
+        every { spyBuilder.signApk(any(), any()) } answers {
+            val output = secondArg<java.io.File>()
+            output.parentFile?.mkdirs()
+            output.createNewFile()
+        }
 
         return block(spyBuilder)
     }

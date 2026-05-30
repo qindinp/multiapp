@@ -222,8 +222,8 @@ class InstanceManagerTest {
             val instanceId = instanceManager.createInstance(app)
             val uuidPart = instanceId.removePrefix("stub_")
 
-            // UUID 格式: 8-4-4-4-12 (32 hex chars + 4 dashes)
-            val uuidRegex = Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+            // UUID 格式: 32 hex chars (无连字符，代码中 replace("-",""))
+            val uuidRegex = Regex("[0-9a-f]{32}")
             assertTrue(
                 uuidRegex.matches(uuidPart),
                 "UUID 部分不符合格式: $uuidPart"

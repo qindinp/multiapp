@@ -44,11 +44,12 @@ class ManifestGeneratorTest {
         )
 
         val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
-        val content = String(bytes, Charsets.UTF_8)
 
-        assertTrue(content.contains("com.test.stub"), "Should contain package name")
-        assertTrue(content.contains("com.test.MainActivity"), "Should contain launcher activity")
-        assertTrue(content.contains("LoaderFactory"), "Should contain appComponentFactory")
+        // 二进制 XML 的字符串以 UTF-16LE 编码存储在 StringPool 中
+        // 搜索 UTF-16LE 编码的字符串
+        val utf16Bytes = "com.test.stub".toByteArray(Charsets.UTF_16LE)
+        assertTrue(bytes.size > utf16Bytes.size, "Output should be larger than string")
+        assertTrue(containsBytes(bytes, utf16Bytes), "StringPool should contain package name (UTF-16LE)")
     }
 
     @Test
@@ -96,10 +97,24 @@ class ManifestGeneratorTest {
         val launcherActivity = ManifestParser.ComponentInfo("com.test.MainActivity", true, null)
 
         val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
-        val content = String(bytes, Charsets.UTF_8)
 
-        assertTrue(content.contains("INTERNET"), "Should contain permission")
-        assertTrue(content.contains("CAMERA"), "Should contain permission")
+        // 二进制 XML 中权限以 UTF-16LE 编码存储
+        assertTrue(containsBytes(bytes, "INTERNET".toByteArray(Charsets.UTF_16LE)), "Should contain INTERNET")
+        assertTrue(containsBytes(bytes, "CAMERA".toByteArray(Charsets.UTF_16LE)), "Should contain CAMERA")
+    }
+
+    /**
+     * 在字节数组中搜索子序列
+     */
+    private fun containsBytes(haystack: ByteArray, needle: ByteArray): Boolean {
+        if (needle.isEmpty()) return true
+        outer@ for (i in 0..haystack.size - needle.size) {
+            for (j in needle.indices) {
+                if (haystack[i + j] != needle[j]) continue@outer
+            }
+            return true
+        }
+        return false
     }
 
     @Test

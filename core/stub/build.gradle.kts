@@ -22,6 +22,11 @@ dependencies {
     implementation(libs.gson)
     implementation(libs.apksig)
     implementation(libs.apkparser)
+
+    testImplementation(libs.junit5.api)
+    testRuntimeOnly(libs.junit5.engine)
+    testImplementation(libs.mockk)
+    testImplementation(libs.kotlin.test)
 }
 
 android {
