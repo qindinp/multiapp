@@ -19,7 +19,7 @@ import timber.log.Timber
  */
 class SignatureBypass : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "SignatureBypass: apply called for instance=%s, pkg=%s",
             config.instanceId,

@@ -24,7 +24,7 @@ import timber.log.Timber
  */
 class DeviceIdentityHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "DeviceIdentityHook: apply called for instance=%s, imei=%s, androidId=%s",
             config.instanceId,

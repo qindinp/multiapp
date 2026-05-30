@@ -21,7 +21,7 @@ import timber.log.Timber
  */
 class PackageIdentityHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "PackageIdentityHook: apply called for instance=%s, stub=%s, original=%s",
             config.instanceId,

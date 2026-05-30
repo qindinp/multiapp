@@ -20,7 +20,7 @@ import java.io.File
  */
 class FileSystemHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "FileSystemHook: apply called for instance=%s, stub=%s",
             config.instanceId,

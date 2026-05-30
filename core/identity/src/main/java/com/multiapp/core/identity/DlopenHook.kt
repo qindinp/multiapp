@@ -18,7 +18,7 @@ import java.io.File
  */
 class DlopenHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "DlopenHook: apply called for instance=%s, stub=%s",
             config.instanceId,

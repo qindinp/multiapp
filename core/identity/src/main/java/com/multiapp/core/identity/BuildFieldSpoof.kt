@@ -17,7 +17,7 @@ import timber.log.Timber
  */
 class BuildFieldSpoof : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "BuildFieldSpoof: apply called for instance=%s, model=%s, manufacturer=%s",
             config.instanceId,

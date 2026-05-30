@@ -22,7 +22,7 @@ import timber.log.Timber
  */
 class ContentProviderHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "ContentProviderHook: apply called for instance=%s, authorityMap=%s",
             config.instanceId,

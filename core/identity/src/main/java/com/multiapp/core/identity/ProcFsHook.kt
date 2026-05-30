@@ -19,7 +19,7 @@ import java.io.FileReader
  */
 class ProcFsHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "ProcFsHook: apply called for instance=%s, stub=%s",
             config.instanceId,

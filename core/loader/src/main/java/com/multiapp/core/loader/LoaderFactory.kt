@@ -55,7 +55,7 @@ class LoaderFactory : AppComponentFactory() {
         val config = readConfigFromAssets(stubApkPath)
 
         // 3. 初始化 NativeHookBridge（native 层 hook 必须最早就位）
-        val nativeBridge = NativeHookBridge.getInstance()
+        val nativeBridge = NativeHookBridge()
         nativeBridge.initNativeHooks(null)
 
         // 4. 解压原始 APK

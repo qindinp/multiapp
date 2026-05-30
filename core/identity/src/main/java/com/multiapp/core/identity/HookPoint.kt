@@ -9,6 +9,7 @@ interface HookPoint {
 
     /**
      * Apply the hook with the given identity configuration.
+     * hookEngine 参数可选，实现类通过 HookEngine.getInstance() 获取全局单例。
      */
-    fun apply(config: IdentityConfig, hookEngine: HookEngine)
+    fun apply(config: IdentityConfig, hookEngine: HookEngine = HookEngine.getInstance())
 }

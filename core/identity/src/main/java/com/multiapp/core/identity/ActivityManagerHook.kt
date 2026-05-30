@@ -19,7 +19,7 @@ import timber.log.Timber
  */
 class ActivityManagerHook : HookPoint {
 
-    override fun apply(config: IdentityConfig) {
+    override fun apply(config: IdentityConfig, hookEngine: HookEngine) {
         Timber.d(
             "ActivityManagerHook: apply called for instance=%s, stub=%s",
             config.instanceId,
