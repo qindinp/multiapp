@@ -63,15 +63,16 @@ class StubBuilder(
             val manifest = parser.parse(originApk)
             Timber.d("StubBuilder: parsed manifest, ${manifest.activities.size} activities")
 
-            // 2. 生成 Stub manifest (二进制 XML)
+            // 2. 生成 Stub manifest — 先生成文本 XML，再用 aapt 编译为二进制 XML
             val launcherActivity = extractor.extractLauncherActivity(manifest)
                 ?: error("No launcher activity found in origin APK")
-            val manifestBytes = generator.generateBytes(
+            val textManifest = generator.generate(
                 stubPackageName = config.stubPackageName,
                 manifest = manifest,
                 launcherActivity = launcherActivity,
                 config = config
             )
+            val manifestBytes = compileManifestWithAapt(textManifest, workDir, config)
 
             // 3. 提取 launcher icon
             val iconFile = extractLauncherIcon(originApk, workDir)
@@ -389,6 +390,104 @@ class StubBuilder(
             "loader.dex not found. Ensure the loader module DEX is bundled " +
                 "as an asset in the stub module. Expected: assets/$LOADER_DEX_ASSET"
         )
+    }
+
+    /**
+     * 使用 aapt 编译文本 XML manifest 为二进制 XML
+     *
+     * 在设备上运行时，使用系统自带的 aapt（/system/bin/aapt 或通过 Context 获取）。
+     * 开发环境下使用 Android SDK 的 aapt。
+     *
+     * @param textManifest 文本格式的 AndroidManifest.xml
+     * @param workDir 临时工作目录
+     * @param config Stub 配置
+     * @return 编译后的二进制 XML 字节数组
+     */
+    private fun compileManifestWithAapt(textManifest: String, workDir: File, config: StubConfig): ByteArray {
+        // 写入文本 manifest
+        val manifestFile = File(workDir, "AndroidManifest.xml")
+        manifestFile.writeText(textManifest)
+
+        // 创建临时 APK（只含 manifest）
+        val tempApk = File(workDir, "manifest-only.apk")
+
+        // 查找 aapt 可执行文件
+        val aaptPath = findAapt()
+
+        // 执行 aapt package
+        val cmd = listOf(
+            aaptPath, "package", "-f",
+            "-M", manifestFile.absolutePath,
+            "-F", tempApk.absolutePath
+        )
+
+        // 添加 -I 参数指向 android.jar（如果能找到）
+        val androidJar = findAndroidJar()
+        val fullCmd = if (androidJar != null) {
+            cmd + listOf("-I", androidJar.absolutePath)
+        } else {
+            cmd
+        }
+
+        val process = ProcessBuilder(fullCmd)
+            .redirectErrorStream(true)
+            .directory(workDir)
+            .start()
+
+        val output = process.inputStream.bufferedReader().readText()
+        val exitCode = process.waitFor()
+
+        if (exitCode != 0) {
+            Timber.e("aapt failed (exit=$exitCode): $output")
+            error("aapt package failed: $output")
+        }
+
+        // 从临时 APK 中提取 AndroidManifest.xml
+        ZipFile(tempApk).use { zip ->
+            val entry = zip.getEntry("AndroidManifest.xml")
+                ?: error("AndroidManifest.xml not found in aapt output")
+            return zip.getInputStream(entry).readBytes()
+        }
+    }
+
+    /**
+     * 查找 aapt 可执行文件
+     */
+    private fun findAapt(): String {
+        val candidates = listOf(
+            // Android SDK (开发环境)
+            "${System.getenv("ANDROID_HOME") ?: ""}/build-tools/36.0.0/aapt",
+            "${System.getenv("ANDROID_HOME") ?: ""}/build-tools/35.0.0/aapt",
+            "${System.getenv("ANDROID_HOME") ?: ""}/build-tools/34.0.0/aapt",
+            // 系统 PATH
+            "/system/bin/aapt",
+            "aapt"
+        )
+
+        for (candidate in candidates) {
+            val file = File(candidate)
+            if (file.canExecute()) return candidate
+        }
+
+        error("aapt not found. Set ANDROID_HOME or ensure aapt is in PATH")
+    }
+
+    /**
+     * 查找 android.jar
+     */
+    private fun findAndroidJar(): File? {
+        val sdkHome = System.getenv("ANDROID_HOME") ?: return null
+        val candidates = listOf(
+            "$sdkHome/platforms/android-36/android.jar",
+            "$sdkHome/platforms/android-35/android.jar",
+            "$sdkHome/platforms/android-34/android.jar"
+        )
+
+        for (candidate in candidates) {
+            val file = File(candidate)
+            if (file.exists()) return file
+        }
+        return null
     }
 
     /**

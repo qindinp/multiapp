@@ -25,13 +25,13 @@ class ManifestGenerator {
         sb.appendLine("""<?xml version="1.0" encoding="utf-8"?>""")
         sb.appendLine("""<manifest xmlns:android="http://schemas.android.com/apk/res/android"""")
         sb.appendLine("""    package="$stubPackageName">""")
+        sb.appendLine("""    <uses-sdk android:minSdkVersion="${config.deviceIdentity.sdkInt}" android:targetSdkVersion="${config.deviceIdentity.sdkInt}" />""")
         for (permission in manifest.permissions) {
             sb.appendLine("""    <uses-permission android:name="$permission" />""")
         }
         sb.appendLine("""    <application""")
         sb.appendLine("""        android:appComponentFactory="com.multiapp.core.loader.LoaderFactory"""")
-        sb.appendLine("""        android:label="${config.stubPackageName}"""")
-        sb.appendLine("""        android:icon="@mipmap/ic_launcher">""")
+        sb.appendLine("""        android:label="${config.stubPackageName}">""")
         sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true">""")
         sb.appendLine("""            <intent-filter>""")
         sb.appendLine("""                <action android:name="android.intent.action.MAIN" />""")
@@ -90,6 +90,9 @@ class ManifestGenerator {
         stringIndex("uses-permission") // 5
         stringIndex("name") // 6
         stringIndex("application") // 7
+        stringIndex("uses-sdk") // 25
+        stringIndex("minSdkVersion") // 26
+        stringIndex("targetSdkVersion") // 27
         stringIndex("appComponentFactory") // 8
         stringIndex("com.multiapp.core.loader.LoaderFactory") // 9
         stringIndex("label") // 10
@@ -139,43 +142,56 @@ class ManifestGenerator {
             0x01010010, // exported
             0x0101001c, // process
             0x0101001d, // authorities
+            0x0101020c, // minSdkVersion
+            0x01010270, // targetSdkVersion
         )
         baos.write(intToBytes(0x00080180)) // RES_XML_RESOURCE_MAP_TYPE
         baos.write(intToBytes(8 + androidAttrs.size * 4))
         for (id in androidAttrs) baos.write(intToBytes(id))
 
         // 根节点 <manifest>
+        // android namespace 的 ns 索引是 1（"http://schemas.android.com/apk/res/android"）
+        // 无 namespace 的属性 ns = 0xFFFFFFFF
+        val NS_ANDROID = 1
+        val NS_NONE = 0xFFFFFFFF.toInt()
+
         writeStartElement(baos, stringIndex("manifest"), listOf(
-            Attr(1, stringIndex("package"), 0x03000008, stringIndex(stubPackageName))
+            Attr(NS_NONE, stringIndex("package"), 0x03, stringIndex(stubPackageName))
         ))
+
+        // <uses-sdk> — 必须包含，否则系统无法确定最低平台版本
+        writeStartElement(baos, stringIndex("uses-sdk"), listOf(
+            Attr(NS_ANDROID, stringIndex("minSdkVersion"), 0x10, config.deviceIdentity.sdkInt),
+            Attr(NS_ANDROID, stringIndex("targetSdkVersion"), 0x10, config.deviceIdentity.sdkInt)
+        ))
+        writeEndElement(baos, stringIndex("uses-sdk"))
 
         // <uses-permission>
         for (perm in manifest.permissions) {
             writeStartElement(baos, stringIndex("uses-permission"), listOf(
-                Attr(1, stringIndex("name"), 0x03000008, stringIndex(perm))
+                Attr(NS_ANDROID, stringIndex("name"), 0x03, stringIndex(perm))
             ))
             writeEndElement(baos, stringIndex("uses-permission"))
         }
 
         // <application>
         writeStartElement(baos, stringIndex("application"), listOf(
-            Attr(1, stringIndex("appComponentFactory"), 0x03000008, stringIndex("com.multiapp.core.loader.LoaderFactory")),
-            Attr(1, stringIndex("label"), 0x03000008, stringIndex(config.stubPackageName)),
-            Attr(-1, stringIndex("icon"), 0x01000000, -1) // @mipmap/ic_launcher → resource ref placeholder
+            Attr(NS_ANDROID, stringIndex("appComponentFactory"), 0x03, stringIndex("com.multiapp.core.loader.LoaderFactory")),
+            Attr(NS_ANDROID, stringIndex("label"), 0x03, stringIndex(config.stubPackageName))
         ))
 
         // Launcher activity
         writeStartElement(baos, stringIndex("activity"), listOf(
-            Attr(-1, stringIndex("name"), 0x03000008, stringIndex(launcherActivity.name)),
-            Attr(-1, stringIndex("exported"), 0x12000000, 1)
+            Attr(NS_ANDROID, stringIndex("name"), 0x03, stringIndex(launcherActivity.name)),
+            Attr(NS_ANDROID, stringIndex("exported"), 0x12, 1)
         ))
         writeStartElement(baos, stringIndex("intent-filter"), emptyList())
         writeStartElement(baos, stringIndex("action"), listOf(
-            Attr(1, stringIndex("name"), 0x03000008, stringIndex("android.intent.action.MAIN"))
+            Attr(NS_ANDROID, stringIndex("name"), 0x03, stringIndex("android.intent.action.MAIN"))
         ))
         writeEndElement(baos, stringIndex("action"))
         writeStartElement(baos, stringIndex("category"), listOf(
-            Attr(1, stringIndex("name"), 0x03000008, stringIndex("android.intent.category.LAUNCHER"))
+            Attr(NS_ANDROID, stringIndex("name"), 0x03, stringIndex("android.intent.category.LAUNCHER"))
         ))
         writeEndElement(baos, stringIndex("category"))
         writeEndElement(baos, stringIndex("intent-filter"))
@@ -185,8 +201,8 @@ class ManifestGenerator {
         for (activity in manifest.activities) {
             if (activity.name == launcherActivity.name) continue
             writeStartElement(baos, stringIndex("activity"), listOf(
-                Attr(-1, stringIndex("name"), 0x03000008, stringIndex(activity.name)),
-                Attr(-1, stringIndex("exported"), 0x12000000, if (activity.exported) 1 else 0)
+                Attr(NS_ANDROID, stringIndex("name"), 0x03, stringIndex(activity.name)),
+                Attr(NS_ANDROID, stringIndex("exported"), 0x12, if (activity.exported) 1 else 0)
             ))
             writeEndElement(baos, stringIndex("activity"))
         }
@@ -194,11 +210,11 @@ class ManifestGenerator {
         // Services
         for (service in manifest.services) {
             val attrs = mutableListOf(
-                Attr(-1, stringIndex("name"), 0x03000008, stringIndex(service.name)),
-                Attr(-1, stringIndex("exported"), 0x12000000, if (service.exported) 1 else 0)
+                Attr(NS_ANDROID, stringIndex("name"), 0x03, stringIndex(service.name)),
+                Attr(NS_ANDROID, stringIndex("exported"), 0x12, if (service.exported) 1 else 0)
             )
             if (service.process != null) {
-                attrs.add(Attr(-1, stringIndex("process"), 0x03000008, stringIndex(service.process)))
+                attrs.add(Attr(NS_ANDROID, stringIndex("process"), 0x03, stringIndex(service.process)))
             }
             writeStartElement(baos, stringIndex("service"), attrs)
             writeEndElement(baos, stringIndex("service"))
@@ -207,8 +223,8 @@ class ManifestGenerator {
         // Receivers
         for (receiver in manifest.receivers) {
             writeStartElement(baos, stringIndex("receiver"), listOf(
-                Attr(-1, stringIndex("name"), 0x03000008, stringIndex(receiver.name)),
-                Attr(-1, stringIndex("exported"), 0x12000000, if (receiver.exported) 1 else 0)
+                Attr(NS_ANDROID, stringIndex("name"), 0x03, stringIndex(receiver.name)),
+                Attr(NS_ANDROID, stringIndex("exported"), 0x12, if (receiver.exported) 1 else 0)
             ))
             writeEndElement(baos, stringIndex("receiver"))
         }
@@ -216,9 +232,9 @@ class ManifestGenerator {
         // Providers
         for (provider in rewrittenProviders) {
             writeStartElement(baos, stringIndex("provider"), listOf(
-                Attr(-1, stringIndex("name"), 0x03000008, stringIndex(provider.name)),
-                Attr(-1, stringIndex("authorities"), 0x03000008, stringIndex(provider.authorities)),
-                Attr(-1, stringIndex("exported"), 0x12000000, if (provider.exported) 1 else 0)
+                Attr(NS_ANDROID, stringIndex("name"), 0x03, stringIndex(provider.name)),
+                Attr(NS_ANDROID, stringIndex("authorities"), 0x03, stringIndex(provider.authorities)),
+                Attr(NS_ANDROID, stringIndex("exported"), 0x12, if (provider.exported) 1 else 0)
             ))
             writeEndElement(baos, stringIndex("provider"))
         }
@@ -235,36 +251,49 @@ class ManifestGenerator {
         return result
     }
 
-    private data class Attr(val ns: Int, val name: Int, val type: Int, val value: Int)
+    /**
+     * Res_value 结构：
+     *   size: uint16 (always 8)
+     *   res0: uint8 (always 0)
+     *   dataType: uint8
+     *   data: uint32
+     */
+    private data class Attr(val ns: Int, val name: Int, val dataType: Int, val data: Int)
 
     private fun writeStartElement(out: ByteArrayOutputStream, nameIdx: Int, attrs: List<Attr>) {
-        out.write(intToBytes(0x00100102)) // RES_XML_START_ELEMENT_TYPE
-        val size = 16 + attrs.size * 20
+        // ResXMLTree_startElement
+        out.write(intToBytes(0x00100102)) // type: RES_XML_START_ELEMENT_TYPE
+        val size = 16 + attrs.size * 20   // header(16) + attrs
         out.write(intToBytes(size))
         out.write(intToBytes(0)) // lineNumber
-        out.write(intToBytes(0xFFFFFFFF.toInt()) ) // comment
-        out.write(intToBytes(0xFFFFFFFF.toInt())) // ns
+        out.write(intToBytes(0xFFFFFFFF.toInt())) // comment (none)
+        out.write(intToBytes(0xFFFFFFFF.toInt())) // ns (none for element itself)
         out.write(intToBytes(nameIdx))
-        out.write(shortToBytes(0x0014)) // attrStart
+        out.write(shortToBytes(0x0014)) // attrStart (20 = sizeof(ResXMLTree_attribute))
         out.write(shortToBytes(0x0014)) // attrSize
-        out.write(shortToBytes(attrs.size))
+        out.write(shortToBytes(attrs.size)) // attrCount
         out.write(shortToBytes(0)) // idIndex
         out.write(shortToBytes(0)) // classIndex
         out.write(shortToBytes(0)) // styleIndex
+
+        // 写入每个属性
         for (attr in attrs) {
-            out.write(intToBytes(attr.ns))
-            out.write(intToBytes(attr.name))
-            out.write(intToBytes(0xFFFFFFFF.toInt())) // rawValue
-            out.write(shortToBytes(attr.type))
-            out.write(shortToBytes(0)) // reserved
-            out.write(intToBytes(attr.value))
+            out.write(intToBytes(attr.ns))   // ns (uint32)
+            out.write(intToBytes(attr.name)) // name (uint32)
+            out.write(intToBytes(0xFFFFFFFF.toInt())) // rawValue (uint32, none)
+            // Res_value 结构
+            out.write(shortToBytes(8))           // size = 8
+            out.write(byteArrayOf(0))            // res0 = 0
+            out.write(byteArrayOf(attr.dataType.toByte())) // dataType
+            out.write(intToBytes(attr.data))     // data (uint32)
         }
     }
 
     private fun writeEndElement(out: ByteArrayOutputStream, nameIdx: Int) {
-        out.write(intToBytes(0x00100103)) // RES_XML_END_ELEMENT_TYPE
-        out.write(intToBytes(16))
-        out.write(intToBytes(0)) // lineNumber
+        // ResXMLTree_endElement
+        out.write(intToBytes(0x00100103)) // type: RES_XML_END_ELEMENT_TYPE
+        out.write(intToBytes(16))         // size
+        out.write(intToBytes(0))          // lineNumber
         out.write(intToBytes(0xFFFFFFFF.toInt())) // comment
         out.write(intToBytes(0xFFFFFFFF.toInt())) // ns
         out.write(intToBytes(nameIdx))
