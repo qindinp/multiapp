@@ -22,14 +22,14 @@ class ManifestGenerator {
         sb.appendLine("""<?xml version="1.0" encoding="utf-8"?>""")
         sb.appendLine("""<manifest xmlns:android="http://schemas.android.com/apk/res/android"""")
         sb.appendLine("""    package="$stubPackageName">""")
-        sb.appendLine("""    <uses-sdk android:minSdkVersion="${config.deviceIdentity.sdkInt}" android:targetSdkVersion="${config.deviceIdentity.sdkInt}" />""")
+        sb.appendLine("""    <uses-sdk android:minSdkVersion="${manifest.minSdkVersion}" android:targetSdkVersion="${manifest.targetSdkVersion}" />""")
         for (permission in manifest.permissions) {
             sb.appendLine("""    <uses-permission android:name="$permission" />""")
         }
         sb.appendLine("""    <application""")
         sb.appendLine("""        android:appComponentFactory="com.multiapp.core.loader.LoaderFactory"""")
-        sb.appendLine("""        android:label="${config.stubPackageName}">""")
-        sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true">""")
+        sb.appendLine("""        android:label="${config.stubPackageName}" android:extractNativeLibs="true">""")
+        sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true" android:enabled="true">""")
         sb.appendLine("""            <intent-filter>""")
         sb.appendLine("""                <action android:name="android.intent.action.MAIN" />""")
         sb.appendLine("""                <category android:name="android.intent.category.LAUNCHER" />""")

@@ -85,9 +85,7 @@ class NativeHookBridge {
     private var appContext: android.content.Context? = null
 
     fun initialize() {
-        if (initialized) return
-        initialized = true
-        Timber.tag(TAG).i("NativeHookBridge initialized")
+        Timber.tag(TAG).i("NativeHookBridge.initialize() called")
         hookRuntimeNativeLoad()
     }
 
@@ -206,7 +204,7 @@ class NativeHookBridge {
     }
 
     fun initNativeHooks(context: android.content.Context? = null, hostDataDir: String? = null): Boolean {
-        if (initialized) return true
+        if (initialized) return nativeHooksAvailable
         appContext = context?.applicationContext
         nativeHooksAvailable = tryLoadNativeLibrary()
         if (nativeHooksAvailable) {
@@ -225,11 +223,13 @@ class NativeHookBridge {
                     Timber.tag(TAG).w("No dataDir available — native path redirection may not work")
                 }
             } catch (e: Exception) { Timber.tag(TAG).e(e, "Native hook init failed"); nativeHooksAvailable = false }
+        } else {
+            Timber.tag(TAG).e("Native library not loaded — native hooks DISABLED")
         }
         ROOT_PATHS.forEach { hiddenPaths.add(it) }
         EMULATOR_PATHS.forEach { hiddenPaths.add(it) }
         initialized = true
-        return true
+        return nativeHooksAvailable
     }
 
     private fun buildFakeProcStatus(pid: Int, packageName: String): ByteArray {

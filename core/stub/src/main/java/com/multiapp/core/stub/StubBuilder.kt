@@ -27,8 +27,8 @@ class StubBuilder(
 
     companion object {
         private const val LOADER_DEX_ASSET = "loader.dex"
-        private const val ORIGIN_APK_ASSET = "assets/origin.apk"
-        private const val CONFIG_JSON_ASSET = "assets/multiapp_config.json"
+        private const val ORIGIN_APK_ENTRY = "assets/origin.apk"
+        private const val CONFIG_JSON_ENTRY = "assets/multiapp_config.json"
         private const val MANIFEST_ENTRY = "AndroidManifest.xml"
         private const val DEX_ENTRY = "classes.dex"
     }
@@ -248,14 +248,14 @@ class StubBuilder(
             zos.closeEntry()
 
             // assets/origin.apk (原始 APK 完整副本)
-            zos.putNextEntry(ZipEntry(ORIGIN_APK_ASSET))
+            zos.putNextEntry(ZipEntry(ORIGIN_APK_ENTRY))
             originApk.inputStream().buffered().use { input ->
                 input.copyTo(zos)
             }
             zos.closeEntry()
 
             // assets/multiapp_config.json
-            zos.putNextEntry(ZipEntry(CONFIG_JSON_ASSET))
+            zos.putNextEntry(ZipEntry(CONFIG_JSON_ENTRY))
             configFile.inputStream().buffered().use { input ->
                 input.copyTo(zos)
             }

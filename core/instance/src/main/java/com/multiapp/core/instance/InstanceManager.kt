@@ -129,12 +129,28 @@ class InstanceManager @Inject constructor(
         val installResult = stubInstaller.install(stubApk)
         when (installResult) {
             is StubInstaller.InstallResult.Success -> {
-                Timber.d("InstanceManager: stub installed successfully")
+                Timber.d("InstanceManager: stub install initiated successfully")
             }
             is StubInstaller.InstallResult.Error -> {
                 Timber.e("InstanceManager: stub install failed: ${installResult.message}")
                 throw RuntimeException("Stub install failed: ${installResult.message}")
             }
+        }
+
+        // 等待安装完成 — 通过轮询包管理器确认安装成功
+        var installConfirmed = false
+        for (attempt in 1..30) {
+            try {
+                context.packageManager.getPackageInfo(identity.stubPackageName, 0)
+                installConfirmed = true
+                Timber.d("InstanceManager: install confirmed on attempt $attempt")
+                break
+            } catch (_: Exception) {
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+        if (!installConfirmed) {
+            Timber.w("InstanceManager: install not confirmed after 30s, saving anyway (user may still be confirming)")
         }
 
         // 9. 保存实例信息到数据库

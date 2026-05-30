@@ -53,11 +53,14 @@ class LoaderFactory : AppComponentFactory() {
 
         // 2. 读取配置
         val config = readConfigFromAssets(stubApkPath)
+        Timber.d("LoaderFactory: config loaded, original=${config.originalPackageName}, stub=${config.stubPackageName}")
 
         // 3. 初始化 NativeHookBridge（native 层 hook 必须最早就位）
         val nativeBridge = NativeHookBridge.getInstance()
-        // 传入 hostDataDir 确保 native 层路径重定向有基准路径（此时无 Context）
-        nativeBridge.initNativeHooks(hostDataDir = dataDir)
+        val nativeOk = nativeBridge.initNativeHooks(hostDataDir = dataDir)
+        if (!nativeOk) {
+            Timber.e("LoaderFactory: Native hooks FAILED to init — anti-detection will be incomplete")
+        }
         nativeBridge.spoofProcSelf(android.os.Process.myPid(), config.originalPackageName)
         // 设置 native 层路径重定向基准
         nativeBridge.setupAppRedirections(
@@ -68,12 +71,16 @@ class LoaderFactory : AppComponentFactory() {
 
         // 4. 解压原始 APK
         val originApk = extractOriginApk(stubApkPath, dataDir, config)
+        require(originApk.exists() && originApk.length() > 0) {
+            "Extracted origin APK is empty or missing: ${originApk.absolutePath}"
+        }
 
         // 4.5 解压 patched DEX (如果有) 替换原始 APK 中的 DEX
         extractPatchedDex(stubApkPath, originApk, dataDir)
 
         // 5. 替换 LoadedApk（返回原始 APK 的 ClassLoader）
         val guestClassLoader = LoadedApkSwapper.swap(activityThread, originApk, config)
+        Timber.d("LoaderFactory: LoadedApk swapped, guestClassLoader=${guestClassLoader.javaClass.name}")
 
         // 5.5 初始化 LSPlant（用原始 APK 的 ClassLoader，确保 hook 目标类已加载）
         val hookEngine = HookEngine.getInstance()
@@ -90,9 +97,10 @@ class LoaderFactory : AppComponentFactory() {
         // 7. 安装签名绕过
         installSignatureBypass(config)
 
-        // 8. 重置 appComponentFactory
+        // 8. 重置 appComponentFactory（防壳检测异常）
         appInfo.appComponentFactory = "android.app.AppComponentFactory"
 
+        Timber.d("LoaderFactory: injection complete, creating Application for ${config.originalPackageName}")
         return super.instantiateApplication(cl, className)
     }
 

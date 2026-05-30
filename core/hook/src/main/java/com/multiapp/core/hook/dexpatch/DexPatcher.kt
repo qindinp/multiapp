@@ -63,7 +63,8 @@ class DexPatcher {
         val classes: List<org.jf.dexlib2.iface.ClassDef> = dex.getClasses().toList()
         val opcodes = dex.getOpcodes()
         var patchedCount = 0
-        val patchedClassTypes = mutableSetOf<String>()
+        // Map: class type -> set of method names that should be neutralized
+        val patchedMethodsByClass = mutableMapOf<String, MutableSet<String>>()
 
         // 第一遍：扫描需要修补的方法
         for (classDef in classes) {
@@ -77,7 +78,7 @@ class DexPatcher {
                     val methods: List<org.jf.dexlib2.iface.Method> = classDef.methods.toList()
                     for (method in methods) {
                         if (matchesMethodStrings(method, signature.signatureStrings)) {
-                            patchedClassTypes.add(classDef.type)
+                            patchedMethodsByClass.getOrPut(classDef.type) { mutableSetOf() }.add(method.name)
                             patchedCount++
                             Timber.tag(TAG).d("Patched: ${signature.id} -> $className.${method.name}")
                         }
@@ -86,17 +87,21 @@ class DexPatcher {
             }
         }
 
-        // 写回修改后的 DEX
+        // 写回修改后的 DEX — 只替换匹配的方法，保留类中的其他方法
         if (patchedCount > 0) {
-            val patchedClassDefs: Set<String> = patchedClassTypes
             val newClasses = mutableListOf<org.jf.dexlib2.iface.ClassDef>()
 
             for (classDef in classes) {
-                if (classDef.type in patchedClassDefs) {
+                val methodsToNeutralize = patchedMethodsByClass[classDef.type]
+                if (methodsToNeutralize != null) {
                     val methods: List<org.jf.dexlib2.iface.Method> = classDef.methods.toList()
                     val patchedMethods = mutableListOf<org.jf.dexlib2.iface.Method>()
                     for (method in methods) {
-                        patchedMethods.add(MethodPatcher.neutralize(method))
+                        if (method.name in methodsToNeutralize) {
+                            patchedMethods.add(MethodPatcher.neutralize(method))
+                        } else {
+                            patchedMethods.add(method)
+                        }
                     }
                     newClasses.add(object : org.jf.dexlib2.iface.ClassDef by classDef {
                         override fun getMethods(): MutableIterable<org.jf.dexlib2.iface.Method> = patchedMethods

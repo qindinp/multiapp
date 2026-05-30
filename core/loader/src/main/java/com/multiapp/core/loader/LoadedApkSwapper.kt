@@ -37,7 +37,7 @@ object LoadedApkSwapper {
         appInfo.publicSourceDir = originApk.absolutePath
         Timber.d("LoadedApkSwapper: sourceDir updated to ${appInfo.sourceDir}")
 
-        // 3. 从 mPackages 移除旧 LoadedApk
+        // 3. 从 mPackages 移除旧 LoadedApk（stub + original 都清理，避免冲突）
         @Suppress("UNCHECKED_CAST")
         val mPackages = activityThread.javaClass
             .getDeclaredField("mPackages")
@@ -45,14 +45,17 @@ object LoadedApkSwapper {
             .get(activityThread) as? MutableMap<String, Any>
             ?: throw IllegalStateException("mPackages is null or not a Map")
         mPackages.remove(config.stubPackageName)
-        Timber.d("LoadedApkSwapper: removed old LoadedApk for ${config.stubPackageName}")
+        mPackages.remove(config.originalPackageName)
+        Timber.d("LoadedApkSwapper: removed old LoadedApk for ${config.stubPackageName} and ${config.originalPackageName}")
 
         // 4. 创建新 LoadedApk
         val newLoadedApk = activityThread.javaClass
             .getDeclaredMethod("getPackageInfoNoCheck", ApplicationInfo::class.java)
             .invoke(activityThread, appInfo)
+        // 同时注册到 stub 和 original 包名，确保两种查找路径都能命中
         mPackages[config.stubPackageName] = WeakReference(newLoadedApk)
-        Timber.d("LoadedApkSwapper: installed new LoadedApk for ${config.stubPackageName}")
+        mPackages[config.originalPackageName] = WeakReference(newLoadedApk)
+        Timber.d("LoadedApkSwapper: installed new LoadedApk for ${config.stubPackageName} and ${config.originalPackageName}")
 
         // 5. 提取新 ClassLoader 供 LSPlant 初始化使用
         val classLoader = newLoadedApk.javaClass

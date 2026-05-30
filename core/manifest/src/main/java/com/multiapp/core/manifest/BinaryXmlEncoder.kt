@@ -44,7 +44,9 @@ class BinaryXmlEncoder {
             "process" to 0x01010011,
             "authorities" to 0x01010018,
             "appComponentFactory" to 0x0101057a,
-            "permission" to 0x01010006
+            "permission" to 0x01010006,
+            "enabled" to 0x0101000e,
+            "extractNativeLibs" to 0x01010419
         )
     }
 
@@ -97,8 +99,10 @@ class BinaryXmlEncoder {
         str("uses-sdk")
         str("minSdkVersion")
         str("targetSdkVersion")
-        str("28")   // minSdkVersion raw string
-        str("36")   // targetSdkVersion raw string
+        val minSdkStr = manifest.minSdkVersion.toString()
+        val targetSdkStr = manifest.targetSdkVersion.toString()
+        str(minSdkStr)
+        str(targetSdkStr)
 
         str("uses-permission")
         for (p in manifest.permissions) str(p)
@@ -110,6 +114,8 @@ class BinaryXmlEncoder {
         str(config.stubPackageName)
         str("icon")
         str("@mipmap/ic_launcher")
+        str("extractNativeLibs")
+        str("enabled")
 
         str("activity")
         str("intent-filter")
@@ -151,8 +157,8 @@ class BinaryXmlEncoder {
 
         // <uses-sdk> — 必须声明，否则 Android 12+ 拒绝安装
         nodes.add(Node.ElemStart(null, "uses-sdk", listOf(
-            XmlAttr(ANDROID_NS_URI, "minSdkVersion", "28", typedValue = 28, dataType = TYPE_INT_DEC),
-            XmlAttr(ANDROID_NS_URI, "targetSdkVersion", "36", typedValue = 36, dataType = TYPE_INT_DEC)
+            XmlAttr(ANDROID_NS_URI, "minSdkVersion", minSdkStr, typedValue = manifest.minSdkVersion, dataType = TYPE_INT_DEC),
+            XmlAttr(ANDROID_NS_URI, "targetSdkVersion", targetSdkStr, typedValue = manifest.targetSdkVersion, dataType = TYPE_INT_DEC)
         )))
         nodes.add(Node.ElemEnd(null, "uses-sdk"))
 
@@ -166,13 +172,15 @@ class BinaryXmlEncoder {
         nodes.add(Node.ElemStart(null, "application", listOf(
             XmlAttr(ANDROID_NS_URI, "appComponentFactory", "com.multiapp.core.loader.LoaderFactory"),
             XmlAttr(ANDROID_NS_URI, "label", config.stubPackageName),
-            XmlAttr(ANDROID_NS_URI, "icon", "@mipmap/ic_launcher")
+            XmlAttr(ANDROID_NS_URI, "icon", "@mipmap/ic_launcher"),
+            XmlAttr(ANDROID_NS_URI, "extractNativeLibs", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN)
         )))
 
         // Launcher activity
         nodes.add(Node.ElemStart(null, "activity", listOf(
             XmlAttr(ANDROID_NS_URI, "name", launcherActivity.name),
-            XmlAttr(ANDROID_NS_URI, "exported", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN)
+            XmlAttr(ANDROID_NS_URI, "exported", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN),
+            XmlAttr(ANDROID_NS_URI, "enabled", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN)
         )))
         nodes.add(Node.ElemStart(null, "intent-filter", emptyList()))
         nodes.add(Node.ElemStart(null, "action", listOf(XmlAttr(ANDROID_NS_URI, "name", "android.intent.action.MAIN"))))
