@@ -144,7 +144,7 @@ class BinaryXmlEncoder {
         str("authorities")
         str("") // empty string for null authorities
         val authorityRewriter = AuthorityRewriter()
-        val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId)
+        val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId, config.authorityMap)
         for (p in rewrittenProviders) { str(p.name); p.authorities?.let { str(it) } }
 
         // Build node tree

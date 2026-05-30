@@ -45,7 +45,7 @@ class ManifestGenerator {
         for (receiver in manifest.receivers) {
             sb.appendLine("""        <receiver android:name="${receiver.name}" android:exported="${receiver.exported}" />""")
         }
-        val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId)
+        val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId, config.authorityMap)
         for (provider in rewrittenProviders) {
             sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}" />""")
         }

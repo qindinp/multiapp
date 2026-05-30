@@ -13,14 +13,16 @@ class AuthorityRewriter {
 
     fun rewrite(
         providers: List<ManifestParser.ProviderInfo>,
-        instanceId: String
+        instanceId: String,
+        authorityMap: Map<String, String>? = null
     ): Pair<List<ManifestParser.ProviderInfo>, Map<String, String>> {
-        val authorityMap = mutableMapOf<String, String>()
+        val resolvedMap = authorityMap ?: providers.associate { provider ->
+            provider.authorities to "${provider.authorities}.$instanceId"
+        }
         val rewrittenProviders = providers.map { provider ->
-            val rewritten = "${provider.authorities}.$instanceId"
-            authorityMap[provider.authorities] = rewritten
+            val rewritten = resolvedMap[provider.authorities] ?: "${provider.authorities}.$instanceId"
             provider.copy(authorities = rewritten)
         }
-        return rewrittenProviders to authorityMap
+        return rewrittenProviders to resolvedMap
     }
 }
