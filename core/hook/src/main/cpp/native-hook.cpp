@@ -545,6 +545,60 @@ static constexpr int g_hook_count = sizeof(g_hook_entries) / sizeof(g_hook_entri
 // ShadowHook stub pointers for unhooking
 static void* g_hook_stubs[g_hook_count] = {};
 
+// ==================== Inline Hook Restore Mode ====================
+// 360 加固会直接读函数入口指令，检测是否有 inline hook trampoline。
+// 对策: hook 完成后临时恢复函数入口，检测时返回原始指令，检测完再 patch 回去。
+// 使用 shadowhook 的 shadowhook_unhook / shadowhook_hook_sym_name 实现。
+
+// 每个 hook 的原始函数入口备份（用于恢复）
+struct HookBackup {
+    void* stub;           // shadowhook stub
+    const char* lib_name;
+    const char* symbol;
+    void* hook_func;
+    void** original_func;
+    bool is_restored;     // 当前是否处于恢复状态
+};
+
+static HookBackup g_hook_backups[g_hook_count] = {};
+
+/**
+ * 恢复所有 hook 的函数入口（对抗 360 inline hook 检测）
+ * 360 在 JNI_OnLoad 中调用检测函数时，函数入口已经是原始指令
+ */
+static void restore_all_hooks() {
+    for (int i = 0; i < g_hook_count; i++) {
+        if (g_hook_stubs[i] != nullptr && !g_hook_backups[i].is_restored) {
+            int ret = shadowhook_unhook(g_hook_stubs[i]);
+            if (ret == 0) {
+                g_hook_backups[i].is_restored = true;
+                LOGD("restore_all_hooks: restored %s", g_hook_entries[i].symbol);
+            }
+        }
+    }
+}
+
+/**
+ * 重新安装所有 hook（360 检测完成后）
+ */
+static void reinstall_all_hooks() {
+    for (int i = 0; i < g_hook_count; i++) {
+        if (g_hook_backups[i].is_restored) {
+            const char* lib = g_hook_entries[i].lib_name ? g_hook_entries[i].lib_name : "libc.so";
+            void* stub = shadowhook_hook_sym_name(
+                lib,
+                g_hook_entries[i].symbol,
+                g_hook_entries[i].hook_func,
+                g_hook_entries[i].original_func);
+            if (stub != nullptr) {
+                g_hook_stubs[i] = stub;
+                g_hook_backups[i].is_restored = false;
+                LOGD("reinstall_all_hooks: re-hooked %s", g_hook_entries[i].symbol);
+            }
+        }
+    }
+}
+
 /**
  * Install all libc hooks using ShadowHook inline hooking.
  * ShadowHook handles trampoline allocation, instruction relocation,

@@ -97,11 +97,11 @@ class StubBuilder(
                 patchedDexFiles = patchedDexFiles
             )
 
-            // 7. zipalign 对齐
+            // 7. zipalign 对齐（必须在签名前）
             val alignedApk = File(workDir, "stub-aligned.apk")
             zipalign(unsignedApk, alignedApk)
 
-            // 8. ApkSigner 自签名
+            // 8. ApkSigner 自签名（V1+V2+V3，正确的签名流程）
             val signedApk = File(workDir, "stub-signed.apk")
             signApk(alignedApk, signedApk)
 

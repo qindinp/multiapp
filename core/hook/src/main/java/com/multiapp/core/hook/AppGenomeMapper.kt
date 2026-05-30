@@ -288,13 +288,29 @@ class AppGenomeMapper @Inject constructor() {
 
         for (entry in dexEntries) {
             try {
-                val bytes = zip.getInputStream(entry).readBytes()
-                val content = String(bytes, Charsets.ISO_8859_1)
-                for (pattern in SUSPICIOUS_API_PATTERNS) {
-                    if (content.contains(pattern, ignoreCase = true)) {
-                        found.add(pattern)
+                // 流式扫描：每次读 8KB，避免大 DEX (50MB+) 导致 OOM
+                val stream = zip.getInputStream(entry).buffered(8192)
+                val buffer = ByteArray(8192)
+                var prevTail = "" // 上一次读取的尾部，用于跨 buffer 匹配
+                var bytesRead: Int
+
+                while (stream.read(buffer).also { bytesRead = it } != -1) {
+                    val chunk = prevTail + String(buffer, 0, bytesRead, Charsets.ISO_8859_1)
+                    for (pattern in SUSPICIOUS_API_PATTERNS) {
+                        if (chunk.contains(pattern, ignoreCase = true)) {
+                            found.add(pattern)
+                        }
                     }
+                    // 保留尾部用于跨 buffer 匹配
+                    prevTail = if (bytesRead >= 256) {
+                        String(buffer, bytesRead - 256, 256, Charsets.ISO_8859_1)
+                    } else {
+                        chunk.takeLast(256)
+                    }
+                    // 如果所有特征都找到了，提前退出
+                    if (found.size == SUSPICIOUS_API_PATTERNS.size) break
                 }
+                stream.close()
             } catch (_: Exception) { /* skip unreadable entries */ }
         }
         return found.sorted()
@@ -304,14 +320,28 @@ class AppGenomeMapper @Inject constructor() {
         val dexEntries = zip.entries().asSequence().filter { it.name.endsWith(".dex") }
         for (entry in dexEntries) {
             try {
-                val bytes = zip.getInputStream(entry).readBytes()
-                val content = String(bytes, Charsets.ISO_8859_1)
-                for ((signature, name) in PACKER_SIGNATURES) {
-                    if (content.contains(signature)) {
-                        Timber.tag(TAG).w("Packer detected: $name (signature: $signature)")
-                        return name
+                // 流式扫描：避免把整个 DEX 读到内存
+                val stream = zip.getInputStream(entry).buffered(8192)
+                val buffer = ByteArray(8192)
+                var prevTail = ""
+                var bytesRead: Int
+
+                while (stream.read(buffer).also { bytesRead = it } != -1) {
+                    val chunk = prevTail + String(buffer, 0, bytesRead, Charsets.ISO_8859_1)
+                    for ((signature, name) in PACKER_SIGNATURES) {
+                        if (chunk.contains(signature)) {
+                            Timber.tag(TAG).w("Packer detected: $name (signature: $signature)")
+                            stream.close()
+                            return name
+                        }
+                    }
+                    prevTail = if (bytesRead >= 256) {
+                        String(buffer, bytesRead - 256, 256, Charsets.ISO_8859_1)
+                    } else {
+                        chunk.takeLast(256)
                     }
                 }
+                stream.close()
             } catch (_: Exception) { /* skip */ }
         }
         return null

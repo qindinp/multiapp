@@ -48,12 +48,12 @@ class LoaderFactory : AppComponentFactory() {
         // 3.5 解压 patched DEX (如果有) 替换原始 APK 中的 DEX
         extractPatchedDex(stubApkPath, originApk, dataDir)
 
-        // 4. 替换 LoadedApk
-        LoadedApkSwapper.swap(activityThread, originApk, config)
+        // 4. 替换 LoadedApk（返回原始 APK 的 ClassLoader）
+        val guestClassLoader = LoadedApkSwapper.swap(activityThread, originApk, config)
 
-        // 4.5 初始化 LSPlant（在安装 hook 之前必须就绪）
+        // 4.5 初始化 LSPlant（用原始 APK 的 ClassLoader，确保 hook 目标类已加载）
         val hookEngine = HookEngine.getInstance()
-        hookEngine.initLsplant(appInfo.getClassLoader() ?: ClassLoader.getSystemClassLoader())
+        hookEngine.initLsplant(guestClassLoader)
 
         // 5. 安装身份 Hook
         installIdentityHooks(config)

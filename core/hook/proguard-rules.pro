@@ -40,3 +40,14 @@
 # DEX patching — uses dexlib2 reflection
 -keep class com.multiapp.core.hook.dexpatch.** { *; }
 -keep class org.jf.dexlib2.** { *; }
+
+# ============================================================================
+# Release 安全: 移除所有 Timber 日志（防止 360 通过 logcat 检测 hook 框架）
+# ============================================================================
+-assumenosideeffects class timber.log.Timber {
+    public static *** v(...);
+    public static *** d(...);
+    public static *** i(...);
+    public static *** w(...);
+    public static *** e(...);
+}

@@ -45,11 +45,14 @@ class ProcFsHook : HookPoint {
             val originalPkg = config.originalPackageName
             val stubPkg = config.stubPackageName
 
+            // cmdline 伪装：Java 层备份（native 层已通过 fopen hook 处理）
             hookCmdlineRead(hookEngine, originalPkg, stubPkg)
-            hookMapsRead(hookEngine, stubPkg)
+
+            // maps 过滤：仅由 native 层处理（native-hook.cpp 的 hooked_fopen）
+            // 不在 Java 层 hook BufferedReader.readLine()，避免双重过滤冲突
 
             Timber.tag(TAG).i(
-                "ProcFsHook installed for instance=%s",
+                "ProcFsHook installed for instance=%s (maps filtering delegated to native)",
                 config.instanceId
             )
         }
