@@ -110,12 +110,31 @@ fun LauncherScreen(
                     instances = uiState.instances,
                     onLaunch = { instance ->
                         try {
-                            val intent = context.packageManager.getLaunchIntentForPackage(instance.stubPackageName)
-                            if (intent != null) {
-                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                context.startActivity(intent)
+                            // 优先用 getLaunchIntentForPackage
+                            var intent = context.packageManager.getLaunchIntentForPackage(instance.stubPackageName)
+                            if (intent == null) {
+                                // fallback: 直接构造 intent 启动 launcher activity
+                                val identity = instance.identity
+                                intent = Intent(Intent.ACTION_MAIN).apply {
+                                    addCategory(Intent.CATEGORY_LAUNCHER)
+                                    setClassName(instance.stubPackageName, identity.originalPackageName.let {
+                                        // 尝试从实例信息获取 launcher activity
+                                        try {
+                                            val pkgInfo = context.packageManager.getPackageInfo(instance.stubPackageName, PackageManager.GET_ACTIVITIES)
+                                            pkgInfo.activities?.firstOrNull { act ->
+                                                act.intentFilters?.any { f ->
+                                                    f.hasAction(Intent.ACTION_MAIN) && f.hasCategory(Intent.CATEGORY_LAUNCHER)
+                                                } == true
+                                            }?.name
+                                        } catch (_: Exception) { null }
+                                    } ?: "")
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                            }
+                            if (intent?.component?.className.isNullOrEmpty()) {
+                                Toast.makeText(context, "无法启动：找不到入口 Activity", Toast.LENGTH_SHORT).show()
                             } else {
-                                Toast.makeText(context, "无法启动 ${instance.originalPackageName.substringAfterLast(".")}", Toast.LENGTH_SHORT).show()
+                                context.startActivity(intent)
                             }
                         } catch (e: Exception) {
                             Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -235,12 +254,16 @@ private fun AppGridItem(
     var showMenu by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    // Load original app icon
-    val appIcon = remember(instance.originalPackageName) {
+    // Load app icon — try stub package first, fall back to original package
+    val appIcon = remember(instance.stubPackageName, instance.originalPackageName) {
         try {
-            context.packageManager.getApplicationIcon(instance.originalPackageName)
+            context.packageManager.getApplicationIcon(instance.stubPackageName)
         } catch (_: Exception) {
-            null
+            try {
+                context.packageManager.getApplicationIcon(instance.originalPackageName)
+            } catch (_: Exception) {
+                null
+            }
         }
     }
 

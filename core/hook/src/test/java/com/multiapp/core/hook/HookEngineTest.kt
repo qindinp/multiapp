@@ -23,7 +23,8 @@ class HookEngineTest {
         // Reset the static lsplantInitializedGlobal to false before each test
         // to ensure test isolation (the field is @Volatile and shared across instances)
         resetLsplantGlobalState()
-        engine = HookEngine()
+        HookEngine.resetInstance()
+        engine = HookEngine.getInstance()
     }
 
     @AfterEach
@@ -486,7 +487,7 @@ class HookEngineTest {
     fun `multiple HookEngine instances share lsplant initialization state`() {
         setLsplantGlobalState(true)
 
-        val engine2 = HookEngine()
+        val engine2 = HookEngine.getInstance()
         assertTrue(engine.initLsplant(this::class.java.classLoader!!))
         assertTrue(engine2.initLsplant(this::class.java.classLoader!!))
     }
@@ -495,7 +496,7 @@ class HookEngineTest {
     fun `lsplant state persists across HookEngine instances after reset`() {
         setLsplantGlobalState(false)
 
-        val engine2 = HookEngine()
+        val engine2 = HookEngine.getInstance()
         assertFalse(engine.initLsplant(this::class.java.classLoader!!))
         assertFalse(engine2.initLsplant(this::class.java.classLoader!!))
     }

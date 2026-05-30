@@ -4,7 +4,7 @@ package com.multiapp.core.manifest
  * 生成 Stub APK 的 AndroidManifest.xml (二进制 XML)
  *
  * 完全参照 aapt 输出格式：
- * - StringPool: UTF-16LE (flags=0x000)
+ * - StringPool: UTF-8 (flags=0x100)
  * - ResourceMap: 按属性出现顺序排列
  * - Res_value: size(16) + res0(8) + dataType(8) + data(32)
  */
@@ -22,14 +22,14 @@ class ManifestGenerator {
         sb.appendLine("""<?xml version="1.0" encoding="utf-8"?>""")
         sb.appendLine("""<manifest xmlns:android="http://schemas.android.com/apk/res/android"""")
         sb.appendLine("""    package="$stubPackageName">""")
-        sb.appendLine("""    <uses-sdk android:minSdkVersion="${config.deviceIdentity.sdkInt}" android:targetSdkVersion="${config.deviceIdentity.sdkInt}" />""")
+        sb.appendLine("""    <uses-sdk android:minSdkVersion="${manifest.minSdkVersion}" android:targetSdkVersion="${manifest.targetSdkVersion}" />""")
         for (permission in manifest.permissions) {
             sb.appendLine("""    <uses-permission android:name="$permission" />""")
         }
         sb.appendLine("""    <application""")
         sb.appendLine("""        android:appComponentFactory="com.multiapp.core.loader.LoaderFactory"""")
-        sb.appendLine("""        android:label="${config.stubPackageName}">""")
-        sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true">""")
+        sb.appendLine("""        android:label="${config.stubPackageName}" android:extractNativeLibs="true">""")
+        sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true" android:enabled="true">""")
         sb.appendLine("""            <intent-filter>""")
         sb.appendLine("""                <action android:name="android.intent.action.MAIN" />""")
         sb.appendLine("""                <category android:name="android.intent.category.LAUNCHER" />""")
@@ -45,7 +45,7 @@ class ManifestGenerator {
         for (receiver in manifest.receivers) {
             sb.appendLine("""        <receiver android:name="${receiver.name}" android:exported="${receiver.exported}" />""")
         }
-        val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId)
+        val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId, config.authorityMap)
         for (provider in rewrittenProviders) {
             sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}" />""")
         }

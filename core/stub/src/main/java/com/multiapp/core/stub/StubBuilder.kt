@@ -27,8 +27,8 @@ class StubBuilder(
 
     companion object {
         private const val LOADER_DEX_ASSET = "loader.dex"
-        private const val ORIGIN_APK_ASSET = "assets/origin.apk"
-        private const val CONFIG_JSON_ASSET = "assets/multiapp_config.json"
+        private const val ORIGIN_APK_ENTRY = "assets/origin.apk"
+        private const val CONFIG_JSON_ENTRY = "assets/multiapp_config.json"
         private const val MANIFEST_ENTRY = "AndroidManifest.xml"
         private const val DEX_ENTRY = "classes.dex"
     }
@@ -248,14 +248,14 @@ class StubBuilder(
             zos.closeEntry()
 
             // assets/origin.apk (原始 APK 完整副本)
-            zos.putNextEntry(ZipEntry(ORIGIN_APK_ASSET))
+            zos.putNextEntry(ZipEntry(ORIGIN_APK_ENTRY))
             originApk.inputStream().buffered().use { input ->
                 input.copyTo(zos)
             }
             zos.closeEntry()
 
             // assets/multiapp_config.json
-            zos.putNextEntry(ZipEntry(CONFIG_JSON_ASSET))
+            zos.putNextEntry(ZipEntry(CONFIG_JSON_ENTRY))
             configFile.inputStream().buffered().use { input ->
                 input.copyTo(zos)
             }
@@ -350,14 +350,21 @@ class StubBuilder(
      * 查找当前应用的 native library 目录
      */
     private fun findAppNativeLibDir(abi: String): File? {
-        val candidates = listOf(
-            // 主 APK 的 native lib 目录
-            File("/data/app/~~/com.multiapp.app-1/lib/$abi"),
-            File("/data/app/com.multiapp.app-1/lib/$abi"),
-            // 通过 ApplicationInfo.nativeLibraryDir 获取（运行时）
-        )
-        for (dir in candidates) {
-            if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true) return dir
+        // 动态查找：扫描 /data/app/ 下所有 com.multiapp.app* 目录
+        val dataApp = File("/data/app")
+        if (dataApp.isDirectory) {
+            dataApp.listFiles()?.filter { dir ->
+                dir.isDirectory && dir.name.startsWith("com.multiapp.app")
+            }?.forEach { appDir ->
+                // 尝试直接子目录 lib/$abi
+                val libDir = File(appDir, "lib/$abi")
+                if (libDir.isDirectory && libDir.listFiles()?.isNotEmpty() == true) return libDir
+                // 尝试 OAT/ODEX 结构下的 lib 目录
+                appDir.listFiles()?.filter { it.isDirectory }?.forEach { subDir ->
+                    val subLibDir = File(subDir, "lib/$abi")
+                    if (subLibDir.isDirectory && subLibDir.listFiles()?.isNotEmpty() == true) return subLibDir
+                }
+            }
         }
         // 回退：从当前进程的 maps 中查找
         return findNativeLibDirFromMaps()
@@ -391,27 +398,44 @@ class StubBuilder(
     internal fun zipalign(input: File, output: File) {
         Timber.d("StubBuilder: zipalign ${input.name}")
 
+        // For each STORED entry, its data must start at a 4-byte aligned offset.
+        // ZipOutputStream writes: LOCAL_FILE_HEADER(30 + nameLen) + data + optional DataDescriptor.
+        // We track the cumulative offset and insert padding via the extra field.
+        //
+        // The approach: write entries with an 'extra' field that pads to 4-byte alignment.
+        // ZipOutputStream includes 'extra' between the header and data.
+
         ZipFile(input).use { srcZip ->
             FileOutputStream(output).buffered().use { fos ->
-                ZipOutputStream(fos).use { zos ->
-                    val buffer = ByteArray(8192)
+                // We need raw byte tracking, so wrap in a counting stream
+                val counter = ByteCountingOutputStream(fos)
+                ZipOutputStream(counter).use { zos ->
+                    val entries = srcZip.entries().toList()
+                    for (entry in entries) {
+                        val data = srcZip.getInputStream(entry).readBytes()
+                        val nameBytes = entry.name.toByteArray()
 
-                    srcZip.entries().asSequence().forEach { entry ->
+                        // Calculate where data would start without padding:
+                        // LOCAL_FILE_HEADER = 30 bytes + nameLen + extraLen
+                        // Current file offset + 30 + nameLen = data start (if extra is empty)
+                        val currentOffset = counter.count
+                        val dataStartNoPadding = currentOffset + 30 + nameBytes.size
+
+                        val padding = if (entry.method == ZipEntry.STORED) {
+                            ((4 - (dataStartNoPadding % 4)) % 4).toInt()
+                        } else 0
+
                         zos.putNextEntry(ZipEntry(entry.name).apply {
                             method = entry.method
                             if (entry.method == ZipEntry.STORED) {
                                 size = entry.size
                                 compressedSize = entry.compressedSize
                                 crc = entry.crc
+                                // Use extra field for padding alignment
+                                if (padding > 0) extra = ByteArray(padding)
                             }
                         })
-
-                        srcZip.getInputStream(entry).use { entryInput ->
-                            var bytesRead: Int
-                            while (entryInput.read(buffer).also { bytesRead = it } != -1) {
-                                zos.write(buffer, 0, bytesRead)
-                            }
-                        }
+                        zos.write(data)
                         zos.closeEntry()
                     }
                 }
@@ -419,6 +443,29 @@ class StubBuilder(
         }
 
         Timber.d("StubBuilder: zipalign complete, size=${output.length()} bytes")
+    }
+
+    /**
+     * OutputStream wrapper that counts bytes written
+     */
+    private class ByteCountingOutputStream(
+        private val out: java.io.OutputStream
+    ) : java.io.OutputStream() {
+        var count: Long = 0L
+            private set
+
+        override fun write(b: Int) {
+            out.write(b)
+            count++
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            out.write(b, off, len)
+            count += len
+        }
+
+        override fun flush() = out.flush()
+        override fun close() = out.close()
     }
 
     /**

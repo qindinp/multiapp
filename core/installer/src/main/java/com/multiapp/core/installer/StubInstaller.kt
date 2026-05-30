@@ -51,6 +51,7 @@ class StubInstaller(private val context: Context) {
     sealed class InstallResult {
         data object Success : InstallResult()
         data class Error(val message: String) : InstallResult()
+        data object PendingUserConfirmation : InstallResult()
     }
 
     /**
@@ -227,7 +228,15 @@ class StubInstaller(private val context: Context) {
         Timber.d("$TAG: installing with FileProvider: ${stubApk.name}")
 
         return try {
-            val uri = getApkUri(stubApk)
+            // Copy APK to the shared_apks/ subdirectory (must match file_provider_paths.xml)
+            val sharedDir = File(context.cacheDir, "shared_apks")
+            sharedDir.mkdirs()
+            val sharedApk = File(sharedDir, stubApk.name)
+            if (stubApk.absolutePath != sharedApk.absolutePath) {
+                stubApk.copyTo(sharedApk, overwrite = true)
+            }
+
+            val uri = getApkUri(sharedApk)
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -235,7 +244,7 @@ class StubInstaller(private val context: Context) {
             }
 
             context.startActivity(intent)
-            InstallResult.Success
+            InstallResult.PendingUserConfirmation
         } catch (e: Exception) {
             Timber.e(e, "$TAG: FileProvider install failed")
             InstallResult.Error(e.message ?: "Unknown error")

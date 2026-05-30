@@ -22,7 +22,9 @@ class ManifestParser @Inject constructor() {
         val services: List<ComponentInfo>,
         val receivers: List<ComponentInfo>,
         val providers: List<ProviderInfo>,
-        val permissions: List<String>
+        val permissions: List<String>,
+        val minSdkVersion: Int = 28,
+        val targetSdkVersion: Int = 36
     )
 
     data class ComponentInfo(
@@ -67,6 +69,13 @@ class ManifestParser @Inject constructor() {
             val receivers = extractComponents(applicationEl, "receiver")
             val providers = extractProviders(applicationEl)
 
+            // 提取 SDK 版本
+            val usesSdk = findFirstChild(manifestEl, "uses-sdk")
+            val minSdkVersion = usesSdk?.getAttributeNS(ANDROID_NS, "minSdkVersion")
+                ?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 28
+            val targetSdkVersion = usesSdk?.getAttributeNS(ANDROID_NS, "targetSdkVersion")
+                ?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 36
+
             return ParsedManifest(
                 packageName = packageName,
                 applicationClass = applicationClass,
@@ -74,7 +83,9 @@ class ManifestParser @Inject constructor() {
                 services = services,
                 receivers = receivers,
                 providers = providers,
-                permissions = permissions
+                permissions = permissions,
+                minSdkVersion = minSdkVersion,
+                targetSdkVersion = targetSdkVersion
             )
         }
     }

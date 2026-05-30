@@ -18,8 +18,9 @@ object PackerDetectionBypass {
     private const val TAG = "PackerBypass"
 
     // Class names that indicate hook frameworks -- used by Class.forName / loadClass interceptors
+    // NOTE: "multiapp" is intentionally NOT listed here -- the stub itself uses multiapp classes
     private val HOOK_INDICATORS = setOf(
-        "xposed", "lsplant", "lspatch", "substrate", "frida", "multiapp"
+        "xposed", "lsplant", "lspatch", "substrate", "frida"
     )
 
     /**

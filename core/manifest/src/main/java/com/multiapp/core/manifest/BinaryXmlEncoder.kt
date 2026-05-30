@@ -44,7 +44,9 @@ class BinaryXmlEncoder {
             "process" to 0x01010011,
             "authorities" to 0x01010018,
             "appComponentFactory" to 0x0101057a,
-            "permission" to 0x01010006
+            "permission" to 0x01010006,
+            "enabled" to 0x0101000e,
+            "extractNativeLibs" to 0x01010419
         )
     }
 
@@ -98,12 +100,13 @@ class BinaryXmlEncoder {
         val IDX_TARGET_SDK = attrStr("targetSdkVersion")
         val IDX_NAME = attrStr("name")
         val IDX_LABEL = attrStr("label")
-        val IDX_ICON = attrStr("icon")
         val IDX_EXPORTED = attrStr("exported")
         val IDX_PROCESS = attrStr("process")
         val IDX_AUTHORITIES = attrStr("authorities")
         val IDX_APP_COMP_FACTORY = attrStr("appComponentFactory")
         val IDX_PERMISSION = attrStr("permission")
+        val IDX_ENABLED = attrStr("enabled")
+        val IDX_EXTRACT_NATIVE_LIBS = attrStr("extractNativeLibs")
 
         // 其他字符串
         val NS_URI = otherStr(ANDROID_NS_URI)
@@ -111,8 +114,10 @@ class BinaryXmlEncoder {
         val MANIFEST = otherStr("manifest")
         val PACKAGE = otherStr("package")
         val USES_SDK = otherStr("uses-sdk")
-        val MIN_VAL = otherStr("28")
-        val TARGET_VAL = otherStr("36")
+        val minSdkStr = manifest.minSdkVersion.toString()
+        val targetSdkStr = manifest.targetSdkVersion.toString()
+        otherStr(minSdkStr)
+        otherStr(targetSdkStr)
         val USES_PERM = otherStr("uses-permission")
         val APPLICATION = otherStr("application")
         val COMP_FACTORY_VAL = otherStr("com.multiapp.core.loader.LoaderFactory")
@@ -125,7 +130,6 @@ class BinaryXmlEncoder {
         val TRUE_VAL = otherStr("true")
         val FALSE_VAL = otherStr("false")
         val VERSION_NAME_VAL = otherStr("1.0")
-        val ICON_VAL = otherStr("@mipmap/ic_launcher")
         val SERVICE = otherStr("service")
         val RECEIVER = otherStr("receiver")
         val PROVIDER = otherStr("provider")
@@ -139,7 +143,7 @@ class BinaryXmlEncoder {
         for (s in manifest.services) { otherStr(s.name); s.process?.let { otherStr(it) } }
         for (r in manifest.receivers) { otherStr(r.name); r.process?.let { otherStr(it) } }
         val authorityRewriter = AuthorityRewriter()
-        val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId)
+        val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId, config.authorityMap)
         for (p in rewrittenProviders) { otherStr(p.name); p.authorities?.let { otherStr(it) } }
 
         // 合并: 属性名在前，其他在后
@@ -159,8 +163,8 @@ class BinaryXmlEncoder {
 
         // <uses-sdk> — 必须声明，否则 Android 12+ 拒绝安装
         nodes.add(Node.ElemStart(null, "uses-sdk", listOf(
-            XmlAttr(ANDROID_NS_URI, "minSdkVersion", "28", typedValue = 28, dataType = TYPE_INT_DEC),
-            XmlAttr(ANDROID_NS_URI, "targetSdkVersion", "36", typedValue = 36, dataType = TYPE_INT_DEC)
+            XmlAttr(ANDROID_NS_URI, "minSdkVersion", minSdkStr, typedValue = manifest.minSdkVersion, dataType = TYPE_INT_DEC),
+            XmlAttr(ANDROID_NS_URI, "targetSdkVersion", targetSdkStr, typedValue = manifest.targetSdkVersion, dataType = TYPE_INT_DEC)
         )))
         nodes.add(Node.ElemEnd(null, "uses-sdk"))
 
@@ -174,13 +178,14 @@ class BinaryXmlEncoder {
         nodes.add(Node.ElemStart(null, "application", listOf(
             XmlAttr(ANDROID_NS_URI, "appComponentFactory", "com.multiapp.core.loader.LoaderFactory"),
             XmlAttr(ANDROID_NS_URI, "label", config.stubPackageName),
-            XmlAttr(ANDROID_NS_URI, "icon", "@mipmap/ic_launcher")
+            XmlAttr(ANDROID_NS_URI, "extractNativeLibs", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN)
         )))
 
         // Launcher activity
         nodes.add(Node.ElemStart(null, "activity", listOf(
             XmlAttr(ANDROID_NS_URI, "name", launcherActivity.name),
-            XmlAttr(ANDROID_NS_URI, "exported", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN)
+            XmlAttr(ANDROID_NS_URI, "exported", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN),
+            XmlAttr(ANDROID_NS_URI, "enabled", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN)
         )))
         nodes.add(Node.ElemStart(null, "intent-filter", emptyList()))
         nodes.add(Node.ElemStart(null, "action", listOf(XmlAttr(ANDROID_NS_URI, "name", "android.intent.action.MAIN"))))
@@ -270,18 +275,22 @@ class BinaryXmlEncoder {
                     body.putInt(idx[n.uri]!!)
                 }
                 is Node.ElemStart -> {
-                    val nodeHeaderSize: Short = 16  // ResChunk_header(8) + lineNumber(4) + comment(4)
-                    val attrExtSize: Short = 20      // ns(4) + name(4) + attrStart(2) + attrSize(2) + attrCount(2) + idIndex(2) + classIndex(2) + styleIndex(2)
-                    val chunkSize = 16 + attrExtSize + n.attrs.size * 20
+                    // AOSP ResXMLTree_attrExt layout:
+                    //   chunk_header(8) + lineNumber(4) + comment(4) = 16 (nodeHeaderSize)
+                    //   ns(4) + name(4) + attrStart(2)+attrSize(2)+attrCount(2)+idIdx(2)+classIdx(2)+styleIdx(2) = 20 (attrExtSize)
+                    //   attrs * 20
+                    val nodeHeaderSize: Short = 16
+                    val attrExtSize: Short = 20
+                    val chunkSize = 36 + n.attrs.size * 20
                     body.putShort(RES_XML_START_ELEMENT_TYPE.toShort())
-                    body.putShort(nodeHeaderSize) // headerSize: apksig splits header/contents here
+                    body.putShort(nodeHeaderSize)
                     body.putInt(chunkSize)
                     body.putInt(1) // lineNumber
                     body.putInt(-1) // comment
                     body.putInt(if (n.ns != null) idx[n.ns]!! else -1)
                     body.putInt(idx[n.name]!!)
-                    body.putShort(attrExtSize) // attributeStart: offset from attrExt start to first attr
-                    body.putShort(20) // attributeSize: each attribute is 20 bytes
+                    body.putShort(attrExtSize) // attributeStart
+                    body.putShort(20) // attributeSize
                     body.putShort(n.attrs.size.toShort())
                     body.putShort(0) // idIndex
                     body.putShort(0) // classIndex
@@ -337,7 +346,7 @@ class BinaryXmlEncoder {
         for ((i, s) in strings.withIndex()) {
             offsets[i] = strData.size()
             val utf8Bytes = s.toByteArray(StandardCharsets.UTF_8)
-            val charCount = s.length  // character count (not byte count)
+            val charCount = s.length  // ASCII-only: correct for package names/URIs; non-BMP text would need UTF-16 code unit count
             val byteCount = utf8Bytes.size
 
             // Write char count (1-2 bytes, high bit = 2-byte mode)

@@ -136,12 +136,25 @@ class HookEngine private constructor() {
         return java.lang.reflect.Proxy.newProxyInstance(
             callbackClass.classLoader,
             arrayOf(callbackClass)
-        ) { _, proxyMethod, args ->
+        ) { _, proxyMethod, proxyArgs ->
             when (proxyMethod.name) {
                 "before" -> {
-                    val receiver = args?.getOrNull(0)
-                    val methodArgs = args?.getOrNull(1) as? Array<Any?> ?: emptyArray()
-                    callback(receiver, methodArgs) != null
+                    val receiver = proxyArgs?.getOrNull(0)
+                    val methodArgs = proxyArgs?.getOrNull(1) as? Array<Any?> ?: emptyArray()
+                    val result = callback(receiver, methodArgs)
+                    if (result != null && result !== methodArgs) {
+                        // Callback returned modified args — copy them back to the original array
+                        // and return false (don't skip the method)
+                        for (i in methodArgs.indices) {
+                            if (i < result.size) {
+                                (proxyArgs[1] as Array<Any?>)[i] = result[i]
+                            }
+                        }
+                        false
+                    } else {
+                        // No changes — return false (don't skip)
+                        false
+                    }
                 }
                 else -> null
             }

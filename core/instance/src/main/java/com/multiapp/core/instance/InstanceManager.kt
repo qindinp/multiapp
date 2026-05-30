@@ -4,7 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import com.multiapp.core.identity.DeviceIdentityPool
-import com.multiapp.core.identity.IdentityConfig
+import com.multiapp.core.model.IdentityConfig
+import com.multiapp.core.hook.IdentitySpoofingEngine
 import com.multiapp.core.installer.StubInstaller
 import com.multiapp.core.manifest.ComponentExtractor
 import com.multiapp.core.manifest.DeviceIdentityConfig
@@ -37,6 +38,7 @@ class InstanceManager @Inject constructor(
     private val stubBuilder: StubBuilder,
     private val stubInstaller: StubInstaller,
     @ApplicationContext private val context: Context,
+    private val identitySpoofingEngine: IdentitySpoofingEngine,
     private val parser: ManifestParser = ManifestParser(),
     private val extractor: ComponentExtractor = ComponentExtractor()
 ) {
@@ -87,6 +89,11 @@ class InstanceManager @Inject constructor(
         val identity = DeviceIdentityPool.generateIdentity(instanceId, app.packageName)
         Timber.d("InstanceManager: generated identity, stubPackage=${identity.stubPackageName}")
 
+        // 2.5. 将身份同步到 IdentitySpoofingEngine，确保运行时使用相同的身份
+        val deviceProfile = identity.toDeviceProfile()
+        identitySpoofingEngine.applyDeviceProfile(deviceProfile, instanceId, identity)
+        Timber.d("InstanceManager: identity synced to IdentitySpoofingEngine")
+
         // 3. 将 IdentityConfig 转换为 StubConfig 所需的 DeviceIdentityConfig
         val deviceIdentityConfig = DeviceIdentityConfig(
             imei = identity.imei,
@@ -129,12 +136,33 @@ class InstanceManager @Inject constructor(
         val installResult = stubInstaller.install(stubApk)
         when (installResult) {
             is StubInstaller.InstallResult.Success -> {
-                Timber.d("InstanceManager: stub installed successfully")
+                Timber.d("InstanceManager: stub install initiated successfully")
+            }
+            is StubInstaller.InstallResult.PendingUserConfirmation -> {
+                Timber.d("InstanceManager: waiting for user to confirm installation")
             }
             is StubInstaller.InstallResult.Error -> {
                 Timber.e("InstanceManager: stub install failed: ${installResult.message}")
                 throw RuntimeException("Stub install failed: ${installResult.message}")
             }
+        }
+
+        // 等待安装完成 — 通过轮询包管理器确认安装成功
+        // PendingUserConfirmation 时给予更长等待时间 (60s)
+        val maxAttempts = if (installResult is StubInstaller.InstallResult.PendingUserConfirmation) 60 else 30
+        var installConfirmed = false
+        for (attempt in 1..maxAttempts) {
+            try {
+                context.packageManager.getPackageInfo(identity.stubPackageName, 0)
+                installConfirmed = true
+                Timber.d("InstanceManager: install confirmed on attempt $attempt")
+                break
+            } catch (_: Exception) {
+                kotlinx.coroutines.delay(1000)
+            }
+        }
+        if (!installConfirmed) {
+            throw RuntimeException("Stub installation not confirmed after ${maxAttempts}s — user may have cancelled or installation failed")
         }
 
         // 9. 保存实例信息到数据库
@@ -346,4 +374,29 @@ data class InstanceInfo(
 
 enum class InstanceStatus {
     CREATING, READY, RUNNING, ERROR
+}
+
+/**
+ * Convert IdentityConfig to DeviceProfile for IdentitySpoofingEngine.
+ * This ensures the same identity values are used in both StubConfig and runtime spoofing.
+ */
+private fun IdentityConfig.toDeviceProfile(): com.multiapp.core.model.DeviceProfile {
+    return com.multiapp.core.model.DeviceProfile(
+        id = instanceId,
+        name = "Instance $instanceId",
+        brand = buildBrand,
+        manufacturer = buildManufacturer,
+        model = buildModel,
+        device = buildDevice,
+        product = buildProduct,
+        board = buildDevice,
+        hardware = buildDevice,
+        fingerprint = buildFingerprint,
+        androidVersion = versionRelease,
+        sdkInt = sdkInt,
+        buildId = buildFingerprint.substringAfter(":").substringBefore("/"),
+        serial = serial,
+        imei = imei,
+        macAddress = macAddress
+    )
 }

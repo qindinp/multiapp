@@ -156,10 +156,10 @@ object DeviceIdentityPool {
         originalPackageName: String,
         instanceId: String
     ): Map<String, String> {
-        val suffix = ".clone$instanceId"
+        // 与 AuthorityRewriter 保持一致：直接追加 .$instanceId
         return mapOf(
-            "$originalPackageName.provider" to "$originalPackageName.provider$suffix",
-            "$originalPackageName.fileprovider" to "$originalPackageName.fileprovider$suffix"
+            "$originalPackageName.provider" to "$originalPackageName.provider.$instanceId",
+            "$originalPackageName.fileprovider" to "$originalPackageName.fileprovider.$instanceId"
         )
     }
 
