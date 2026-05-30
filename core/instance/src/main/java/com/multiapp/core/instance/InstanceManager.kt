@@ -64,26 +64,30 @@ class InstanceManager @Inject constructor(
      * @throws RuntimeException 如果安装失败
      * @throws IllegalArgumentException 如果原始 APK 不存在或无 launcher Activity
      */
-    suspend fun createInstance(app: VirtualApp): String = withContext(Dispatchers.IO) {
+    suspend fun createInstance(
+        app: VirtualApp,
+        onProgress: suspend (String) -> Unit = {}
+    ): String = withContext(Dispatchers.IO) {
         Timber.d("InstanceManager: creating instance for ${app.packageName}")
         val instanceId = "stub_${UUID.randomUUID().toString().replace("-", "")}"
 
         // 1. 生成设备身份 (DeviceIdentityPool 是 object 单例，直接调用)
-        val identity = DeviceIdentityPool.generateIdentity(instanceId, app.packageName)
-        Timber.d("InstanceManager: generated identity, stubPackage=${identity.stubPackageName}")
-
-        // 2. 解析原始 APK manifest
+        onProgress("解析APK")
         val originApkFile = File(app.apkPath)
         require(originApkFile.exists()) { "Origin APK not found: ${app.apkPath}" }
         val manifest = parser.parse(originApkFile)
         Timber.d("InstanceManager: parsed manifest, ${manifest.activities.size} activities")
 
-        // 3. 提取 launcher Activity
+        // 2. 提取 launcher Activity
         val launcherActivity = extractor.extractLauncherActivity(manifest)
             ?: error("No launcher activity found in ${app.packageName}")
         Timber.d("InstanceManager: launcher activity = ${launcherActivity.name}")
 
-        // 4. 将 IdentityConfig 转换为 StubConfig 所需的 DeviceIdentityConfig
+        onProgress("生成身份")
+        val identity = DeviceIdentityPool.generateIdentity(instanceId, app.packageName)
+        Timber.d("InstanceManager: generated identity, stubPackage=${identity.stubPackageName}")
+
+        // 3. 将 IdentityConfig 转换为 StubConfig 所需的 DeviceIdentityConfig
         val deviceIdentityConfig = DeviceIdentityConfig(
             imei = identity.imei,
             androidId = identity.androidId,
@@ -99,10 +103,11 @@ class InstanceManager @Inject constructor(
             sdkInt = identity.sdkInt
         )
 
-        // 5. DEX Patch (可选 — 对加固 APK 执行检测代码删除)
+        // 4. DEX Patch (可选 — 对加固 APK 执行检测代码删除)
         val patchedDexPaths = runDexPatch(originApkFile, instanceId)
 
-        // 6. 构建 StubConfig (originalSignatures 存放 originApk 路径)
+        onProgress("构建Stub")
+        // 5. 构建 StubConfig (originalSignatures 存放 originApk 路径)
         val stubConfig = StubConfig(
             instanceId = instanceId,
             stubPackageName = identity.stubPackageName,
@@ -114,11 +119,12 @@ class InstanceManager @Inject constructor(
             patchedDexPaths = patchedDexPaths
         )
 
-        // 7. 构建 Stub APK
+        // 6. 构建 Stub APK
         val stubApk = stubBuilder.build(stubConfig)
         Timber.d("InstanceManager: stub APK built at ${stubApk.absolutePath}")
 
-        // 8. 安装 Stub (智能降级: Session API → 系统安装器 Intent)
+        onProgress("安装中")
+        // 7. 安装 Stub (智能降级: Session API → 系统安装器 Intent)
         // 如果没有安装权限，会自动降级到系统安装器，用户手动点确认即可
         val installResult = stubInstaller.install(stubApk)
         when (installResult) {
@@ -200,6 +206,49 @@ class InstanceManager @Inject constructor(
         _instances.update { list -> list.filter { it.instanceId != instanceId } }
 
         Timber.d("InstanceManager: instance deleted successfully, id=$instanceId")
+    }
+
+    /**
+     * 撤销删除分身实例
+     *
+     * 重新将实例记录写入数据库并刷新 StateFlow。
+     * 注意：此方法不会重新安装 Stub APK，仅恢复数据库记录。
+     *
+     * @param instanceId 要恢复的实例 ID
+     * @param identityJson 实例的身份配置 JSON
+     */
+    suspend fun undoDelete(instanceId: String, identityJson: String) = withContext(Dispatchers.IO) {
+        Timber.d("InstanceManager: undoing delete for $instanceId")
+
+        val identity = try {
+            gson.fromJson(identityJson, IdentityConfig::class.java)
+        } catch (e: Exception) {
+            Timber.e(e, "InstanceManager: failed to parse identity JSON for undo")
+            return@withContext
+        }
+
+        val now = System.currentTimeMillis()
+        val entity = InstanceEntity(
+            instanceId = instanceId,
+            originalPackageName = identity.originalPackageName,
+            stubPackageName = identity.stubPackageName,
+            identityJson = identityJson,
+            createdAt = now,
+            status = InstanceStatus.READY.name
+        )
+        instanceDatabase.instanceDao().insert(entity)
+
+        val info = InstanceInfo(
+            instanceId = instanceId,
+            originalPackageName = identity.originalPackageName,
+            stubPackageName = identity.stubPackageName,
+            identity = identity,
+            createdAt = now,
+            status = InstanceStatus.READY
+        )
+        _instances.update { it + info }
+
+        Timber.d("InstanceManager: undo delete successful, id=$instanceId")
     }
 
     /**

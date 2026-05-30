@@ -19,7 +19,8 @@ import javax.inject.Inject
 data class LauncherUiState(
     val instances: List<InstanceInfo> = emptyList(),
     val isLoading: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val creationStep: String? = null
 )
 
 @HiltViewModel
@@ -55,16 +56,27 @@ class LauncherViewModel @Inject constructor(
 
     fun createInstance(app: VirtualApp) {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
+            _uiState.update { it.copy(creationStep = "准备中…", error = null) }
+
             try {
-                instanceManager.createInstance(app)
+                instanceManager.createInstance(app) { step ->
+                    _uiState.update { it.copy(creationStep = step) }
+                }
+
+                _uiState.update { it.copy(creationStep = null) }
                 loadInstances()
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to create instance")
-                _uiState.update { it.copy(isLoading = false, error = e.message) }
+                _uiState.update {
+                    it.copy(creationStep = null, error = e.message)
+                }
             }
         }
+    }
+
+    fun dismissCreationProgress() {
+        _uiState.update { it.copy(creationStep = null) }
     }
 
     fun deleteInstance(instanceId: String) {

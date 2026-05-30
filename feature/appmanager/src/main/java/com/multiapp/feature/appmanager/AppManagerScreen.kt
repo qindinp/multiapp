@@ -1,13 +1,17 @@
 package com.multiapp.feature.appmanager
 
+import android.content.pm.PackageManager
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -16,15 +20,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.graphics.drawable.toBitmap
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.multiapp.core.designsystem.components.LoadingState
+import com.multiapp.core.designsystem.components.ErrorState
+import com.multiapp.core.designsystem.components.EmptyState
+import com.multiapp.core.common.formatBytes
+import com.multiapp.core.common.getDirSize
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceStatus
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -32,15 +49,36 @@ fun AppManagerScreen(
     viewModel: AppManagerViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    var showDetailDialog by remember { mutableStateOf<InstanceInfo?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Handle undo delete events
+    LaunchedEffect(Unit) {
+        viewModel.events.collect { event ->
+            when (event) {
+                is AppManagerEvent.UndoDelete -> {
+                    val result = snackbarHostState.showSnackbar(
+                        message = "已删除 ${event.instanceId.substringAfterLast("_").take(8)}…",
+                        actionLabel = "撤销",
+                        duration = SnackbarDuration.Short
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        viewModel.undoDelete(event.instanceId, event.identityJson)
+                    }
+                }
+            }
+        }
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "应用管理",
+                            text = "实例管理",
                             style = MaterialTheme.typography.titleLarge,
                         )
                         if (uiState.instances.isNotEmpty()) {
@@ -57,6 +95,11 @@ fun AppManagerScreen(
                                 )
                             }
                         }
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { viewModel.onEvent(AppManagerEvent.Refresh) }) {
+                        Icon(Icons.Default.Refresh, contentDescription = "刷新")
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -89,15 +132,15 @@ fun AppManagerScreen(
                                 visible = visible,
                                 enter = fadeIn(tween(300)) + slideInVertically { it / 2 }
                             ) {
-                                val isExpanded = uiState.expandedInstanceId == instance.instanceId
                                 AppManagerCard(
                                     instance = instance,
-                                    isExpanded = isExpanded,
+                                    isExpanded = uiState.expandedInstanceId == instance.instanceId,
                                     onToggleExpand = {
                                         viewModel.onEvent(
                                             AppManagerEvent.ToggleExpand(instance.instanceId)
                                         )
                                     },
+                                    onShowDetail = { showDetailDialog = instance },
                                     onDelete = {
                                         viewModel.onEvent(
                                             AppManagerEvent.DeleteInstance(instance.instanceId)
@@ -111,6 +154,14 @@ fun AppManagerScreen(
             }
         }
     }
+
+    // Detail dialog (P1-3)
+    showDetailDialog?.let { instance ->
+        InstanceDetailDialog(
+            instance = instance,
+            onDismiss = { showDetailDialog = null }
+        )
+    }
 }
 
 @Composable
@@ -118,9 +169,32 @@ private fun AppManagerCard(
     instance: InstanceInfo,
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
+    onShowDetail: () -> Unit,
     onDelete: () -> Unit
 ) {
-    var showDeleteDialog by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Load original app icon
+    val appIcon = remember(instance.originalPackageName) {
+        try {
+            context.packageManager.getApplicationIcon(instance.originalPackageName)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // Async data size computation
+    var dataSize by remember(instance) { mutableStateOf("—") }
+    LaunchedEffect(instance) {
+        dataSize = withContext(Dispatchers.IO) {
+            try {
+                val dataDir = File("/data/data/${instance.stubPackageName}")
+                if (dataDir.exists()) formatBytes(getDirSize(dataDir)) else "—"
+            } catch (_: Exception) {
+                "—"
+            }
+        }
+    }
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -151,12 +225,21 @@ private fun AppManagerCard(
                         ),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.PhoneAndroid,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
+                    if (appIcon != null) {
+                        val bitmap = remember(appIcon) { appIcon.toBitmap(96, 96) }
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp))
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.PhoneAndroid,
+                            contentDescription = null,
+                            modifier = Modifier.size(24.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
 
                     // Running indicator
                     if (instance.status == InstanceStatus.RUNNING) {
@@ -199,11 +282,27 @@ private fun AppManagerCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    // Identity summary + data size
+                    Text(
+                        text = "${instance.identity.buildModel} · ${instance.identity.buildManufacturer} · $dataSize",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                     Spacer(modifier = Modifier.height(6.dp))
                     InstanceStatusChip(status = instance.status)
                 }
 
                 Row {
+                    IconButton(onClick = onShowDetail) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = "详情",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     IconButton(onClick = onToggleExpand) {
                         Icon(
                             if (isExpanded) Icons.Default.KeyboardArrowUp
@@ -212,7 +311,7 @@ private fun AppManagerCard(
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    IconButton(onClick = { showDeleteDialog = true }) {
+                    IconButton(onClick = onDelete) {
                         Icon(
                             Icons.Default.Delete,
                             contentDescription = "删除",
@@ -242,64 +341,154 @@ private fun AppManagerCard(
             }
         }
     }
+}
 
-    if (showDeleteDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            icon = {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.errorContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        Icons.Default.ErrorOutline,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(24.dp)
+/**
+ * P1-3: Instance detail dialog showing device identity, timestamps, stub package, status.
+ */
+@Composable
+private fun InstanceDetailDialog(
+    instance: InstanceInfo,
+    onDismiss: () -> Unit
+) {
+    val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(
+                        Brush.linearGradient(
+                            listOf(
+                                MaterialTheme.colorScheme.primaryContainer,
+                                MaterialTheme.colorScheme.tertiaryContainer
+                            )
+                        )
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.PhoneAndroid,
+                    contentDescription = null,
+                    modifier = Modifier.size(28.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            }
+        },
+        title = {
+            Text(
+                text = instance.originalPackageName.substringAfterLast("."),
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                // Status
+                DetailDialogSection("状态") {
+                    DetailDialogRow(Icons.Default.Circle, "当前状态", when (instance.status) {
+                        InstanceStatus.CREATING -> "创建中"
+                        InstanceStatus.READY -> "就绪"
+                        InstanceStatus.RUNNING -> "运行中"
+                        InstanceStatus.ERROR -> "错误"
+                    })
+                }
+
+                // Package info
+                DetailDialogSection("包信息") {
+                    DetailDialogRow(Icons.Default.Tag, "实例 ID", instance.instanceId)
+                    DetailDialogRow(Icons.Default.FolderOpen, "原始包名", instance.originalPackageName)
+                    DetailDialogRow(Icons.Default.Folder, "Stub 包名", instance.stubPackageName)
+                }
+
+                // Device identity
+                DetailDialogSection("设备身份") {
+                    DetailDialogRow(Icons.Default.Phone, "IMEI", instance.identity.imei)
+                    DetailDialogRow(Icons.Default.Key, "Android ID", instance.identity.androidId)
+                    DetailDialogRow(Icons.Default.Wifi, "MAC 地址", instance.identity.macAddress)
+                    DetailDialogRow(Icons.Default.Tag, "序列号", instance.identity.serial)
+                    DetailDialogRow(Icons.Default.PhoneAndroid, "设备型号", instance.identity.buildModel)
+                    DetailDialogRow(Icons.Default.Business, "制造商", instance.identity.buildManufacturer)
+                    DetailDialogRow(Icons.Default.BrandingWatermark, "品牌", instance.identity.buildBrand)
+                    DetailDialogRow(Icons.Default.Memory, "设备代号", instance.identity.buildDevice)
+                    DetailDialogRow(Icons.Default.Android, "Android 版本", instance.identity.versionRelease)
+                    DetailDialogRow(Icons.Default.Code, "SDK 版本", instance.identity.sdkInt.toString())
+                }
+
+                // Timestamps
+                DetailDialogSection("时间") {
+                    DetailDialogRow(
+                        Icons.Default.Schedule,
+                        "创建时间",
+                        dateFormat.format(Date(instance.createdAt))
                     )
                 }
-            },
-            title = {
-                Text(
-                    "确认删除",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    textAlign = TextAlign.Center
-                )
-            },
-            text = {
-                Text(
-                    "确定要删除分身实例 ${instance.originalPackageName.substringAfterLast(".")} 吗？此操作不可撤销。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        showDeleteDialog = false
-                        onDelete()
-                    },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    ),
-                    shape = RoundedCornerShape(50)
-                ) {
-                    Text("删除")
-                }
-            },
-            dismissButton = {
-                OutlinedButton(
-                    onClick = { showDeleteDialog = false },
-                    shape = RoundedCornerShape(50)
-                ) {
-                    Text("取消")
-                }
-            },
-            shape = RoundedCornerShape(24.dp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        },
+        shape = RoundedCornerShape(24.dp)
+    )
+}
+
+@Composable
+private fun DetailDialogSection(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.labelLarge,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+    )
+    Column(content = content)
+    HorizontalDivider(
+        modifier = Modifier.padding(vertical = 4.dp),
+        color = MaterialTheme.colorScheme.outlineVariant
+    )
+}
+
+@Composable
+private fun DetailDialogRow(icon: ImageVector, label: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(72.dp)
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
@@ -354,114 +543,12 @@ private fun DetailRow(icon: ImageVector, label: String, value: String) {
     }
 }
 
-@Composable
-private fun LoadingState() {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator(
-                color = MaterialTheme.colorScheme.primary,
-                strokeWidth = 3.dp,
-                modifier = Modifier.size(48.dp)
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                "加载应用中...",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun ErrorState(error: String) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .size(80.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.errorContainer),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Default.ErrorOutline,
-                contentDescription = null,
-                modifier = Modifier.size(40.dp),
-                tint = MaterialTheme.colorScheme.error
-            )
-        }
-        Spacer(modifier = Modifier.height(20.dp))
-        Text(
-            text = "出了点问题",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = error,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
-    }
-}
+// LoadingState, ErrorState, EmptyState 已提取到 core/designsystem/CommonComponents.kt
 
 @Composable
 private fun EmptyState() {
-    val infiniteTransition = rememberInfiniteTransition(label = "emptyFloat")
-    val offsetY by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = -10f,
-        animationSpec = infiniteRepeatable(
-            tween(1800, easing = FastOutSlowInEasing),
-            RepeatMode.Reverse
-        ),
-        label = "floatAnim"
+    EmptyState(
+        title = "暂无分身实例",
+        subtitle = "在首页添加应用分身后，\n可以在这里管理所有实例。"
     )
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(40.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .offset(y = offsetY.dp)
-                .size(120.dp)
-                .clip(RoundedCornerShape(28.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Default.PhoneAndroid,
-                contentDescription = null,
-                modifier = Modifier.size(52.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
-        }
-
-        Spacer(modifier = Modifier.height(28.dp))
-
-        Text(
-            text = "暂无分身实例",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "在首页添加应用分身后，\n可以在这里管理所有实例。",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            lineHeight = 22.sp
-        )
-    }
 }

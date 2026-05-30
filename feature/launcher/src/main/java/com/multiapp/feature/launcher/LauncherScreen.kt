@@ -1,6 +1,8 @@
 package com.multiapp.feature.launcher
 
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -30,9 +32,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.multiapp.core.designsystem.components.LoadingState
+import com.multiapp.core.designsystem.components.ErrorState
+import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceStatus
 import com.multiapp.core.model.VirtualApp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,6 +47,7 @@ fun LauncherScreen(
     viewModel: LauncherViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
     var showAppPicker by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -49,7 +57,7 @@ fun LauncherScreen(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "MultiApp",
+                            text = "快捷启动",
                             style = MaterialTheme.typography.titleLarge,
                         )
                         if (uiState.instances.isNotEmpty()) {
@@ -92,15 +100,36 @@ fun LauncherScreen(
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
             when {
-                uiState.isLoading -> LoadingState()
-                uiState.error != null -> ErrorState(
+                uiState.isLoading && uiState.creationStep == null -> LoadingState()
+                uiState.error != null && uiState.creationStep == null -> ErrorState(
                     error = uiState.error!!,
                     onRetry = { viewModel.loadInstances() }
                 )
-                uiState.instances.isEmpty() -> EmptyState(onAdd = { showAppPicker = true })
+                uiState.instances.isEmpty() && uiState.creationStep == null -> EmptyState(onAdd = { showAppPicker = true })
                 else -> AppGrid(
                     instances = uiState.instances,
+                    onLaunch = { instance ->
+                        try {
+                            val intent = context.packageManager.getLaunchIntentForPackage(instance.stubPackageName)
+                            if (intent != null) {
+                                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                context.startActivity(intent)
+                            } else {
+                                Toast.makeText(context, "无法启动 ${instance.originalPackageName.substringAfterLast(".")}", Toast.LENGTH_SHORT).show()
+                            }
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                        }
+                    },
                     onDelete = { viewModel.deleteInstance(it.instanceId) }
+                )
+            }
+
+            // Creation progress overlay
+            uiState.creationStep?.let { step ->
+                CreationProgressDialog(
+                    step = step,
+                    onDismiss = { viewModel.dismissCreationProgress() }
                 )
             }
         }
@@ -118,8 +147,56 @@ fun LauncherScreen(
 }
 
 @Composable
+private fun CreationProgressDialog(step: String) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.scrim.copy(alpha = 0.5f)
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            ElevatedCard(
+                shape = RoundedCornerShape(24.dp),
+                elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
+                colors = CardDefaults.elevatedCardColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
+                modifier = Modifier
+                    .fillMaxWidth(0.85f)
+                    .wrapContentHeight()
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(48.dp),
+                        strokeWidth = 3.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(
+                        text = step,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(6.dp)
+                            .clip(RoundedCornerShape(3.dp)),
+                        color = MaterialTheme.colorScheme.primary,
+                        trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun AppGrid(
     instances: List<InstanceInfo>,
+    onLaunch: (InstanceInfo) -> Unit,
     onDelete: (InstanceInfo) -> Unit
 ) {
     LazyVerticalGrid(
@@ -143,6 +220,7 @@ private fun AppGrid(
             ) {
                 AppGridItem(
                     instance = instance,
+                    onLaunch = { onLaunch(instance) },
                     onDelete = { onDelete(instance) }
                 )
             }
@@ -154,15 +232,26 @@ private fun AppGrid(
 @Composable
 private fun AppGridItem(
     instance: InstanceInfo,
+    onLaunch: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Load original app icon
+    val appIcon = remember(instance.originalPackageName) {
+        try {
+            context.packageManager.getApplicationIcon(instance.originalPackageName)
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
             .combinedClickable(
-                onClick = { /* TODO: launch instance */ },
+                onClick = onLaunch,
                 onLongClick = { showMenu = true }
             ),
         shape = RoundedCornerShape(16.dp),
@@ -190,12 +279,21 @@ private fun AppGridItem(
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.PhoneAndroid,
-                    contentDescription = instance.originalPackageName,
-                    modifier = Modifier.size(32.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
+                if (appIcon != null) {
+                    val bitmap = remember(appIcon) { appIcon.toBitmap(128, 128) }
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = instance.originalPackageName,
+                        modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp))
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Default.PhoneAndroid,
+                        contentDescription = instance.originalPackageName,
+                        modifier = Modifier.size(32.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
 
                 // Running indicator
                 if (instance.status == InstanceStatus.RUNNING) {
@@ -251,7 +349,7 @@ private fun AppGridItem(
                     },
                     onClick = {
                         showMenu = false
-                        // TODO: launch instance
+                        onLaunch()
                     }
                 )
                 DropdownMenuItem(
@@ -295,138 +393,27 @@ private fun InstanceStatusChip(status: InstanceStatus) {
     }
 }
 
-@Composable
-private fun LoadingState() {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            CircularProgressIndicator(
-                color = MaterialTheme.colorScheme.primary,
-                strokeWidth = 3.dp,
-                modifier = Modifier.size(48.dp)
-            )
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                "加载应用中...",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun ErrorState(error: String, onRetry: () -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize().padding(32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .size(80.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.errorContainer),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Default.ErrorOutline,
-                contentDescription = null,
-                modifier = Modifier.size(40.dp),
-                tint = MaterialTheme.colorScheme.error
-            )
-        }
-        Spacer(modifier = Modifier.height(20.dp))
-        Text(
-            text = "出了点问题",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = error,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(24.dp))
-        Button(
-            onClick = onRetry,
-            shape = RoundedCornerShape(50),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-        ) {
-            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-            Spacer(modifier = Modifier.width(8.dp))
-            Text("重试")
-        }
-    }
-}
+// LoadingState, ErrorState, EmptyState 已提取到 core/designsystem/CommonComponents.kt
 
 @Composable
 private fun EmptyState(onAdd: () -> Unit) {
-    val infiniteTransition = rememberInfiniteTransition(label = "emptyFloat")
-    val offsetY by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = -10f,
-        animationSpec = infiniteRepeatable(
-            tween(1800, easing = FastOutSlowInEasing),
-            RepeatMode.Reverse
-        ),
-        label = "floatAnim"
+    EmptyState(
+        icon = Icons.Default.CloudDownload,
+        title = "暂无分身应用",
+        subtitle = "点击下方按钮添加应用分身，\n在独立沙箱中运行多个实例。",
+        action = {
+            Button(
+                onClick = onAdd,
+                shape = RoundedCornerShape(50),
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                contentPadding = PaddingValues(horizontal = 28.dp, vertical = 14.dp)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("添加应用", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
     )
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(40.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .offset(y = offsetY.dp)
-                .size(120.dp)
-                .clip(RoundedCornerShape(28.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                Icons.Default.CloudDownload,
-                contentDescription = null,
-                modifier = Modifier.size(52.dp),
-                tint = MaterialTheme.colorScheme.primary
-            )
-        }
-
-        Spacer(modifier = Modifier.height(28.dp))
-
-        Text(
-            text = "暂无分身应用",
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(
-            text = "点击下方按钮添加应用分身，\n在独立沙箱中运行多个实例。",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            lineHeight = 22.sp
-        )
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Button(
-            onClick = onAdd,
-            shape = RoundedCornerShape(50),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-            contentPadding = PaddingValues(horizontal = 28.dp, vertical = 14.dp)
-        ) {
-            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-            Spacer(modifier = Modifier.width(10.dp))
-            Text("添加应用", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        }
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -437,35 +424,38 @@ private fun AppPickerSheet(
 ) {
     val context = LocalContext.current
     var searchQuery by remember { mutableStateOf("") }
+    var allApps by remember { mutableStateOf<List<VirtualApp>>(emptyList()) }
 
-    val apps = remember {
-        val pm = context.packageManager
-        pm.getInstalledPackages(PackageManager.GET_META_DATA)
-            .filter { pkg ->
-                val appInfo = pkg.applicationInfo ?: return@filter false
-                val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-                val isSelf = pkg.packageName == context.packageName
-                val hasLauncher = pm.getLaunchIntentForPackage(pkg.packageName) != null
-                !isSelf && (hasLauncher || !isSystem)
-            }
-            .map { pkg ->
-                val appInfo = pkg.applicationInfo!!
-                VirtualApp(
-                    packageName = pkg.packageName,
-                    appName = pm.getApplicationLabel(appInfo).toString(),
-                    versionName = pkg.versionName ?: "",
-                    versionCode = if (android.os.Build.VERSION.SDK_INT >= 28) pkg.longVersionCode else pkg.versionCode.toLong(),
-                    icon = pm.getApplicationIcon(appInfo),
-                    apkPath = appInfo.sourceDir,
-                    instanceId = "",
-                    mainActivity = pm.getLaunchIntentForPackage(pkg.packageName)?.component?.className
-                )
-            }
-            .sortedBy { it.appName.lowercase() }
+    LaunchedEffect(Unit) {
+        allApps = withContext(Dispatchers.IO) {
+            val pm = context.packageManager
+            pm.getInstalledPackages(PackageManager.GET_META_DATA)
+                .filter { pkg ->
+                    val appInfo = pkg.applicationInfo ?: return@filter false
+                    val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                    val isSelf = pkg.packageName == context.packageName
+                    val hasLauncher = pm.getLaunchIntentForPackage(pkg.packageName) != null
+                    !isSelf && (hasLauncher || !isSystem)
+                }
+                .map { pkg ->
+                    val appInfo = pkg.applicationInfo!!
+                    VirtualApp(
+                        packageName = pkg.packageName,
+                        appName = pm.getApplicationLabel(appInfo).toString(),
+                        versionName = pkg.versionName ?: "",
+                        versionCode = if (android.os.Build.VERSION.SDK_INT >= 28) pkg.longVersionCode else pkg.versionCode.toLong(),
+                        icon = pm.getApplicationIcon(appInfo),
+                        apkPath = appInfo.sourceDir,
+                        instanceId = "",
+                        mainActivity = pm.getLaunchIntentForPackage(pkg.packageName)?.component?.className
+                    )
+                }
+                .sortedBy { it.appName.lowercase() }
+        }
     }
 
-    val filteredApps = if (searchQuery.isBlank()) apps
-    else apps.filter {
+    val filteredApps = if (searchQuery.isBlank()) allApps
+    else allApps.filter {
         it.appName.contains(searchQuery, ignoreCase = true) ||
             it.packageName.contains(searchQuery, ignoreCase = true)
     }

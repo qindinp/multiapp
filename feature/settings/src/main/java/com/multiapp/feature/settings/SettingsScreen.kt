@@ -1,5 +1,8 @@
 package com.multiapp.feature.settings
 
+import android.os.Build
+import android.os.Environment
+import android.os.StatFs
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -20,6 +23,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.multiapp.core.designsystem.components.SettingsSection
+import com.multiapp.core.designsystem.components.SettingsDivider
+import com.multiapp.core.common.formatBytes
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,7 +66,7 @@ fun SettingsScreen(
                 buildType = uiState.buildType
             )
 
-            // Device identity section
+            // Device identity section — real system data
             SettingsSection(
                 title = "设备身份模板",
                 icon = Icons.Default.PhoneAndroid,
@@ -69,13 +75,13 @@ fun SettingsScreen(
                 DeviceIdentityContent()
             }
 
-            // About section
+            // About section — storage usage instead of tech stack
             SettingsSection(
-                title = "关于",
-                icon = Icons.Default.Info,
+                title = "存储使用",
+                icon = Icons.Default.Storage,
                 iconTint = MaterialTheme.colorScheme.tertiary
             ) {
-                AboutContent()
+                StorageContent()
             }
 
             Spacer(modifier = Modifier.height(32.dp))
@@ -210,25 +216,25 @@ private fun DeviceIdentityContent() {
         DeviceIdentityItem(
             icon = Icons.Default.PhoneAndroid,
             label = "设备型号",
-            value = "Pixel 7 Pro"
+            value = Build.MODEL
         )
         SettingsDivider()
         DeviceIdentityItem(
             icon = Icons.Default.Business,
             label = "制造商",
-            value = "Google"
+            value = Build.MANUFACTURER
         )
         SettingsDivider()
         DeviceIdentityItem(
             icon = Icons.Default.Android,
             label = "Android 版本",
-            value = "14"
+            value = Build.VERSION.RELEASE
         )
         SettingsDivider()
         DeviceIdentityItem(
             icon = Icons.Default.Code,
             label = "SDK 版本",
-            value = "34"
+            value = Build.VERSION.SDK_INT.toString()
         )
     }
 }
@@ -274,30 +280,76 @@ private fun DeviceIdentityItem(
 }
 
 @Composable
-private fun AboutContent() {
+private fun StorageContent() {
+    val storageInfo = remember {
+        try {
+            val stat = StatFs(Environment.getDataDirectory().path)
+            val totalBytes = stat.totalBytes
+            val availableBytes = stat.availableBytes
+            val usedBytes = totalBytes - availableBytes
+            Triple(totalBytes, usedBytes, availableBytes)
+        } catch (_: Exception) {
+            Triple(0L, 0L, 0L)
+        }
+    }
+
+    val (totalBytes, usedBytes, availableBytes) = storageInfo
+    val usedPercent = if (totalBytes > 0) (usedBytes.toFloat() / totalBytes) else 0f
+
     Column {
-        AboutItem(
-            icon = Icons.Default.Security,
-            label = "架构",
-            value = "Jetpack Compose + Material 3 + Hilt"
+        // Storage usage bar
+        Column(modifier = Modifier.padding(bottom = 12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "已使用",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "${formatBytes(usedBytes)} / ${formatBytes(totalBytes)}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = { usedPercent },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(4.dp)),
+                color = if (usedPercent > 0.9f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.surfaceVariant,
+            )
+        }
+
+        SettingsDivider()
+
+        StorageItem(
+            icon = Icons.Default.SdStorage,
+            label = "总容量",
+            value = formatBytes(totalBytes)
         )
         SettingsDivider()
-        AboutItem(
-            icon = Icons.Default.Memory,
-            label = "数据库",
-            value = "Room"
+        StorageItem(
+            icon = Icons.Default.DataUsage,
+            label = "已使用",
+            value = formatBytes(usedBytes)
         )
         SettingsDivider()
-        AboutItem(
-            icon = Icons.Default.Sync,
-            label = "异步框架",
-            value = "Kotlin Coroutines + Flow"
+        StorageItem(
+            icon = Icons.Default.Storage,
+            label = "可用空间",
+            value = formatBytes(availableBytes)
         )
     }
 }
 
 @Composable
-private fun AboutItem(
+private fun StorageItem(
     icon: ImageVector,
     label: String,
     value: String
@@ -329,58 +381,13 @@ private fun AboutItem(
         )
         Text(
             text = value,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.End
+            fontWeight = FontWeight.Medium
         )
     }
 }
 
-@Composable
-internal fun SettingsSection(
-    title: String,
-    icon: ImageVector,
-    iconTint: Color,
-    content: @Composable ColumnScope.() -> Unit
-) {
-    Column {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(bottom = 8.dp, start = 4.dp)
-        ) {
-            Icon(
-                icon, contentDescription = null,
-                modifier = Modifier.size(18.dp),
-                tint = iconTint
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = iconTint
-            )
-        }
-        ElevatedCard(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
-            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
-            colors = CardDefaults.elevatedCardColors(
-                containerColor = MaterialTheme.colorScheme.surface
-            )
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                content = content
-            )
-        }
-    }
-}
 
-@Composable
-internal fun SettingsDivider() {
-    HorizontalDivider(
-        modifier = Modifier.padding(vertical = 8.dp),
-        color = MaterialTheme.colorScheme.outlineVariant
-    )
-}
+
+// SettingsSection, SettingsDivider 已提取到 core/designsystem/CommonComponents.kt
