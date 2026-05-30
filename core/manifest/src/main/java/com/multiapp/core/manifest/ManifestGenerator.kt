@@ -59,7 +59,12 @@ class ManifestGenerator {
     }
 
     /**
-     * 生成二进制 XML（fallback，设备上无 aapt 时使用）
+     * 生成二进制 XML（设备上无 aapt 时使用）
+     *
+     * 关键规则（参照 aapt 输出）：
+     * 1. StringPool 前 N 个字符串是属性名，顺序与 ResourceMap 对应
+     * 2. ResourceMap 只包含前 N 个字符串（属性名）的 resource ID
+     * 3. 后面的字符串（元素名、值等）不在 ResourceMap 中
      */
     fun generateBytes(
         stubPackageName: String,
@@ -69,178 +74,192 @@ class ManifestGenerator {
     ): ByteArray {
         val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId)
 
-        // 收集所有字符串（按出现顺序）
-        val strings = mutableListOf<String>()
-        val stringIndex = { s: String ->
-            val idx = strings.indexOf(s)
-            if (idx >= 0) idx else { strings.add(s); strings.size - 1 }
+        // ─── 构建字符串池 ───
+        // 属性名必须在前 N 个位置，顺序与 ResourceMap 对应
+        val attrNames = mutableListOf<String>()  // 属性名（ResourceMap 对应）
+        val otherStrings = mutableListOf<String>() // 其他字符串（元素名、值等）
+
+        val attrNameIndex = { s: String ->
+            val idx = attrNames.indexOf(s)
+            if (idx >= 0) idx else { attrNames.add(s); attrNames.size - 1 }
+        }
+        val otherStringIndex = { s: String ->
+            val idx = otherStrings.indexOf(s)
+            if (idx >= 0) idx else { otherStrings.add(s); otherStrings.size - 1 }
         }
 
-        // android namespace 必须是第一个字符串（index=0）
-        val NS_URI = stringIndex("http://schemas.android.com/apk/res/android")
+        // 属性名（必须在 ResourceMap 中，顺序与 ResourceMap 一致）
+        // 参照 aapt: compileSdkVersion, compileSdkVersionCodename, minSdkVersion, targetSdkVersion, name, appComponentFactory, label, exported, authorities
+        val COMPILE_SDK = attrNameIndex("compileSdkVersion")
+        val COMPILE_SDK_CODENAME = attrNameIndex("compileSdkVersionCodename")
+        val MIN_SDK = attrNameIndex("minSdkVersion")
+        val TARGET_SDK = attrNameIndex("targetSdkVersion")
+        val NAME = attrNameIndex("name")
+        val APP_COMP_FACTORY = attrNameIndex("appComponentFactory")
+        val LABEL = attrNameIndex("label")
+        val EXPORTED = attrNameIndex("exported")
+        val AUTHORITIES = attrNameIndex("authorities")
+
         // 其他字符串
-        val PKG_NAME = stringIndex(stubPackageName)
-        val MANIFEST = stringIndex("manifest")
-        val PACKAGE = stringIndex("package")
-        val USES_SDK = stringIndex("uses-sdk")
-        val MIN_SDK = stringIndex("minSdkVersion")
-        val TARGET_SDK = stringIndex("targetSdkVersion")
-        val USES_PERM = stringIndex("uses-permission")
-        val NAME = stringIndex("name")
-        val APPLICATION = stringIndex("application")
-        val APP_COMP_FACTORY = stringIndex("appComponentFactory")
-        val COMP_FACTORY_VAL = stringIndex("com.multiapp.core.loader.LoaderFactory")
-        val LABEL = stringIndex("label")
-        val ACTIVITY = stringIndex("activity")
-        val EXPORTED = stringIndex("exported")
-        val INTENT_FILTER = stringIndex("intent-filter")
-        val ACTION = stringIndex("action")
-        val MAIN_ACTION = stringIndex("android.intent.action.MAIN")
-        val CATEGORY = stringIndex("android.intent.category")
-        val LAUNCHER_CAT = stringIndex("android.intent.category.LAUNCHER")
-        val SERVICE = stringIndex("service")
-        val RECEIVER = stringIndex("receiver")
-        val PROVIDER = stringIndex("provider")
-        val AUTHORITIES = stringIndex("authorities")
+        val NS_URI = otherStringIndex("http://schemas.android.com/apk/res/android")
+        val PKG_NAME = otherStringIndex(stubPackageName)
+        val MANIFEST = otherStringIndex("manifest")
+        val PACKAGE = otherStringIndex("package")
+        val USES_SDK = otherStringIndex("uses-sdk")
+        val USES_PERM = otherStringIndex("uses-permission")
+        val APPLICATION = otherStringIndex("application")
+        val COMP_FACTORY_VAL = otherStringIndex("com.multiapp.core.loader.LoaderFactory")
+        val ACTIVITY = otherStringIndex("activity")
+        val INTENT_FILTER = otherStringIndex("intent-filter")
+        val ACTION = otherStringIndex("action")
+        val MAIN_ACTION = otherStringIndex("android.intent.action.MAIN")
+        val CATEGORY = otherStringIndex("android.intent.category")
+        val LAUNCHER_CAT = otherStringIndex("android.intent.category.LAUNCHER")
+        val SERVICE = otherStringIndex("service")
+        val RECEIVER = otherStringIndex("receiver")
+        val PROVIDER = otherStringIndex("provider")
+        val SDK_VAL = otherStringIndex("36")
+        val CODENAME_VAL = otherStringIndex("16")
+        val PLATFORM_CODE = otherStringIndex("platformBuildVersionCode")
+        val PLATFORM_NAME = otherStringIndex("platformBuildVersionName")
 
         // 动态字符串
-        for (perm in manifest.permissions) stringIndex(perm)
-        stringIndex(launcherActivity.name)
-        for (activity in manifest.activities) { if (activity.name != launcherActivity.name) stringIndex(activity.name) }
-        for (service in manifest.services) stringIndex(service.name)
-        for (receiver in manifest.receivers) stringIndex(receiver.name)
-        for (provider in rewrittenProviders) { stringIndex(provider.name); stringIndex(provider.authorities) }
+        for (perm in manifest.permissions) otherStringIndex(perm)
+        otherStringIndex(launcherActivity.name)
+        for (activity in manifest.activities) { if (activity.name != launcherActivity.name) otherStringIndex(activity.name) }
+        for (service in manifest.services) otherStringIndex(service.name)
+        for (receiver in manifest.receivers) otherStringIndex(receiver.name)
+        for (provider in rewrittenProviders) { otherStringIndex(provider.name); otherStringIndex(provider.authorities) }
+
+        // 合并字符串池：属性名在前，其他在后
+        val allStrings = attrNames + otherStrings
+        val attrOffset = 0
+        val otherOffset = attrNames.size
+
+        // 索引转换函数
+        val attrIdx = { localIdx: Int -> attrOffset + localIdx }
+        val otherIdx = { localIdx: Int -> otherOffset + localIdx }
 
         val out = ByteArrayOutputStream()
 
         // === XML Header ===
-        out.writeLE32(0x00080003) // RES_XML_TYPE
-        out.writeLE32(0)          // fileSize placeholder (回填)
+        out.writeLE32(0x00080003)
+        out.writeLE32(0)
 
-        // === StringPool (UTF-16LE, 参照 aapt 输出) ===
-        val spBytes = buildStringPool(strings)
+        // === StringPool ===
+        val spBytes = buildStringPool(allStrings)
         out.write(spBytes)
 
         // === ResourceMap ===
-        // 按属性在文档中首次出现的顺序排列
         val resourceMap = intArrayOf(
-            0x01010572, // compileSdkVersion (aapt 自动添加)
-            0x01010573, // compileSdkVersionCodename (aapt 自动添加)
-            0x0101020c, // minSdkVersion
-            0x01010270, // targetSdkVersion
-            0x01010003, // name
-            0x01010001, // label
-            0x0101057a, // appComponentFactory
-            0x01010010, // exported
-            0x0101001d  // authorities
+            0x01010572, 0x01010573, 0x0101020c, 0x01010270,
+            0x01010003, 0x0101057a, 0x01010001, 0x01010010, 0x0101001d
         )
-        out.writeLE32(0x00080180) // RES_XML_RESOURCE_MAP_TYPE
+        out.writeLE32(0x00080180)
         out.writeLE32(8 + resourceMap.size * 4)
         for (id in resourceMap) out.writeLE32(id)
 
         // === XML Tree ===
-        val NS_ANDROID = NS_URI  // android namespace string index
-        val NS_NONE = -1         // 0xFFFFFFFF
+        writeStartNs(out, otherIdx(NS_URI))
 
         // <manifest>
-        writeStartNs(out, NS_URI)
-        writeStartElement(out, MANIFEST, NS_NONE, listOf(
-            AttrVal(NS_NONE, PACKAGE, 0x03, PKG_NAME),                         // package="..."
-            AttrVal(NS_NONE, stringIndex("compileSdkVersion"), 0x10, 36),       // aapt 自动添加
-            AttrVal(NS_NONE, stringIndex("compileSdkVersionCodename"), 0x03, stringIndex("16")),
-            AttrVal(NS_NONE, stringIndex("platformBuildVersionCode"), 0x03, stringIndex("36")),
-            AttrVal(NS_NONE, stringIndex("platformBuildVersionName"), 0x03, stringIndex("16"))
+        writeStartElement(out, otherIdx(MANIFEST), -1, listOf(
+            AttrVal(-1, otherIdx(PACKAGE), 0x03, otherIdx(PKG_NAME)),
+            AttrVal(-1, attrIdx(COMPILE_SDK), 0x10, 36),
+            AttrVal(-1, attrIdx(COMPILE_SDK_CODENAME), 0x03, otherIdx(CODENAME_VAL)),
+            AttrVal(-1, otherIdx(PLATFORM_CODE), 0x03, otherIdx(SDK_VAL)),
+            AttrVal(-1, otherIdx(PLATFORM_NAME), 0x03, otherIdx(CODENAME_VAL))
         ))
 
         // <uses-sdk>
-        writeStartElement(out, USES_SDK, NS_NONE, listOf(
-            AttrVal(NS_ANDROID, MIN_SDK, 0x10, config.deviceIdentity.sdkInt),
-            AttrVal(NS_ANDROID, TARGET_SDK, 0x10, config.deviceIdentity.sdkInt)
+        writeStartElement(out, otherIdx(USES_SDK), -1, listOf(
+            AttrVal(otherIdx(NS_URI), attrIdx(MIN_SDK), 0x10, config.deviceIdentity.sdkInt),
+            AttrVal(otherIdx(NS_URI), attrIdx(TARGET_SDK), 0x10, config.deviceIdentity.sdkInt)
         ))
-        writeEndElement(out, USES_SDK)
+        writeEndElement(out, otherIdx(USES_SDK))
 
         // <uses-permission>
         for (perm in manifest.permissions) {
-            writeStartElement(out, USES_PERM, NS_NONE, listOf(
-                AttrVal(NS_ANDROID, NAME, 0x03, stringIndex(perm))
+            writeStartElement(out, otherIdx(USES_PERM), -1, listOf(
+                AttrVal(otherIdx(NS_URI), attrIdx(NAME), 0x03, otherStringIndex(perm) + otherOffset)
             ))
-            writeEndElement(out, USES_PERM)
+            writeEndElement(out, otherIdx(USES_PERM))
         }
 
         // <application>
-        writeStartElement(out, APPLICATION, NS_NONE, listOf(
-            AttrVal(NS_ANDROID, LABEL, 0x03, PKG_NAME),
-            AttrVal(NS_ANDROID, APP_COMP_FACTORY, 0x03, COMP_FACTORY_VAL)
+        writeStartElement(out, otherIdx(APPLICATION), -1, listOf(
+            AttrVal(otherIdx(NS_URI), attrIdx(LABEL), 0x03, otherIdx(PKG_NAME)),
+            AttrVal(otherIdx(NS_URI), attrIdx(APP_COMP_FACTORY), 0x03, otherIdx(COMP_FACTORY_VAL))
         ))
 
         // Launcher activity
-        writeStartElement(out, ACTIVITY, NS_NONE, listOf(
-            AttrVal(NS_ANDROID, NAME, 0x03, stringIndex(launcherActivity.name)),
-            AttrVal(NS_ANDROID, EXPORTED, 0x12, 1)
+        val launcherNameIdx = otherStringIndex(launcherActivity.name) + otherOffset
+        writeStartElement(out, otherIdx(ACTIVITY), -1, listOf(
+            AttrVal(otherIdx(NS_URI), attrIdx(NAME), 0x03, launcherNameIdx),
+            AttrVal(otherIdx(NS_URI), attrIdx(EXPORTED), 0x12, 1)
         ))
-        // <intent-filter>
-        writeStartElement(out, INTENT_FILTER, NS_NONE, emptyList())
-        // <action>
-        writeStartElement(out, ACTION, NS_NONE, listOf(
-            AttrVal(NS_ANDROID, NAME, 0x03, MAIN_ACTION)
+        writeStartElement(out, otherIdx(INTENT_FILTER), -1, emptyList())
+        writeStartElement(out, otherIdx(ACTION), -1, listOf(
+            AttrVal(otherIdx(NS_URI), attrIdx(NAME), 0x03, otherIdx(MAIN_ACTION))
         ))
-        writeEndElement(out, ACTION)
-        // <category>
-        writeStartElement(out, CATEGORY, NS_NONE, listOf(
-            AttrVal(NS_ANDROID, NAME, 0x03, LAUNCHER_CAT)
+        writeEndElement(out, otherIdx(ACTION))
+        writeStartElement(out, otherIdx(CATEGORY), -1, listOf(
+            AttrVal(otherIdx(NS_URI), attrIdx(NAME), 0x03, otherIdx(LAUNCHER_CAT))
         ))
-        writeEndElement(out, CATEGORY)
-        writeEndElement(out, INTENT_FILTER)
-        writeEndElement(out, ACTIVITY)
+        writeEndElement(out, otherIdx(CATEGORY))
+        writeEndElement(out, otherIdx(INTENT_FILTER))
+        writeEndElement(out, otherIdx(ACTIVITY))
 
         // Other activities
         for (activity in manifest.activities) {
             if (activity.name == launcherActivity.name) continue
-            writeStartElement(out, ACTIVITY, NS_NONE, listOf(
-                AttrVal(NS_ANDROID, NAME, 0x03, stringIndex(activity.name)),
-                AttrVal(NS_ANDROID, EXPORTED, 0x12, if (activity.exported) 1 else 0)
+            val nameIdx = otherStringIndex(activity.name) + otherOffset
+            writeStartElement(out, otherIdx(ACTIVITY), -1, listOf(
+                AttrVal(otherIdx(NS_URI), attrIdx(NAME), 0x03, nameIdx),
+                AttrVal(otherIdx(NS_URI), attrIdx(EXPORTED), 0x12, if (activity.exported) 1 else 0)
             ))
-            writeEndElement(out, ACTIVITY)
+            writeEndElement(out, otherIdx(ACTIVITY))
         }
 
         // Services
         for (service in manifest.services) {
-            writeStartElement(out, SERVICE, NS_NONE, listOf(
-                AttrVal(NS_ANDROID, NAME, 0x03, stringIndex(service.name)),
-                AttrVal(NS_ANDROID, EXPORTED, 0x12, if (service.exported) 1 else 0)
+            val nameIdx = otherStringIndex(service.name) + otherOffset
+            writeStartElement(out, otherIdx(SERVICE), -1, listOf(
+                AttrVal(otherIdx(NS_URI), attrIdx(NAME), 0x03, nameIdx),
+                AttrVal(otherIdx(NS_URI), attrIdx(EXPORTED), 0x12, if (service.exported) 1 else 0)
             ))
-            writeEndElement(out, SERVICE)
+            writeEndElement(out, otherIdx(SERVICE))
         }
 
         // Receivers
         for (receiver in manifest.receivers) {
-            writeStartElement(out, RECEIVER, NS_NONE, listOf(
-                AttrVal(NS_ANDROID, NAME, 0x03, stringIndex(receiver.name)),
-                AttrVal(NS_ANDROID, EXPORTED, 0x12, if (receiver.exported) 1 else 0)
+            val nameIdx = otherStringIndex(receiver.name) + otherOffset
+            writeStartElement(out, otherIdx(RECEIVER), -1, listOf(
+                AttrVal(otherIdx(NS_URI), attrIdx(NAME), 0x03, nameIdx),
+                AttrVal(otherIdx(NS_URI), attrIdx(EXPORTED), 0x12, if (receiver.exported) 1 else 0)
             ))
-            writeEndElement(out, RECEIVER)
+            writeEndElement(out, otherIdx(RECEIVER))
         }
 
         // Providers
         for (provider in rewrittenProviders) {
-            writeStartElement(out, PROVIDER, NS_NONE, listOf(
-                AttrVal(NS_ANDROID, NAME, 0x03, stringIndex(provider.name)),
-                AttrVal(NS_ANDROID, AUTHORITIES, 0x03, stringIndex(provider.authorities)),
-                AttrVal(NS_ANDROID, EXPORTED, 0x12, if (provider.exported) 1 else 0)
+            val nameIdx = otherStringIndex(provider.name) + otherOffset
+            val authIdx = otherStringIndex(provider.authorities) + otherOffset
+            writeStartElement(out, otherIdx(PROVIDER), -1, listOf(
+                AttrVal(otherIdx(NS_URI), attrIdx(NAME), 0x03, nameIdx),
+                AttrVal(otherIdx(NS_URI), attrIdx(AUTHORITIES), 0x03, authIdx),
+                AttrVal(otherIdx(NS_URI), attrIdx(EXPORTED), 0x12, if (provider.exported) 1 else 0)
             ))
-            writeEndElement(out, PROVIDER)
+            writeEndElement(out, otherIdx(PROVIDER))
         }
 
-        writeEndElement(out, APPLICATION)
-        writeEndElement(out, MANIFEST)
-        writeEndNs(out, NS_URI)
+        writeEndElement(out, otherIdx(APPLICATION))
+        writeEndElement(out, otherIdx(MANIFEST))
+        writeEndNs(out, otherIdx(NS_URI))
 
         val result = out.toByteArray()
-
-        // 回填 fileSize
         val sizeBuf = ByteBuffer.wrap(result).order(ByteOrder.LITTLE_ENDIAN)
         sizeBuf.putInt(4, result.size)
-
         return result
     }
 
@@ -268,17 +287,21 @@ class ManifestGenerator {
 
     private fun writeStartElement(out: ByteArrayOutputStream, nameIdx: Int, nsIdx: Int, attrs: List<AttrVal>) {
         // ResXMLTree_startElement
+        // 结构: type(4) + size(4) + lineNumber(4) + comment(4) + ns(4) + name(4) + attrStart(2) + attrSize(2) + attrCount(2) + idIndex(2) + classIndex(2) + styleIndex(2)
+        // = 16 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 2 = 36 bytes header before attributes
         out.writeLE32(0x00100102) // type
-        val size = 16 + attrs.size * 20
+        val headerSize = 36  // 16 (chunk header) + 4 (ns) + 4 (name) + 12 (6 x uint16)
+        val size = headerSize + attrs.size * 20
         out.writeLE32(size)       // size
         out.writeLE32(1)          // lineNumber
         out.writeLE32(-1)         // comment
         out.writeLE32(nsIdx)      // element ns
         out.writeLE32(nameIdx)    // element name
-        // attrStart, attrSize, attrCount, idIndex, classIndex, styleIndex
-        out.writeLE16(0x0014)     // attrStart = sizeof(ResXMLTree_attribute)
-        out.writeLE16(0x0014)     // attrSize
-        out.writeLE16(attrs.size) // attrCount
+        // attrStart: 从 ResXMLTree_attrExt 开始（offset 16，即 ns 字段）到第一个属性的偏移
+        // ns(4) + name(4) + 6*uint16(12) = 20
+        out.writeLE16(20)           // attrStart = 20 (从 ns 算起)
+        out.writeLE16(0x0014)       // attrSize = 20 (sizeof each ResXMLTree_attribute)
+        out.writeLE16(attrs.size)   // attrCount
         out.writeLE16(0)          // idIndex
         out.writeLE16(0)          // classIndex
         out.writeLE16(0)          // styleIndex

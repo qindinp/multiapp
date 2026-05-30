@@ -63,9 +63,10 @@ class ManifestGeneratorValidationTest {
             config = config
         )
 
-        // 调试输出
-        println("=== ManifestGenerator 二进制输出 ===")
-        println("大小: ${bytes.size} bytes")
+        // 调试输出：完整 hex 到文件
+        val hexFile = File("/tmp/manifest-generator-output.hex")
+        hexFile.writeText(bytes.joinToString("") { "%02x".format(it) })
+        println("完整 hex 已写入: ${hexFile.absolutePath} (${bytes.size} bytes)")
         println("前128hex: ${bytes.take(128).joinToString("") { "%02x".format(it) }}")
 
         // 解析关键字段
