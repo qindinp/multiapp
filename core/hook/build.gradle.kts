@@ -67,4 +67,10 @@ dependencies {
     testImplementation(libs.coroutines.test)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlin.test)
+    testImplementation(libs.robolectric)
+}
+
+tasks.withType<Test> {
+    useJUnitPlatform()
+    systemProperty("robolectric.dependency.repo.url", "https://maven.aliyun.com/repository/central")
 }

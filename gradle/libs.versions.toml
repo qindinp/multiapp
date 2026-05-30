@@ -22,6 +22,7 @@ apksig = "8.7.3"
 apkparser = "2.6.10"
 dexlib2 = "2.5.2"
 junit5 = "5.10.2"
+robolectric = "4.14.1"
 mockk = "1.13.9"
 turbine = "1.0.0"
 coroutines-test = "1.9.0"
@@ -68,6 +69,7 @@ mockk-android = { group = "io.mockk", name = "mockk-android", version.ref = "moc
 turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine" }
 coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "coroutines-test" }
 kotlin-test = { group = "org.jetbrains.kotlin", name = "kotlin-test-junit5", version.ref = "kotlin-test" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "security-crypto" }
 
 [plugins]
