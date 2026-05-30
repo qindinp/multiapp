@@ -10,9 +10,6 @@ import com.multiapp.core.hook.antidetection.VirtualEnvironmentBypass
 import timber.log.Timber
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-import javax.inject.Inject
-import javax.inject.Singleton
-
 /**
  * AntiDetectionEngine -- Comprehensive anti-detection system for virtual apps.
  *
@@ -26,9 +23,10 @@ import javax.inject.Singleton
  * - BASIC:      Root + emulator checks only (fast, low overhead)
  * - MODERATE:   + virtual env + Xposed + signature spoofing
  * - AGGRESSIVE: + stack trace cleaning + integrity checks + Play Integrity
+ *
+ * 不使用 Hilt @Singleton/@Inject，由 LoaderFactory 手动构造并传入依赖。
  */
-@Singleton
-class AntiDetectionEngine @Inject constructor(
+class AntiDetectionEngine(
     @Suppress("unused") private val hookEngine: HookEngine,
     private val nativeHookBridge: NativeHookBridge
 ) {

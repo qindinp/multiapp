@@ -10,11 +10,13 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
-import javax.inject.Inject
-import javax.inject.Singleton
-
-@Singleton
-class NativeHookBridge @Inject constructor() {
+/**
+ * NativeHookBridge — Native 层 hook 引擎
+ *
+ * 不使用 Hilt @Singleton/@Inject，因为 LoaderFactory 在 AppComponentFactory 阶段
+ * 直接构造实例，此时 Hilt 尚未初始化。
+ */
+class NativeHookBridge {
 
     companion object {
         private const val TAG = "NativeHook"

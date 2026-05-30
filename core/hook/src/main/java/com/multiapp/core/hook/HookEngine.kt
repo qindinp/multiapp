@@ -5,9 +5,6 @@ import java.lang.reflect.Executable
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
-import javax.inject.Inject
-import javax.inject.Singleton
-
 /**
  * HookEngine — Unified hook management for MultiApp.
  *
@@ -16,9 +13,11 @@ import javax.inject.Singleton
  * - 静态/实例字段修改（通过 HiddenApiBypass 兼容 Android 14+）
  * - 全局单例（getInstance），所有 hook 模块共享同一实例
  * - 线程安全（CopyOnWriteArrayList + ConcurrentHashMap）
+ *
+ * 注意：不使用 Hilt @Singleton/@Inject，因为 LoaderFactory 在 AppComponentFactory 阶段
+ * 运行，此时 Hilt 尚未初始化。所有调用方通过 getInstance() 获取全局单例。
  */
-@Singleton
-class HookEngine @Inject constructor() {
+class HookEngine private constructor() {
 
     companion object {
         private const val TAG = "HookEngine"
