@@ -66,6 +66,7 @@ fun AppManagerScreen(
                         viewModel.undoDelete(event.instanceId, event.identityJson)
                     }
                 }
+                else -> {} // 其他事件由 ViewModel 处理
             }
         }
     }

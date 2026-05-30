@@ -127,10 +127,7 @@ fun LauncherScreen(
 
             // Creation progress overlay
             uiState.creationStep?.let { step ->
-                CreationProgressDialog(
-                    step = step,
-                    onDismiss = { viewModel.dismissCreationProgress() }
-                )
+                CreationProgressDialog(step = step)
             }
         }
     }
