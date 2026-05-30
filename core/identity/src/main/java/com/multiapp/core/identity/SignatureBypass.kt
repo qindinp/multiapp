@@ -179,21 +179,28 @@ class SignatureBypass : HookPoint {
                 val ctx = atClass.getDeclaredMethod("getSystemContext").invoke(at) as android.content.Context
                 val pm = ctx.packageManager
 
-                // 用 getPackageArchiveInfo 读文件签名，不走 getPackageInfo hook
-                val archivePath = "/data/app/$originalPkg-1/base.apk"
-                val pkgInfo = pm.getPackageArchiveInfo(archivePath, PackageManager.GET_SIGNATURES)
-                if (pkgInfo?.signatures != null) {
-                    return pkgInfo.signatures
+                // 尝试多个可能的 APK 路径（不同设备后缀不同）
+                val possiblePaths = listOf(
+                    "/data/app/$originalPkg-1/base.apk",
+                    "/data/app/$originalPkg-2/base.apk",
+                    "/data/app/$originalPkg/base.apk",
+                    "/data/app/~~${originalPkg.hashCode() and 0x7FFFFFFF}/$originalPkg-1/base.apk"
+                )
+
+                for (path in possiblePaths) {
+                    val file = java.io.File(path)
+                    if (!file.exists()) continue
+
+                    // 用 getPackageArchiveInfo 读文件签名，不走 getPackageInfo hook
+                    val pkgInfo = pm.getPackageArchiveInfo(path, PackageManager.GET_SIGNATURES)
+                    if (pkgInfo?.signatures != null) {
+                        Timber.tag(TAG).d("Read signatures from %s", path)
+                        return pkgInfo.signatures
+                    }
                 }
 
-                // 回退: 直接调用隐藏的 getPackageInfo 反射方法
-                val method = PackageManager::class.java.getDeclaredMethod(
-                    "getPackageInfo",
-                    String::class.java,
-                    Int::class.javaPrimitiveType
-                )
-                val result = method.invoke(pm, originalPkg, PackageManager.GET_SIGNATURES) as? PackageInfo
-                result?.signatures
+                Timber.tag(TAG).w("No signatures found for %s in any known path", originalPkg)
+                null
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to read original signatures for %s", originalPkg)
                 null

@@ -16,6 +16,7 @@ import com.multiapp.core.identity.PackageIdentityHook
 import com.multiapp.core.identity.ProcFsHook
 import com.multiapp.core.identity.SignatureBypass
 import com.multiapp.core.hook.HookEngine
+import com.multiapp.core.hook.NativeHookBridge
 import com.multiapp.core.manifest.StubConfig
 import timber.log.Timber
 import java.io.File
@@ -33,6 +34,15 @@ class LoaderFactory : AppComponentFactory() {
     override fun instantiateApplication(cl: ClassLoader, className: String): Application {
         Timber.d("LoaderFactory: instantiateApplication for $className")
 
+        return try {
+            instantiateApplicationInternal(cl, className)
+        } catch (e: Exception) {
+            Timber.e(e, "LoaderFactory: fatal error, falling back to default Application")
+            super.instantiateApplication(cl, className)
+        }
+    }
+
+    private fun instantiateApplicationInternal(cl: ClassLoader, className: String): Application {
         // 1. 获取 ApplicationInfo (不依赖 Context)
         val activityThread = getActivityThread()
         val appInfo = getBoundAppInfo(activityThread)
@@ -42,26 +52,30 @@ class LoaderFactory : AppComponentFactory() {
         // 2. 读取配置
         val config = readConfigFromAssets(stubApkPath)
 
-        // 3. 解压原始 APK
+        // 3. 初始化 NativeHookBridge（native 层 hook 必须最早就位）
+        val nativeBridge = NativeHookBridge.getInstance()
+        nativeBridge.initNativeHooks(null)
+
+        // 4. 解压原始 APK
         val originApk = extractOriginApk(stubApkPath, dataDir, config)
 
-        // 3.5 解压 patched DEX (如果有) 替换原始 APK 中的 DEX
+        // 4.5 解压 patched DEX (如果有) 替换原始 APK 中的 DEX
         extractPatchedDex(stubApkPath, originApk, dataDir)
 
-        // 4. 替换 LoadedApk（返回原始 APK 的 ClassLoader）
+        // 5. 替换 LoadedApk（返回原始 APK 的 ClassLoader）
         val guestClassLoader = LoadedApkSwapper.swap(activityThread, originApk, config)
 
-        // 4.5 初始化 LSPlant（用原始 APK 的 ClassLoader，确保 hook 目标类已加载）
+        // 5.5 初始化 LSPlant（用原始 APK 的 ClassLoader，确保 hook 目标类已加载）
         val hookEngine = HookEngine.getInstance()
         hookEngine.initLsplant(guestClassLoader)
 
-        // 5. 安装身份 Hook
+        // 6. 安装身份 Hook
         installIdentityHooks(config)
 
-        // 6. 安装签名绕过
+        // 7. 安装签名绕过
         installSignatureBypass(config)
 
-        // 7. 重置 appComponentFactory
+        // 8. 重置 appComponentFactory
         appInfo.appComponentFactory = "android.app.AppComponentFactory"
 
         return super.instantiateApplication(cl, className)

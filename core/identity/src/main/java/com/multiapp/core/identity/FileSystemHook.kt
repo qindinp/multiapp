@@ -176,8 +176,10 @@ class FileSystemHook : HookPoint {
                 .replace("/data/user/10/$originalPkg/", "/data/user/10/$stubPkg/")
                 .replace("/storage/emulated/0/Android/data/$originalPkg/", "/storage/emulated/0/Android/data/$stubPkg/")
                 .replace("/storage/emulated/0/Android/obb/$originalPkg/", "/storage/emulated/0/Android/obb/$stubPkg/")
+                .replace("/storage/emulated/0/Android/media/$originalPkg/", "/storage/emulated/0/Android/media/$stubPkg/")
                 .replace("/sdcard/Android/data/$originalPkg/", "/sdcard/Android/data/$stubPkg/")
                 .replace("/sdcard/Android/obb/$originalPkg/", "/sdcard/Android/obb/$stubPkg/")
+                .replace("/sdcard/Android/media/$originalPkg/", "/sdcard/Android/media/$stubPkg/")
                 .replace("/mnt/sdcard/Android/data/$originalPkg/", "/mnt/sdcard/Android/data/$stubPkg/")
         }
 

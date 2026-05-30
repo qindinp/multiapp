@@ -17,15 +17,15 @@ class NativeLibHandler {
             zip.entries().asSequence()
                 .filter { it.name.startsWith("lib/") && !it.isDirectory }
                 .forEach { entry ->
-                    // entry.name = "lib/arm64-v8a/libfoo.so" -> extract just "libfoo.so"
-                    val fileName = entry.name.substringAfterLast('/')
-                    val target = File(stubLibDir, fileName)
+                    // entry.name = "lib/arm64-v8a/libfoo.so" -> 保留 ABI 目录结构
+                    val relativePath = entry.name.removePrefix("lib/")
+                    val target = File(stubLibDir, relativePath)
                     target.parentFile?.mkdirs()
                     zip.getInputStream(entry).use { input ->
                         target.outputStream().use { output -> input.copyTo(output) }
                     }
                     copiedCount++
-                    Timber.d("NativeLibHandler: copied ${entry.name} -> $fileName")
+                    Timber.d("NativeLibHandler: copied ${entry.name} -> $relativePath")
                 }
         }
         Timber.d("NativeLibHandler: copied $copiedCount native libraries")

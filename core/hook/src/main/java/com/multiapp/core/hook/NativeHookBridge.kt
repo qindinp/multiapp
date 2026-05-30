@@ -177,8 +177,9 @@ class NativeHookBridge @Inject constructor() {
 
     fun cleanup() {
         pathRedirections.clear(); pathTrie.clear(); hiddenPaths.clear()
+        synchronized(pathCacheLock) { pathCache.clear() }
         fakeFileContent.clear(); propertyOverrides.clear()
-        spoofedPackageName = null; spoofedPid = -1
+        spoofedPackageName = null; spoofedPid = -1; appContext = null
         if (nativeHooksAvailable) nativeCleanup()
         initialized = false
         Timber.tag(TAG).i("Native hook bridge cleaned up")

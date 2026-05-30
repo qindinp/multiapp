@@ -3,26 +3,19 @@ package com.multiapp.core.hook
 import timber.log.Timber
 import java.lang.reflect.Executable
 import java.lang.reflect.Method
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
 import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
  * HookEngine — Unified hook management for MultiApp.
  *
- * Supports:
- * - Java method hooking via reflection (no native required)
- * - Proxy-based interception (InvocationHandler)
- * - ART method hooking via LSPlant (Android 5-17, including Android 16)
- *
- * For Phase 1, we use pure Java/Kotlin reflection which doesn't require
- * native libraries. This works for:
- * - Static field modification (Build.* spoofing)
- * - Singleton replacement (IActivityManager, IPackageManager)
- * - Handler.Callback injection (ActivityThread.mH)
- * - ClassLoader swapping
- *
- * For Phase 3+, LSPlant provides ART-level method hooking that intercepts
- * calls at the ART runtime level, covering both Java and JNI methods.
+ * 支持:
+ * - LSPlant ART 级方法 hook（Java + JNI）
+ * - 静态/实例字段修改（通过 HiddenApiBypass 兼容 Android 14+）
+ * - 全局单例（getInstance），所有 hook 模块共享同一实例
+ * - 线程安全（CopyOnWriteArrayList + ConcurrentHashMap）
  */
 @Singleton
 class HookEngine @Inject constructor() {
@@ -50,12 +43,12 @@ class HookEngine @Inject constructor() {
         }
     }
 
-    // Track installed hooks for cleanup
-    private val installedHooks = mutableListOf<HookInfo>()
+    // Track installed hooks for cleanup — 线程安全
+    private val installedHooks = CopyOnWriteArrayList<HookInfo>()
 
     // LSPlant state
     private var lsplantInitialized = false
-    private val lsplantHooks = mutableMapOf<Executable, Any>() // Executable -> LSPlant.Unhook
+    private val lsplantHooks = ConcurrentHashMap<Executable, Any>() // Executable -> LSPlant.Unhook
 
     fun initLsplant(classLoader: ClassLoader): Boolean {
         if (lsplantInitialized) return true
@@ -180,22 +173,12 @@ class HookEngine @Inject constructor() {
     fun hookStaticField(className: String, fieldName: String, newValue: Any?): Boolean {
         return try {
             val clazz = Class.forName(className)
-            val field = clazz.getDeclaredField(fieldName)
+            val field = com.multiapp.core.common.findField(clazz, fieldName)
+                ?: throw NoSuchFieldException("$fieldName not found in $className")
             field.isAccessible = true
 
-            try {
-                val accessFlagsField = java.lang.reflect.Field::class.java
-                    .getDeclaredField("accessFlags")
-                accessFlagsField.isAccessible = true
-                accessFlagsField.setInt(
-                    field,
-                    field.modifiers and java.lang.reflect.Modifier.FINAL.inv()
-                )
-            } catch (_: Exception) {
-                val modField = java.lang.reflect.Field::class.java.getDeclaredField("modifiers")
-                modField.isAccessible = true
-                modField.setInt(field, field.modifiers and java.lang.reflect.Modifier.FINAL.inv())
-            }
+            // 使用 HiddenApiBypass 兼容的 removeFinalModifier
+            com.multiapp.core.common.removeFinalModifier(field)
 
             val oldValue = field.get(null)
             field.set(null, newValue)
