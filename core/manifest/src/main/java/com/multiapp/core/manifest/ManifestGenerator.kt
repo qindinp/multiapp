@@ -272,40 +272,73 @@ class ManifestGenerator {
 
     private fun buildStringPool(strings: List<String>): ByteArray {
         val baos = ByteArrayOutputStream()
-        val strBytes = strings.map { it.toByteArray(Charsets.UTF_16LE) }
-        val totalChars = strBytes.sumOf { it.size / 2 }
-        val styleCount = 0
-
-        // Header
-        baos.write(intToBytes(0x001C0001)) // RES_STRING_POOL_TYPE
         val headerSize = 28
-        // 计算 strings 区域大小
-        val stringsStart = headerSize + strings.size * 4 + 4 // 4 bytes per string offset + padding
-        var dataSize = 0
-        for (b in strBytes) {
-            dataSize += 2 + b.size + 2 // uint16 len + data + null terminator
+        val stringCount = strings.size
+        val styleCount = 0
+        val UTF8_FLAG = 0x00000100
+
+        // 计算每个字符串的 UTF-8 编码字节
+        val strByteArrays = strings.map { it.toByteArray(Charsets.UTF_8) }
+
+        // 计算 strings 区域偏移（header + offsets + padding）
+        // offsets: 每个 string 4 bytes，需要 4 字节对齐
+        val offsetsSize = stringCount * 4
+        val stringsStart = headerSize + offsetsSize
+
+        // 计算每个字符串的数据大小（UTF-8 格式：charLen + byteLen + data + \0）
+        val stringDataSizes = strByteArrays.map { bytes ->
+            val charLen = bytes.size // UTF-8 字符数近似等于字节数（对 ASCII）
+            val byteLen = bytes.size
+            // charLen 编码：1 byte（<128）或 2 bytes（>=128）
+            val charLenSize = if (charLen < 128) 1 else 2
+            // byteLen 编码：1 byte（<128）或 2 bytes（>=128）
+            val byteLenSize = if (byteLen < 128) 1 else 2
+            charLenSize + byteLenSize + byteLen + 1 // +1 for null terminator
         }
-        val totalSize = stringsStart + dataSize
+
+        val totalDataSize = stringDataSizes.sum()
+        val totalSize = stringsStart + totalDataSize
+
+        // 写入 header
+        baos.write(intToBytes(0x001C0001)) // RES_STRING_POOL_TYPE
         baos.write(intToBytes(totalSize))
-        baos.write(intToBytes(strings.size)) // stringCount
+        baos.write(intToBytes(stringCount))
         baos.write(intToBytes(styleCount))
-        baos.write(intToBytes(0)) // flags: UTF-16
-        baos.write(intToBytes(stringsStart)) // stringsStart
+        baos.write(intToBytes(UTF8_FLAG)) // UTF-8 flag
+        baos.write(intToBytes(stringsStart))
         baos.write(intToBytes(0)) // stylesStart
 
-        // String offsets
+        // 写入 string offsets（相对于 stringsStart）
         var offset = 0
-        for (b in strBytes) {
+        for (size in stringDataSizes) {
             baos.write(intToBytes(offset))
-            offset += 2 + b.size + 2
+            offset += size
         }
-        baos.write(intToBytes(0)) // padding
 
-        // String data
-        for (b in strBytes) {
-            baos.write(shortToBytes(b.size / 2)) // char count
-            baos.write(b)
-            baos.write(shortToBytes(0)) // null terminator
+        // 写入字符串数据（UTF-8 格式）
+        for ((index, bytes) in strByteArrays.withIndex()) {
+            val charLen = bytes.size
+            val byteLen = bytes.size
+
+            // 写入 charLen（UTF-8 字符数）
+            if (charLen < 128) {
+                baos.write(byteArrayOf(charLen.toByte()))
+            } else {
+                baos.write(byteArrayOf((0x80 or (charLen shr 7)).toByte(), (charLen and 0x7F).toByte()))
+            }
+
+            // 写入 byteLen（UTF-8 字节数）
+            if (byteLen < 128) {
+                baos.write(byteArrayOf(byteLen.toByte()))
+            } else {
+                baos.write(byteArrayOf((0x80 or (byteLen shr 7)).toByte(), (byteLen and 0x7F).toByte()))
+            }
+
+            // 写入字符串数据
+            baos.write(bytes)
+
+            // null terminator
+            baos.write(0)
         }
 
         return baos.toByteArray()
