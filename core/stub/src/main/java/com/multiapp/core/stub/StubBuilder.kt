@@ -282,9 +282,101 @@ class StubBuilder(
                 zos.closeEntry()
                 Timber.d("StubBuilder: embedded patched DEX: $entryName (${dexFile.length()} bytes)")
             }
+
+            // lib/ native libraries — 从原始 APK 中提取并打包
+            // loader.dex 依赖 libmultiapp-native.so（shadowhook PLT hook）
+            // 必须打进 Stub APK 的 lib/ 目录，否则 native hook 全部失效
+            packageNativeLibs(originApk, zos)
         }
 
         Timber.d("StubBuilder: APK assembled, size=${outputFile.length()} bytes")
+    }
+
+    /**
+     * 从原始 APK 和应用自身提取 native libraries 打包到 Stub APK
+     *
+     * loader.dex 依赖 libmultiapp-native.so（shadowhook PLT hook），
+     * 必须打进 Stub APK 的 lib/ 目录。同时打包原始 APK 的 native libs。
+     */
+    private fun packageNativeLibs(originApk: File, zos: ZipOutputStream) {
+        val primaryAbi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+        val libPrefix = "lib/$primaryAbi/"
+        var count = 0
+
+        // 1. 从原始 APK 提取 native libs
+        try {
+            ZipFile(originApk).use { zip ->
+                zip.entries().asSequence()
+                    .filter { it.name.startsWith(libPrefix) && it.name.endsWith(".so") && !it.isDirectory }
+                    .forEach { entry ->
+                        zos.putNextEntry(ZipEntry(entry.name))
+                        zip.getInputStream(entry).use { it.copyTo(zos) }
+                        zos.closeEntry()
+                        count++
+                    }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to extract native libs from origin APK")
+        }
+
+        // 2. 从当前应用的 native lib 目录提取 libmultiapp-native.so
+        // loader.dex 运行时需要它来做 shadowhook PLT hook
+        try {
+            val appNativeDir = findAppNativeLibDir(primaryAbi)
+            if (appNativeDir != null) {
+                val nativeFiles = listOf(
+                    "libmultiapp-native.so",
+                    "libshadowhook.so"
+                )
+                for (libName in nativeFiles) {
+                    val libFile = File(appNativeDir, libName)
+                    if (libFile.exists()) {
+                        zos.putNextEntry(ZipEntry("$libPrefix$libName"))
+                        libFile.inputStream().use { it.copyTo(zos) }
+                        zos.closeEntry()
+                        count++
+                        Timber.d("StubBuilder: packaged $libName from app native dir")
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Timber.w(e, "Failed to package app native libs")
+        }
+
+        Timber.d("StubBuilder: packaged $count native libraries for $primaryAbi")
+    }
+
+    /**
+     * 查找当前应用的 native library 目录
+     */
+    private fun findAppNativeLibDir(abi: String): File? {
+        val candidates = listOf(
+            // 主 APK 的 native lib 目录
+            File("/data/app/~~/com.multiapp.app-1/lib/$abi"),
+            File("/data/app/com.multiapp.app-1/lib/$abi"),
+            // 通过 ApplicationInfo.nativeLibraryDir 获取（运行时）
+        )
+        for (dir in candidates) {
+            if (dir.isDirectory && dir.listFiles()?.isNotEmpty() == true) return dir
+        }
+        // 回退：从当前进程的 maps 中查找
+        return findNativeLibDirFromMaps()
+    }
+
+    /**
+     * 从 /proc/self/maps 中查找 libmultiapp-native.so 所在目录
+     */
+    private fun findNativeLibDirFromMaps(): File? {
+        return try {
+            java.io.BufferedReader(java.io.FileReader("/proc/self/maps")).use { reader ->
+                reader.lineSequence()
+                    .firstOrNull { it.contains("libmultiapp-native.so") }
+                    ?.trim()
+                    ?.split("\\s+".toRegex())
+                    ?.lastOrNull()
+                    ?.let { path -> File(path).parentFile }
+            }
+        } catch (_: Exception) { null }
     }
 
     /**

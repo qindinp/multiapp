@@ -56,7 +56,15 @@ class LoaderFactory : AppComponentFactory() {
 
         // 3. 初始化 NativeHookBridge（native 层 hook 必须最早就位）
         val nativeBridge = NativeHookBridge()
+        // 传入 dataDir 作为 context 替代，确保 native 路径重定向有基准路径
         nativeBridge.initNativeHooks(null)
+        nativeBridge.spoofProcSelf(android.os.Process.myPid(), config.originalPackageName)
+        // 设置 native 层路径重定向基准
+        nativeBridge.setupAppRedirections(
+            config.originalPackageName,
+            config.instanceId,
+            "$dataDir/data/${config.stubPackageName}"
+        )
 
         // 4. 解压原始 APK
         val originApk = extractOriginApk(stubApkPath, dataDir, config)

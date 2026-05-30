@@ -179,32 +179,66 @@ class SignatureBypass : HookPoint {
                 val ctx = atClass.getDeclaredMethod("getSystemContext").invoke(at) as android.content.Context
                 val pm = ctx.packageManager
 
-                // 尝试多个可能的 APK 路径（不同设备后缀不同）
-                val possiblePaths = listOf(
-                    "/data/app/$originalPkg-1/base.apk",
-                    "/data/app/$originalPkg-2/base.apk",
-                    "/data/app/$originalPkg/base.apk",
-                    "/data/app/~~${originalPkg.hashCode() and 0x7FFFFFFF}/$originalPkg-1/base.apk"
-                )
-
-                for (path in possiblePaths) {
-                    val file = java.io.File(path)
-                    if (!file.exists()) continue
-
-                    // 用 getPackageArchiveInfo 读文件签名，不走 getPackageInfo hook
-                    val pkgInfo = pm.getPackageArchiveInfo(path, PackageManager.GET_SIGNATURES)
+                // 方法1: 从 Stub assets 中读取的 origin.apk（最可靠）
+                val originApkPath = findOriginApkPath(ctx)
+                if (originApkPath != null) {
+                    val pkgInfo = pm.getPackageArchiveInfo(originApkPath, PackageManager.GET_SIGNATURES)
                     if (pkgInfo?.signatures != null) {
-                        Timber.tag(TAG).d("Read signatures from %s", path)
+                        Timber.tag(TAG).d("Read signatures from origin.apk: %s", originApkPath)
                         return pkgInfo.signatures
                     }
                 }
 
-                Timber.tag(TAG).w("No signatures found for %s in any known path", originalPkg)
+                // 方法2: 通过 ApplicationInfo.sourceDir 获取（系统安装的原始 APK）
+                try {
+                    val appInfo = pm.getApplicationInfo(originalPkg, 0)
+                    val sourceDir = appInfo.sourceDir
+                    if (sourceDir != null && java.io.File(sourceDir).exists()) {
+                        val pkgInfo = pm.getPackageArchiveInfo(sourceDir, PackageManager.GET_SIGNATURES)
+                        if (pkgInfo?.signatures != null) {
+                            Timber.tag(TAG).d("Read signatures from sourceDir: %s", sourceDir)
+                            return pkgInfo.signatures
+                        }
+                    }
+                } catch (_: Exception) { /* original app may not be installed */ }
+
+                // 方法3: 扫描 /data/app/ 目录（兜底）
+                val dataAppDir = java.io.File("/data/app")
+                if (dataAppDir.isDirectory) {
+                    dataAppDir.listFiles()?.forEach { dir ->
+                        if (dir.isDirectory && dir.name.contains(originalPkg)) {
+                            val apk = java.io.File(dir, "base.apk")
+                            if (apk.exists()) {
+                                val pkgInfo = pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.GET_SIGNATURES)
+                                if (pkgInfo?.signatures != null) {
+                                    Timber.tag(TAG).d("Read signatures from scan: %s", apk.absolutePath)
+                                    return pkgInfo.signatures
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Timber.tag(TAG).w("No signatures found for %s", originalPkg)
                 null
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to read original signatures for %s", originalPkg)
                 null
             }
+        }
+
+        /**
+         * 查找 Stub assets 中解压的 origin.apk 路径
+         */
+        private fun findOriginApkPath(ctx: android.content.Context): String? {
+            val candidates = listOf(
+                "${ctx.dataDir}/cache/origin/base.apk",
+                "${ctx.cacheDir}/origin/base.apk"
+            )
+            for (path in candidates) {
+                if (java.io.File(path).exists()) return path
+            }
+            return null
         }
     }
 }
