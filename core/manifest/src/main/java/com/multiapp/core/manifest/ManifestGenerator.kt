@@ -320,10 +320,10 @@ class ManifestGenerator {
 
     private fun writeEndElement(out: ByteArrayOutputStream, nameIdx: Int) {
         out.writeLE32(0x00100103) // RES_XML_END_ELEMENT_TYPE
-        out.writeLE32(16)         // size
+        out.writeLE32(24)         // size (16 + ns(4) + name(4) = 24)
         out.writeLE32(1)          // lineNumber
         out.writeLE32(-1)         // comment
-        out.writeLE32(-1)         // ns
+        out.writeLE32(-1)         // ns (0xFFFFFFFF = none)
         out.writeLE32(nameIdx)    // name
     }
 
