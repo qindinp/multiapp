@@ -199,12 +199,14 @@ class SpeedController @Inject constructor(
      * @return The scaled elapsed time
      */
     fun transformElapsed(realElapsed: Long): Long {
-        for ((instanceId, config) in configs) {
-            if (config.multiplier != 1.0) {
-                return transformElapsedForInstance(instanceId, realElapsed)
+        synchronized(lock) {
+            for ((instanceId, config) in configs) {
+                if (config.multiplier != 1.0) {
+                    return transformElapsedForInstance(instanceId, realElapsed)
+                }
             }
+            return realElapsed
         }
-        return realElapsed
     }
 
     /**
@@ -231,12 +233,14 @@ class SpeedController @Inject constructor(
      * For speed control, we scale the delta from anchor time.
      */
     fun transformWallClock(realTime: Long): Long {
-        for ((instanceId, config) in configs) {
-            if (config.multiplier != 1.0) {
-                return transformWallClockForInstance(instanceId, realTime)
+        synchronized(lock) {
+            for ((instanceId, config) in configs) {
+                if (config.multiplier != 1.0) {
+                    return transformWallClockForInstance(instanceId, realTime)
+                }
             }
+            return realTime
         }
-        return realTime
     }
 
     /**
@@ -318,12 +322,14 @@ class SpeedController @Inject constructor(
      * Used for sleep/wait: at 2x speed, sleep(1000) becomes sleep(500).
      */
     private fun scaleInverse(durationMs: Long): Long {
-        for ((_, config) in configs) {
-            if (config.multiplier != 1.0) {
-                return (durationMs / config.multiplier).toLong().coerceAtLeast(1L)
+        synchronized(lock) {
+            for ((_, config) in configs) {
+                if (config.multiplier != 1.0) {
+                    return (durationMs / config.multiplier).toLong().coerceAtLeast(1L)
+                }
             }
+            return durationMs
         }
-        return durationMs
     }
 
     /**

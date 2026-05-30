@@ -15,6 +15,8 @@ import com.multiapp.core.identity.IdentityConfig
 import com.multiapp.core.identity.PackageIdentityHook
 import com.multiapp.core.identity.ProcFsHook
 import com.multiapp.core.identity.SignatureBypass
+import com.multiapp.core.hook.AntiDetectionEngine
+import com.multiapp.core.hook.DetectionLevel
 import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.hook.NativeHookBridge
 import com.multiapp.core.manifest.StubConfig
@@ -71,6 +73,11 @@ class LoaderFactory : AppComponentFactory() {
 
         // 6. 安装身份 Hook
         installIdentityHooks(config)
+
+        // 6.5 启用 AntiDetectionEngine（Root/模拟器/Xposed 检测绕过）
+        val antiDetect = AntiDetectionEngine(hookEngine, nativeBridge)
+        antiDetect.initialize()
+        antiDetect.enableAntiDetection(config.instanceId, DetectionLevel.MODERATE)
 
         // 7. 安装签名绕过
         installSignatureBypass(config)

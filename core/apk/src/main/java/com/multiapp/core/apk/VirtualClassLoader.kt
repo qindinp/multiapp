@@ -40,6 +40,13 @@ object VirtualClassLoader {
         prebuiltLibrarySearchPath: String? = null,
         splitApkPaths: List<String> = emptyList()
     ): ClassLoader {
+        // Android 15 (API 35) REQUIRE_SECURE_ENV 处理
+        // 标记此标志的应用在检测到非安全环境时拒绝加载
+        // 通过 hook IntegrityCheckBypass.hookAndroid16RequireSecureEnv() 提前处理
+        if (Build.VERSION.SDK_INT >= 35) {
+            Timber.tag(TAG).d("Android 15+ detected, REQUIRE_SECURE_ENV bypass will be applied by AntiDetectionEngine")
+        }
+
         // Optimized DEX cache directory
         val optimizedDir = File(parentDir, "data/$instanceId/code_cache")
         optimizedDir.mkdirs()
