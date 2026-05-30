@@ -162,13 +162,14 @@ class ManifestGenerator {
         // === XML Tree ===
         writeStartNs(out, otherIdx(NS_URI))
 
-        // <manifest>
+        // <manifest> — 属性顺序和类型必须与 aapt 一致
+        // aapt 顺序: compileSdkVersion(android), compileSdkVersionCodename(android), package, platformBuildVersionCode, platformBuildVersionName
         writeStartElement(out, otherIdx(MANIFEST), -1, listOf(
-            AttrVal(-1, otherIdx(PACKAGE), 0x03, otherIdx(PKG_NAME)),
-            AttrVal(-1, attrIdx(COMPILE_SDK), 0x10, 36),
-            AttrVal(-1, attrIdx(COMPILE_SDK_CODENAME), 0x03, otherIdx(CODENAME_VAL)),
-            AttrVal(-1, otherIdx(PLATFORM_CODE), 0x03, otherIdx(SDK_VAL)),
-            AttrVal(-1, otherIdx(PLATFORM_NAME), 0x03, otherIdx(CODENAME_VAL))
+            AttrVal(otherIdx(NS_URI), attrIdx(COMPILE_SDK), 0x10, 36),                    // android:compileSdkVersion = 36 (INT_DEC)
+            AttrVal(otherIdx(NS_URI), attrIdx(COMPILE_SDK_CODENAME), 0x03, otherIdx(CODENAME_VAL)), // android:compileSdkVersionCodename = "16" (STRING)
+            AttrVal(-1, otherIdx(PACKAGE), 0x03, otherIdx(PKG_NAME)),                     // package = "..." (STRING, no ns)
+            AttrVal(-1, otherIdx(PLATFORM_CODE), 0x10, 36),                                // platformBuildVersionCode = 36 (INT_DEC)
+            AttrVal(-1, otherIdx(PLATFORM_NAME), 0x10, 16)                                 // platformBuildVersionName = 16 (INT_DEC)
         ))
 
         // <uses-sdk>
