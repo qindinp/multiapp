@@ -63,16 +63,15 @@ class StubBuilder(
             val manifest = parser.parse(originApk)
             Timber.d("StubBuilder: parsed manifest, ${manifest.activities.size} activities")
 
-            // 2. 生成 Stub manifest — 先生成文本 XML，再用 aapt 编译为二进制 XML
+            // 2. 生成 Stub manifest (二进制 XML)
             val launcherActivity = extractor.extractLauncherActivity(manifest)
                 ?: error("No launcher activity found in origin APK")
-            val textManifest = generator.generate(
+            val manifestBytes = generator.generateBytes(
                 stubPackageName = config.stubPackageName,
                 manifest = manifest,
                 launcherActivity = launcherActivity,
                 config = config
             )
-            val manifestBytes = compileManifestWithAapt(textManifest, workDir, config)
 
             // 3. 提取 launcher icon
             val iconFile = extractLauncherIcon(originApk, workDir)
