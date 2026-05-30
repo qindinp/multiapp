@@ -143,7 +143,8 @@ class ManifestGenerator {
         val out = ByteArrayOutputStream()
 
         // === XML Header ===
-        out.writeLE32(0x00080003)
+        out.writeLE16(0x0003) // RES_XML_TYPE
+        out.writeLE16(8)      // headerSize
         out.writeLE32(0)
 
         // === StringPool ===
@@ -155,7 +156,8 @@ class ManifestGenerator {
             0x01010572, 0x01010573, 0x0101020c, 0x01010270,
             0x01010003, 0x0101057a, 0x01010001, 0x01010010, 0x0101001d
         )
-        out.writeLE32(0x00080180)
+        out.writeLE16(0x0180) // RES_XML_RESOURCE_MAP_TYPE
+        out.writeLE16(8)      // headerSize
         out.writeLE32(8 + resourceMap.size * 4)
         for (id in resourceMap) out.writeLE32(id)
 
@@ -269,8 +271,9 @@ class ManifestGenerator {
     private data class AttrVal(val ns: Int, val name: Int, val dataType: Int, val data: Int)
 
     private fun writeStartNs(out: ByteArrayOutputStream, nsUri: Int) {
-        out.writeLE32(0x00100100) // RES_XML_START_NAMESPACE_TYPE
-        out.writeLE32(24)         // size
+        out.writeLE16(0x0100) // RES_XML_START_NAMESPACE_TYPE
+        out.writeLE16(16)     // headerSize
+        out.writeLE32(24)     // size
         out.writeLE32(1)          // lineNumber
         out.writeLE32(-1)         // comment (0xFFFFFFFF)
         out.writeLE32(-1)         // prefix (none)
@@ -278,8 +281,9 @@ class ManifestGenerator {
     }
 
     private fun writeEndNs(out: ByteArrayOutputStream, nsUri: Int) {
-        out.writeLE32(0x00100101) // RES_XML_END_NAMESPACE_TYPE
-        out.writeLE32(24)         // size
+        out.writeLE16(0x0101) // RES_XML_END_NAMESPACE_TYPE
+        out.writeLE16(16)     // headerSize
+        out.writeLE32(24)     // size
         out.writeLE32(1)          // lineNumber
         out.writeLE32(-1)         // comment
         out.writeLE32(-1)         // prefix
@@ -288,11 +292,11 @@ class ManifestGenerator {
 
     private fun writeStartElement(out: ByteArrayOutputStream, nameIdx: Int, nsIdx: Int, attrs: List<AttrVal>) {
         // ResXMLTree_startElement
-        // 结构: type(4) + size(4) + lineNumber(4) + comment(4) + ns(4) + name(4) + attrStart(2) + attrSize(2) + attrCount(2) + idIndex(2) + classIndex(2) + styleIndex(2)
-        // = 16 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 2 = 36 bytes header before attributes
-        out.writeLE32(0x00100102) // type
-        val headerSize = 36  // 16 (chunk header) + 4 (ns) + 4 (name) + 12 (6 x uint16)
-        val size = headerSize + attrs.size * 20
+        // 结构: type(2) + headerSize(2) + size(4) + lineNumber(4) + comment(4) + ns(4) + name(4) + attrStart(2) + attrSize(2) + attrCount(2) + idIndex(2) + classIndex(2) + styleIndex(2)
+        // = 36 bytes header before attributes
+        out.writeLE16(0x0102) // RES_XML_START_ELEMENT_TYPE
+        out.writeLE16(36)     // headerSize
+        val size = 36 + attrs.size * 20
         out.writeLE32(size)       // size
         out.writeLE32(1)          // lineNumber
         out.writeLE32(-1)         // comment
@@ -320,8 +324,9 @@ class ManifestGenerator {
     }
 
     private fun writeEndElement(out: ByteArrayOutputStream, nameIdx: Int) {
-        out.writeLE32(0x00100103) // RES_XML_END_ELEMENT_TYPE
-        out.writeLE32(24)         // size (16 + ns(4) + name(4) = 24)
+        out.writeLE16(0x0103) // RES_XML_END_ELEMENT_TYPE
+        out.writeLE16(16)     // headerSize
+        out.writeLE32(24)     // size (16 + ns(4) + name(4) = 24)
         out.writeLE32(1)          // lineNumber
         out.writeLE32(-1)         // comment
         out.writeLE32(-1)         // ns (0xFFFFFFFF = none)
@@ -356,7 +361,8 @@ class ManifestGenerator {
         val totalSize = stringsStart + paddedTotalDataSize
 
         // 写入 header
-        baos.writeLE32(0x001C0001) // RES_STRING_POOL_TYPE
+        baos.writeLE16(0x0001) // RES_STRING_POOL_TYPE
+        baos.writeLE16(28)     // headerSize
         baos.writeLE32(totalSize)
         baos.writeLE32(stringCount)
         baos.writeLE32(styleCount)
