@@ -72,8 +72,7 @@ class ManifestGeneratorTest {
     fun `generateBytes should handle providers with authority rewrite`() {
         val manifest = createTestManifest().copy(
             providers = listOf(
-                ManifestParser.ComponentInfo("com.test.MyProvider", true, null)
-                    .copy(authorities = "com.test.provider")
+                ManifestParser.ProviderInfo("com.test.MyProvider", "com.test.provider", true)
             )
         )
         val config = createTestConfig()
@@ -120,6 +119,7 @@ class ManifestGeneratorTest {
 
     private fun createTestManifest() = ManifestParser.ParsedManifest(
         packageName = "com.test.app",
+        applicationClass = null,
         permissions = emptyList(),
         activities = listOf(
             ManifestParser.ComponentInfo("com.test.MainActivity", true, null)
