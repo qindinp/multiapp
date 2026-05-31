@@ -196,7 +196,7 @@ object DeviceIdentityPool {
      */
     private fun generateBuildId(rnd: SecureRandom): String {
         val letters = ('A'..'Z')
-        return "${letters.toList().secureRandom(rnd)}${rnd.nextInt(1, 10)}${letters.toList().secureRandom(rnd)}${rnd.nextInt(100000, 999999)}"
+        return "${letters.toList().secureRandom(rnd)}${1 + rnd.nextInt(9)}${letters.toList().secureRandom(rnd)}${100000 + rnd.nextInt(899999)}"
     }
 
     /**

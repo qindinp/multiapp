@@ -1,4 +1,6 @@
 package com.multiapp.core.identity
+
+import android.annotation.SuppressLint
 import com.multiapp.core.model.IdentityConfig
 
 import com.multiapp.core.hook.HookEngine
@@ -147,6 +149,7 @@ class ProcFsHook : HookPoint {
          * Check if the BufferedReader is reading from /proc/self/maps
          * by inspecting the underlying stream.
          */
+        @SuppressLint("SoonBlockedPrivateApi")
         private fun isMapsReader(reader: Any?): Boolean {
             if (reader !is BufferedReader) return false
             return try {
