@@ -60,6 +60,22 @@ ksp {
     arg("correctErrorTypes", "true")
 }
 
+// 将 core:stub 生成的 loader.dex 复制到 app 模块的 assets 目录
+// AAR 不包含 assets，所以需要显式复制到 app 模块确保打包进 APK
+val copyLoaderDex by tasks.registering(Copy::class) {
+    // 必须依赖 generateLoaderDex，否则会复制旧版 loader.dex
+    dependsOn(":core:stub:generateLoaderDex")
+    from("${project(":core:stub").projectDir}/src/main/assets/loader.dex")
+    into("${projectDir}/src/main/assets")
+    rename { "loader.dex" }
+}
+
+tasks.configureEach {
+    if (name.startsWith("merge") && name.endsWith("Assets")) {
+        dependsOn(copyLoaderDex)
+    }
+}
+
 dependencies {
     // All core modules
     implementation(project(":core:model"))
