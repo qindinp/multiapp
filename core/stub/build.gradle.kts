@@ -81,11 +81,20 @@ val generateLoaderDex by tasks.registering {
         stagingDir.mkdirs()
 
         // 1. 收集所有 core 模块的编译类文件
+        // AGP 8.x 把类输出从 classes/debug 改到了 runtime_library_classes_dir/debug
         val coreModules = listOf("model", "common", "hook", "identity", "manifest", "loader")
         for (mod in coreModules) {
-            val classesDir = rootProject.file("core/$mod/build/intermediates/classes/debug")
-            if (classesDir.isDirectory) {
+            // 尝试多个可能的类输出目录
+            val candidates = listOf(
+                rootProject.file("core/$mod/build/intermediates/classes/debug"),
+                rootProject.file("core/$mod/build/intermediates/runtime_library_classes_dir/debug"),
+                rootProject.file("core/$mod/build/tmp/kotlin-classes/debug")
+            )
+            val classesDir = candidates.firstOrNull { it.isDirectory }
+            if (classesDir != null) {
                 classesDir.copyRecursively(stagingDir, overwrite = true)
+            } else {
+                logger.warn("generateLoaderDex: no classes dir found for core/$mod")
             }
         }
 
@@ -116,8 +125,14 @@ val generateLoaderDex by tasks.registering {
                 }
             }
             depClassCount = stagingDir.walk().filter { it.extension == "class" }.count() - coreModules.sumOf { mod ->
-                val dir = rootProject.file("core/$mod/build/intermediates/classes/debug")
-                if (dir.isDirectory) dir.walk().filter { it.extension == "class" }.count() else 0
+                // 尝试多个可能的类输出目录
+                val candidates = listOf(
+                    rootProject.file("core/$mod/build/intermediates/classes/debug"),
+                    rootProject.file("core/$mod/build/intermediates/runtime_library_classes_dir/debug"),
+                    rootProject.file("core/$mod/build/tmp/kotlin-classes/debug")
+                )
+                val dir = candidates.firstOrNull { it.isDirectory }
+                if (dir != null) dir.walk().filter { it.extension == "class" }.count() else 0
             }
             logger.lifecycle("generateLoaderDex: resolved ${files.size} dependency artifacts, ~$depClassCount dep classes")
         } catch (e: Exception) {

@@ -59,9 +59,36 @@ object LoadedApkSwapper {
         Timber.d("LoadedApkSwapper: removed old LoadedApk for ${config.stubPackageName} and ${config.originalPackageName}")
 
         // 4. 创建新 LoadedApk
-        val newLoadedApk = activityThread.javaClass
-            .getDeclaredMethod("getPackageInfoNoCheck", ApplicationInfo::class.java)
-            .invoke(activityThread, appInfo)
+        // Android 16 (API 36) 把 getPackageInfoNoCheck 改为 2 参数版本:
+        //   getPackageInfoNoCheck(ApplicationInfo, CompatibilityInfo)
+        val newLoadedApk = try {
+            activityThread.javaClass
+                .getDeclaredMethod("getPackageInfoNoCheck", ApplicationInfo::class.java)
+                .invoke(activityThread, appInfo)
+        } catch (_: NoSuchMethodException) {
+            Timber.d("LoadedApkSwapper: 1-arg getPackageInfoNoCheck not found, trying 2-arg (Android 16+)")
+            try {
+                val compatInfoClass = Class.forName("android.content.res.CompatibilityInfo")
+                val defaultCompat = compatInfoClass.getField("DEFAULT_COMPATIBILITY_INFO").get(null)
+                activityThread.javaClass
+                    .getDeclaredMethod("getPackageInfoNoCheck", ApplicationInfo::class.java, compatInfoClass)
+                    .invoke(activityThread, appInfo, defaultCompat)
+            } catch (e2: Exception) {
+                // Fallback: try getPackageInfo(ApplicationInfo) which some custom ROMs use
+                Timber.d("LoadedApkSwapper: 2-arg also failed, trying getPackageInfo fallback")
+                try {
+                    activityThread.javaClass
+                        .getDeclaredMethod("getPackageInfo", ApplicationInfo::class.java, Int::class.javaPrimitiveType)
+                        .invoke(activityThread, appInfo, 0)
+                } catch (e3: Exception) {
+                    throw RuntimeException(
+                        "getPackageInfoNoCheck not found. Tried: " +
+                        "(ApplicationInfo), (ApplicationInfo, CompatibilityInfo), " +
+                        "(ApplicationInfo, int). Last error: ${e3.message}", e3
+                    )
+                }
+            }
+        }
         mPackages[config.stubPackageName] = WeakReference(newLoadedApk)
         mPackages[config.originalPackageName] = WeakReference(newLoadedApk)
         strongRefToNewLoadedApk = newLoadedApk
@@ -109,7 +136,6 @@ class StealthClassLoader(
 ) : ClassLoader(ClassLoader.getSystemClassLoader()) {
 
     override fun loadClass(name: String?, resolve: Boolean): Class<*> {
-        // loadClass(String, boolean) is protected, use public loadClass(String)
         return delegate.loadClass(name)
     }
 
