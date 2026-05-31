@@ -4,9 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceManager
+import com.multiapp.core.common.formatBytes
+import com.multiapp.core.common.getDirSize
 import com.google.gson.Gson
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,14 +18,17 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import timber.log.Timber
+import java.io.File
 import javax.inject.Inject
 
 data class AppManagerUiState(
     val instances: List<InstanceInfo> = emptyList(),
     val isLoading: Boolean = false,
     val error: String? = null,
-    val expandedInstanceId: String? = null
+    val expandedInstanceId: String? = null,
+    val dataSizeMap: Map<String, String> = emptyMap()
 )
 
 sealed interface AppManagerEvent {
@@ -66,14 +72,37 @@ class AppManagerViewModel @Inject constructor(
             _uiState.update { it.copy(isLoading = true, error = null) }
             try {
                 instanceManager.loadInstances()
-                instanceManager.instances.collect { instances ->
-                    _uiState.update { it.copy(instances = instances, isLoading = false) }
-                }
+                _uiState.update { it.copy(isLoading = false) }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to load instances")
                 _uiState.update { it.copy(isLoading = false, error = e.message) }
             }
+        }
+        // 单独的观察协程，避免 collect 永不结束阻塞 loadJob
+        viewModelScope.launch {
+            instanceManager.instances
+                .collect { instances ->
+                    _uiState.update { it.copy(instances = instances) }
+                    // 批量计算所有实例的数据目录大小
+                    computeDataSizes(instances)
+                }
+        }
+    }
+
+    private fun computeDataSizes(instances: List<InstanceInfo>) {
+        viewModelScope.launch {
+            val sizeMap = withContext(Dispatchers.IO) {
+                instances.associate { instance ->
+                    instance.instanceId to try {
+                        val dataDir = File("/data/data/${instance.stubPackageName}")
+                        if (dataDir.exists()) formatBytes(getDirSize(dataDir)) else "—"
+                    } catch (_: Exception) {
+                        "—"
+                    }
+                }
+            }
+            _uiState.update { it.copy(dataSizeMap = sizeMap) }
         }
     }
 

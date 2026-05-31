@@ -3,7 +3,7 @@
 # ============================================================================
 
 # IdentityConfig — serialized/deserialized via Gson (reflection-based)
--keep class com.multiapp.core.identity.IdentityConfig { *; }
+-keep class com.multiapp.core.model.IdentityConfig { *; }
 
 # DeviceIdentityPool — object singleton, called by InstanceManager
 -keep class com.multiapp.core.identity.DeviceIdentityPool { *; }

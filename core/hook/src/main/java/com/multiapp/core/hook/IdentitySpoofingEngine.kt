@@ -4,8 +4,10 @@ import android.content.Context
 import android.os.Build
 import com.multiapp.core.common.AndroidCompat
 import com.multiapp.core.common.findField
+import com.multiapp.core.common.maskSensitive
 import com.multiapp.core.common.removeFinalModifier
 import com.multiapp.core.common.runSafe
+import com.multiapp.core.model.IdentityConfig
 import com.multiapp.core.model.DeviceProfile
 import timber.log.Timber
 import java.security.MessageDigest
@@ -69,6 +71,42 @@ class IdentitySpoofingEngine @Inject constructor(
         Timber.tag(TAG).i("Device profile applied: ${countSpoofedFields()} fields modified")
     }
 
+    /**
+     * Apply device profile using pre-generated IdentityConfig from DeviceIdentityPool.
+     *
+     * This overload uses the identity values from IdentityConfig directly instead of
+     * generating new ones, ensuring consistency between StubConfig and runtime spoofing.
+     *
+     * @param profile     The device profile for Build fields
+     * @param instanceId  The instance ID
+     * @param identity    Pre-generated identity from DeviceIdentityPool
+     */
+    fun applyDeviceProfile(profile: DeviceProfile, instanceId: String, identity: IdentityConfig) {
+        Timber.tag(TAG).i("Applying device profile '${profile.name}' with pre-generated identity for instance: $instanceId")
+        if (!isGlobalSpoofApplied) backupOriginalValues()
+        spoofBuildFields(profile)
+        spoofBuildVersionFields(profile)
+        spoofSerial(profile)
+        // Use the androidId from IdentityConfig instead of generating a new one
+        spoofAndroidIdWithIdentity(instanceId, identity.androidId)
+        spoofTelephonyWithIdentity(profile, instanceId, identity)
+        spoofWifiWithIdentity(instanceId, identity.macAddress)
+        spoofTimezone(profile)
+        installLsplantMethodHooks(instanceId)
+        if (!timePrisonManager.isActive(instanceId)) {
+            timePrisonManager.configureTimePrison(instanceId, TimePrisonConfig())
+        }
+        spoofedInstances[instanceId] = SpoofState(
+            profile = profile, appliedAt = System.currentTimeMillis(),
+            androidId = identity.androidId,
+            imei = identity.imei,
+            macAddress = identity.macAddress,
+            spoofedFields = BUILD_FIELDS + VERSION_FIELDS + listOf("SERIAL")
+        )
+        isGlobalSpoofApplied = true
+        Timber.tag(TAG).i("Device profile applied with identity: ${countSpoofedFields()} fields modified")
+    }
+
     fun spoofBuildFields(profile: DeviceProfile) {
         val buildClass = Build::class.java
         val fieldMap = mapOf(
@@ -129,7 +167,7 @@ class IdentitySpoofingEngine @Inject constructor(
                         val values = valuesField.get(cache) as? MutableMap<String, String>
                         if (values != null) {
                             values["android_id"] = spoofedId
-                            Timber.tag(TAG).d("Injected ANDROID_ID into Settings cache: $spoofedId")
+                            Timber.tag(TAG).d("Injected ANDROID_ID into Settings cache: ${maskSensitive(spoofedId)}")
                         }
                     }
                 }
@@ -137,14 +175,14 @@ class IdentitySpoofingEngine @Inject constructor(
         } catch (e: Exception) {
             Timber.tag(TAG).e(e, "Failed to spoof ANDROID_ID via Settings cache")
         }
-        Timber.tag(TAG).d("ANDROID_ID for instance $instanceId: $spoofedId")
+        Timber.tag(TAG).d("ANDROID_ID for instance $instanceId: ${maskSensitive(spoofedId)}")
     }
 
     fun spoofAndroidId(context: Context, instanceId: String) {
         val spoofedId = generateConsistentAndroidId(instanceId)
         try {
             spoofAndroidId(instanceId)
-            Timber.tag(TAG).d("ANDROID_ID spoofed for instance $instanceId: $spoofedId")
+            Timber.tag(TAG).d("ANDROID_ID spoofed for instance $instanceId: ${maskSensitive(spoofedId)}")
         } catch (e: Exception) {
             Timber.tag(TAG).e(e, "Failed to spoof ANDROID_ID with context")
         }
@@ -171,7 +209,7 @@ class IdentitySpoofingEngine @Inject constructor(
             } catch (e: Exception) {
                 Timber.tag(TAG).d("TelephonyManager.mImei field not accessible: ${e.message}")
             }
-            Timber.tag(TAG).d("Telephony spoofed for instance $instanceId: IMEI=$imei")
+            Timber.tag(TAG).d("Telephony spoofed for instance $instanceId: IMEI=${maskSensitive(imei)}")
         } catch (e: Exception) {
             Timber.tag(TAG).e(e, "Failed to spoof telephony for instance $instanceId")
         }
@@ -185,7 +223,7 @@ class IdentitySpoofingEngine @Inject constructor(
             if (macField != null) Timber.tag(TAG).d("Found WifiInfo.mMacAddress for injection")
             val state = spoofedInstances[instanceId]
             if (state != null) spoofedInstances[instanceId] = state.copy(macAddress = macAddress)
-            Timber.tag(TAG).d("WiFi MAC spoofed for instance $instanceId: $macAddress")
+            Timber.tag(TAG).d("WiFi MAC spoofed for instance $instanceId: ${maskSensitive(macAddress)}")
         } catch (e: Exception) {
             Timber.tag(TAG).e(e, "Failed to spoof WiFi MAC for instance $instanceId")
         }
@@ -206,7 +244,82 @@ class IdentitySpoofingEngine @Inject constructor(
         val adId = generateConsistentUuid(instanceId, "adid")
         val state = spoofedInstances[instanceId]
         if (state != null) spoofedInstances[instanceId] = state.copy(advertisingId = adId)
-        Timber.tag(TAG).d("Advertising ID spoofed for instance $instanceId: $adId")
+        Timber.tag(TAG).d("Advertising ID spoofed for instance $instanceId: ${maskSensitive(adId)}")
+    }
+
+    /**
+     * Spoof Android ID using pre-generated value from IdentityConfig.
+     */
+    private fun spoofAndroidIdWithIdentity(instanceId: String, androidId: String) {
+        try {
+            val secureClass = Class.forName("android.provider.Settings\$Secure")
+            val cacheField = findField(secureClass, "sNameValueCache")
+            if (cacheField != null) {
+                cacheField.isAccessible = true
+                val cache = cacheField.get(null)
+                if (cache != null) {
+                    val valuesField = findField(cache::class.java, "mValues")
+                    if (valuesField != null) {
+                        valuesField.isAccessible = true
+                        @Suppress("UNCHECKED_CAST")
+                        val values = valuesField.get(cache) as? MutableMap<String, String>
+                        if (values != null) {
+                            values["android_id"] = androidId
+                            Timber.tag(TAG).d("Injected ANDROID_ID into Settings cache: $androidId")
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Failed to spoof ANDROID_ID via Settings cache")
+        }
+        Timber.tag(TAG).d("ANDROID_ID for instance $instanceId: ${maskSensitive(androidId)}")
+    }
+
+    /**
+     * Spoof telephony using pre-generated values from IdentityConfig.
+     */
+    private fun spoofTelephonyWithIdentity(profile: DeviceProfile, instanceId: String, identity: IdentityConfig) {
+        try {
+            val imei = identity.imei
+            val imsi = generateConsistentImsi(instanceId, profile.mcc, profile.mnc)
+            val phoneNumber = generateConsistentPhone(instanceId)
+            val simSerial = generateConsistentSimSerial(instanceId)
+            val spoofState = spoofedInstances[instanceId]
+            spoofedInstances[instanceId] = (spoofState ?: SpoofState(
+                profile = profile, appliedAt = System.currentTimeMillis(),
+                androidId = identity.androidId
+            )).copy(imei = imei, imsi = imsi, phoneNumber = phoneNumber, simSerial = simSerial)
+            try {
+                val tmClass = Class.forName("android.telephony.TelephonyManager")
+                val deviceIdField = findField(tmClass, "mImei")
+                if (deviceIdField != null) {
+                    deviceIdField.isAccessible = true
+                    Timber.tag(TAG).d("Found TelephonyManager.mImei field for injection")
+                }
+            } catch (e: Exception) {
+                Timber.tag(TAG).d("TelephonyManager.mImei field not accessible: ${e.message}")
+            }
+            Timber.tag(TAG).d("Telephony spoofed for instance $instanceId: IMEI=${maskSensitive(imei)}")
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Failed to spoof telephony for instance $instanceId")
+        }
+    }
+
+    /**
+     * Spoof WiFi MAC using pre-generated value from IdentityConfig.
+     */
+    private fun spoofWifiWithIdentity(instanceId: String, macAddress: String) {
+        try {
+            val wifiInfoClass = Class.forName("android.net.wifi.WifiInfo")
+            val macField = findField(wifiInfoClass, "mMacAddress")
+            if (macField != null) Timber.tag(TAG).d("Found WifiInfo.mMacAddress for injection")
+            val state = spoofedInstances[instanceId]
+            if (state != null) spoofedInstances[instanceId] = state.copy(macAddress = macAddress)
+            Timber.tag(TAG).d("WiFi MAC spoofed for instance $instanceId: ${maskSensitive(macAddress)}")
+        } catch (e: Exception) {
+            Timber.tag(TAG).e(e, "Failed to spoof WiFi MAC for instance $instanceId")
+        }
     }
 
     fun generateConsistentAndroidId(instanceId: String): String {

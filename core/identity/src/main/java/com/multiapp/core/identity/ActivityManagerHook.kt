@@ -1,4 +1,5 @@
 package com.multiapp.core.identity
+import com.multiapp.core.model.IdentityConfig
 
 import android.app.ActivityManager
 import android.os.Process

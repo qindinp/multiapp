@@ -22,6 +22,7 @@ android {
 }
 
 dependencies {
+    implementation(project(":core:instance"))
     implementation(libs.core.ktx)
 
     implementation(platform(libs.compose.bom))

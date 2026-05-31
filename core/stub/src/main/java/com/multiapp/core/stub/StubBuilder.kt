@@ -7,6 +7,7 @@ import com.multiapp.core.manifest.StubConfig
 import com.android.apksig.ApkSigner
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.multiapp.core.common.ConfigEncryptor
 import timber.log.Timber
 import java.io.File
 import java.io.FileOutputStream
@@ -217,7 +218,11 @@ class StubBuilder(
                 "sdkInt" to config.deviceIdentity.sdkInt
             )
         )
-        return gson.toJson(configMap)
+        // 加密敏感字段 (IMEI, MAC, AndroidId, Serial)
+        val encryptedMap = ConfigEncryptor.encryptSensitiveFields(
+            configMap, config.stubPackageName, config.instanceId
+        )
+        return gson.toJson(encryptedMap)
     }
 
     /**
@@ -299,15 +304,15 @@ class StubBuilder(
      * 必须打进 Stub APK 的 lib/ 目录。同时打包原始 APK 的 native libs。
      */
     private fun packageNativeLibs(originApk: File, zos: ZipOutputStream) {
-        val primaryAbi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
-        val libPrefix = "lib/$primaryAbi/"
+        // 打包所有可用 ABI 的 native libs, 避免目标设备 ABI 不匹配
+        val supportedAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
         var count = 0
 
-        // 1. 从原始 APK 提取 native libs
+        // 1. 从原始 APK 提取 native libs (所有 ABI)
         try {
             ZipFile(originApk).use { zip ->
                 zip.entries().asSequence()
-                    .filter { it.name.startsWith(libPrefix) && it.name.endsWith(".so") && !it.isDirectory }
+                    .filter { it.name.startsWith("lib/") && it.name.endsWith(".so") && !it.isDirectory }
                     .forEach { entry ->
                         zos.putNextEntry(ZipEntry(entry.name))
                         zip.getInputStream(entry).use { it.copyTo(zos) }
@@ -321,7 +326,9 @@ class StubBuilder(
 
         // 2. 从当前应用的 native lib 目录提取 libmultiapp-native.so
         // loader.dex 运行时需要它来做 shadowhook PLT hook
+        // 只打包当前设备 ABI (构建时可用的)
         try {
+            val primaryAbi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
             val appNativeDir = findAppNativeLibDir(primaryAbi)
             if (appNativeDir != null) {
                 val nativeFiles = listOf(
@@ -331,7 +338,7 @@ class StubBuilder(
                 for (libName in nativeFiles) {
                     val libFile = File(appNativeDir, libName)
                     if (libFile.exists()) {
-                        zos.putNextEntry(ZipEntry("$libPrefix$libName"))
+                        zos.putNextEntry(ZipEntry("lib/$primaryAbi/$libName"))
                         libFile.inputStream().use { it.copyTo(zos) }
                         zos.closeEntry()
                         count++
@@ -343,7 +350,7 @@ class StubBuilder(
             Timber.w(e, "Failed to package app native libs")
         }
 
-        Timber.d("StubBuilder: packaged $count native libraries for $primaryAbi")
+        Timber.d("StubBuilder: packaged $count native libraries")
     }
 
     /**

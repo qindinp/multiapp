@@ -35,11 +35,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
+import com.multiapp.core.designsystem.components.InstanceStatusChip
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceStatus
 import com.multiapp.core.model.VirtualApp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,6 +48,7 @@ fun LauncherScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     var showAppPicker by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf<InstanceInfo?>(null) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -114,21 +114,16 @@ fun LauncherScreen(
                             var intent = context.packageManager.getLaunchIntentForPackage(instance.stubPackageName)
                             if (intent == null) {
                                 // fallback: 直接构造 intent 启动 launcher activity
-                                val identity = instance.identity
                                 intent = Intent(Intent.ACTION_MAIN).apply {
                                     addCategory(Intent.CATEGORY_LAUNCHER)
-                                    setClassName(instance.stubPackageName, identity.originalPackageName.let {
-                                        // 尝试从实例信息获取 launcher activity
-                                        try {
-                                            val pkgInfo = context.packageManager.getPackageInfo(instance.stubPackageName, PackageManager.GET_ACTIVITIES)
-                                            pkgInfo.activities?.firstOrNull { act ->
-                                                act.intentFilters?.any { f ->
-                                                    f.hasAction(Intent.ACTION_MAIN) && f.hasCategory(Intent.CATEGORY_LAUNCHER)
-                                                } == true
-                                            }?.name
-                                        } catch (_: Exception) { null }
-                                    } ?: "")
+                                    setPackage(instance.stubPackageName)
                                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                val resolveInfos = context.packageManager.queryIntentActivities(intent, 0)
+                                if (resolveInfos.isNotEmpty()) {
+                                    intent.setClassName(instance.stubPackageName, resolveInfos.first().activityInfo.name)
+                                } else {
+                                    intent = null
                                 }
                             }
                             if (intent?.component?.className.isNullOrEmpty()) {
@@ -140,7 +135,7 @@ fun LauncherScreen(
                             Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
                         }
                     },
-                    onDelete = { viewModel.deleteInstance(it.instanceId) }
+                    onDelete = { showDeleteConfirm = it }
                 )
             }
 
@@ -157,6 +152,25 @@ fun LauncherScreen(
             onAppSelected = { app ->
                 showAppPicker = false
                 viewModel.createInstance(app)
+            },
+            viewModel = viewModel
+        )
+    }
+
+    // Delete confirmation dialog
+    showDeleteConfirm?.let { instance ->
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = null },
+            title = { Text("确认删除") },
+            text = { Text("确定要删除 ${instance.stubPackageName} 吗？此操作不可撤销。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteInstance(instance.instanceId)
+                    showDeleteConfirm = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = null }) { Text("取消") }
             }
         )
     }
@@ -391,27 +405,7 @@ private fun AppGridItem(
     }
 }
 
-@Composable
-private fun InstanceStatusChip(status: InstanceStatus) {
-    val (label, color, bgColor) = when (status) {
-        InstanceStatus.CREATING -> Triple("创建中", MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.tertiaryContainer)
-        InstanceStatus.READY -> Triple("就绪", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
-        InstanceStatus.RUNNING -> Triple("运行中", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
-        InstanceStatus.ERROR -> Triple("错误", MaterialTheme.colorScheme.error, MaterialTheme.colorScheme.errorContainer)
-    }
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = bgColor,
-        modifier = Modifier.padding(top = 4.dp)
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-        )
-    }
-}
+// InstanceStatusChip 已提取到 core/designsystem/CommonComponents.kt
 
 // LoadingState, ErrorState, EmptyState 已提取到 core/designsystem/CommonComponents.kt
 
@@ -440,38 +434,15 @@ private fun EmptyState(onAdd: () -> Unit) {
 @Composable
 private fun AppPickerSheet(
     onDismiss: () -> Unit,
-    onAppSelected: (VirtualApp) -> Unit
+    onAppSelected: (VirtualApp) -> Unit,
+    viewModel: LauncherViewModel
 ) {
-    val context = LocalContext.current
+    val allApps by viewModel.allApps.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
-    var allApps by remember { mutableStateOf<List<VirtualApp>>(emptyList()) }
+    val context = LocalContext.current
 
     LaunchedEffect(Unit) {
-        allApps = withContext(Dispatchers.IO) {
-            val pm = context.packageManager
-            pm.getInstalledPackages(PackageManager.GET_META_DATA)
-                .filter { pkg ->
-                    val appInfo = pkg.applicationInfo ?: return@filter false
-                    val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
-                    val isSelf = pkg.packageName == context.packageName
-                    val hasLauncher = pm.getLaunchIntentForPackage(pkg.packageName) != null
-                    !isSelf && (hasLauncher || !isSystem)
-                }
-                .map { pkg ->
-                    val appInfo = pkg.applicationInfo!!
-                    VirtualApp(
-                        packageName = pkg.packageName,
-                        appName = pm.getApplicationLabel(appInfo).toString(),
-                        versionName = pkg.versionName ?: "",
-                        versionCode = if (android.os.Build.VERSION.SDK_INT >= 28) pkg.longVersionCode else pkg.versionCode.toLong(),
-                        icon = pm.getApplicationIcon(appInfo),
-                        apkPath = appInfo.sourceDir,
-                        instanceId = "",
-                        mainActivity = pm.getLaunchIntentForPackage(pkg.packageName)?.component?.className
-                    )
-                }
-                .sortedBy { it.appName.lowercase() }
-        }
+        viewModel.loadAllApps(context.packageManager)
     }
 
     val filteredApps = if (searchQuery.isBlank()) allApps

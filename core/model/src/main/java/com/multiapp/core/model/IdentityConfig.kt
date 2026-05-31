@@ -1,4 +1,4 @@
-package com.multiapp.core.identity
+package com.multiapp.core.model
 
 /**
  * Identity configuration for a cloned app instance.

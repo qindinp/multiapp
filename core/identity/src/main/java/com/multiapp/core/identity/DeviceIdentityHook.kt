@@ -1,10 +1,12 @@
 package com.multiapp.core.identity
+import com.multiapp.core.model.IdentityConfig
 
 import android.annotation.SuppressLint
 import android.net.wifi.WifiInfo
 import android.os.Build
 import android.provider.Settings
 import android.telephony.TelephonyManager
+import com.multiapp.core.common.maskSensitive
 import com.multiapp.core.hook.HookEngine
 import timber.log.Timber
 
@@ -28,8 +30,8 @@ class DeviceIdentityHook : HookPoint {
         Timber.d(
             "DeviceIdentityHook: apply called for instance=%s, imei=%s, androidId=%s",
             config.instanceId,
-            config.imei,
-            config.androidId
+            maskSensitive(config.imei),
+            maskSensitive(config.androidId)
         )
         applyInternal(config)
     }

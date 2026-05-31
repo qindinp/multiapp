@@ -1,4 +1,5 @@
 package com.multiapp.core.identity
+import com.multiapp.core.model.IdentityConfig
 
 import android.os.Build
 import com.multiapp.core.hook.HookEngine

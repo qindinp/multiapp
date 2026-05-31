@@ -68,6 +68,12 @@ class StubInstaller(private val context: Context) {
     fun install(stubApk: File): InstallResult {
         Timber.d("$TAG: installing ${stubApk.name}")
 
+        // 主线程保护: commitSession 内部有 latch.await(), 主线程调用会 ANR
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            Timber.e("$TAG: install() called on main thread, this will cause ANR!")
+            return InstallResult.Error("Cannot install on main thread")
+        }
+
         // 检查安装权限
         if (!canInstallPackages()) {
             Timber.w("$TAG: no install permission, falling back to system installer")

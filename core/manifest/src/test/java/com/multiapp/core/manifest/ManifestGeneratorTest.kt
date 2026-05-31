@@ -45,11 +45,11 @@ class ManifestGeneratorTest {
 
         val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
 
-        // 二进制 XML 的字符串以 UTF-16LE 编码存储在 StringPool 中
-        // 搜索 UTF-16LE 编码的字符串
-        val utf16Bytes = "com.test.stub".toByteArray(Charsets.UTF_16LE)
-        assertTrue(bytes.size > utf16Bytes.size, "Output should be larger than string")
-        assertTrue(containsBytes(bytes, utf16Bytes), "StringPool should contain package name (UTF-16LE)")
+        // 二进制 XML 的字符串以 UTF-8 编码存储在 StringPool 中
+        // 搜索 UTF-8 编码的字符串
+        val utf8Bytes = "com.test.stub".toByteArray(Charsets.UTF_8)
+        assertTrue(bytes.size > utf8Bytes.size, "Output should be larger than string")
+        assertTrue(containsBytes(bytes, utf8Bytes), "StringPool should contain package name (UTF-8)")
     }
 
     @Test
@@ -98,9 +98,9 @@ class ManifestGeneratorTest {
 
         val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
 
-        // 二进制 XML 中权限以 UTF-16LE 编码存储
-        assertTrue(containsBytes(bytes, "INTERNET".toByteArray(Charsets.UTF_16LE)), "Should contain INTERNET")
-        assertTrue(containsBytes(bytes, "CAMERA".toByteArray(Charsets.UTF_16LE)), "Should contain CAMERA")
+        // 二进制 XML 中权限以 UTF-8 编码存储
+        assertTrue(containsBytes(bytes, "INTERNET".toByteArray(Charsets.UTF_8)), "Should contain INTERNET")
+        assertTrue(containsBytes(bytes, "CAMERA".toByteArray(Charsets.UTF_8)), "Should contain CAMERA")
     }
 
     /**

@@ -1,4 +1,5 @@
 package com.multiapp.core.identity
+import com.multiapp.core.model.IdentityConfig
 
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
@@ -31,6 +32,9 @@ class SignatureBypass : HookPoint {
     companion object {
 
         private const val TAG = "SignatureBypass"
+
+        // 递归保护标志: 防止 readOriginalSignatures() 内部调用触发已 hook 的 getPackageInfo
+        private val recursionGuard = ThreadLocal<Boolean>()
 
         fun apply(config: IdentityConfig) {
             Timber.d(
@@ -130,6 +134,9 @@ class SignatureBypass : HookPoint {
             // Only intercept queries for the original package or our stub
             if (queriedPkg != originalPkg) return result
 
+            // 递归保护: 如果当前调用来自 readOriginalSignatures(), 跳过拦截
+            if (recursionGuard.get() == true) return result
+
             try {
                 // Read the original APK signatures from the actual installed package
                 val originalSignatures = readOriginalSignatures(originalPkg)
@@ -173,58 +180,66 @@ class SignatureBypass : HookPoint {
          * 不调用 getPackageInfo（避免命中已安装的 hook 导致递归）。
          */
         private fun readOriginalSignatures(originalPkg: String): Array<Signature>? {
+            // 设置递归保护, 防止内部 getPackageArchiveInfo 触发已 hook 的 getPackageInfo
+            recursionGuard.set(true)
             return try {
-                val atClass = Class.forName("android.app.ActivityThread")
-                val at = atClass.getDeclaredMethod("currentActivityThread").invoke(null)
-                val ctx = atClass.getDeclaredMethod("getSystemContext").invoke(at) as android.content.Context
-                val pm = ctx.packageManager
+                readOriginalSignaturesInternal(originalPkg)
+            } catch (e: Exception) {
+                Timber.tag(TAG).e(e, "Failed to read original signatures for %s", originalPkg)
+                null
+            } finally {
+                recursionGuard.set(false)
+            }
+        }
 
-                // 方法1: 从 Stub assets 中读取的 origin.apk（最可靠）
-                val originApkPath = findOriginApkPath(ctx)
-                if (originApkPath != null) {
-                    val pkgInfo = pm.getPackageArchiveInfo(originApkPath, PackageManager.GET_SIGNATURES)
+        private fun readOriginalSignaturesInternal(originalPkg: String): Array<Signature>? {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val at = atClass.getDeclaredMethod("currentActivityThread").invoke(null)
+            val ctx = atClass.getDeclaredMethod("getSystemContext").invoke(at) as android.content.Context
+            val pm = ctx.packageManager
+
+            // 方法1: 从 Stub assets 中读取的 origin.apk（最可靠）
+            val originApkPath = findOriginApkPath(ctx)
+            if (originApkPath != null) {
+                val pkgInfo = pm.getPackageArchiveInfo(originApkPath, PackageManager.GET_SIGNATURES)
+                if (pkgInfo?.signatures != null) {
+                    Timber.tag(TAG).d("Read signatures from origin.apk: %s", originApkPath)
+                    return pkgInfo.signatures
+                }
+            }
+
+            // 方法2: 通过 ApplicationInfo.sourceDir 获取（系统安装的原始 APK）
+            try {
+                val appInfo = pm.getApplicationInfo(originalPkg, 0)
+                val sourceDir = appInfo.sourceDir
+                if (sourceDir != null && java.io.File(sourceDir).exists()) {
+                    val pkgInfo = pm.getPackageArchiveInfo(sourceDir, PackageManager.GET_SIGNATURES)
                     if (pkgInfo?.signatures != null) {
-                        Timber.tag(TAG).d("Read signatures from origin.apk: %s", originApkPath)
+                        Timber.tag(TAG).d("Read signatures from sourceDir: %s", sourceDir)
                         return pkgInfo.signatures
                     }
                 }
+            } catch (_: Exception) { /* original app may not be installed */ }
 
-                // 方法2: 通过 ApplicationInfo.sourceDir 获取（系统安装的原始 APK）
-                try {
-                    val appInfo = pm.getApplicationInfo(originalPkg, 0)
-                    val sourceDir = appInfo.sourceDir
-                    if (sourceDir != null && java.io.File(sourceDir).exists()) {
-                        val pkgInfo = pm.getPackageArchiveInfo(sourceDir, PackageManager.GET_SIGNATURES)
-                        if (pkgInfo?.signatures != null) {
-                            Timber.tag(TAG).d("Read signatures from sourceDir: %s", sourceDir)
-                            return pkgInfo.signatures
-                        }
-                    }
-                } catch (_: Exception) { /* original app may not be installed */ }
-
-                // 方法3: 扫描 /data/app/ 目录（兜底）
-                val dataAppDir = java.io.File("/data/app")
-                if (dataAppDir.isDirectory) {
-                    dataAppDir.listFiles()?.forEach { dir ->
-                        if (dir.isDirectory && dir.name.contains(originalPkg)) {
-                            val apk = java.io.File(dir, "base.apk")
-                            if (apk.exists()) {
-                                val pkgInfo = pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.GET_SIGNATURES)
-                                if (pkgInfo?.signatures != null) {
-                                    Timber.tag(TAG).d("Read signatures from scan: %s", apk.absolutePath)
-                                    return pkgInfo.signatures
-                                }
+            // 方法3: 扫描 /data/app/ 目录（兜底）
+            val dataAppDir = java.io.File("/data/app")
+            if (dataAppDir.isDirectory) {
+                dataAppDir.listFiles()?.forEach { dir ->
+                    if (dir.isDirectory && dir.name.contains(originalPkg)) {
+                        val apk = java.io.File(dir, "base.apk")
+                        if (apk.exists()) {
+                            val pkgInfo = pm.getPackageArchiveInfo(apk.absolutePath, PackageManager.GET_SIGNATURES)
+                            if (pkgInfo?.signatures != null) {
+                                Timber.tag(TAG).d("Read signatures from scan: %s", apk.absolutePath)
+                                return pkgInfo.signatures
                             }
                         }
                     }
                 }
-
-                Timber.tag(TAG).w("No signatures found for %s", originalPkg)
-                null
-            } catch (e: Exception) {
-                Timber.tag(TAG).e(e, "Failed to read original signatures for %s", originalPkg)
-                null
             }
+
+            Timber.tag(TAG).w("No signatures found for %s", originalPkg)
+            return null
         }
 
         /**

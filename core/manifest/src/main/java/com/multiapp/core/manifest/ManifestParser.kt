@@ -52,42 +52,49 @@ class ManifestParser @Inject constructor() {
     fun parse(apkFile: File): ParsedManifest {
         ApkFile(apkFile).use { apk ->
             val manifestXml = apk.manifestXml
-            val doc = parseXmlString(manifestXml)
-
-            val manifestEl = doc.documentElement
-            val packageName = manifestEl.getAttribute("package")
-
-            val applicationEl = findFirstChild(manifestEl, "application")
-            val applicationClass = applicationEl
-                ?.getAttributeNS(ANDROID_NS, "name")
-                ?.takeIf { it.isNotEmpty() }
-
-            val permissions = extractPermissions(manifestEl)
-            val activities = extractComponents(applicationEl, "activity") +
-                extractComponents(applicationEl, "activity-alias")
-            val services = extractComponents(applicationEl, "service")
-            val receivers = extractComponents(applicationEl, "receiver")
-            val providers = extractProviders(applicationEl)
-
-            // 提取 SDK 版本
-            val usesSdk = findFirstChild(manifestEl, "uses-sdk")
-            val minSdkVersion = usesSdk?.getAttributeNS(ANDROID_NS, "minSdkVersion")
-                ?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 28
-            val targetSdkVersion = usesSdk?.getAttributeNS(ANDROID_NS, "targetSdkVersion")
-                ?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 36
-
-            return ParsedManifest(
-                packageName = packageName,
-                applicationClass = applicationClass,
-                activities = activities,
-                services = services,
-                receivers = receivers,
-                providers = providers,
-                permissions = permissions,
-                minSdkVersion = minSdkVersion,
-                targetSdkVersion = targetSdkVersion
-            )
+            return parseFromXml(manifestXml)
         }
+    }
+
+    /**
+     * 直接从 XML 字符串解析（供测试使用，或已解码的 manifest）
+     */
+    fun parseFromXml(xml: String): ParsedManifest {
+        val doc = parseXmlString(xml)
+
+        val manifestEl = doc.documentElement
+        val packageName = manifestEl.getAttribute("package")
+
+        val applicationEl = findFirstChild(manifestEl, "application")
+        val applicationClass = applicationEl
+            ?.getAttributeNS(ANDROID_NS, "name")
+            ?.takeIf { it.isNotEmpty() }
+
+        val permissions = extractPermissions(manifestEl)
+        val activities = extractComponents(applicationEl, "activity") +
+            extractComponents(applicationEl, "activity-alias")
+        val services = extractComponents(applicationEl, "service")
+        val receivers = extractComponents(applicationEl, "receiver")
+        val providers = extractProviders(applicationEl)
+
+        // 提取 SDK 版本
+        val usesSdk = findFirstChild(manifestEl, "uses-sdk")
+        val minSdkVersion = usesSdk?.getAttributeNS(ANDROID_NS, "minSdkVersion")
+            ?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 28
+        val targetSdkVersion = usesSdk?.getAttributeNS(ANDROID_NS, "targetSdkVersion")
+            ?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 36
+
+        return ParsedManifest(
+            packageName = packageName,
+            applicationClass = applicationClass,
+            activities = activities,
+            services = services,
+            receivers = receivers,
+            providers = providers,
+            permissions = permissions,
+            minSdkVersion = minSdkVersion,
+            targetSdkVersion = targetSdkVersion
+        )
     }
 
     // ── XML 解析辅助 ──────────────────────────────────────────────

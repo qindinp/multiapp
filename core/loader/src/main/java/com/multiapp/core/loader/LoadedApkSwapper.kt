@@ -5,6 +5,8 @@ import com.multiapp.core.manifest.StubConfig
 import timber.log.Timber
 import java.io.File
 import java.lang.ref.WeakReference
+import java.net.URL
+import java.util.Enumeration
 
 /**
  * LoadedApk 替换核心 (借鉴 LSPatch)
@@ -13,10 +15,11 @@ import java.lang.ref.WeakReference
  */
 object LoadedApkSwapper {
 
-    /**
-     * 替换 LoadedApk 并返回新的 ClassLoader (原始 APK 的)
-     * LoaderFactory 需要用它来初始化 LSPlant
-     */
+    // 强引用持有新 LoadedApk, 防止 GC 导致 WeakReference.get() 返回 null
+    @Volatile
+    @JvmStatic
+    private var strongRefToNewLoadedApk: Any? = null
+
     fun swap(activityThread: Any, originApk: File, config: StubConfig): ClassLoader {
         Timber.d("LoadedApkSwapper: swapping to ${originApk.absolutePath}")
 
@@ -36,8 +39,6 @@ object LoadedApkSwapper {
         appInfo.sourceDir = originApk.absolutePath
         appInfo.publicSourceDir = originApk.absolutePath
 
-        // 2.5 更新 nativeLibraryDir 指向原始 APK 所在目录的 lib 子目录
-        // 原始 APK 从 stub assets 解压出来，其 SO 在同级 lib/ 目录
         val originLibDir = File(originApk.parentFile, "lib")
         if (originLibDir.isDirectory) {
             appInfo.nativeLibraryDir = originLibDir.absolutePath
@@ -46,7 +47,7 @@ object LoadedApkSwapper {
 
         Timber.d("LoadedApkSwapper: sourceDir updated to ${appInfo.sourceDir}")
 
-        // 3. 从 mPackages 移除旧 LoadedApk（stub + original 都清理，避免冲突）
+        // 3. 从 mPackages 移除旧 LoadedApk
         @Suppress("UNCHECKED_CAST")
         val mPackages = activityThread.javaClass
             .getDeclaredField("mPackages")
@@ -61,19 +62,71 @@ object LoadedApkSwapper {
         val newLoadedApk = activityThread.javaClass
             .getDeclaredMethod("getPackageInfoNoCheck", ApplicationInfo::class.java)
             .invoke(activityThread, appInfo)
-        // 同时注册到 stub 和 original 包名，确保两种查找路径都能命中
         mPackages[config.stubPackageName] = WeakReference(newLoadedApk)
         mPackages[config.originalPackageName] = WeakReference(newLoadedApk)
+        strongRefToNewLoadedApk = newLoadedApk
         Timber.d("LoadedApkSwapper: installed new LoadedApk for ${config.stubPackageName} and ${config.originalPackageName}")
 
-        // 5. 提取新 ClassLoader 供 LSPlant 初始化使用
-        val classLoader = newLoadedApk.javaClass
+        // 5. 提取真实 ClassLoader
+        val realClassLoader = newLoadedApk.javaClass
             .getDeclaredField("mClassLoader")
             .apply { isAccessible = true }
             .get(newLoadedApk) as? ClassLoader
             ?: throw IllegalStateException("mClassLoader is null or not a ClassLoader")
-        Timber.d("LoadedApkSwapper: new ClassLoader = ${classLoader.javaClass.name}")
+        Timber.d("LoadedApkSwapper: real ClassLoader = ${realClassLoader.javaClass.name}")
 
-        return classLoader
+        // 6. 用 StealthClassLoader 包装, 隐藏 ClassLoader 链中的 stub/multiapp 痕迹
+        val stealthClassLoader = StealthClassLoader(realClassLoader, originApk.absolutePath)
+
+        // 7. 替换 mClassLoader
+        newLoadedApk.javaClass
+            .getDeclaredField("mClassLoader")
+            .apply { isAccessible = true }
+            .set(newLoadedApk, stealthClassLoader)
+        strongRefToNewLoadedApk = newLoadedApk
+
+        Timber.d("LoadedApkSwapper: ClassLoader wrapped with StealthClassLoader")
+        return stealthClassLoader
+    }
+}
+
+/**
+ * 隐蔽 ClassLoader — 隐藏 stub/multiapp 痕迹
+ *
+ * 加固壳会遍历 ClassLoader 链检查:
+ *   ClassLoader cl = context.getClassLoader();
+ *   while (cl != null) {
+ *       if (cl.toString().contains("clonestub")) return true;
+ *       cl = cl.getParent();
+ *   }
+ *
+ * StealthClassLoader 包装真实 ClassLoader, 使其 toString() 和 parent 链
+ * 看起来像普通的 PathClassLoader, 不包含任何 stub 痕迹。
+ */
+class StealthClassLoader(
+    private val delegate: ClassLoader,
+    private val fakePath: String
+) : ClassLoader(ClassLoader.getSystemClassLoader()) {
+
+    override fun loadClass(name: String?, resolve: Boolean): Class<*> {
+        // loadClass(String, boolean) is protected, use public loadClass(String)
+        return delegate.loadClass(name)
+    }
+
+    override fun getResource(name: String?): URL? {
+        return delegate.getResource(name)
+    }
+
+    override fun getResources(name: String?): Enumeration<URL> {
+        return delegate.getResources(name)
+    }
+
+    override fun getResourceAsStream(name: String?): java.io.InputStream? {
+        return delegate.getResourceAsStream(name)
+    }
+
+    override fun toString(): String {
+        return "DexPathList[[\"$fakePath\"]]\n" +
+            "nativeLibraryDirectories=[\"${fakePath.substringBeforeLast("/")}/lib\"]"
     }
 }

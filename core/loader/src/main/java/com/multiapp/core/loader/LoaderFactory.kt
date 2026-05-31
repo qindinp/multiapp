@@ -19,6 +19,7 @@ import com.multiapp.core.hook.AntiDetectionEngine
 import com.multiapp.core.hook.DetectionLevel
 import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.hook.NativeHookBridge
+import com.multiapp.core.common.ConfigEncryptor
 import com.multiapp.core.manifest.StubConfig
 import timber.log.Timber
 import java.io.File
@@ -63,6 +64,8 @@ class LoaderFactory : AppComponentFactory() {
         if (!nativeOk) {
             Timber.e("LoaderFactory: Native hooks FAILED to init — anti-detection will be incomplete")
         }
+        // 立即 spoof, 消除 initNativeHooks 和 spoofProcSelf 之间的时序窗口
+        // 在此窗口期间如果有代码读取 /proc/self/cmdline 会暴露 stub 包名
         nativeBridge.spoofProcSelf(android.os.Process.myPid(), config.originalPackageName)
         // 设置 native 层路径重定向基准
         nativeBridge.setupAppRedirections(
@@ -133,7 +136,21 @@ class LoaderFactory : AppComponentFactory() {
                 ?: throw IllegalStateException("assets/multiapp_config.json not found in stub APK")
             val json = zip.getInputStream(entry).bufferedReader().readText()
             Timber.d("LoaderFactory: config JSON loaded (${json.length} chars)")
-            return Gson().fromJson(json, StubConfig::class.java)
+
+            // 先解析为 Map, 检查是否有加密字段
+            @Suppress("UNCHECKED_CAST")
+            val configMap = Gson().fromJson(json, Map::class.java) as Map<String, Any?>
+
+            // 解密敏感字段
+            val decryptedMap = if (ConfigEncryptor.hasEncryptedFields(configMap)) {
+                val stubPkg = configMap["stubPackageName"] as? String ?: ""
+                val instanceId = configMap["instanceId"] as? String ?: ""
+                ConfigEncryptor.decryptSensitiveFields(configMap, stubPkg, instanceId)
+            } else {
+                configMap
+            }
+
+            return Gson().fromJson(Gson().toJson(decryptedMap), StubConfig::class.java)
         }
     }
 

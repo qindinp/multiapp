@@ -2,8 +2,8 @@
 <paths>
     <!-- Stub APK output directory -->
     <files-path name="stubs" path="stubs/" />
-    <!-- Cache directory for origin APK extraction -->
-    <cache-path name="cache" path="." />
-    <!-- External files directory -->
-    <external-files-path name="external_files" path="." />
+    <!-- Cache directory for shared APK files -->
+    <cache-path name="cache" path="shared_apks/" />
+    <!-- External files directory for shared APK files -->
+    <external-files-path name="external_files" path="shared_apks/" />
 </paths>

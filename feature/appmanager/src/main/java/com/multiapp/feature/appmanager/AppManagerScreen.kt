@@ -33,13 +33,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
-import com.multiapp.core.common.formatBytes
-import com.multiapp.core.common.getDirSize
+import com.multiapp.core.designsystem.components.InstanceStatusChip
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceStatus
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -135,6 +131,7 @@ fun AppManagerScreen(
                             ) {
                                 AppManagerCard(
                                     instance = instance,
+                                    dataSize = uiState.dataSizeMap[instance.instanceId] ?: "—",
                                     isExpanded = uiState.expandedInstanceId == instance.instanceId,
                                     onToggleExpand = {
                                         viewModel.onEvent(
@@ -168,6 +165,7 @@ fun AppManagerScreen(
 @Composable
 private fun AppManagerCard(
     instance: InstanceInfo,
+    dataSize: String,
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
     onShowDetail: () -> Unit,
@@ -181,19 +179,6 @@ private fun AppManagerCard(
             context.packageManager.getApplicationIcon(instance.originalPackageName)
         } catch (_: Exception) {
             null
-        }
-    }
-
-    // Async data size computation
-    var dataSize by remember(instance) { mutableStateOf("—") }
-    LaunchedEffect(instance) {
-        dataSize = withContext(Dispatchers.IO) {
-            try {
-                val dataDir = File("/data/data/${instance.stubPackageName}")
-                if (dataDir.exists()) formatBytes(getDirSize(dataDir)) else "—"
-            } catch (_: Exception) {
-                "—"
-            }
         }
     }
 
@@ -494,26 +479,7 @@ private fun DetailDialogRow(icon: ImageVector, label: String, value: String) {
     }
 }
 
-@Composable
-private fun InstanceStatusChip(status: InstanceStatus) {
-    val (label, color, bgColor) = when (status) {
-        InstanceStatus.CREATING -> Triple("创建中", MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.tertiaryContainer)
-        InstanceStatus.READY -> Triple("就绪", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
-        InstanceStatus.RUNNING -> Triple("运行中", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
-        InstanceStatus.ERROR -> Triple("错误", MaterialTheme.colorScheme.error, MaterialTheme.colorScheme.errorContainer)
-    }
-    Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = bgColor
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = color,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-        )
-    }
-}
+// InstanceStatusChip 已提取到 core/designsystem/CommonComponents.kt
 
 @Composable
 private fun DetailRow(icon: ImageVector, label: String, value: String) {

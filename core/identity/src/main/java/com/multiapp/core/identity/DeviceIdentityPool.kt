@@ -1,16 +1,24 @@
 package com.multiapp.core.identity
+import com.multiapp.core.model.IdentityConfig
 
+import com.multiapp.core.common.maskSensitive
 import timber.log.Timber
-import kotlin.random.Random
+import java.security.MessageDigest
+import java.security.SecureRandom
 
 /**
  * Device identity pool.
  *
- * Generates randomized but realistic device identity configurations for
- * each cloned app instance. Each call to [generateIdentity] produces a
- * unique set of device identifiers that looks like a real device.
+ * Generates deterministic device identity configurations for each cloned app
+ * instance. Each call to [generateIdentity] with the same instanceId produces
+ * the same set of device identifiers, ensuring consistency across multiple
+ * systems (StubConfig, IdentitySpoofingEngine, etc.).
+ *
+ * Uses SecureRandom seeded by instanceId hash for deterministic generation.
  */
 object DeviceIdentityPool {
+
+    private val secureRandom by lazy { SecureRandom() }
 
     private val BUILD_MODELS = listOf(
         "SM-S9380",
@@ -59,19 +67,39 @@ object DeviceIdentityPool {
     private const val HEX_CHARS = "0123456789abcdef"
     private const val ALPHANUMERIC_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
+    private fun <T> List<T>.secureRandom(rnd: SecureRandom): T = this[rnd.nextInt(size)]
+
     /**
-     * Generate a random identity configuration for a cloned app instance.
+     * Create a deterministic SecureRandom seeded by instanceId.
+     * Same instanceId always produces the same random sequence.
+     */
+    private fun createSeededRandom(instanceId: String): SecureRandom {
+        val seed = MessageDigest.getInstance("SHA-256")
+            .digest(("multiapp_identity_$instanceId").toByteArray())
+        return SecureRandom.getInstance("SHA1PRNG").apply {
+            setSeed(seed)
+        }
+    }
+
+    /**
+     * Generate a deterministic identity configuration for a cloned app instance.
+     *
+     * Uses SecureRandom seeded by instanceId hash, ensuring the same instanceId
+     * always produces the same identity. This allows IdentitySpoofingEngine and
+     * StubConfig to use consistent device identifiers.
      *
      * @param instanceId          Unique identifier for this clone instance
      * @param originalPackageName The original app package name
-     * @return A fully populated [IdentityConfig] with randomized device identifiers
+     * @return A fully populated [IdentityConfig] with deterministic device identifiers
      */
     fun generateIdentity(instanceId: String, originalPackageName: String): IdentityConfig {
-        val model = BUILD_MODELS.random()
-        val manufacturer = BUILD_MANUFACTURERS.random()
-        val brand = BUILD_BRANDS.random()
-        val sdkInt = Random.nextInt(33, 36)
-        val versionRelease = VERSION_RELEASES.random()
+        val random = createSeededRandom(instanceId)
+
+        val model = BUILD_MODELS.secureRandom(random)
+        val manufacturer = BUILD_MANUFACTURERS.secureRandom(random)
+        val brand = BUILD_BRANDS.secureRandom(random)
+        val sdkInt = 33 + random.nextInt(3) // 33..35
+        val versionRelease = VERSION_RELEASES.secureRandom(random)
 
         val device = model.lowercase().replace(" ", "_")
         val product = "${device}_user"
@@ -81,13 +109,13 @@ object DeviceIdentityPool {
             stubPackageName = "$originalPackageName.clone$instanceId",
             originalPackageName = originalPackageName,
             authorityMap = generateAuthorityMap(originalPackageName, instanceId),
-            imei = generateImei(),
-            androidId = generateAndroidId(),
-            macAddress = generateMacAddress(),
-            serial = generateSerial(),
+            imei = generateImei(random),
+            androidId = generateAndroidId(random),
+            macAddress = generateMacAddress(random),
+            serial = generateSerial(random),
             buildModel = model,
             buildManufacturer = manufacturer,
-            buildFingerprint = "$brand/$device/$device:$versionRelease/${generateBuildId()}/${Random.nextLong(1000000000L, 9999999999L)}:user/release-keys",
+            buildFingerprint = "$brand/$device/$device:$versionRelease/${generateBuildId(random)}/${1000000000L + nextSecureLong(random, 8999999999L)}:user/release-keys",
             buildBrand = brand,
             buildDevice = device,
             buildProduct = product,
@@ -99,7 +127,7 @@ object DeviceIdentityPool {
             "DeviceIdentityPool: generated identity for instance=%s, model=%s, imei=%s",
             instanceId,
             config.buildModel,
-            config.imei
+            maskSensitive(config.imei)
         )
 
         return config
@@ -108,10 +136,10 @@ object DeviceIdentityPool {
     /**
      * Generate a random IMEI (15 digits, starts with 86).
      */
-    private fun generateImei(): String {
+    private fun generateImei(rnd: SecureRandom): String {
         val sb = StringBuilder("86")
         repeat(13) {
-            sb.append(Random.nextInt(0, 10))
+            sb.append(rnd.nextInt(0, 10))
         }
         return sb.toString()
     }
@@ -119,10 +147,10 @@ object DeviceIdentityPool {
     /**
      * Generate a random Android ID (16 hex characters).
      */
-    private fun generateAndroidId(): String {
+    private fun generateAndroidId(rnd: SecureRandom): String {
         return buildString(16) {
             repeat(16) {
-                append(HEX_CHARS[Random.nextInt(HEX_CHARS.length)])
+                append(HEX_CHARS[rnd.nextInt(HEX_CHARS.length)])
             }
         }
     }
@@ -130,9 +158,9 @@ object DeviceIdentityPool {
     /**
      * Generate a random MAC address in AA:BB:CC:DD:EE:FF format.
      */
-    private fun generateMacAddress(): String {
+    private fun generateMacAddress(rnd: SecureRandom): String {
         val octets = List(6) {
-            String.format("%02X", Random.nextInt(0, 256))
+            String.format("%02X", rnd.nextInt(0, 256))
         }
         return octets.joinToString(":")
     }
@@ -140,10 +168,10 @@ object DeviceIdentityPool {
     /**
      * Generate a random serial number (10 alphanumeric characters).
      */
-    private fun generateSerial(): String {
+    private fun generateSerial(rnd: SecureRandom): String {
         return buildString(10) {
             repeat(10) {
-                append(ALPHANUMERIC_CHARS[Random.nextInt(ALPHANUMERIC_CHARS.length)])
+                append(ALPHANUMERIC_CHARS[rnd.nextInt(ALPHANUMERIC_CHARS.length)])
             }
         }
     }
@@ -166,8 +194,15 @@ object DeviceIdentityPool {
     /**
      * Generate a random Android build ID (e.g. "A1B2C3D4").
      */
-    private fun generateBuildId(): String {
+    private fun generateBuildId(rnd: SecureRandom): String {
         val letters = ('A'..'Z')
-        return "${letters.random()}${Random.nextInt(1, 10)}${letters.random()}${Random.nextInt(100000, 999999)}"
+        return "${letters.toList().secureRandom(rnd)}${rnd.nextInt(1, 10)}${letters.toList().secureRandom(rnd)}${rnd.nextInt(100000, 999999)}"
+    }
+
+    /**
+     * Generate a secure random long in [0, bound) range.
+     */
+    private fun nextSecureLong(rnd: SecureRandom, bound: Long): Long {
+        return (rnd.nextLong().toULong() % bound.toULong()).toLong()
     }
 }

@@ -24,6 +24,7 @@ dependencies {
     implementation(project(":core:designsystem"))
     implementation(project(":core:instance"))
     implementation(project(":core:installer"))
+    implementation(project(":core:identity"))
 
     implementation(libs.core.ktx)
     implementation(libs.timber)

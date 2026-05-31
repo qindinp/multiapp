@@ -2,6 +2,7 @@ package com.multiapp.app
 
 import android.content.Context
 import androidx.room.Room
+import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.instance.InstanceDatabase
 import com.multiapp.core.installer.StubInstaller
 import com.multiapp.core.stub.StubBuilder
@@ -15,6 +16,10 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
+
+    @Provides
+    @Singleton
+    fun provideHookEngine(): HookEngine = HookEngine.getInstance()
 
     @Provides
     @Singleton
@@ -36,7 +41,6 @@ object AppModule {
             InstanceDatabase::class.java,
             "multiapp_instances.db"
         ).addMigrations(InstanceDatabase.MIGRATION_1_2)
-         .fallbackToDestructiveMigration()
          .build()
     }
 }

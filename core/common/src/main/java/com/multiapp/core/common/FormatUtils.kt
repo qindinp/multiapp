@@ -2,6 +2,18 @@ package com.multiapp.core.common
 
 import java.io.File
 
+/**
+ * Mask sensitive value for safe logging.
+ * Shows first 4 and last 4 characters, replaces middle with "****".
+ * Examples: "861234567890123" -> "8612****0123"
+ *           "abcdef1234567890" -> "abcd****7890"
+ *           "short"            -> "****" (too short to mask)
+ */
+fun maskSensitive(value: String): String {
+    if (value.length <= 8) return "****"
+    return value.take(4) + "****" + value.takeLast(4)
+}
+
 fun formatBytes(bytes: Long): String {
     if (bytes <= 0) return "0 B"
     val units = arrayOf("B", "KB", "MB", "GB", "TB")

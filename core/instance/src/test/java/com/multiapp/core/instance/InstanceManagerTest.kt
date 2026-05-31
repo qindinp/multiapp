@@ -3,7 +3,7 @@ package com.multiapp.core.instance
 import android.content.Context
 import com.google.gson.Gson
 import com.multiapp.core.identity.DeviceIdentityPool
-import com.multiapp.core.identity.IdentityConfig
+import com.multiapp.core.model.IdentityConfig
 import com.multiapp.core.installer.StubInstaller
 import com.multiapp.core.manifest.ComponentExtractor
 import com.multiapp.core.manifest.DeviceIdentityConfig
