@@ -34,20 +34,68 @@ import java.util.zip.ZipFile
  */
 class LoaderFactory : AppComponentFactory() {
 
+    // 标记: 是否已完成 ClassLoader 替换 (ContentProvider 先于 Application 实例化)
+    @Volatile
+    private var classLoaderReady = false
+    // 保存替换后的 ClassLoader, 供 instantiateProvider 使用
+    @Volatile
+    private var guestClassLoader: ClassLoader? = null
+
+    // 一次性初始化锁
+    private val initLock = Any()
+
+    /**
+     * ContentProvider 先于 Application 实例化。
+     * 必须在第一个 Provider 创建前完成 ClassLoader 替换，
+     * 否则 Provider 加载原始 app 的类时会 ClassNotFoundException。
+     */
+    override fun instantiateProvider(cl: ClassLoader, className: String): android.content.ContentProvider {
+        Timber.d("LoaderFactory: instantiateProvider for $className")
+        ensureClassLoaderSwapped(cl)
+        // 用替换后的 ClassLoader 加载 Provider 类
+        val realCl = guestClassLoader ?: cl
+        return try {
+            val clazz = realCl.loadClass(className)
+            clazz.getDeclaredConstructor().newInstance() as android.content.ContentProvider
+        } catch (e: Exception) {
+            Timber.e(e, "LoaderFactory: failed to instantiate provider $className with real ClassLoader, falling back")
+            super.instantiateProvider(cl, className)
+        }
+    }
+
     override fun instantiateApplication(cl: ClassLoader, className: String): Application {
         Timber.d("LoaderFactory: instantiateApplication for $className")
+        ensureClassLoaderSwapped(cl)
 
         return try {
-            instantiateApplicationInternal(cl, className)
+            // 用 guestClassLoader 加载 Application 类
+            val realCl = guestClassLoader ?: cl
+            val appClass = realCl.loadClass(className)
+            appClass.getDeclaredConstructor().newInstance() as Application
         } catch (e: Exception) {
             Timber.e(e, "LoaderFactory: FATAL — cannot initialize, stub will crash")
-            // Don't silently fallback — the stub can't function without proper ClassLoader setup
-            // Re-throw so the crash log contains the actual root cause
             throw RuntimeException("LoaderFactory initialization failed: ${e.message}", e)
         }
     }
 
-    private fun instantiateApplicationInternal(cl: ClassLoader, className: String): Application {
+    /**
+     * 确保 ClassLoader 替换只执行一次 (由 instantiateProvider 或 instantiateApplication 触发)
+     */
+    private fun ensureClassLoaderSwapped(cl: ClassLoader) {
+        if (classLoaderReady) return
+        synchronized(initLock) {
+            if (classLoaderReady) return
+            try {
+                initializeInternal(cl)
+                classLoaderReady = true
+            } catch (e: Exception) {
+                Timber.e(e, "LoaderFactory: initialization failed")
+                throw RuntimeException("LoaderFactory initialization failed: ${e.message}", e)
+            }
+        }
+    }
+
+    private fun initializeInternal(cl: ClassLoader) {
         // 1. 获取 ApplicationInfo (不依赖 Context)
         val activityThread = getActivityThread()
         val appInfo = getBoundAppInfo(activityThread)
@@ -84,12 +132,12 @@ class LoaderFactory : AppComponentFactory() {
         extractPatchedDex(stubApkPath, originApk, dataDir)
 
         // 5. 替换 LoadedApk（返回原始 APK 的 ClassLoader）
-        val guestClassLoader = LoadedApkSwapper.swap(activityThread, originApk, config)
-        Timber.d("LoaderFactory: LoadedApk swapped, guestClassLoader=${guestClassLoader.javaClass.name}")
+        guestClassLoader = LoadedApkSwapper.swap(activityThread, originApk, config)
+        Timber.d("LoaderFactory: LoadedApk swapped, guestClassLoader=${guestClassLoader!!.javaClass.name}")
 
         // 5.5 初始化 LSPlant（用原始 APK 的 ClassLoader，确保 hook 目标类已加载）
         val hookEngine = HookEngine.getInstance()
-        hookEngine.initLsplant(guestClassLoader)
+        hookEngine.initLsplant(guestClassLoader!!)
 
         // 6. 安装身份 Hook
         installIdentityHooks(config)
@@ -105,8 +153,7 @@ class LoaderFactory : AppComponentFactory() {
         // 8. 重置 appComponentFactory（防壳检测异常）
         appInfo.appComponentFactory = "android.app.AppComponentFactory"
 
-        Timber.d("LoaderFactory: injection complete, creating Application for ${config.originalPackageName}")
-        return super.instantiateApplication(cl, className)
+        Timber.d("LoaderFactory: injection complete for ${config.originalPackageName}")
     }
 
     private fun getActivityThread(): Any {
