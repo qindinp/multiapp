@@ -139,7 +139,7 @@ object DeviceIdentityPool {
     private fun generateImei(rnd: SecureRandom): String {
         val sb = StringBuilder("86")
         repeat(13) {
-            sb.append(rnd.nextInt(0, 10))
+            sb.append(rnd.nextInt(10))
         }
         return sb.toString()
     }
@@ -160,7 +160,7 @@ object DeviceIdentityPool {
      */
     private fun generateMacAddress(rnd: SecureRandom): String {
         val octets = List(6) {
-            String.format("%02X", rnd.nextInt(0, 256))
+            String.format("%02X", rnd.nextInt(256))
         }
         return octets.joinToString(":")
     }
