@@ -363,7 +363,7 @@ class IdentityHookTest {
         @Test
         fun `companion apply does not throw when LSPlant unavailable`() {
             org.junit.jupiter.api.assertDoesNotThrow {
-                PackageIdentityHook.apply(testConfig, mockHookEngine)
+                PackageIdentityHook().apply(testConfig, mockHookEngine)
             }
         }
 
@@ -409,7 +409,7 @@ class IdentityHookTest {
         @Test
         fun `companion apply does not throw when LSPlant unavailable`() {
             org.junit.jupiter.api.assertDoesNotThrow {
-                BuildFieldSpoof.apply(testConfig, mockHookEngine)
+                BuildFieldSpoof().apply(testConfig, mockHookEngine)
             }
         }
 
@@ -454,7 +454,7 @@ class IdentityHookTest {
             )
 
             org.junit.jupiter.api.assertDoesNotThrow {
-                BuildFieldSpoof.apply(customConfig, mockHookEngine)
+                BuildFieldSpoof().apply(customConfig, mockHookEngine)
             }
 
             assertEquals("CustomModel123", customConfig.buildModel)
@@ -498,7 +498,7 @@ class IdentityHookTest {
         @Test
         fun `companion apply does not throw when LSPlant unavailable`() {
             org.junit.jupiter.api.assertDoesNotThrow {
-                FileSystemHook.apply(testConfig, mockHookEngine)
+                FileSystemHook().apply(testConfig, mockHookEngine)
             }
         }
 
@@ -612,7 +612,7 @@ class IdentityHookTest {
         @Test
         fun `companion apply does not throw when LSPlant unavailable`() {
             org.junit.jupiter.api.assertDoesNotThrow {
-                ProcFsHook.apply(testConfig, mockHookEngine)
+                ProcFsHook().apply(testConfig, mockHookEngine)
             }
         }
 
@@ -726,7 +726,7 @@ class IdentityHookTest {
         @Test
         fun `companion apply does not throw when LSPlant unavailable`() {
             org.junit.jupiter.api.assertDoesNotThrow {
-                ContentProviderHook.apply(testConfig, mockHookEngine)
+                ContentProviderHook().apply(testConfig, mockHookEngine)
             }
         }
 
@@ -801,14 +801,14 @@ class IdentityHookTest {
         @Test
         fun `companion apply does not throw when LSPlant unavailable`() {
             org.junit.jupiter.api.assertDoesNotThrow {
-                ActivityManagerHook.apply(testConfig, mockHookEngine)
+                ActivityManagerHook().apply(testConfig, mockHookEngine)
             }
         }
 
         @Test
         fun `apply passes correct package names to hook engine`() {
             org.junit.jupiter.api.assertDoesNotThrow {
-                ActivityManagerHook.apply(testConfig, mockHookEngine)
+                ActivityManagerHook().apply(testConfig, mockHookEngine)
             }
             // Config is not modified
             assertEquals(TEST_ORIGINAL_PKG, testConfig.originalPackageName)
@@ -869,7 +869,7 @@ class IdentityHookTest {
         @Test
         fun `companion apply does not throw when LSPlant unavailable`() {
             org.junit.jupiter.api.assertDoesNotThrow {
-                DlopenHook.apply(testConfig, mockHookEngine)
+                DlopenHook().apply(testConfig, mockHookEngine)
             }
         }
 
@@ -970,7 +970,7 @@ class IdentityHookTest {
 
         @Test
         fun `constructor apply does not throw when LSPlant unavailable`() {
-            val hook = DeviceIdentityHook(mockHookEngine)
+            val hook = DeviceIdentityHook()
             org.junit.jupiter.api.assertDoesNotThrow {
                 hook.apply(testConfig, mockHookEngine)
             }
@@ -983,7 +983,7 @@ class IdentityHookTest {
             val originalMac = testConfig.macAddress
             val originalSerial = testConfig.serial
 
-            DeviceIdentityHook(mockHookEngine).apply(testConfig, mockHookEngine)
+            DeviceIdentityHook().apply(testConfig, mockHookEngine)
 
             assertEquals(originalImei, testConfig.imei)
             assertEquals(originalAndroidId, testConfig.androidId)
@@ -1000,7 +1000,7 @@ class IdentityHookTest {
                 serial = ""
             )
             org.junit.jupiter.api.assertDoesNotThrow {
-                DeviceIdentityHook(mockHookEngine).apply(config, mockHookEngine)
+                DeviceIdentityHook().apply(config, mockHookEngine)
             }
         }
 
@@ -1031,7 +1031,7 @@ class IdentityHookTest {
          * Invoke the private generateFakeImsi method via reflection.
          */
         private fun invokeGenerateFakeImsi(instanceId: String): String? {
-            val hook = DeviceIdentityHook(mockHookEngine)
+            val hook = DeviceIdentityHook()
             val method = DeviceIdentityHook::class.java.getDeclaredMethod(
                 "generateFakeImsi",
                 String::class.java
@@ -1051,7 +1051,7 @@ class IdentityHookTest {
 
         @Test
         fun `constructor apply does not throw when LSPlant unavailable`() {
-            val hook = SignatureBypass(mockHookEngine)
+            val hook = SignatureBypass()
             org.junit.jupiter.api.assertDoesNotThrow {
                 hook.apply(testConfig, mockHookEngine)
             }
@@ -1060,7 +1060,7 @@ class IdentityHookTest {
         @Test
         fun `apply does not modify the input config`() {
             val originalPkg = testConfig.originalPackageName
-            SignatureBypass(mockHookEngine).apply(testConfig, mockHookEngine)
+            SignatureBypass().apply(testConfig, mockHookEngine)
             assertEquals(originalPkg, testConfig.originalPackageName)
         }
 
@@ -1068,7 +1068,7 @@ class IdentityHookTest {
         fun `apply with empty package name does not throw`() {
             val config = testConfig.copy(originalPackageName = "")
             org.junit.jupiter.api.assertDoesNotThrow {
-                SignatureBypass(mockHookEngine).apply(config, mockHookEngine)
+                SignatureBypass().apply(config, mockHookEngine)
             }
         }
     }
