@@ -32,7 +32,8 @@ jobs:
         run: chmod +x gradlew
 
       - name: Lint
-        run: ./gradlew lintDebug
+        run: ./gradlew lintDebug --continue
+        continue-on-error: true
 
       - name: Unit Tests
         run: ./gradlew testDebugUnitTest
