@@ -2,85 +2,63 @@ package com.multiapp.core.loader
 
 import android.app.AppComponentFactory
 import android.app.Application
-import android.content.Intent
-import android.content.pm.ApplicationInfo
-import com.google.gson.Gson
-import com.multiapp.core.identity.ActivityManagerHook
-import com.multiapp.core.identity.BuildFieldSpoof
-import com.multiapp.core.identity.ContentProviderHook
-import com.multiapp.core.identity.DeviceIdentityHook
-import com.multiapp.core.identity.DlopenHook
-import com.multiapp.core.identity.FileSystemHook
-import com.multiapp.core.model.IdentityConfig
-import com.multiapp.core.identity.PackageIdentityHook
-import com.multiapp.core.identity.ProcFsHook
-import com.multiapp.core.identity.SignatureBypass
-import com.multiapp.core.hook.AntiDetectionEngine
-import com.multiapp.core.hook.DetectionLevel
-import com.multiapp.core.hook.HookEngine
-import com.multiapp.core.hook.NativeHookBridge
-import com.multiapp.core.common.ConfigEncryptor
-import com.multiapp.core.manifest.StubConfig
-import timber.log.Timber
+import android.content.ContentProvider
+import android.util.Log
+import dalvik.system.PathClassLoader
 import java.io.File
 import java.util.zip.ZipFile
 
 /**
- * Stub 的 AppComponentFactory 入口 (借鉴 LSPatch)
- * 在 Application.attachBaseContext() 之前执行注入
+ * 【最小 POC 骨架】LoaderFactory
  *
- * Stub AndroidManifest.xml 声明:
- * <application android:appComponentFactory="com.multiapp.loader.LoaderFactory">
+ * 只验证核心链路：Stub 启动 → 替换 ClassLoader → 原始 Application 创建成功
+ *
+ * 剥离所有非必要依赖：NativeHook、HookEngine、AntiDetection、IdentityHook、
+ * SignatureBypass、ConfigEncryptor、StealthClassLoader 等。
+ *
+ * 日志用 android.util.Log 而非 Timber（避免依赖）。
+ * 配置用简单正则提取（避免 Gson 依赖）。
  */
 class LoaderFactory : AppComponentFactory() {
 
-    // 标记: 是否已完成 ClassLoader 替换 (ContentProvider 先于 Application 实例化)
+    companion object {
+        private const val TAG = "MultiApp.POC"
+    }
+
     @Volatile
     private var classLoaderReady = false
-    // 保存替换后的 ClassLoader, 供 instantiateProvider 使用
+
     @Volatile
     private var guestClassLoader: ClassLoader? = null
 
-    // 一次性初始化锁
     private val initLock = Any()
 
-    /**
-     * ContentProvider 先于 Application 实例化。
-     * 必须在第一个 Provider 创建前完成 ClassLoader 替换，
-     * 否则 Provider 加载原始 app 的类时会 ClassNotFoundException。
-     */
-    override fun instantiateProvider(cl: ClassLoader, className: String): android.content.ContentProvider {
-        Timber.d("LoaderFactory: instantiateProvider for $className")
+    override fun instantiateProvider(cl: ClassLoader, className: String): ContentProvider {
+        Log.d(TAG, "instantiateProvider: $className")
         ensureClassLoaderSwapped(cl)
-        // 用替换后的 ClassLoader 加载 Provider 类
         val realCl = guestClassLoader ?: cl
         return try {
             val clazz = realCl.loadClass(className)
-            clazz.getDeclaredConstructor().newInstance() as android.content.ContentProvider
+            clazz.getDeclaredConstructor().newInstance() as ContentProvider
         } catch (e: Exception) {
-            Timber.e(e, "LoaderFactory: failed to instantiate provider $className with real ClassLoader, falling back")
+            Log.e(TAG, "instantiateProvider failed, falling back to system", e)
             super.instantiateProvider(cl, className)
         }
     }
 
     override fun instantiateApplication(cl: ClassLoader, className: String): Application {
-        Timber.d("LoaderFactory: instantiateApplication for $className")
+        Log.d(TAG, "instantiateApplication: $className")
         ensureClassLoaderSwapped(cl)
-
+        val realCl = guestClassLoader ?: cl
         return try {
-            // 用 guestClassLoader 加载 Application 类
-            val realCl = guestClassLoader ?: cl
             val appClass = realCl.loadClass(className)
             appClass.getDeclaredConstructor().newInstance() as Application
         } catch (e: Exception) {
-            Timber.e(e, "LoaderFactory: FATAL — cannot initialize, stub will crash")
-            throw RuntimeException("LoaderFactory initialization failed: ${e.message}", e)
+            Log.e(TAG, "FATAL: cannot create Application $className", e)
+            throw RuntimeException("LoaderFactory POC failed: ${e.message}", e)
         }
     }
 
-    /**
-     * 确保 ClassLoader 替换只执行一次 (由 instantiateProvider 或 instantiateApplication 触发)
-     */
     private fun ensureClassLoaderSwapped(cl: ClassLoader) {
         if (classLoaderReady) return
         synchronized(initLock) {
@@ -88,126 +66,173 @@ class LoaderFactory : AppComponentFactory() {
             try {
                 initializeInternal(cl)
                 classLoaderReady = true
+                Log.d(TAG, "ClassLoader swap complete!")
             } catch (e: Exception) {
-                Timber.e(e, "LoaderFactory: initialization failed")
-                throw RuntimeException("LoaderFactory initialization failed: ${e.message}", e)
+                Log.e(TAG, "Initialization failed", e)
+                throw RuntimeException("LoaderFactory POC failed: ${e.message}", e)
             }
         }
     }
 
     private fun initializeInternal(cl: ClassLoader) {
-        // 1. 获取 ApplicationInfo (不依赖 Context)
-        val activityThread = getActivityThread()
-        val appInfo = getBoundAppInfo(activityThread)
-        val stubApkPath = appInfo.sourceDir
-        val dataDir = appInfo.dataDir
+        Log.d(TAG, "=== POC LoaderFactory starting ===")
 
-        // 2. 读取配置
-        val config = readConfigFromAssets(stubApkPath)
-        Timber.d("LoaderFactory: config loaded, original=${config.originalPackageName}, stub=${config.stubPackageName}")
+        // 1. 获取 ActivityThread
+        val activityThread = Class.forName("android.app.ActivityThread")
+            .getDeclaredMethod("currentActivityThread")
+            .apply { isAccessible = true }
+            .invoke(null)!!
+        Log.d(TAG, "Got ActivityThread")
 
-        // 3. 初始化 NativeHookBridge（native 层 hook 必须最早就位）
-        val nativeBridge = NativeHookBridge.getInstance()
-        val nativeOk = nativeBridge.initNativeHooks(hostDataDir = dataDir)
-        if (!nativeOk) {
-            Timber.e("LoaderFactory: Native hooks FAILED to init — anti-detection will be incomplete")
-        }
-        // 立即 spoof, 消除 initNativeHooks 和 spoofProcSelf 之间的时序窗口
-        // 在此窗口期间如果有代码读取 /proc/self/cmdline 会暴露 stub 包名
-        nativeBridge.spoofProcSelf(android.os.Process.myPid(), config.originalPackageName)
-        // 设置 native 层路径重定向基准
-        nativeBridge.setupAppRedirections(
-            config.originalPackageName,
-            config.instanceId,
-            "$dataDir/data/${config.stubPackageName}"
-        )
-
-        // 4. 解压原始 APK
-        val originApk = extractOriginApk(stubApkPath, dataDir, config)
-        require(originApk.exists() && originApk.length() > 0) {
-            "Extracted origin APK is empty or missing: ${originApk.absolutePath}"
-        }
-
-        // 4.5 解压 patched DEX (如果有) 替换原始 APK 中的 DEX
-        extractPatchedDex(stubApkPath, originApk, dataDir)
-
-        // 5. 替换 LoadedApk（返回原始 APK 的 ClassLoader）
-        guestClassLoader = LoadedApkSwapper.swap(activityThread, originApk, config)
-        Timber.d("LoaderFactory: LoadedApk swapped, guestClassLoader=${guestClassLoader!!.javaClass.name}")
-
-        // 5.5 初始化 LSPlant（用原始 APK 的 ClassLoader，确保 hook 目标类已加载）
-        val hookEngine = HookEngine.getInstance()
-        hookEngine.initLsplant(guestClassLoader!!)
-
-        // 6. 安装身份 Hook
-        installIdentityHooks(config)
-
-        // 6.5 启用 AntiDetectionEngine（Root/模拟器/Xposed 检测绕过）
-        val antiDetect = AntiDetectionEngine(hookEngine, nativeBridge)
-        antiDetect.initialize()
-        antiDetect.enableAntiDetection(config.instanceId, DetectionLevel.MODERATE)
-
-        // 7. 安装签名绕过
-        installSignatureBypass(config)
-
-        // 8. 重置 appComponentFactory（防壳检测异常）
-        appInfo.appComponentFactory = "android.app.AppComponentFactory"
-
-        Timber.d("LoaderFactory: injection complete for ${config.originalPackageName}")
-    }
-
-    private fun getActivityThread(): Any {
-        Timber.d("LoaderFactory: getActivityThread via reflection")
-        val clazz = Class.forName("android.app.ActivityThread")
-        val method = clazz.getDeclaredMethod("currentActivityThread")
-        method.isAccessible = true
-        return method.invoke(null)!!
-    }
-
-    private fun getBoundAppInfo(activityThread: Any): ApplicationInfo {
-        Timber.d("LoaderFactory: getBoundAppInfo via reflection")
+        // 2. 获取 ApplicationInfo
         val mBound = activityThread.javaClass
             .getDeclaredField("mBoundApplication")
             .apply { isAccessible = true }
             .get(activityThread)
-        return mBound.javaClass
+        val appInfo = mBound.javaClass
             .getDeclaredField("appInfo")
             .apply { isAccessible = true }
-            .get(mBound) as ApplicationInfo
+            .get(mBound) as android.content.pm.ApplicationInfo
+        val stubApkPath = appInfo.sourceDir
+        val dataDir = appInfo.dataDir
+        Log.d(TAG, "Stub APK: $stubApkPath, dataDir: $dataDir")
+
+        // 3. 从 Stub APK assets 读取最小配置 (不用 Gson)
+        val config = readConfig(stubApkPath)
+        Log.d(TAG, "Config: originalPkg=${config.originalPkg}, stubPkg=${config.stubPkg}")
+
+        // 4. 解压 origin.apk
+        val originApk = extractOriginApk(stubApkPath, dataDir)
+        Log.d(TAG, "Origin APK extracted: ${originApk.absolutePath}, size=${originApk.length()}")
+
+        // 5. 替换 LoadedApk 的 ClassLoader (不调任何隐藏 API)
+        swapClassLoader(activityThread, appInfo, originApk, config)
+        Log.d(TAG, "=== POC LoaderFactory complete ===")
     }
 
-    private fun readConfigFromAssets(stubApkPath: String): StubConfig {
-        Timber.d("LoaderFactory: readConfigFromAssets from $stubApkPath")
+    /**
+     * 核心方法：直接修改现有 LoadedApk 的字段
+     *
+     * 策略：不调 getPackageInfoNoCheck（Android 16 CorePlatformApi），
+     * 不调 setHiddenApiExemptions（同样被拦截），
+     * 直接修改现有 LoadedApk 的 mClassLoader 和路径字段。
+     */
+    private fun swapClassLoader(
+        activityThread: Any,
+        appInfo: android.content.pm.ApplicationInfo,
+        originApk: File,
+        config: PocConfig
+    ) {
+        // 获取 LoadedApk 对象
+        val mBound = activityThread.javaClass
+            .getDeclaredField("mBoundApplication")
+            .apply { isAccessible = true }
+            .get(activityThread)
+
+        val loadedApk = mBound.javaClass
+            .getDeclaredField("info")
+            .apply { isAccessible = true }
+            .get(mBound)
+            ?: throw IllegalStateException("LoadedApk is null")
+
+        Log.d(TAG, "Got LoadedApk: ${loadedApk.javaClass.name}")
+
+        // 修改 ApplicationInfo 路径
+        appInfo.sourceDir = originApk.absolutePath
+        appInfo.publicSourceDir = originApk.absolutePath
+
+        val originLibDir = File(originApk.parentFile, "lib")
+        if (originLibDir.isDirectory) {
+            appInfo.nativeLibraryDir = originLibDir.absolutePath
+        }
+
+        Log.d(TAG, "Updated sourceDir -> ${appInfo.sourceDir}")
+
+        // 创建指向原始 APK 的 PathClassLoader
+        val bootClassLoader = ClassLoader.getSystemClassLoader().parent
+        val newClassLoader = PathClassLoader(
+            originApk.absolutePath,
+            appInfo.nativeLibraryDir,
+            bootClassLoader
+        )
+        Log.d(TAG, "Created PathClassLoader for ${originApk.absolutePath}")
+
+        // 替换 LoadedApk.mClassLoader
+        loadedApk.javaClass
+            .getDeclaredField("mClassLoader")
+            .apply { isAccessible = true }
+            .set(loadedApk, newClassLoader)
+
+        Log.d(TAG, "Replaced LoadedApk.mClassLoader")
+
+        // 更新资源路径
+        try {
+            loadedApk.javaClass.getDeclaredField("mAppDir")
+                .apply { isAccessible = true }
+                .set(loadedApk, originApk.absolutePath)
+            loadedApk.javaClass.getDeclaredField("mResDir")
+                .apply { isAccessible = true }
+                .set(loadedApk, originApk.absolutePath)
+            Log.d(TAG, "Updated mAppDir/mResDir")
+        } catch (e: Exception) {
+            Log.w(TAG, "mAppDir/mResDir update failed (OK on some Android versions): ${e.message}")
+        }
+
+        // 更新 mPackages 映射
+        try {
+            @Suppress("UNCHECKED_CAST")
+            val mPackages = activityThread.javaClass
+                .getDeclaredField("mPackages")
+                .apply { isAccessible = true }
+                .get(activityThread) as? MutableMap<String, Any>
+            if (mPackages != null) {
+                val weakRef = java.lang.ref.WeakReference(loadedApk)
+                mPackages[config.stubPkg] = weakRef
+                mPackages[config.originalPkg] = weakRef
+                Log.d(TAG, "Updated mPackages for ${config.stubPkg} and ${config.originalPkg}")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "mPackages update failed: ${e.message}")
+        }
+
+        guestClassLoader = newClassLoader
+    }
+
+    /**
+     * 从 Stub APK assets/multiapp_config.json 读取配置
+     * 最小解析：只提取 originalPackageName 和 stubPackageName
+     */
+    private fun readConfig(stubApkPath: String): PocConfig {
         ZipFile(stubApkPath).use { zip ->
             val entry = zip.getEntry("assets/multiapp_config.json")
-                ?: throw IllegalStateException("assets/multiapp_config.json not found in stub APK")
+                ?: throw IllegalStateException("assets/multiapp_config.json not found")
             val json = zip.getInputStream(entry).bufferedReader().readText()
-            Timber.d("LoaderFactory: config JSON loaded (${json.length} chars)")
+            Log.d(TAG, "Config JSON: ${json.take(200)}...")
 
-            // 先解析为 Map, 检查是否有加密字段
-            @Suppress("UNCHECKED_CAST")
-            val configMap = Gson().fromJson(json, Map::class.java) as Map<String, Any?>
+            // 简单正则提取，不用 Gson
+            val originalPkg = json.regexFind("\"originalPackageName\"\\s*:\\s*\"([^\"]+)\"")
+                ?: throw IllegalStateException("originalPackageName not found in config")
+            val stubPkg = json.regexFind("\"stubPackageName\"\\s*:\\s*\"([^\"]+)\"")
+                ?: throw IllegalStateException("stubPackageName not found in config")
 
-            // 解密敏感字段
-            val decryptedMap = if (ConfigEncryptor.hasEncryptedFields(configMap)) {
-                val stubPkg = configMap["stubPackageName"] as? String ?: ""
-                val instanceId = configMap["instanceId"] as? String ?: ""
-                ConfigEncryptor.decryptSensitiveFields(configMap, stubPkg, instanceId)
-            } else {
-                configMap
-            }
-
-            return Gson().fromJson(Gson().toJson(decryptedMap), StubConfig::class.java)
+            return PocConfig(originalPkg = originalPkg, stubPkg = stubPkg)
         }
     }
 
-    private fun extractOriginApk(stubApkPath: String, dataDir: String, config: StubConfig): File {
-        Timber.d("LoaderFactory: extractOriginApk for ${config.originalPackageName}")
+    private fun String.regexFind(pattern: String): String? {
+        val regex = Regex(pattern)
+        return regex.find(this)?.groupValues?.getOrNull(1)
+    }
+
+    /**
+     * 从 Stub APK 解压 origin.apk
+     */
+    private fun extractOriginApk(stubApkPath: String, dataDir: String): File {
         val outputDir = File(dataDir, "cache/origin")
         outputDir.mkdirs()
         val output = File(outputDir, "base.apk")
         if (output.exists()) {
-            Timber.d("LoaderFactory: origin APK already extracted at ${output.absolutePath}")
+            Log.d(TAG, "Origin APK already extracted")
             return output
         }
         ZipFile(stubApkPath).use { zip ->
@@ -217,86 +242,14 @@ class LoaderFactory : AppComponentFactory() {
                 output.outputStream().use { out -> input.copyTo(out) }
             }
         }
-        Timber.d("LoaderFactory: extracted origin APK to ${output.absolutePath}")
         return output
     }
 
     /**
-     * 从 Stub APK 解压 patched DEX 文件到原始 APK 目录
-     *
-     * patched DEX 是加固壳检测代码已被 dexlib2 删除的 DEX 文件。
-     * 解压后替换原始 APK 中的对应 DEX，使加固壳的检测方法变成空实现。
+     * 最小配置类
      */
-    private fun extractPatchedDex(stubApkPath: String, originApk: File, dataDir: String) {
-        try {
-            ZipFile(stubApkPath).use { zip ->
-                val patchedEntries = zip.entries().asSequence()
-                    .filter { it.name.startsWith("assets/patched/") && it.name.endsWith(".dex") }
-                    .toList()
-
-                if (patchedEntries.isEmpty()) {
-                    Timber.d("LoaderFactory: no patched DEX files found, skipping")
-                    return
-                }
-
-                // 解压到 origin APK 所在目录
-                val originDir = originApk.parentFile ?: return
-                for (entry in patchedEntries) {
-                    val fileName = entry.name.removePrefix("assets/patched/")
-                    val targetFile = File(originDir, fileName)
-                    zip.getInputStream(entry).use { input ->
-                        targetFile.outputStream().use { out -> input.copyTo(out) }
-                    }
-                    Timber.d("LoaderFactory: extracted patched DEX: $fileName")
-                }
-                Timber.d("LoaderFactory: ${patchedEntries.size} patched DEX files extracted")
-            }
-        } catch (e: Exception) {
-            Timber.e(e, "LoaderFactory: failed to extract patched DEX, continuing with original")
-        }
-    }
-
-    private fun installIdentityHooks(config: StubConfig) {
-        Timber.d("LoaderFactory: installIdentityHooks for instance=${config.instanceId}")
-        val identityConfig = config.toIdentityConfig()
-        PackageIdentityHook.apply(identityConfig)
-        DeviceIdentityHook.apply(identityConfig)
-        BuildFieldSpoof.apply(identityConfig)
-        FileSystemHook.apply(identityConfig)
-        ProcFsHook.apply(identityConfig)
-        ContentProviderHook.apply(identityConfig)
-        ActivityManagerHook.apply(identityConfig)
-        DlopenHook.apply(identityConfig)
-    }
-
-    private fun installSignatureBypass(config: StubConfig) {
-        Timber.d("LoaderFactory: installSignatureBypass for instance=${config.instanceId}")
-        val identityConfig = config.toIdentityConfig()
-        SignatureBypass.apply(identityConfig)
-    }
-
-    /**
-     * StubConfig -> IdentityConfig 映射
-     */
-    private fun StubConfig.toIdentityConfig(): IdentityConfig {
-        val di = this.deviceIdentity
-        return IdentityConfig(
-            instanceId = this.instanceId,
-            stubPackageName = this.stubPackageName,
-            originalPackageName = this.originalPackageName,
-            authorityMap = this.authorityMap,
-            imei = di.imei,
-            androidId = di.androidId,
-            macAddress = di.macAddress,
-            serial = di.serial,
-            buildModel = di.buildModel,
-            buildManufacturer = di.buildManufacturer,
-            buildFingerprint = di.buildFingerprint,
-            buildBrand = di.buildBrand,
-            buildDevice = di.buildDevice,
-            buildProduct = di.buildProduct,
-            versionRelease = di.versionRelease,
-            sdkInt = di.sdkInt
-        )
-    }
+    data class PocConfig(
+        val originalPkg: String,
+        val stubPkg: String
+    )
 }
