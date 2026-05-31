@@ -1,4 +1,4 @@
-# Built outputs
+﻿# Built outputs
 *.iml
 .gradle/
 /local.properties
@@ -10,7 +10,7 @@
 
 # Gradle
 .gradle
-/gradle/wrapper/gradle-wrapper.jar
+
 
 # Android
 *.apk
