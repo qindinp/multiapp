@@ -103,6 +103,33 @@ class ManifestGeneratorTest {
         assertTrue(containsBytes(bytes, "CAMERA".toByteArray(Charsets.UTF_8)), "Should contain CAMERA")
     }
 
+    @Test
+    fun `generateBytes should encode theme IDs as reference values`() {
+        val applicationThemeId = 0x7f100123
+        val activityThemeId = 0x7f100456
+        val manifest = createTestManifest().copy(
+            applicationTheme = "@style/AppTheme",
+            applicationThemeId = applicationThemeId,
+            activities = listOf(
+                ManifestParser.ComponentInfo(
+                    name = "com.test.MainActivity",
+                    exported = true,
+                    themeId = activityThemeId
+                )
+            )
+        )
+        val config = createTestConfig()
+        val launcherActivity = manifest.activities.first()
+
+        val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
+
+        assertFalse(
+            containsBytes(bytes, "@style/AppTheme".toByteArray(Charsets.UTF_8)),
+            "Theme string should not be written into the string pool"
+        )
+        assertEquals(2, countReferenceThemeValues(bytes, applicationThemeId, activityThemeId))
+    }
+
     /**
      * 在字节数组中搜索子序列
      */
@@ -115,6 +142,48 @@ class ManifestGeneratorTest {
             return true
         }
         return false
+    }
+
+    private fun countReferenceThemeValues(bytes: ByteArray, vararg expectedThemeIds: Int): Int {
+        val resourceMapStart = 8 + le32(bytes, 12)
+        val resourceMapSize = le32(bytes, resourceMapStart + 4)
+        var offset = resourceMapStart + resourceMapSize
+        var count = 0
+
+        while (offset + 8 <= bytes.size) {
+            val chunkType = le16(bytes, offset)
+            val chunkSize = le32(bytes, offset + 4)
+            if (chunkSize < 8 || offset + chunkSize > bytes.size) break
+
+            if (chunkType == 0x0102) {
+                val attrCount = le16(bytes, offset + 28)
+                val attrsStart = offset + 36
+                for (i in 0 until attrCount) {
+                    val attrStart = attrsStart + i * 20
+                    val dataType = bytes[attrStart + 15].toInt() and 0xFF
+                    val data = le32(bytes, attrStart + 16)
+                    if (dataType == 0x01 && expectedThemeIds.contains(data)) {
+                        val rawValue = le32(bytes, attrStart + 8)
+                        assertEquals(-1, rawValue, "Reference theme rawValue should be absent")
+                        count++
+                    }
+                }
+            }
+            offset += chunkSize
+        }
+        return count
+    }
+
+    private fun le16(bytes: ByteArray, offset: Int): Int {
+        return (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+    }
+
+    private fun le32(bytes: ByteArray, offset: Int): Int {
+        return (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
     }
 
     @Test

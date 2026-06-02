@@ -166,8 +166,7 @@ class StubBuilder(
 
         val enrichedActivities = manifest.activities.map { act ->
             val activityThemeId = activityThemeById[act.name] ?: 0
-            val effectiveThemeId = if (activityThemeId != 0) activityThemeId else appThemeId
-            if (effectiveThemeId != 0) act.copy(themeId = effectiveThemeId) else act
+            if (activityThemeId != 0) act.copy(themeId = activityThemeId) else act
         }
 
         Log.w(

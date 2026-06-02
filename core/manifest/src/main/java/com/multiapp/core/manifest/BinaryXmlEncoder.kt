@@ -330,7 +330,11 @@ class BinaryXmlEncoder {
                     for (a in n.attrs) {
                         body.putInt(if (a.ns != null) idx[a.ns]!! else -1)
                         body.putInt(idx[a.name]!!)
-                        val rawIdx = idx[a.rawValue] ?: -1
+                        val rawIdx = if (a.rawValue.isEmpty() && a.dataType != TYPE_STRING) {
+                            -1
+                        } else {
+                            idx[a.rawValue] ?: -1
+                        }
                         body.putInt(rawIdx) // rawValue in string pool
                         body.putShort(8) // typedValueSize
                         body.put(0) // res0
