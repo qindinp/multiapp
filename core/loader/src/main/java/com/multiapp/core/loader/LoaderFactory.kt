@@ -7,6 +7,7 @@ import android.content.Intent
 import android.content.res.AssetManager
 import android.content.res.Resources
 import android.util.Log
+import com.multiapp.core.hook.NativeHookBridge
 import dalvik.system.PathClassLoader
 import java.io.File
 import java.util.zip.ZipFile
@@ -307,8 +308,12 @@ class LoaderFactory : AppComponentFactory() {
                 throw IllegalStateException("origin.apk missing")
             }
 
-            // 5. 替换 ClassLoader
-            logD("Step 5: Swapping ClassLoader...")
+            // 5. 安装 nativeLoad hook，确保加固壳的 JNI_OnLoad/RegisterNatives 能完整执行
+            logD("Step 5: Installing nativeLoad hook...")
+            installNativeLoadHookIfAvailable()
+
+            // 6. 替换 ClassLoader
+            logD("Step 6: Swapping ClassLoader...")
             swapClassLoader(activityThread, appInfo, originApk, config)
             logD("=== POC LoaderFactory complete ===")
 
@@ -316,6 +321,15 @@ class LoaderFactory : AppComponentFactory() {
             logE("=== POC LoaderFactory FAILED ===", e)
             try { writeDebugLogToFile(cl) } catch (_: Exception) {}
             throw e
+        }
+    }
+
+    private fun installNativeLoadHookIfAvailable() {
+        try {
+            NativeHookBridge.getInstance().hookRuntimeNativeLoad()
+            logD("  Runtime.nativeLoad hook install attempted")
+        } catch (e: Throwable) {
+            logW("  Runtime.nativeLoad hook unavailable: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
