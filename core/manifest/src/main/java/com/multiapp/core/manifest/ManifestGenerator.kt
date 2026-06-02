@@ -28,6 +28,9 @@ class ManifestGenerator {
         }
         sb.appendLine("""    <application""")
         sb.appendLine("""        android:appComponentFactory="com.multiapp.core.loader.LoaderFactory"""")
+        if (manifest.applicationClass != null) {
+            sb.appendLine("""        android:name="${manifest.applicationClass}"""")
+        }
         sb.appendLine("""        android:label="${config.stubPackageName}" android:extractNativeLibs="true">""")
         sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true" android:enabled="true">""")
         sb.appendLine("""            <intent-filter>""")

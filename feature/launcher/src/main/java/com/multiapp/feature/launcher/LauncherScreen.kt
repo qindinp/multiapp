@@ -2,6 +2,7 @@ package com.multiapp.feature.launcher
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -526,7 +527,10 @@ private fun AppPickerSheet(
                     ) {
                         AppPickerItem(
                             app = app,
-                            onClick = { onAppSelected(app) }
+                            onClick = {
+                                Log.w("LauncherScreen", "AppPickerItem clicked: ${app.packageName}")
+                                onAppSelected(app)
+                            }
                         )
                     }
                 }

@@ -23,8 +23,8 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideStubBuilder(): StubBuilder {
-        return StubBuilder()
+    fun provideStubBuilder(@ApplicationContext context: Context): StubBuilder {
+        return StubBuilder(context = context)
     }
 
     @Provides

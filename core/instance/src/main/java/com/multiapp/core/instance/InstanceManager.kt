@@ -3,6 +3,7 @@ package com.multiapp.core.instance
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import com.multiapp.core.identity.DeviceIdentityPool
 import com.multiapp.core.model.IdentityConfig
 import com.multiapp.core.hook.IdentitySpoofingEngine
@@ -39,7 +40,7 @@ class InstanceManager @Inject constructor(
     private val stubInstaller: StubInstaller,
     @ApplicationContext private val context: Context,
     private val identitySpoofingEngine: IdentitySpoofingEngine,
-    private val parser: ManifestParser = ManifestParser(),
+    private val parser: ManifestParser = ManifestParser(context),
     private val extractor: ComponentExtractor = ComponentExtractor()
 ) {
     private val _instances = MutableStateFlow<List<InstanceInfo>>(emptyList())
@@ -70,7 +71,7 @@ class InstanceManager @Inject constructor(
         app: VirtualApp,
         onProgress: suspend (String) -> Unit = {}
     ): String = withContext(Dispatchers.IO) {
-        Timber.d("InstanceManager: creating instance for ${app.packageName}")
+        Log.w("InstanceMgr", "createInstance: ${app.packageName}, apkPath=${app.apkPath}")
         val instanceId = "stub_${UUID.randomUUID().toString().replace("-", "")}"
 
         // 1. 生成设备身份 (DeviceIdentityPool 是 object 单例，直接调用)
@@ -78,21 +79,25 @@ class InstanceManager @Inject constructor(
         val originApkFile = File(app.apkPath)
         require(originApkFile.exists()) { "Origin APK not found: ${app.apkPath}" }
         val manifest = parser.parse(originApkFile)
-        Timber.d("InstanceManager: parsed manifest, ${manifest.activities.size} activities")
+        Log.w("InstanceMgr", "parsed manifest: ${manifest.activities.size} activities")
 
         // 2. 提取 launcher Activity
         val launcherActivity = extractor.extractLauncherActivity(manifest)
             ?: error("No launcher activity found in ${app.packageName}")
-        Timber.d("InstanceManager: launcher activity = ${launcherActivity.name}")
+        Log.w("InstanceMgr", "launcher activity = ${launcherActivity.name}")
 
         onProgress("生成身份")
         val identity = DeviceIdentityPool.generateIdentity(instanceId, app.packageName)
-        Timber.d("InstanceManager: generated identity, stubPackage=${identity.stubPackageName}")
+        Log.w("InstanceMgr", "identity generated, stubPackage=${identity.stubPackageName}")
 
         // 2.5. 将身份同步到 IdentitySpoofingEngine，确保运行时使用相同的身份
-        val deviceProfile = identity.toDeviceProfile()
-        identitySpoofingEngine.applyDeviceProfile(deviceProfile, instanceId, identity)
-        Timber.d("InstanceManager: identity synced to IdentitySpoofingEngine")
+        try {
+            val deviceProfile = identity.toDeviceProfile()
+            identitySpoofingEngine.applyDeviceProfile(deviceProfile, instanceId, identity)
+            Log.w("InstanceMgr", "identity synced to IdentitySpoofingEngine")
+        } catch (e: Throwable) {
+            Log.e("InstanceMgr", "applyDeviceProfile failed (non-fatal, continuing)", e)
+        }
 
         // 3. 将 IdentityConfig 转换为 StubConfig 所需的 DeviceIdentityConfig
         val deviceIdentityConfig = DeviceIdentityConfig(
@@ -114,6 +119,7 @@ class InstanceManager @Inject constructor(
         val patchedDexPaths = runDexPatch(originApkFile, instanceId)
 
         onProgress("构建Stub")
+        Log.w("InstanceMgr", "building stub APK")
         // 5. 构建 StubConfig (originalSignatures 存放 originApk 路径)
         val stubConfig = StubConfig(
             instanceId = instanceId,
@@ -128,7 +134,7 @@ class InstanceManager @Inject constructor(
 
         // 6. 构建 Stub APK
         val stubApk = stubBuilder.build(stubConfig)
-        Timber.d("InstanceManager: stub APK built at ${stubApk.absolutePath}")
+        Log.w("InstanceMgr", "stub APK built: ${stubApk.absolutePath}, size=${stubApk.length()}")
 
         onProgress("安装中")
         // 7. 安装 Stub (智能降级: Session API → 系统安装器 Intent)
@@ -136,13 +142,13 @@ class InstanceManager @Inject constructor(
         val installResult = stubInstaller.install(stubApk)
         when (installResult) {
             is StubInstaller.InstallResult.Success -> {
-                Timber.d("InstanceManager: stub install initiated successfully")
+                Log.w("InstanceMgr", "stub install initiated successfully")
             }
             is StubInstaller.InstallResult.PendingUserConfirmation -> {
-                Timber.d("InstanceManager: waiting for user to confirm installation")
+                Log.w("InstanceMgr", "waiting for user to confirm installation")
             }
             is StubInstaller.InstallResult.Error -> {
-                Timber.e("InstanceManager: stub install failed: ${installResult.message}")
+                Log.e("InstanceMgr", "stub install failed: ${installResult.message}")
                 throw RuntimeException("Stub install failed: ${installResult.message}")
             }
         }
@@ -155,7 +161,7 @@ class InstanceManager @Inject constructor(
             try {
                 context.packageManager.getPackageInfo(identity.stubPackageName, 0)
                 installConfirmed = true
-                Timber.d("InstanceManager: install confirmed on attempt $attempt")
+                Log.w("InstanceMgr", "install confirmed on attempt $attempt")
                 break
             } catch (_: Exception) {
                 kotlinx.coroutines.delay(1000)
@@ -177,7 +183,7 @@ class InstanceManager @Inject constructor(
             status = InstanceStatus.READY.name
         )
         instanceDatabase.instanceDao().insert(entity)
-        Timber.d("InstanceManager: instance saved to database")
+        Log.w("InstanceMgr", "instance saved to database")
 
         // 10. 更新 StateFlow
         val info = InstanceInfo(
@@ -190,7 +196,7 @@ class InstanceManager @Inject constructor(
         )
         _instances.update { it + info }
 
-        Timber.d("InstanceManager: instance created successfully, id=$instanceId")
+        Log.w("InstanceMgr", "instance created successfully, id=$instanceId")
         instanceId
     }
 

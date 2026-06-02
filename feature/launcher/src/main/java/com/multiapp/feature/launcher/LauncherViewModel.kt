@@ -7,6 +7,7 @@ import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceManager
 import com.multiapp.core.model.VirtualApp
 import dagger.hilt.android.lifecycle.HiltViewModel
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -50,10 +51,10 @@ class LauncherViewModel @Inject constructor(
             try {
                 instanceManager.loadInstances()
                 _uiState.update { it.copy(isLoading = false) }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 if (e is CancellationException) throw e
-                Timber.e(e, "Failed to load instances")
-                _uiState.update { it.copy(isLoading = false, error = e.message) }
+                Log.e("LauncherVM", "Failed to load instances", e)
+                _uiState.update { it.copy(isLoading = false, error = e.message ?: "Unknown error") }
             }
         }
         // 单独的观察协程，避免 collect 永不结束阻塞 loadJob
@@ -70,15 +71,17 @@ class LauncherViewModel @Inject constructor(
             _uiState.update { it.copy(creationStep = "准备中…", error = null) }
 
             try {
+                Log.w("LauncherVM", "createInstance called for ${app.packageName}")
                 instanceManager.createInstance(app) { step ->
+                    Log.w("LauncherVM", "creation step: $step")
                     _uiState.update { it.copy(creationStep = step) }
                 }
 
                 _uiState.update { it.copy(creationStep = null) }
                 loadInstances()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 if (e is CancellationException) throw e
-                Timber.e(e, "Failed to create instance")
+                Log.e("LauncherVM", "Failed to create instance", e)
                 val (friendly, detail) = e.toUserError()
                 _uiState.update {
                     it.copy(creationStep = null, error = friendly, errorDetail = detail)
@@ -95,10 +98,10 @@ class LauncherViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 instanceManager.deleteInstance(instanceId)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 if (e is CancellationException) throw e
-                Timber.e(e, "Failed to delete instance")
-                _uiState.update { it.copy(error = e.message) }
+                Log.e("LauncherVM", "Failed to delete instance", e)
+                _uiState.update { it.copy(error = e.message ?: "Unknown error") }
             }
         }
     }
@@ -123,9 +126,9 @@ class LauncherViewModel @Inject constructor(
                     }
                     .sortedBy { it.appName.lowercase() }
                 _allApps.value = apps
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 if (e is CancellationException) throw e
-                Timber.e(e, "Failed to load all apps")
+                Log.e("LauncherVM", "Failed to load all apps", e)
             }
         }
     }
@@ -133,7 +136,7 @@ class LauncherViewModel @Inject constructor(
     /**
      * 将技术异常转换为用户友好的错误信息
      */
-    private fun Exception.toUserError(): Pair<String, String?> {
+    private fun Throwable.toUserError(): Pair<String, String?> {
         val msg = message ?: ""
         return when {
             msg.contains("loader.dex not found") ->

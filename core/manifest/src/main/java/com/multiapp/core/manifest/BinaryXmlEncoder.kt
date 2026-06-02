@@ -25,6 +25,7 @@ class BinaryXmlEncoder {
         private const val RES_XML_END_ELEMENT_TYPE = 0x0103
         private const val RES_XML_RESOURCE_MAP_TYPE = 0x0180
         private const val TYPE_STRING = 0x03
+        private const val TYPE_REFERENCE = 0x01
         private const val TYPE_INT_DEC = 0x10
         private const val TYPE_INT_BOOLEAN = 0x12
 
@@ -39,6 +40,7 @@ class BinaryXmlEncoder {
             "name" to 0x01010003,
             "label" to 0x01010001,
             "icon" to 0x01010002,
+            "theme" to 0x01010000,
             "debuggable" to 0x0101000f,
             "exported" to 0x01010010,
             "process" to 0x01010011,
@@ -46,7 +48,8 @@ class BinaryXmlEncoder {
             "appComponentFactory" to 0x0101057a,
             "permission" to 0x01010006,
             "enabled" to 0x0101000e,
-            "extractNativeLibs" to 0x01010419
+            "extractNativeLibs" to 0x010104ea,
+            "grantUriPermissions" to 0x0101001b
         )
     }
 
@@ -100,6 +103,7 @@ class BinaryXmlEncoder {
         val IDX_TARGET_SDK = attrStr("targetSdkVersion")
         val IDX_NAME = attrStr("name")
         val IDX_LABEL = attrStr("label")
+        val IDX_THEME = attrStr("theme")
         val IDX_EXPORTED = attrStr("exported")
         val IDX_PROCESS = attrStr("process")
         val IDX_AUTHORITIES = attrStr("authorities")
@@ -107,6 +111,7 @@ class BinaryXmlEncoder {
         val IDX_PERMISSION = attrStr("permission")
         val IDX_ENABLED = attrStr("enabled")
         val IDX_EXTRACT_NATIVE_LIBS = attrStr("extractNativeLibs")
+        val IDX_GRANT_URI_PERMS = attrStr("grantUriPermissions")
 
         // 其他字符串
         val NS_URI = otherStr(ANDROID_NS_URI)
@@ -146,6 +151,13 @@ class BinaryXmlEncoder {
         val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId, config.authorityMap)
         for (p in rewrittenProviders) { otherStr(p.name); p.authorities?.let { otherStr(it) } }
 
+        // 如果有 applicationClass，动态添加到 string pool
+        val appClassName = manifest.applicationClass
+        if (appClassName != null) otherStr(appClassName)
+
+        // theme 以 TYPE_REFERENCE（资源 ID）写入，不进 string pool。
+        // applicationTheme 字符串仅保留用于日志/调试，不再注入。
+
         // 合并: 属性名在前，其他在后
         val pool = attrNames + otherStrings
         val otherOffset = attrNames.size
@@ -175,18 +187,17 @@ class BinaryXmlEncoder {
             nodes.add(Node.ElemEnd(null, "uses-permission"))
         }
 
-        nodes.add(Node.ElemStart(null, "application", listOf(
-            XmlAttr(ANDROID_NS_URI, "appComponentFactory", "com.multiapp.core.loader.LoaderFactory"),
-            XmlAttr(ANDROID_NS_URI, "label", config.stubPackageName),
-            XmlAttr(ANDROID_NS_URI, "extractNativeLibs", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN)
-        )))
+        nodes.add(Node.ElemStart(null, "application", buildApplicationAttrs(config, manifest.applicationClass, manifest.applicationThemeId)))
 
         // Launcher activity
-        nodes.add(Node.ElemStart(null, "activity", listOf(
-            XmlAttr(ANDROID_NS_URI, "name", launcherActivity.name),
-            XmlAttr(ANDROID_NS_URI, "exported", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN),
-            XmlAttr(ANDROID_NS_URI, "enabled", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN)
-        )))
+        nodes.add(Node.ElemStart(null, "activity", buildList {
+            add(XmlAttr(ANDROID_NS_URI, "name", launcherActivity.name))
+            add(XmlAttr(ANDROID_NS_URI, "exported", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN))
+            add(XmlAttr(ANDROID_NS_URI, "enabled", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN))
+            if (launcherActivity.themeId != 0) {
+                add(XmlAttr(ANDROID_NS_URI, "theme", "", typedValue = launcherActivity.themeId, dataType = TYPE_REFERENCE))
+            }
+        }))
         nodes.add(Node.ElemStart(null, "intent-filter", emptyList()))
         nodes.add(Node.ElemStart(null, "action", listOf(XmlAttr(ANDROID_NS_URI, "name", "android.intent.action.MAIN"))))
         nodes.add(Node.ElemEnd(null, "action"))
@@ -198,17 +209,22 @@ class BinaryXmlEncoder {
         // Other activities
         for (a in manifest.activities) {
             if (a.name == launcherActivity.name) continue
-            addComponentNode(nodes, "activity", a.name, a.exported, a.process)
+            addComponentNode(nodes, "activity", a.name, a.exported, a.process, a.themeId)
         }
         for (s in manifest.services) addComponentNode(nodes, "service", s.name, s.exported, s.process)
         for (r in manifest.receivers) addComponentNode(nodes, "receiver", r.name, r.exported, r.process)
         for (p in rewrittenProviders) {
-            nodes.add(Node.ElemStart(null, "provider", listOf(
+            val attrs = mutableListOf(
                 XmlAttr(ANDROID_NS_URI, "name", p.name),
                 XmlAttr(ANDROID_NS_URI, "authorities", p.authorities ?: ""),
                 XmlAttr(ANDROID_NS_URI, "exported", if (p.exported) "true" else "false",
                     typedValue = if (p.exported) -1 else 0, dataType = TYPE_INT_BOOLEAN)
-            )))
+            )
+            if (p.grantUriPermissions) {
+                attrs.add(XmlAttr(ANDROID_NS_URI, "grantUriPermissions", "true",
+                    typedValue = -1, dataType = TYPE_INT_BOOLEAN))
+            }
+            nodes.add(Node.ElemStart(null, "provider", attrs))
             nodes.add(Node.ElemEnd(null, "provider"))
         }
 
@@ -219,13 +235,29 @@ class BinaryXmlEncoder {
         return encodeBinary(pool, attrNames.size, nodes)
     }
 
-    private fun addComponentNode(nodes: MutableList<Node>, tag: String, name: String, exported: Boolean, process: String?) {
+    private fun addComponentNode(nodes: MutableList<Node>, tag: String, name: String, exported: Boolean, process: String?, themeId: Int = 0) {
         val attrs = mutableListOf(XmlAttr(ANDROID_NS_URI, "name", name))
         attrs.add(XmlAttr(ANDROID_NS_URI, "exported", if (exported) "true" else "false",
             typedValue = if (exported) -1 else 0, dataType = TYPE_INT_BOOLEAN))
         if (process != null) attrs.add(XmlAttr(ANDROID_NS_URI, "process", process))
+        if (themeId != 0) attrs.add(XmlAttr(ANDROID_NS_URI, "theme", "", typedValue = themeId, dataType = TYPE_REFERENCE))
         nodes.add(Node.ElemStart(null, tag, attrs))
         nodes.add(Node.ElemEnd(null, tag))
+    }
+
+    private fun buildApplicationAttrs(config: StubConfig, applicationClass: String?, applicationThemeId: Int): List<XmlAttr> {
+        val attrs = mutableListOf(XmlAttr(ANDROID_NS_URI, "appComponentFactory", "com.multiapp.core.loader.LoaderFactory"))
+        if (applicationClass != null) {
+            attrs.add(XmlAttr(ANDROID_NS_URI, "name", applicationClass))
+        }
+        // theme 以 TYPE_REFERENCE 写入原 app 的资源 ID。运行时 addAssetPath(origin.apk)
+        // 已挂载原 app 资源，该 ID 解析到原 app 自己的 theme。0 表示原 app 未声明，则不写。
+        if (applicationThemeId != 0) {
+            attrs.add(XmlAttr(ANDROID_NS_URI, "theme", "", typedValue = applicationThemeId, dataType = TYPE_REFERENCE))
+        }
+        attrs.add(XmlAttr(ANDROID_NS_URI, "label", config.stubPackageName))
+        attrs.add(XmlAttr(ANDROID_NS_URI, "extractNativeLibs", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN))
+        return attrs
     }
 
     /**
@@ -333,9 +365,9 @@ class BinaryXmlEncoder {
     }
 
     /**
-     * 编码 StringPool chunk (UTF-16LE)
+     * 编码 StringPool chunk (UTF-8)
      *
-     * 每个字符串: [uint16 charCount] [UTF-16LE bytes] [uint16 0x0000]
+     * 每个字符串: [charCount] [byteCount] [UTF-8 bytes] [null terminator]
      * 每个条目必须 4 字节对齐，Android ResStringPool 解析器要求此对齐。
      */
     private fun encodeStringPool(strings: List<String>): ByteArray {
@@ -367,6 +399,10 @@ class BinaryXmlEncoder {
             strData.write(utf8Bytes)
             // null terminator
             strData.write(0)
+            // Per-string 4-byte alignment padding (Android ResStringPool parser requires this)
+            val currentSize = strData.size()
+            val alignPad = (4 - (currentSize % 4)) % 4
+            for (p in 0 until alignPad) strData.write(0)
         }
 
         val dataBytes = strData.toByteArray()

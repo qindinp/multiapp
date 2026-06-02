@@ -118,6 +118,39 @@ class ManifestGeneratorTest {
     }
 
     @Test
+    fun `generateBytes string pool entries should be 4-byte aligned`() {
+        val manifest = createTestManifest()
+        val config = createTestConfig()
+        val launcherActivity = ManifestParser.ComponentInfo("com.test.MainActivity", true, null)
+
+        val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
+
+        // 解析 StringPool header
+        // RES_XML_TYPE header: 8 bytes (type=2, headerSize=2, size=4)
+        // StringPool starts at offset 8
+        val spChunkType = (bytes[8].toInt() and 0xFF) or ((bytes[9].toInt() and 0xFF) shl 8)
+        assertEquals(0x0001, spChunkType, "Expected RES_STRING_POOL_TYPE at offset 8")
+
+        // StringPool header fields (all little-endian):
+        // offset 12: stringCount (4 bytes)
+        // offset 24: stringsStart (4 bytes)
+        val stringCount = (bytes[16].toInt() and 0xFF) or
+            ((bytes[17].toInt() and 0xFF) shl 8) or
+            ((bytes[18].toInt() and 0xFF) shl 16) or
+            ((bytes[19].toInt() and 0xFF) shl 24)
+        assertTrue(stringCount > 0, "StringPool should have strings")
+
+        // 每个字符串偏移量从 offset 28 开始，每个 4 字节
+        for (i in 0 until stringCount) {
+            val offset = (bytes[28 + i * 4].toInt() and 0xFF) or
+                ((bytes[29 + i * 4].toInt() and 0xFF) shl 8) or
+                ((bytes[30 + i * 4].toInt() and 0xFF) shl 16) or
+                ((bytes[31 + i * 4].toInt() and 0xFF) shl 24)
+            assertEquals(0, offset % 4, "String $i offset $offset is not 4-byte aligned")
+        }
+    }
+
+    @Test
     fun `generate should produce valid text XML`() {
         val manifest = createTestManifest()
         val config = createTestConfig()

@@ -9,6 +9,7 @@ import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.multiapp.core.common.ConfigEncryptor
 import timber.log.Timber
+import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.CRC32
@@ -21,7 +22,8 @@ import java.util.zip.ZipOutputStream
  * 组装完整的 Stub APK: manifest + DEX + 原始 APK (assets) + 配置 + 签名
  */
 class StubBuilder(
-    private val parser: ManifestParser = ManifestParser(),
+    private val context: android.content.Context? = null,
+    private val parser: ManifestParser = context?.let { ManifestParser(it) } ?: ManifestParser(),
     private val generator: ManifestGenerator = ManifestGenerator(),
     private val extractor: ComponentExtractor = ComponentExtractor()
 ) {
@@ -52,7 +54,7 @@ class StubBuilder(
      * @return 生成的 Stub APK 文件
      */
     fun build(config: StubConfig): File {
-        Timber.d("StubBuilder: building stub for ${config.originalPackageName}")
+        Log.w("StubBuilder", "build() called, instanceId=${config.instanceId}, pkg=${config.stubPackageName}")
 
         val workDir = createWorkDir(config.instanceId)
         try {
@@ -61,18 +63,28 @@ class StubBuilder(
                 ?: error("originalSignatures must contain the origin APK path"))
             require(originApk.exists()) { "Origin APK not found: ${originApk.absolutePath}" }
 
-            val manifest = parser.parse(originApk)
-            Timber.d("StubBuilder: parsed manifest, ${manifest.activities.size} activities")
+            val parsedManifest = parser.parse(originApk)
+            Log.w("StubBuilder", "parsed manifest, ${parsedManifest.activities.size} activities")
 
-            // 2. 生成 Stub manifest (二进制 XML)
+            // 2. 提取原 app 的 theme 资源 ID（int），用于以 TYPE_REFERENCE 写进 stub manifest。
+            // 运行时 addAssetPath(origin.apk) 已挂载原 app 资源，该 ID 正确解析到原 app 自己的 theme。
+            val manifest = enrichWithThemeIds(parsedManifest, originApk)
+
+            // 3. 生成 Stub manifest (二进制 XML)
             val launcherActivity = extractor.extractLauncherActivity(manifest)
                 ?: error("No launcher activity found in origin APK")
-            val manifestBytes = generator.generateBytes(
-                stubPackageName = config.stubPackageName,
-                manifest = manifest,
-                launcherActivity = launcherActivity,
-                config = config
-            )
+            val manifestBytes = try {
+                generator.generateBytes(
+                    stubPackageName = config.stubPackageName,
+                    manifest = manifest,
+                    launcherActivity = launcherActivity,
+                    config = config
+                )
+            } catch (e: Throwable) {
+                Log.e("StubBuilder", "generateBytes failed", e)
+                throw e
+            }
+            Log.w("StubBuilder", "manifest binary XML: ${manifestBytes.size} bytes")
 
             // 3. 提取 launcher icon
             val iconFile = extractLauncherIcon(originApk, workDir)
@@ -84,6 +96,7 @@ class StubBuilder(
 
             // 5. 获取 loader DEX
             val loaderDex = getLoaderDex()
+            Log.w("StubBuilder", "loader.dex: ${loaderDex.size} bytes")
 
             // 6. 组装 APK (含 patched DEX)
             val patchedDexFiles = config.patchedDexPaths.map { File(it) }.filter { it.exists() }
@@ -112,11 +125,62 @@ class StubBuilder(
             val outputFile = File(outputDir, "stub-${config.instanceId}.apk")
             signedApk.copyTo(outputFile, overwrite = true)
 
-            Timber.d("StubBuilder: stub APK built at ${outputFile.absolutePath}")
+            Log.w("StubBuilder", "stub APK built at ${outputFile.absolutePath}, size=${outputFile.length()}")
             return outputFile
         } finally {
             workDir.deleteRecursively()
         }
+    }
+
+    /**
+     * 用原 app 的 theme 资源 ID 补全 ParsedManifest。
+     *
+     * 通过 PackageManager.getPackageArchiveInfo 直接拿到 int 资源 ID（可靠，
+     * 无需解析 binary XML）：
+     * - applicationInfo.theme → application theme ID
+     * - 每个 activityInfo.theme → 对应 activity 的 theme ID（0 = 未声明）
+     *
+     * 无 context（测试场景）时原样返回，theme ID 保持 0，回退到旧行为。
+     */
+    internal fun enrichWithThemeIds(
+        manifest: ManifestParser.ParsedManifest,
+        originApk: File
+    ): ManifestParser.ParsedManifest {
+        val pm = context?.packageManager ?: run {
+            Log.w("StubBuilder", "no context, skip theme ID extraction")
+            return manifest
+        }
+        @Suppress("DEPRECATION")
+        val pkgInfo = pm.getPackageArchiveInfo(
+            originApk.absolutePath,
+            android.content.pm.PackageManager.GET_ACTIVITIES
+        )
+        if (pkgInfo == null) {
+            Log.w("StubBuilder", "getPackageArchiveInfo returned null, theme IDs unavailable")
+            return manifest
+        }
+
+        val appThemeId = pkgInfo.applicationInfo?.theme ?: 0
+        val activityThemeById = (pkgInfo.activities ?: emptyArray())
+            .associate { it.name to it.theme }
+
+        val enrichedActivities = manifest.activities.map { act ->
+            val activityThemeId = activityThemeById[act.name] ?: 0
+            val effectiveThemeId = if (activityThemeId != 0) activityThemeId else appThemeId
+            if (effectiveThemeId != 0) act.copy(themeId = effectiveThemeId) else act
+        }
+
+        Log.w(
+            "StubBuilder",
+            "Extracted theme IDs: app=0x${Integer.toHexString(appThemeId)}, " +
+                "activities=${activityThemeById.filterValues { it != 0 }
+                    .mapValues { "0x${Integer.toHexString(it.value)}" }}"
+        )
+
+        return manifest.copy(
+            applicationThemeId = appThemeId,
+            activities = enrichedActivities
+        )
     }
 
     /**
@@ -218,11 +282,16 @@ class StubBuilder(
                 "sdkInt" to config.deviceIdentity.sdkInt
             )
         )
-        // 加密敏感字段 (IMEI, MAC, AndroidId, Serial)
-        val encryptedMap = ConfigEncryptor.encryptSensitiveFields(
-            configMap, config.stubPackageName, config.instanceId
-        )
-        return gson.toJson(encryptedMap)
+        // 加密敏感字段 (IMEI, MAC, AndroidId, Serial) — 失败时使用明文
+        return try {
+            val encryptedMap = ConfigEncryptor.encryptSensitiveFields(
+                configMap, config.stubPackageName, config.instanceId
+            )
+            gson.toJson(encryptedMap)
+        } catch (e: Throwable) {
+            Log.e("StubBuilder", "ConfigEncryptor failed, using plain JSON", e)
+            gson.toJson(configMap)
+        }
     }
 
     /**

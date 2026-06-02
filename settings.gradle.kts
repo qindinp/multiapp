@@ -41,3 +41,6 @@ include(":core:installer")
 include(":feature:launcher")
 include(":feature:appmanager")
 include(":feature:settings")
+
+// Test fixtures
+include(":test-fixtures:minimal-app")
