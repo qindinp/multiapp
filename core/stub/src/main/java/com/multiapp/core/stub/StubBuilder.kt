@@ -34,6 +34,7 @@ class StubBuilder(
         private const val CONFIG_JSON_ENTRY = "assets/multiapp_config.json"
         private const val MANIFEST_ENTRY = "AndroidManifest.xml"
         private const val DEX_ENTRY = "classes.dex"
+        private val HOOK_NATIVE_LIBS = listOf("libmultiapp-native.so", "libshadowhook.so")
     }
 
     private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
@@ -392,27 +393,23 @@ class StubBuilder(
             Timber.w(e, "Failed to extract native libs from origin APK")
         }
 
-        // 2. 从当前应用的 native lib 目录提取 libmultiapp-native.so
+        // 2. 从当前应用的 native lib 目录提取 hook libs
         // loader.dex 运行时需要它来做 shadowhook PLT hook
         // 只打包当前设备 ABI (构建时可用的)
         try {
-            val primaryAbi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+            val primaryAbi = currentProcessSupportedAbis().firstOrNull() ?: "arm64-v8a"
             val appNativeDir = findAppNativeLibDir(primaryAbi)
             if (appNativeDir != null) {
-                val nativeFiles = listOf(
-                    "libmultiapp-native.so",
-                    "libshadowhook.so"
-                )
-                for (libName in nativeFiles) {
+                for (libName in HOOK_NATIVE_LIBS) {
                     val libFile = File(appNativeDir, libName)
-                    if (libFile.exists()) {
-                        zos.putNextEntry(ZipEntry("lib/$primaryAbi/$libName"))
-                        libFile.inputStream().use { it.copyTo(zos) }
-                        zos.closeEntry()
-                        count++
-                        Timber.d("StubBuilder: packaged $libName from app native dir")
-                    }
+                    zos.putNextEntry(ZipEntry("lib/$primaryAbi/$libName"))
+                    libFile.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                    count++
+                    Timber.d("StubBuilder: packaged $libName from ${appNativeDir.absolutePath}")
                 }
+            } else {
+                Timber.w("StubBuilder: hook native libs unavailable for ABI $primaryAbi")
             }
         } catch (e: Exception) {
             Timber.w(e, "Failed to package app native libs")
@@ -425,24 +422,57 @@ class StubBuilder(
      * 查找当前应用的 native library 目录
      */
     private fun findAppNativeLibDir(abi: String): File? {
+        val contextNativeDir = context?.applicationInfo?.nativeLibraryDir
+            ?.let { File(it) }
+        if (contextNativeDir?.isDirectory == true && hasHookNativeLibs(contextNativeDir)) {
+            return contextNativeDir
+        }
+
         // 动态查找：扫描 /data/app/ 下所有 com.multiapp.app* 目录
         val dataApp = File("/data/app")
+        val nativeDirNames = nativeDirNamesForAbi(abi)
         if (dataApp.isDirectory) {
             dataApp.listFiles()?.filter { dir ->
                 dir.isDirectory && dir.name.startsWith("com.multiapp.app")
             }?.forEach { appDir ->
                 // 尝试直接子目录 lib/$abi
-                val libDir = File(appDir, "lib/$abi")
-                if (libDir.isDirectory && libDir.listFiles()?.isNotEmpty() == true) return libDir
+                for (dirName in nativeDirNames) {
+                    val libDir = File(appDir, "lib/$dirName")
+                    if (libDir.isDirectory && hasHookNativeLibs(libDir)) return libDir
+                }
                 // 尝试 OAT/ODEX 结构下的 lib 目录
                 appDir.listFiles()?.filter { it.isDirectory }?.forEach { subDir ->
-                    val subLibDir = File(subDir, "lib/$abi")
-                    if (subLibDir.isDirectory && subLibDir.listFiles()?.isNotEmpty() == true) return subLibDir
+                    for (dirName in nativeDirNames) {
+                        val subLibDir = File(subDir, "lib/$dirName")
+                        if (subLibDir.isDirectory && hasHookNativeLibs(subLibDir)) return subLibDir
+                    }
                 }
             }
         }
         // 回退：从当前进程的 maps 中查找
-        return findNativeLibDirFromMaps()
+        return findNativeLibDirFromMaps()?.takeIf { hasHookNativeLibs(it) }
+    }
+
+    private fun currentProcessSupportedAbis(): Array<String> {
+        val processAbis = if (android.os.Process.is64Bit()) {
+            android.os.Build.SUPPORTED_64_BIT_ABIS
+        } else {
+            android.os.Build.SUPPORTED_32_BIT_ABIS
+        }
+        return if (processAbis.isNotEmpty()) processAbis else android.os.Build.SUPPORTED_ABIS
+    }
+
+    private fun nativeDirNamesForAbi(abi: String): List<String> {
+        val installDirName = when (abi) {
+            "arm64-v8a" -> "arm64"
+            "armeabi-v7a", "armeabi" -> "arm"
+            else -> abi
+        }
+        return listOf(abi, installDirName).distinct()
+    }
+
+    private fun hasHookNativeLibs(dir: File): Boolean {
+        return HOOK_NATIVE_LIBS.all { File(dir, it).isFile }
     }
 
     /**
