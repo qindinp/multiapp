@@ -416,18 +416,18 @@ class LoaderFactory : AppComponentFactory() {
         logD("  Updated sourceDir -> ${appInfo.sourceDir}")
         logD("  Kept packageName as stub: ${appInfo.packageName}")
 
-        val originLibDir = File(originApk.parentFile, "lib")
+        val originLibDir = extractOriginNativeLibs(originApk)
         val nativeSearchPaths = mutableListOf<String>()
-        if (originLibDir.isDirectory) {
+        if (originLibDir != null && originLibDir.isDirectory) {
             nativeSearchPaths += originLibDir.absolutePath
             logD("  Found extracted origin lib dir: ${originLibDir.absolutePath}")
         } else {
-            logD("  No lib dir found at ${originLibDir.absolutePath}")
+            logD("  No extracted origin lib dir available")
         }
         listOfNotNull(stubNativeLibraryDir, stubSecondaryNativeLibraryDir)
             .filter { it.isNotBlank() }
             .forEach { nativeSearchPaths += it }
-        android.os.Build.SUPPORTED_ABIS
+        currentProcessSupportedAbis()
             .filter { it.isNotBlank() }
             .forEach { abi -> nativeSearchPaths += "$stubApkPath!/lib/$abi" }
 
@@ -435,8 +435,9 @@ class LoaderFactory : AppComponentFactory() {
             .distinct()
             .joinToString(File.pathSeparator)
         if (nativeLibraryPath.isNotBlank()) {
-            appInfo.nativeLibraryDir = nativeSearchPaths.first()
-            originNativeLibDir = nativeLibraryPath
+            val exposedNativeLibDir = originLibDir?.absolutePath ?: nativeSearchPaths.first()
+            appInfo.nativeLibraryDir = exposedNativeLibDir
+            originNativeLibDir = exposedNativeLibDir
             logD("  Updated nativeLibraryDir -> ${appInfo.nativeLibraryDir}")
             logD("  Native library search path -> $nativeLibraryPath")
         } else {
@@ -768,6 +769,121 @@ class LoaderFactory : AppComponentFactory() {
         // Android 禁止从可写目录加载 dex 文件，必须设为只读
         ensureReadOnly(output)
         return output
+    }
+
+    /**
+     * Extract origin APK native libraries for the current process ABI.
+     *
+     * Loading protected apps directly from "base.apk!/lib/<abi>" is fragile: some
+     * packers expect a real filesystem path during early Application init.
+     */
+    private fun extractOriginNativeLibs(originApk: File): File? {
+        ZipFile(originApk).use { zip ->
+            val abi = findOriginNativeAbi(zip)
+            if (abi == null) {
+                logW("No origin native libs found for current process ABIs")
+                return null
+            }
+
+            val prefix = "lib/$abi/"
+            val entries = zip.entries().asSequence()
+                .filter { !it.isDirectory && it.name.startsWith(prefix) && it.name.endsWith(".so") }
+                .toList()
+
+            val outputDir = File(originApk.parentFile, "lib/${nativeDirNameForAbi(abi)}")
+            val marker = File(outputDir, ".complete")
+            val markerText = buildString {
+                append("abi=").append(abi).append('\n')
+                append("apkLength=").append(originApk.length()).append('\n')
+                append("apkLastModified=").append(originApk.lastModified()).append('\n')
+                append("count=").append(entries.size).append('\n')
+            }
+
+            val existingSoCount = outputDir.listFiles()?.count { it.isFile && it.extension == "so" } ?: 0
+            if (marker.exists() && marker.readText() == markerText && existingSoCount >= entries.size) {
+                logD("Origin native libs already extracted for $abi")
+                ensureReadOnlyTree(outputDir)
+                return outputDir
+            }
+
+            outputDir.mkdirs()
+            ensureWritableDir(outputDir)
+            outputDir.listFiles()
+                ?.filter { it.isFile && (it.extension == "so" || it.name == marker.name) }
+                ?.forEach { file ->
+                    if (!file.delete()) {
+                        logW("  Failed to delete stale native lib cache file: ${file.name}")
+                    }
+                }
+
+            var extracted = 0
+            entries.forEach { entry ->
+                val outFile = File(outputDir, entry.name.substringAfterLast('/'))
+                zip.getInputStream(entry).use { input ->
+                    outFile.outputStream().use { output -> input.copyTo(output) }
+                }
+                ensureReadOnly(outFile)
+                extracted++
+                logD("  Extracted origin native lib: ${outFile.name}")
+            }
+
+            marker.writeText(markerText)
+            ensureReadOnly(marker)
+            ensureReadOnlyTree(outputDir)
+            logD("Extracted $extracted origin native libs for $abi to ${outputDir.absolutePath}")
+            return outputDir
+        }
+    }
+
+    private fun ensureWritableDir(dir: File) {
+        try {
+            dir.setWritable(true, true)
+            Runtime.getRuntime().exec(arrayOf("chmod", "755", dir.absolutePath)).waitFor()
+        } catch (e: Exception) {
+            logW("ensureWritableDir failed: ${e.message}")
+        }
+    }
+
+    private fun findOriginNativeAbi(zip: ZipFile): String? {
+        val availableAbis = zip.entries().asSequence()
+            .mapNotNull { entry ->
+                val name = entry.name
+                if (!entry.isDirectory && name.startsWith("lib/") && name.endsWith(".so")) {
+                    name.removePrefix("lib/").substringBefore('/')
+                } else {
+                    null
+                }
+            }
+            .toSet()
+        return currentProcessSupportedAbis().firstOrNull { it in availableAbis }
+    }
+
+    private fun currentProcessSupportedAbis(): Array<String> {
+        val processAbis = if (android.os.Process.is64Bit()) {
+            android.os.Build.SUPPORTED_64_BIT_ABIS
+        } else {
+            android.os.Build.SUPPORTED_32_BIT_ABIS
+        }
+        return if (processAbis.isNotEmpty()) processAbis else android.os.Build.SUPPORTED_ABIS
+    }
+
+    private fun nativeDirNameForAbi(abi: String): String {
+        return when (abi) {
+            "arm64-v8a" -> "arm64"
+            "armeabi-v7a", "armeabi" -> "arm"
+            else -> abi
+        }
+    }
+
+    private fun ensureReadOnlyTree(dir: File) {
+        try {
+            dir.walkTopDown().forEach { file ->
+                if (file.isFile) ensureReadOnly(file)
+            }
+            Runtime.getRuntime().exec(arrayOf("chmod", "555", dir.absolutePath)).waitFor()
+        } catch (e: Exception) {
+            logW("ensureReadOnlyTree failed: ${e.message}")
+        }
     }
 
     /**
