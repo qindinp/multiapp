@@ -37,6 +37,13 @@ class NativeHookBridge {
             "/system/lib/libc_malloc_debug_qemu.so", "/sys/qemu_trace", "/system/bin/qemu-props"
         )
 
+        private val DEFAULT_NATIVE_LOAD_CALLERS = arrayOf(
+            "com.stub.StubApp",
+            "com.qihoo.util.StubApp",
+            "com.stub.StubApplication",
+            "com.secneo.apkwrapper.ApplicationWrapper"
+        )
+
         @Volatile private var nativeLibLoaded = false
 
         /**
@@ -49,6 +56,16 @@ class NativeHookBridge {
             return instance ?: synchronized(this) {
                 instance ?: NativeHookBridge().also { instance = it }
             }
+        }
+
+        /**
+         * 手动标记 native 库已加载。
+         * 当库被其他 ClassLoader 加载时（如 stub ClassLoader），
+         * NativeHookBridge 的 init 块无法检测到，需要手动标记。
+         */
+        fun markNativeLibLoaded() {
+            nativeLibLoaded = true
+            Timber.tag(TAG).i("nativeLibLoaded manually set to true")
         }
 
         fun resetInstance() {
@@ -89,14 +106,103 @@ class NativeHookBridge {
         hookRuntimeNativeLoad()
     }
 
-    fun hookRuntimeNativeLoad() {
+    fun hookRuntimeNativeLoad(fallbackCallerClasses: Array<String> = DEFAULT_NATIVE_LOAD_CALLERS): Boolean {
         if (nativeLibLoaded) {
             try {
-                val result = nativeInstallRuntimeLoadHook()
-                if (result) { Timber.tag(TAG).i("Runtime.nativeLoad JNI hook installed"); return }
+                val result = nativeInstallRuntimeLoadHook(fallbackCallerClasses)
+                if (result) {
+                    Timber.tag(TAG).i("Runtime.nativeLoad JNI hook installed")
+                    return true
+                }
             } catch (e: Exception) { Timber.tag(TAG).w("Native Runtime.nativeLoad hook failed: ${e.message}") }
         }
         Timber.tag(TAG).w("Runtime.nativeLoad hook not available")
+        return false
+    }
+
+    /**
+     * 通过 dlopen 直接加载 native 库（绕过 Java 层 hidden API 限制）
+     * 用于加载加固壳的 libjiagu_vip.so 等库
+     */
+    fun preloadNativeLibraries(libPaths: List<String>): Int {
+        if (libPaths.isEmpty()) return 0
+        if (!nativeLibLoaded) {
+            Timber.tag(TAG).w("Cannot preload: native lib not loaded")
+            return 0
+        }
+        return try {
+            val count = nativePreloadLibraries(libPaths.toTypedArray())
+            Timber.tag(TAG).i("Preloaded $count/${libPaths.size} native libraries via dlopen")
+            count
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "nativePreloadLibraries failed")
+            0
+        }
+    }
+
+    /**
+     * 通过 JNI 调用 Runtime.nativeLoad，将库加载到 guest ClassLoader 命名空间
+     * JNI 层面调用绕过 Java hidden API 限制
+     */
+    fun loadLibraryForGuest(libPath: String, classLoader: ClassLoader, callerClass: Class<*>): Boolean {
+        if (!nativeLibLoaded) {
+            Timber.tag(TAG).w("Cannot load for guest: native lib not loaded")
+            return false
+        }
+        return try {
+            val result = nativeLoadLibraryForGuest(libPath, classLoader, callerClass)
+            if (result == 0) {
+                Timber.tag(TAG).i("loadLibraryForGuest OK: $libPath")
+                true
+            } else {
+                Timber.tag(TAG).w("loadLibraryForGuest failed ($result): $libPath")
+                false
+            }
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "loadLibraryForGuest exception")
+            false
+        }
+    }
+
+    /**
+     * 设置 FindClass hook 的 guest ClassLoader 和目标类名。
+     * 当 JNI_OnLoad 中 FindClass 查找目标类时，通过 guest ClassLoader 加载。
+     */
+    fun setupFindClassHook(classLoader: ClassLoader, targetClassName: String): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeSetupFindClassHook(classLoader, targetClassName)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "setupFindClassHook failed")
+            false
+        }
+    }
+
+    /**
+     * 安装 FindClass hook（修改 JNI 函数表）。
+     * 必须在 setupFindClassHook 之后、System.loadLibrary 之前调用。
+     */
+    fun installFindClassHook() {
+        if (!nativeLibLoaded) return
+        try {
+            nativeInstallFindClassHook()
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "installFindClassHook failed")
+        }
+    }
+
+    /**
+     * 手动注册壳的 native 方法 stub 实现。
+     * 当 FindClass hook 不生效时，用 RegisterNatives 直接注册。
+     */
+    fun registerStubMethods(classLoader: ClassLoader, className: String): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeRegisterStubMethods(classLoader, className)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerStubMethods failed")
+            false
+        }
     }
 
     private fun rebuildPrefixIndex() {
@@ -261,9 +367,16 @@ class NativeHookBridge {
     private external fun nativeGetRedirectCount(): Int
     private external fun nativeGetPropertySpoofCount(): Int
     private external fun nativeIsInitialized(): Boolean
-    private external fun nativeInstallRuntimeLoadHook(): Boolean
+    private external fun nativeInstallRuntimeLoadHook(fallbackCallerClasses: Array<String>): Boolean
+    private external fun nativePreloadLibraries(libPaths: Array<String>): Int
+    private external fun nativeLoadLibraryForGuest(libPath: String, classLoader: ClassLoader, callerClass: Class<*>): Int
+    private external fun nativeSetupFindClassHook(classLoader: ClassLoader, targetClassName: String): Boolean
+    private external fun nativeInstallFindClassHook()
+    private external fun nativeRegisterStubMethods(classLoader: ClassLoader, className: String): Boolean
 
     private fun tryLoadNativeLibrary(): Boolean = nativeLibLoaded
+
+    fun isNativeLibLoaded(): Boolean = nativeLibLoaded
 
     private class PathTrie {
         private class Node {

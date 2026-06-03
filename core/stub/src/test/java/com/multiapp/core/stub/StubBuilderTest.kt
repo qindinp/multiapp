@@ -409,6 +409,43 @@ class StubBuilderTest {
                 assertEquals(6, entries.size)
             }
         }
+
+        @Test
+        fun `copyHookNativeLibsFromApk packages hook libs embedded in host APK`() {
+            val hostApk = createMinimalZip(
+                File(tempDir, "host.apk"),
+                mapOf(
+                    "lib/arm64-v8a/libmultiapp-native.so" to "native-hook",
+                    "lib/arm64-v8a/libshadowhook.so" to "shadowhook",
+                    "lib/arm64-v8a/libc++_shared.so" to "cxx-runtime"
+                )
+            )
+            val outputFile = File(tempDir, "hook-libs.zip")
+            val writtenEntries = mutableSetOf<String>()
+
+            ZipOutputStream(FileOutputStream(outputFile)).use { zos ->
+                val count = stubBuilder.copyHookNativeLibsFromApk(
+                    hostApk = hostApk,
+                    abi = "arm64-v8a",
+                    zos = zos,
+                    writtenEntries = writtenEntries
+                )
+                assertEquals(3, count)
+            }
+
+            ZipFile(outputFile).use { zip ->
+                val nativeEntry = zip.getEntry("lib/arm64-v8a/libmultiapp-native.so")
+                val shadowHookEntry = zip.getEntry("lib/arm64-v8a/libshadowhook.so")
+                val cxxEntry = zip.getEntry("lib/arm64-v8a/libc++_shared.so")
+
+                assertNotNull(nativeEntry)
+                assertNotNull(shadowHookEntry)
+                assertNotNull(cxxEntry)
+                assertEquals("native-hook", String(zip.getInputStream(nativeEntry!!).readBytes()))
+                assertEquals("shadowhook", String(zip.getInputStream(shadowHookEntry!!).readBytes()))
+                assertEquals("cxx-runtime", String(zip.getInputStream(cxxEntry!!).readBytes()))
+            }
+        }
     }
 
     // =====================================================================

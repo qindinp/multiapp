@@ -37,7 +37,9 @@ class ManifestParser @Inject constructor(
         val applicationTheme: String? = null,
         // 原 app 的 application theme 资源 ID（int，如 0x7f0f00xx）。
         // 0 表示未声明。由 StubBuilder 在构建期通过 getPackageArchiveInfo 填充。
-        val applicationThemeId: Int = 0
+        val applicationThemeId: Int = 0,
+        // ContentProvider 的 <meta-data> 子元素，key = provider name
+        val providerMetaData: Map<String, List<MetaDataInfo>> = emptyMap()
     )
 
     data class ComponentInfo(
@@ -46,7 +48,20 @@ class ManifestParser @Inject constructor(
         val process: String? = null,
         val intentFilters: List<IntentFilterInfo> = emptyList(),
         // 该 activity 声明的 theme 资源 ID（int）。0 表示未声明，运行时回退到 app theme。
-        val themeId: Int = 0
+        val themeId: Int = 0,
+        // ── 以下字段用于保留原始 APK 的关键组件属性 ──
+        val launchMode: String? = null,           // "singleTop", "singleTask", "singleInstance", "singleInstancePerTask"
+        val configChanges: String? = null,        // e.g. "orientation|screenSize|keyboardHidden"
+        val screenOrientation: String? = null,    // "portrait", "landscape", "unspecified", etc.
+        val windowSoftInputMode: String? = null,  // "adjustResize", "adjustPan", "stateHidden", etc.
+        val taskAffinity: String? = null,         // null = default (package name), "" = no affinity
+        val permission: String? = null,           // component-level permission
+        val stateNotNeeded: Boolean = false,
+        val noHistory: Boolean = false,
+        val allowTaskReparenting: Boolean = false,
+        val clearTaskOnLaunch: Boolean = false,
+        val finishOnTaskLaunch: Boolean = false,
+        val enabled: Boolean = true
     )
 
     data class ProviderInfo(
@@ -56,6 +71,12 @@ class ManifestParser @Inject constructor(
         val grantUriPermissions: Boolean = false
     )
 
+    data class MetaDataInfo(
+        val name: String,
+        val resource: String? = null,
+        val value: String? = null
+    )
+
     data class IntentFilterInfo(
         val actions: List<String>,
         val categories: List<String> = emptyList()
@@ -63,6 +84,97 @@ class ManifestParser @Inject constructor(
 
     companion object {
         const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
+
+        /**
+         * ActivityInfo.launchMode → manifest 字符串
+         */
+        fun convertLaunchMode(value: Int): String? = when (value) {
+            0 -> null   // standard (default)
+            1 -> "singleTop"
+            2 -> "singleTask"
+            3 -> "singleInstance"
+            4 -> "singleInstancePerTask"
+            else -> null
+        }
+
+        /**
+         * ActivityInfo.screenOrientation → manifest 字符串
+         */
+        fun convertScreenOrientation(value: Int): String? = when (value) {
+            -1 -> "unspecified"     // SCREEN_ORIENTATION_UNSPECIFIED
+            0 -> "landscape"        // SCREEN_ORIENTATION_LANDSCAPE
+            1 -> "portrait"         // SCREEN_ORIENTATION_PORTRAIT
+            2 -> "user"             // SCREEN_ORIENTATION_USER
+            3 -> "behind"           // SCREEN_ORIENTATION_BEHIND
+            4 -> "sensor"           // SCREEN_ORIENTATION_SENSOR
+            5 -> "nosensor"         // SCREEN_ORIENTATION_NOSENSOR
+            6 -> "sensorLandscape"  // SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            7 -> "sensorPortrait"   // SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            8 -> "reverseLandscape" // SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+            9 -> "reversePortrait"  // SCREEN_ORIENTATION_REVERSE_PORTRAIT
+            10 -> "fullSensor"      // SCREEN_ORIENTATION_FULL_SENSOR
+            11 -> "userLandscape"   // SCREEN_ORIENTATION_USER_LANDSCAPE
+            12 -> "userPortrait"    // SCREEN_ORIENTATION_USER_PORTRAIT
+            13 -> "fullUser"        // SCREEN_ORIENTATION_FULL_USER
+            14 -> "locked"          // SCREEN_ORIENTATION_LOCKED
+            else -> null
+        }
+
+        /**
+         * ActivityInfo.configChanges bitmask → manifest 管道分隔字符串
+         */
+        fun convertConfigChanges(value: Int): String? {
+            if (value == 0) return null
+            val flags = mutableListOf<String>()
+            if (value and 0x0001 != 0) flags.add("mcc")
+            if (value and 0x0002 != 0) flags.add("mnc")
+            if (value and 0x0004 != 0) flags.add("locale")
+            if (value and 0x0008 != 0) flags.add("touchscreen")
+            if (value and 0x0010 != 0) flags.add("keyboard")
+            if (value and 0x0020 != 0) flags.add("keyboardHidden")
+            if (value and 0x0040 != 0) flags.add("navigation")
+            if (value and 0x0080 != 0) flags.add("orientation")
+            if (value and 0x0100 != 0) flags.add("screenLayout")
+            if (value and 0x0200 != 0) flags.add("uiMode")
+            if (value and 0x0400 != 0) flags.add("screenSize")
+            if (value and 0x0800 != 0) flags.add("smallestScreenSize")
+            if (value and 0x1000 != 0) flags.add("density")
+            if (value and 0x2000 != 0) flags.add("layoutDirection")
+            if (value and 0x4000 != 0) flags.add("colorMode")
+            if (value and 0x8000.toInt() != 0) flags.add("fontScale")
+            if (value and 0x10000 != 0) flags.add("fontWeightAdjustment")
+            if (value and 0x10000000 != 0) flags.add("grammaticalGender")
+            val knownMask = 0x1001FFFF
+            val unknown = value and knownMask.inv()
+            if (unknown != 0) flags.add("0x${Integer.toHexString(unknown)}")
+            return flags.joinToString("|")
+        }
+
+        /**
+         * ActivityInfo.softInputMode → manifest 字符串
+         */
+        fun convertSoftInputMode(value: Int): String? {
+            if (value == 0) return null
+            val statePart = value and 0x0F
+            val adjustPart = value and 0xF0
+            val flags = mutableListOf<String>()
+            when (statePart) {
+                0x00 -> {} // stateUnspecified (default)
+                0x01 -> flags.add("stateUnchanged")
+                0x02 -> flags.add("stateHidden")
+                0x03 -> flags.add("stateAlwaysHidden")
+                0x04 -> flags.add("stateVisible")
+                0x05 -> flags.add("stateAlwaysVisible")
+            }
+            when (adjustPart) {
+                0x00 -> {} // adjustUnspecified (default)
+                0x10 -> flags.add("adjustResize")
+                0x20 -> flags.add("adjustPan")
+                0x30 -> flags.add("adjustNothing")
+            }
+            if (value and 0x100 != 0) flags.add("isForwardNavigation")
+            return flags.joinToString("|").takeIf { it.isNotEmpty() }
+        }
 
         private fun getDefaultContext(): android.content.Context {
             // 尝试通过 ActivityThread 获取 Application Context
@@ -142,7 +254,19 @@ class ManifestParser @Inject constructor(
                 name = act.name,
                 exported = act.exported,
                 process = act.processName?.takeIf { it.isNotEmpty() },
-                intentFilters = resolvedFilters
+                intentFilters = resolvedFilters,
+                launchMode = convertLaunchMode(act.launchMode),
+                configChanges = convertConfigChanges(act.configChanges),
+                screenOrientation = convertScreenOrientation(act.screenOrientation),
+                windowSoftInputMode = convertSoftInputMode(act.softInputMode),
+                taskAffinity = act.taskAffinity?.takeIf { it.isNotEmpty() },
+                permission = act.permission?.takeIf { it.isNotEmpty() },
+                stateNotNeeded = (act.flags and 0x0040) != 0,
+                noHistory = (act.flags and 0x8000) != 0,
+                allowTaskReparenting = (act.flags and 0x0020) != 0,
+                clearTaskOnLaunch = (act.flags and 0x0004) != 0,
+                finishOnTaskLaunch = (act.flags and 0x0002) != 0,
+                enabled = act.enabled
             )
         }
 
@@ -151,7 +275,9 @@ class ManifestParser @Inject constructor(
                 name = svc.name,
                 exported = svc.exported,
                 process = svc.processName?.takeIf { it.isNotEmpty() },
-                intentFilters = emptyList()
+                intentFilters = emptyList(),
+                permission = svc.permission?.takeIf { it.isNotEmpty() },
+                enabled = svc.enabled
             )
         }
 
@@ -160,11 +286,27 @@ class ManifestParser @Inject constructor(
                 name = rcv.name,
                 exported = rcv.exported,
                 process = rcv.processName?.takeIf { it.isNotEmpty() },
-                intentFilters = emptyList()
+                intentFilters = emptyList(),
+                permission = rcv.permission?.takeIf { it.isNotEmpty() },
+                enabled = rcv.enabled
             )
         }
 
+        val providerMetaDataMap = mutableMapOf<String, List<MetaDataInfo>>()
         val providers = (info.providers ?: emptyArray<android.content.pm.ProviderInfo>()).map { prv: android.content.pm.ProviderInfo ->
+            val metaData = prv.metaData?.let { bundle ->
+                bundle.keySet().mapNotNull { key ->
+                    val value = bundle.get(key)
+                    when (value) {
+                        is Int -> MetaDataInfo(name = key, resource = "@0x${Integer.toHexString(value)}")
+                        is String -> MetaDataInfo(name = key, value = value)
+                        else -> MetaDataInfo(name = key, value = value?.toString())
+                    }
+                }
+            } ?: emptyList()
+            if (metaData.isNotEmpty()) {
+                providerMetaDataMap[prv.name ?: ""] = metaData
+            }
             ProviderInfo(
                 name = prv.name ?: "",
                 authorities = prv.authority ?: "",
@@ -192,7 +334,8 @@ class ManifestParser @Inject constructor(
             providers = providers,
             permissions = permissions,
             minSdkVersion = minSdk,
-            targetSdkVersion = targetSdk
+            targetSdkVersion = targetSdk,
+            providerMetaData = providerMetaDataMap
         )
     }
 
@@ -298,7 +441,7 @@ class ManifestParser @Inject constructor(
             extractComponents(applicationEl, "activity-alias")
         val services = extractComponents(applicationEl, "service")
         val receivers = extractComponents(applicationEl, "receiver")
-        val providers = extractProviders(applicationEl)
+        val (providers, providerMetaData) = extractProviders(applicationEl)
 
         // 提取 SDK 版本
         val usesSdk = findFirstChild(manifestEl, "uses-sdk")
@@ -317,7 +460,8 @@ class ManifestParser @Inject constructor(
             permissions = permissions,
             minSdkVersion = minSdkVersion,
             targetSdkVersion = targetSdkVersion,
-            applicationTheme = applicationTheme
+            applicationTheme = applicationTheme,
+            providerMetaData = providerMetaData
         )
     }
 
@@ -354,7 +498,24 @@ class ManifestParser @Inject constructor(
                         name = name,
                         exported = el.getAttributeNS(ANDROID_NS, "exported") == "true",
                         process = el.getAttributeNS(ANDROID_NS, "process").takeIf { it.isNotEmpty() },
-                        intentFilters = extractIntentFilters(el)
+                        intentFilters = extractIntentFilters(el),
+                        launchMode = el.getAttributeNS(ANDROID_NS, "launchMode").takeIf { it.isNotEmpty() },
+                        configChanges = el.getAttributeNS(ANDROID_NS, "configChanges").takeIf { it.isNotEmpty() },
+                        screenOrientation = el.getAttributeNS(ANDROID_NS, "screenOrientation").takeIf { it.isNotEmpty() },
+                        windowSoftInputMode = el.getAttributeNS(ANDROID_NS, "windowSoftInputMode").takeIf { it.isNotEmpty() },
+                        taskAffinity = el.getAttributeNS(ANDROID_NS, "taskAffinity").let { v ->
+                            // 区分"未声明"(null) 和"显式设为空串"("")
+                            if (el.hasAttributeNS(ANDROID_NS, "taskAffinity")) v else null
+                        },
+                        permission = el.getAttributeNS(ANDROID_NS, "permission").takeIf { it.isNotEmpty() },
+                        stateNotNeeded = el.getAttributeNS(ANDROID_NS, "stateNotNeeded") == "true",
+                        noHistory = el.getAttributeNS(ANDROID_NS, "noHistory") == "true",
+                        allowTaskReparenting = el.getAttributeNS(ANDROID_NS, "allowTaskReparenting") == "true",
+                        clearTaskOnLaunch = el.getAttributeNS(ANDROID_NS, "clearTaskOnLaunch") == "true",
+                        finishOnTaskLaunch = el.getAttributeNS(ANDROID_NS, "finishOnTaskLaunch") == "true",
+                        enabled = el.getAttributeNS(ANDROID_NS, "enabled").let {
+                            if (it.isEmpty()) true else it == "true"
+                        }
                     )
                 )
             }
@@ -362,9 +523,10 @@ class ManifestParser @Inject constructor(
         return components
     }
 
-    private fun extractProviders(applicationEl: Element?): List<ProviderInfo> {
-        if (applicationEl == null) return emptyList()
+    private fun extractProviders(applicationEl: Element?): Pair<List<ProviderInfo>, Map<String, List<MetaDataInfo>>> {
+        if (applicationEl == null) return emptyList<ProviderInfo>() to emptyMap()
         val providers = mutableListOf<ProviderInfo>()
+        val metaDataMap = mutableMapOf<String, List<MetaDataInfo>>()
         forEachChild(applicationEl, "provider") { el ->
             val name = el.getAttributeNS(ANDROID_NS, "name")
             if (name.isNotEmpty()) {
@@ -376,9 +538,29 @@ class ManifestParser @Inject constructor(
                         grantUriPermissions = el.getAttributeNS(ANDROID_NS, "grantUriPermissions") == "true"
                     )
                 )
+                val metaData = extractMetaData(el)
+                if (metaData.isNotEmpty()) {
+                    metaDataMap[name] = metaData
+                }
             }
         }
-        return providers
+        return providers to metaDataMap
+    }
+
+    private fun extractMetaData(el: Element?): List<MetaDataInfo> {
+        if (el == null) return emptyList()
+        val result = mutableListOf<MetaDataInfo>()
+        forEachChild(el, "meta-data") { meta ->
+            val metaName = meta.getAttributeNS(ANDROID_NS, "name")
+            if (metaName.isNotEmpty()) {
+                result.add(MetaDataInfo(
+                    name = metaName,
+                    resource = meta.getAttributeNS(ANDROID_NS, "resource").ifEmpty { null },
+                    value = meta.getAttributeNS(ANDROID_NS, "value").ifEmpty { null }
+                ))
+            }
+        }
+        return result
     }
 
     private fun extractIntentFilters(componentEl: Element): List<IntentFilterInfo> {

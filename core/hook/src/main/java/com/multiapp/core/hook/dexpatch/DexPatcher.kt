@@ -168,4 +168,64 @@ class DexPatcher {
             methodStrings.any { it.contains(sig, ignoreCase = true) }
         }
     }
+
+    /**
+     * 在指定类的方法开头注入 System.loadLibrary 调用
+     */
+    fun injectLoadLibrary(
+        dexPaths: List<File>,
+        targetClass: String,
+        methodName: String,
+        libName: String
+    ): Boolean {
+        Timber.tag(TAG).i("Injecting System.loadLibrary(\"$libName\") into $targetClass->$methodName")
+        val internalType = "L${targetClass.replace(".", "/")};"
+
+        for (dexFile in dexPaths) {
+            try {
+                val dex = DexFileFactory.loadDexFile(dexFile, null as org.jf.dexlib2.Opcodes?)
+                val classes = dex.getClasses().toList()
+                val opcodes = dex.getOpcodes()
+
+                for (classDef in classes) {
+                    if (classDef.type != internalType) continue
+
+                    val methods = classDef.methods.toList()
+                    var injected = false
+                    val newMethods = mutableListOf<org.jf.dexlib2.iface.Method>()
+
+                    for (method in methods) {
+                        if (method.name == methodName && method.parameterTypes.isEmpty()) {
+                            newMethods.add(MethodPatcher.injectLoadLibrary(method, libName))
+                            injected = true
+                        } else {
+                            newMethods.add(method)
+                        }
+                    }
+
+                    if (injected) {
+                        val newClasses = classes.map { c ->
+                            if (c.type == internalType) {
+                                object : org.jf.dexlib2.iface.ClassDef by c {
+                                    override fun getMethods(): MutableIterable<org.jf.dexlib2.iface.Method> = newMethods
+                                }
+                            } else c
+                        }
+                        val tmpFile = File(dexFile.parentFile, dexFile.name + ".inject.tmp")
+                        val dexPool = DexPool(opcodes)
+                        for (c in newClasses) { dexPool.internClass(c) }
+                        dexPool.writeTo(FileDataStore(tmpFile))
+                        dexFile.delete()
+                        tmpFile.renameTo(dexFile)
+                        Timber.tag(TAG).i("Injection complete: ${dexFile.name}")
+                        return true
+                    }
+                }
+            } catch (e: Exception) {
+                Timber.tag(TAG).w("Failed to process ${dexFile.name}: ${e.message}")
+            }
+        }
+        Timber.tag(TAG).w("Target $targetClass->$methodName not found in any DEX")
+        return false
+    }
 }

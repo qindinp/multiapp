@@ -34,7 +34,11 @@ class StubBuilder(
         private const val CONFIG_JSON_ENTRY = "assets/multiapp_config.json"
         private const val MANIFEST_ENTRY = "AndroidManifest.xml"
         private const val DEX_ENTRY = "classes.dex"
-        private val HOOK_NATIVE_LIBS = listOf("libmultiapp-native.so", "libshadowhook.so")
+        private val HOOK_NATIVE_LIBS = listOf(
+            "libmultiapp-native.so",
+            "libshadowhook.so",
+            "libc++_shared.so"
+        )
     }
 
     private val gson: Gson = GsonBuilder().setPrettyPrinting().create()
@@ -99,6 +103,13 @@ class StubBuilder(
             val loaderDex = getLoaderDex()
             Log.w("StubBuilder", "loader.dex: ${loaderDex.size} bytes")
 
+            // 5.5 注入 System.loadLibrary("jiagu_vip") 到加固壳 StubApp.load()
+            // originApk 在 /data/app/... 是只读的，先复制到 workDir 再注入
+            val injectableApk = File(workDir, "origin_inject.apk")
+            originApk.copyTo(injectableApk, overwrite = true)
+            injectPackerLibLoad(injectableApk)
+            Log.w("StubBuilder", "injectableApk: ${injectableApk.length()} bytes")
+
             // 6. 组装 APK (含 patched DEX)
             val patchedDexFiles = config.patchedDexPaths.map { File(it) }.filter { it.exists() }
             val unsignedApk = File(workDir, "stub-unsigned.apk")
@@ -106,7 +117,7 @@ class StubBuilder(
                 outputFile = unsignedApk,
                 manifestBytes = manifestBytes,
                 loaderDex = loaderDex,
-                originApk = originApk,
+                originApk = injectableApk,
                 configFile = configFile,
                 iconFile = iconFile,
                 patchedDexFiles = patchedDexFiles
@@ -154,7 +165,9 @@ class StubBuilder(
         @Suppress("DEPRECATION")
         val pkgInfo = pm.getPackageArchiveInfo(
             originApk.absolutePath,
-            android.content.pm.PackageManager.GET_ACTIVITIES
+            android.content.pm.PackageManager.GET_ACTIVITIES or
+                android.content.pm.PackageManager.GET_SERVICES or
+                android.content.pm.PackageManager.GET_RECEIVERS
         )
         if (pkgInfo == null) {
             Log.w("StubBuilder", "getPackageArchiveInfo returned null, theme IDs unavailable")
@@ -162,12 +175,55 @@ class StubBuilder(
         }
 
         val appThemeId = pkgInfo.applicationInfo?.theme ?: 0
-        val activityThemeById = (pkgInfo.activities ?: emptyArray())
-            .associate { it.name to it.theme }
+        val activityByName = (pkgInfo.activities ?: emptyArray())
+            .associateBy { it.name }
+        val activityThemeById = activityByName.mapValues { it.value.theme }
 
         val enrichedActivities = manifest.activities.map { act ->
             val activityThemeId = activityThemeById[act.name] ?: 0
-            if (activityThemeId != 0) act.copy(themeId = activityThemeId) else act
+            val actInfo = activityByName[act.name]
+            act.copy(
+                themeId = if (activityThemeId != 0) activityThemeId else act.themeId,
+                // 仅当 XML 解析未填充时，从 PackageManager 补充
+                launchMode = act.launchMode ?: actInfo?.let {
+                    ManifestParser.convertLaunchMode(it.launchMode)
+                },
+                configChanges = act.configChanges ?: actInfo?.let {
+                    ManifestParser.convertConfigChanges(it.configChanges)
+                },
+                screenOrientation = act.screenOrientation ?: actInfo?.let {
+                    ManifestParser.convertScreenOrientation(it.screenOrientation)
+                },
+                windowSoftInputMode = act.windowSoftInputMode ?: actInfo?.let {
+                    ManifestParser.convertSoftInputMode(it.softInputMode)
+                },
+                taskAffinity = act.taskAffinity ?: actInfo?.taskAffinity?.takeIf { it.isNotEmpty() },
+                permission = act.permission ?: actInfo?.permission?.takeIf { it.isNotEmpty() },
+                stateNotNeeded = act.stateNotNeeded || (actInfo != null && (actInfo.flags and 0x0040) != 0),
+                noHistory = act.noHistory || (actInfo != null && (actInfo.flags and 0x8000) != 0),
+                allowTaskReparenting = act.allowTaskReparenting || (actInfo != null && (actInfo.flags and 0x0020) != 0),
+                clearTaskOnLaunch = act.clearTaskOnLaunch || (actInfo != null && (actInfo.flags and 0x0004) != 0),
+                finishOnTaskLaunch = act.finishOnTaskLaunch || (actInfo != null && (actInfo.flags and 0x0002) != 0),
+                enabled = act.enabled && (actInfo?.enabled ?: true)
+            )
+        }
+
+        // 为 service/receiver 补充 permission 和 enabled
+        val serviceByName = (pkgInfo.services ?: emptyArray()).associateBy { it.name }
+        val enrichedServices = manifest.services.map { svc ->
+            val svcInfo = serviceByName[svc.name]
+            svc.copy(
+                permission = svc.permission ?: svcInfo?.permission?.takeIf { it.isNotEmpty() },
+                enabled = svc.enabled && (svcInfo?.enabled ?: true)
+            )
+        }
+        val receiverByName = (pkgInfo.receivers ?: emptyArray()).associateBy { it.name }
+        val enrichedReceivers = manifest.receivers.map { rcv ->
+            val rcvInfo = receiverByName[rcv.name]
+            rcv.copy(
+                permission = rcv.permission ?: rcvInfo?.permission?.takeIf { it.isNotEmpty() },
+                enabled = rcv.enabled && (rcvInfo?.enabled ?: true)
+            )
         }
 
         Log.w(
@@ -179,7 +235,9 @@ class StubBuilder(
 
         return manifest.copy(
             applicationThemeId = appThemeId,
-            activities = enrichedActivities
+            activities = enrichedActivities,
+            services = enrichedServices,
+            receivers = enrichedReceivers
         )
     }
 
@@ -374,8 +432,8 @@ class StubBuilder(
      */
     private fun packageNativeLibs(originApk: File, zos: ZipOutputStream) {
         // 打包所有可用 ABI 的 native libs, 避免目标设备 ABI 不匹配
-        val supportedAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
-        var count = 0
+        val writtenEntries = mutableSetOf<String>()
+        var count = packageHookNativeLibs(zos, writtenEntries)
 
         // 1. 从原始 APK 提取 native libs (所有 ABI)
         try {
@@ -383,6 +441,10 @@ class StubBuilder(
                 zip.entries().asSequence()
                     .filter { it.name.startsWith("lib/") && it.name.endsWith(".so") && !it.isDirectory }
                     .forEach { entry ->
+                        if (!writtenEntries.add(entry.name)) {
+                            Timber.w("StubBuilder: skipping duplicate native lib ${entry.name}")
+                            return@forEach
+                        }
                         zos.putNextEntry(ZipEntry(entry.name))
                         zip.getInputStream(entry).use { it.copyTo(zos) }
                         zos.closeEntry()
@@ -393,29 +455,96 @@ class StubBuilder(
             Timber.w(e, "Failed to extract native libs from origin APK")
         }
 
-        // 2. 从当前应用的 native lib 目录提取 hook libs
-        // loader.dex 运行时需要它来做 shadowhook PLT hook
-        // 只打包当前设备 ABI (构建时可用的)
-        try {
+        Timber.d("StubBuilder: packaged $count native libraries")
+    }
+
+    private fun packageHookNativeLibs(
+        zos: ZipOutputStream,
+        writtenEntries: MutableSet<String>
+    ): Int {
+        return try {
             val primaryAbi = currentProcessSupportedAbis().firstOrNull() ?: "arm64-v8a"
             val appNativeDir = findAppNativeLibDir(primaryAbi)
             if (appNativeDir != null) {
-                for (libName in HOOK_NATIVE_LIBS) {
-                    val libFile = File(appNativeDir, libName)
-                    zos.putNextEntry(ZipEntry("lib/$primaryAbi/$libName"))
-                    libFile.inputStream().use { it.copyTo(zos) }
-                    zos.closeEntry()
-                    count++
-                    Timber.d("StubBuilder: packaged $libName from ${appNativeDir.absolutePath}")
-                }
+                copyHookNativeLibsFromDirectory(appNativeDir, primaryAbi, zos, writtenEntries)
             } else {
-                Timber.w("StubBuilder: hook native libs unavailable for ABI $primaryAbi")
+                val fromHostApk = copyHookNativeLibsFromHostApk(primaryAbi, zos, writtenEntries)
+                if (fromHostApk != HOOK_NATIVE_LIBS.size) {
+                    Timber.w("StubBuilder: hook native libs unavailable for ABI $primaryAbi")
+                }
+                fromHostApk
             }
         } catch (e: Exception) {
             Timber.w(e, "Failed to package app native libs")
+            0
         }
+    }
 
-        Timber.d("StubBuilder: packaged $count native libraries")
+    private fun copyHookNativeLibsFromDirectory(
+        sourceDir: File,
+        abi: String,
+        zos: ZipOutputStream,
+        writtenEntries: MutableSet<String>
+    ): Int {
+        var count = 0
+        for (libName in HOOK_NATIVE_LIBS) {
+            val entryName = "lib/$abi/$libName"
+            if (!writtenEntries.add(entryName)) continue
+            val libFile = File(sourceDir, libName)
+            zos.putNextEntry(ZipEntry(entryName))
+            libFile.inputStream().use { it.copyTo(zos) }
+            zos.closeEntry()
+            count++
+            Timber.d("StubBuilder: packaged $libName from ${sourceDir.absolutePath}")
+        }
+        return count
+    }
+
+    private fun copyHookNativeLibsFromHostApk(
+        abi: String,
+        zos: ZipOutputStream,
+        writtenEntries: MutableSet<String>
+    ): Int {
+        val sourceDirs = listOfNotNull(
+            context?.applicationInfo?.sourceDir,
+            context?.applicationInfo?.publicSourceDir
+        ).distinct()
+
+        for (sourceDir in sourceDirs) {
+            val copied = copyHookNativeLibsFromApk(File(sourceDir), abi, zos, writtenEntries)
+            if (copied == HOOK_NATIVE_LIBS.size) {
+                Timber.d("StubBuilder: packaged hook native libs from host APK $sourceDir")
+                return copied
+            }
+        }
+        return 0
+    }
+
+    internal fun copyHookNativeLibsFromApk(
+        hostApk: File,
+        abi: String,
+        zos: ZipOutputStream,
+        writtenEntries: MutableSet<String>
+    ): Int {
+        if (!hostApk.isFile) return 0
+
+        ZipFile(hostApk).use { zip ->
+            val entries = HOOK_NATIVE_LIBS.map { libName ->
+                val entryName = "lib/$abi/$libName"
+                entryName to zip.getEntry(entryName)
+            }
+            if (entries.any { it.second == null }) return 0
+
+            var count = 0
+            for ((entryName, entry) in entries) {
+                if (!writtenEntries.add(entryName)) continue
+                zos.putNextEntry(ZipEntry(entryName))
+                zip.getInputStream(entry!!).use { it.copyTo(zos) }
+                zos.closeEntry()
+                count++
+            }
+            return count
+        }
     }
 
     /**
@@ -603,6 +732,96 @@ class StubBuilder(
             .sign()
 
         Timber.d("StubBuilder: APK signed, size=${output.length()} bytes")
+    }
+
+    /**
+     * 在 origin APK 的 DEX 中注入 System.loadLibrary("jiagu_vip") 到 StubApp.load()
+     *
+     * 加固壳的 StubApp.load() 直接调用 interface20() 等 native 方法，
+     * 但不先加载 libjiagu_vip.so。正常 app 中，System.loadLibrary 由 app 代码调用，
+     * ClassLoader 是 app 的 → linker namespace 正确。
+     *
+     * 构建时注入确保 origin APK 提取后 DEX 已包含加载调用。
+     */
+    private fun injectPackerLibLoad(originApk: File) {
+        try {
+            val workDir = File(originApk.parentFile, "dex_inject")
+            workDir.mkdirs()
+
+            // 提取 DEX 文件
+            val dexFiles = mutableListOf<File>()
+            ZipFile(originApk).use { zip ->
+                for (entry in zip.entries()) {
+                    if (entry.name.endsWith(".dex")) {
+                        val outFile = File(workDir, entry.name)
+                        zip.getInputStream(entry).use { input ->
+                            outFile.outputStream().use { output -> input.copyTo(output) }
+                        }
+                        dexFiles.add(outFile)
+                    }
+                }
+            }
+
+            if (dexFiles.isEmpty()) {
+                Log.w("StubBuilder", "injectPackerLibLoad: no DEX files found")
+                workDir.deleteRecursively()
+                return
+            }
+
+            Log.w("StubBuilder", "injectPackerLibLoad: extracted ${dexFiles.size} DEX files")
+
+            // 注入到多个可能的壳类
+            val packerClasses = listOf(
+                "com.stub.StubApp",
+                "com.qihoo.util.StubApp",
+                "com.stub.StubApplication",
+                "com.secneo.apkwrapper.ApplicationWrapper"
+            )
+
+            val patcher = com.multiapp.core.hook.dexpatch.DexPatcher()
+            var injected = false
+            for (className in packerClasses) {
+                if (patcher.injectLoadLibrary(dexFiles, className, "load", "jiagu_vip")) {
+                    Log.w("StubBuilder", "injectPackerLibLoad: injected into $className.load()")
+                    injected = true
+                    break
+                }
+            }
+
+            if (!injected) {
+                Log.w("StubBuilder", "injectPackerLibLoad: no packer class found")
+                workDir.deleteRecursively()
+                return
+            }
+
+            // 用 patched DEX 替换 origin APK 中的 DEX
+            val tmpApk = File(originApk.parentFile, "origin_patched.apk")
+            ZipFile(originApk).use { zip ->
+                ZipOutputStream(tmpApk.outputStream().buffered()).use { zos ->
+                    var dexIndex = 0
+                    for (entry in zip.entries()) {
+                        val newEntry = ZipEntry(entry.name)
+                        newEntry.method = ZipEntry.DEFLATED
+                        zos.putNextEntry(newEntry)
+                        if (entry.name.endsWith(".dex") && dexIndex < dexFiles.size) {
+                            dexFiles[dexIndex].inputStream().use { it.copyTo(zos) }
+                            dexIndex++
+                        } else {
+                            zip.getInputStream(entry).use { it.copyTo(zos) }
+                        }
+                        zos.closeEntry()
+                    }
+                }
+            }
+
+            originApk.delete()
+            tmpApk.renameTo(originApk)
+            Log.w("StubBuilder", "injectPackerLibLoad: origin APK patched, size=${originApk.length()}")
+
+            workDir.deleteRecursively()
+        } catch (e: Exception) {
+            Log.w("StubBuilder", "injectPackerLibLoad failed: ${e.message}")
+        }
     }
 
     /**

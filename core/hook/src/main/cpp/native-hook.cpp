@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <sys/ptrace.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -920,15 +921,22 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeIsInitialized(
 
 // Original native implementation saved via method registration replacement
 static void* g_orig_nativeLoad_fn = nullptr;
+static std::vector<std::string> g_native_load_fallback_callers;
+
+// FindClass hook: 在 JNI_OnLoad 中用 guest ClassLoader 查找加固壳类
+static jobject g_guest_classloader = nullptr;
+static jclass g_findclass_target_class = nullptr;
+static std::string g_findclass_target_internal; // e.g. "Lcom/stub/StubApp;"
+static jmethodID g_classloader_loadclass = nullptr;
+static void* g_orig_findclass = nullptr; // 原始 FindClass 函数指针
 
 // Type alias matching ART's native signature for Runtime.nativeLoad
 // static jni: (JNIEnv*, jclass, jstring filename, jobject classLoader, jclass caller) -> jstring
 typedef jstring (*NativeLoadFn)(JNIEnv*, jclass, jstring, jobject, jclass);
 
 /**
- * Runtime.nativeLoad hook — loads native libraries via dlopen + JNI_OnLoad
- * instead of forwarding to ART's nativeLoad which crashes on NULL
- * ProtectionDomain arrays in virtual environment caller classes.
+ * Runtime.nativeLoad hook — fixes a null caller Class and then forwards to
+ * ART's original nativeLoad.
  *
  * ART's nativeLoad accesses caller.getProtectionDomain() internally and
  * crashes with SIGABRT when the ProtectionDomain array is NULL. In virtual
@@ -936,10 +944,62 @@ typedef jstring (*NativeLoadFn)(JNIEnv*, jclass, jstring, jobject, jclass);
  * NULL ProtectionDomain because the Class object isn't fully initialized
  * from ART's perspective.
  *
- * Our approach: load the .so via dlopen, find and call JNI_OnLoad if present.
- * This bypasses ART's ProtectionDomain check entirely while still properly
- * initializing the native library.
+ * Loading via raw dlopen + manual JNI_OnLoad is not equivalent to ART
+ * nativeLoad: ART records the native library against the ClassLoader and that
+ * association is required for FindClass/RegisterNatives inside packer
+ * JNI_OnLoad. Forwarding to ART keeps libjiagu_vip.so bound to the guest
+ * ClassLoader so registrations such as StubApp.interface20 can complete.
  */
+static jclass resolve_native_load_caller(JNIEnv* env, jobject classLoader) {
+    if (classLoader != nullptr) {
+        jclass classLoaderClass = env->GetObjectClass(classLoader);
+        jmethodID loadClass = classLoaderClass != nullptr
+            ? env->GetMethodID(classLoaderClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;")
+            : nullptr;
+
+        if (loadClass != nullptr) {
+            std::vector<std::string> candidates;
+            {
+                std::shared_lock<std::shared_mutex> lock(g_mutex);
+                candidates = g_native_load_fallback_callers;
+            }
+
+            for (const std::string& className : candidates) {
+                jstring name = env->NewStringUTF(className.c_str());
+                if (name == nullptr) continue;
+
+                auto clazz = reinterpret_cast<jclass>(
+                    env->CallObjectMethod(classLoader, loadClass, name));
+                env->DeleteLocalRef(name);
+
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    clazz = nullptr;
+                }
+
+                if (clazz != nullptr) {
+                    LOGI("resolve_native_load_caller: using %s", className.c_str());
+                    env->DeleteLocalRef(classLoaderClass);
+                    return clazz;
+                }
+            }
+        }
+
+        if (classLoaderClass != nullptr) {
+            env->DeleteLocalRef(classLoaderClass);
+        }
+    }
+
+    jclass runtimeClass = env->FindClass("java/lang/Runtime");
+    if (runtimeClass == nullptr && env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+    if (runtimeClass != nullptr) {
+        LOGW("resolve_native_load_caller: falling back to java.lang.Runtime");
+    }
+    return runtimeClass;
+}
+
 static jstring hooked_nativeLoad(JNIEnv* env, jclass runtimeClass,
                                   jstring filename, jobject classLoader, jclass caller) {
     if (filename == nullptr) {
@@ -957,55 +1017,41 @@ static jstring hooked_nativeLoad(JNIEnv* env, jclass runtimeClass,
         return nullptr;
     }
 
-    LOGI("hooked_nativeLoad: loading '%s' via dlopen (bypassing ART nativeLoad)", path);
+    LOGI("hooked_nativeLoad: forwarding '%s' to ART nativeLoad", path);
 
-    // Try RTLD_NOW first, fall back to RTLD_LAZY
-    void* handle = dlopen(path, RTLD_NOW);
-    if (handle == nullptr) {
-        const char* err = dlerror();
-        // Try RTLD_LAZY as fallback
-        handle = dlopen(path, RTLD_LAZY);
-        if (handle == nullptr) {
-            const char* lazyErr = dlerror();
-            LOGE("hooked_nativeLoad: dlopen failed for '%s': RTLD_NOW=%s, RTLD_LAZY=%s",
-                 path, err ? err : "null", lazyErr ? lazyErr : "null");
-
-            // Fall back to original ART nativeLoad as last resort
-            env->ReleaseStringUTFChars(filename, path);
-            if (g_orig_nativeLoad_fn != nullptr) {
-                LOGW("hooked_nativeLoad: falling back to original ART nativeLoad");
-                return ((NativeLoadFn)g_orig_nativeLoad_fn)(env, runtimeClass, filename, classLoader, caller);
-            }
-            return nullptr;
-        }
+    jclass effectiveCaller = caller;
+    if (effectiveCaller == nullptr) {
+        LOGW("hooked_nativeLoad: caller is null, resolving fallback caller");
+        effectiveCaller = resolve_native_load_caller(env, classLoader);
     }
 
-    LOGI("hooked_nativeLoad: dlopen succeeded for '%s'", path);
-
-    // Call JNI_OnLoad if present — this is what ART's nativeLoad does internally
-    // to initialize the JNI native library
-    typedef jint (*JNI_OnLoadFn)(JavaVM*, void*);
-    JNI_OnLoadFn jniOnLoad = reinterpret_cast<JNI_OnLoadFn>(dlsym(handle, "JNI_OnLoad"));
-    if (jniOnLoad != nullptr) {
-        JavaVM* vm = nullptr;
-        env->GetJavaVM(&vm);
-        if (vm != nullptr) {
-            LOGI("hooked_nativeLoad: calling JNI_OnLoad for '%s'", path);
-            jint jniVersion = jniOnLoad(vm, nullptr);
-            if (jniVersion < 0) {
-                LOGE("hooked_nativeLoad: JNI_OnLoad failed for '%s' (returned %d)", path, jniVersion);
-            } else {
-                LOGI("hooked_nativeLoad: JNI_OnLoad succeeded for '%s' (version 0x%x)", path, jniVersion);
-            }
-        }
+    jstring result = nullptr;
+    if (g_orig_nativeLoad_fn != nullptr) {
+        result = ((NativeLoadFn)g_orig_nativeLoad_fn)(
+            env,
+            runtimeClass,
+            filename,
+            classLoader,
+            effectiveCaller);
     } else {
-        LOGD("hooked_nativeLoad: no JNI_OnLoad in '%s' (pure native library)", path);
+        LOGE("hooked_nativeLoad: original ART nativeLoad pointer is null");
+    }
+
+    if (result == nullptr) {
+        LOGI("hooked_nativeLoad: ART nativeLoad succeeded for '%s'", path);
+    } else {
+        const char* error = env->GetStringUTFChars(result, nullptr);
+        LOGE("hooked_nativeLoad: ART nativeLoad failed for '%s': %s",
+             path, error ? error : "null");
+        if (error) env->ReleaseStringUTFChars(result, error);
     }
 
     env->ReleaseStringUTFChars(filename, path);
 
-    // Return null to indicate success (same as ART's nativeLoad on success)
-    return nullptr;
+    if (effectiveCaller != nullptr && effectiveCaller != caller) {
+        env->DeleteLocalRef(effectiveCaller);
+    }
+    return result;
 }
 
 /**
@@ -1104,9 +1150,26 @@ static bool installNativeLoadHook(JNIEnv* env) {
  */
 JNIEXPORT jboolean JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallRuntimeLoadHook(
-    JNIEnv* env, jobject thiz)
+    JNIEnv* env, jobject thiz, jobjectArray fallbackCallerClasses)
 {
     (void)thiz;
+    {
+        std::unique_lock<std::shared_mutex> lock(g_mutex);
+        g_native_load_fallback_callers.clear();
+        if (fallbackCallerClasses != nullptr) {
+            jsize count = env->GetArrayLength(fallbackCallerClasses);
+            for (jsize i = 0; i < count; i++) {
+                auto item = (jstring)env->GetObjectArrayElement(fallbackCallerClasses, i);
+                if (item == nullptr) continue;
+                const char* chars = env->GetStringUTFChars(item, nullptr);
+                if (chars != nullptr && chars[0] != '\0') {
+                    g_native_load_fallback_callers.emplace_back(chars);
+                }
+                if (chars) env->ReleaseStringUTFChars(item, chars);
+                env->DeleteLocalRef(item);
+            }
+        }
+    }
     return installNativeLoadHook(env) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -1218,6 +1281,398 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofSystemPropertyStatic(
 
     if (k) env->ReleaseStringUTFChars(key, k);
     if (v) env->ReleaseStringUTFChars(value, v);
+}
+
+/**
+ * LoaderFactory 专用: 通过 dlopen 直接加载加固壳 native 库
+ *
+ * 绕过 Java 层 Runtime.nativeLoad 的 hidden API 限制。
+ * dlopen 会将 .so 加载到进程全局命名空间，JNI_OnLoad 会自动执行，
+ * 从而完成 RegisterNatives（如 StubApp.interface20）。
+ *
+ * @param libPaths 要加载的 .so 文件绝对路径数组
+ * @return 成功加载的数量
+ */
+JNIEXPORT jint JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
+    JNIEnv* env, jclass clazz, jobjectArray libPaths)
+{
+    (void)clazz;
+    if (libPaths == nullptr) return 0;
+
+    jsize count = env->GetArrayLength(libPaths);
+    jint loaded = 0;
+
+    for (jsize i = 0; i < count; i++) {
+        auto jPath = (jstring)env->GetObjectArrayElement(libPaths, i);
+        if (jPath == nullptr) continue;
+
+        const char* path = env->GetStringUTFChars(jPath, nullptr);
+        if (path == nullptr) { env->DeleteLocalRef(jPath); continue; }
+
+        LOGI("nativePreloadLibraries: dlopen %s", path);
+        void* handle = dlopen(path, RTLD_NOW);
+        if (handle != nullptr) {
+            LOGI("nativePreloadLibraries: OK %s", path);
+            loaded++;
+        } else {
+            const char* err = dlerror();
+            LOGW("nativePreloadLibraries: FAILED %s: %s", path, err ? err : "unknown");
+        }
+
+        env->ReleaseStringUTFChars(jPath, path);
+        env->DeleteLocalRef(jPath);
+    }
+
+    LOGI("nativePreloadLibraries: loaded %d/%d", loaded, count);
+    return loaded;
+}
+
+/**
+ * 通过 JNI 调用 Runtime.nativeLoad(path, classLoader, callerClass)
+ *
+ * JNI 调用绕过 Java 层 hidden API 检查。
+ * 传入 guest ClassLoader 确保库加载到正确的命名空间。
+ *
+ * @param libPath .so 文件绝对路径
+ * @param classLoader guest ClassLoader (PathClassLoader)
+ * @param callerClass guest 中的调用者类 (如 com.stub.StubApp)
+ * @return JNI_OnLoad 返回值 (0=成功, <0=失败)
+ */
+JNIEXPORT jint JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
+    JNIEnv* env, jclass clazz, jstring libPath, jobject classLoader, jobject callerClass)
+{
+    (void)clazz;
+    if (libPath == nullptr) return -1;
+
+    // 找到 Runtime 类和 nativeLoad 方法
+    jclass runtimeClass = env->FindClass("java/lang/Runtime");
+    if (runtimeClass == nullptr) {
+        LOGE("nativeLoadLibraryForGuest: Runtime class not found");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return -2;
+    }
+
+    // 获取 Runtime.getRuntime() 实例
+    jmethodID getRuntime = env->GetStaticMethodID(runtimeClass, "getRuntime", "()Ljava/lang/Runtime;");
+    if (getRuntime == nullptr) {
+        LOGE("nativeLoadLibraryForGuest: getRuntime not found");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(runtimeClass);
+        return -3;
+    }
+    jobject runtime = env->CallStaticObjectMethod(runtimeClass, getRuntime);
+    if (runtime == nullptr) {
+        LOGE("nativeLoadLibraryForGuest: getRuntime returned null");
+        env->DeleteLocalRef(runtimeClass);
+        return -4;
+    }
+
+    // 获取 nativeLoad(String, ClassLoader, Class) 方法
+    jmethodID nativeLoad = env->GetMethodID(
+        runtimeClass, "nativeLoad",
+        "(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;");
+    env->DeleteLocalRef(runtimeClass);
+
+    if (nativeLoad == nullptr) {
+        LOGE("nativeLoadLibraryForGuest: nativeLoad method not found");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(runtime);
+        return -5;
+    }
+
+    // 调用 runtime.nativeLoad(libPath, classLoader, callerClass)
+    const char* path = env->GetStringUTFChars(libPath, nullptr);
+    LOGI("nativeLoadLibraryForGuest: calling nativeLoad(%s)", path ? path : "null");
+    env->ReleaseStringUTFChars(libPath, path);
+
+    jstring error = (jstring)env->CallObjectMethod(
+        runtime, nativeLoad, libPath, classLoader, callerClass);
+    env->DeleteLocalRef(runtime);
+
+    if (error == nullptr) {
+        // null 表示成功
+        LOGI("nativeLoadLibraryForGuest: SUCCESS");
+        return 0;
+    }
+
+    const char* errStr = env->GetStringUTFChars(error, nullptr);
+    LOGE("nativeLoadLibraryForGuest: FAILED: %s", errStr ? errStr : "unknown");
+    env->ReleaseStringUTFChars(error, errStr);
+    env->DeleteLocalRef(error);
+    return -6;
+}
+
+/**
+ * hook_FindClass: 拦截 JNI_OnLoad 中的 FindClass 调用
+ *
+ * 当查找目标类（如 com.stub.StubApp）时，通过 guest ClassLoader 加载。
+ * 其他类调用原始 FindClass。
+ */
+static jclass hooked_FindClass(JNIEnv* env, const char* name) {
+    if (g_guest_classloader != nullptr && name != nullptr) {
+        // 将 "." 转换为 "/" 进行比较
+        std::string slashName(name);
+        for (auto& c : slashName) { if (c == '.') c = '/'; }
+
+        std::string targetSlash = g_findclass_target_internal;
+        // 去掉 L 前缀和 ; 后缀
+        if (targetSlash.size() >= 3) {
+            targetSlash = targetSlash.substr(1, targetSlash.size() - 2);
+        }
+
+        if (slashName == targetSlash) {
+            LOGI("hooked_FindClass: intercepted FindClass(\"%s\"), using guest ClassLoader", name);
+
+            // 调用 guest ClassLoader.loadClass(name)
+            std::string dotName(name);
+            for (auto& c : dotName) { if (c == '/') c = '.'; }
+
+            jstring jClassName = env->NewStringUTF(dotName.c_str());
+            if (jClassName != nullptr && g_classloader_loadclass != nullptr) {
+                jclass clazz = (jclass)env->CallObjectMethod(
+                    g_guest_classloader, g_classloader_loadclass, jClassName);
+                env->DeleteLocalRef(jClassName);
+
+                if (clazz != nullptr) {
+                    LOGI("hooked_FindClass: SUCCESS via guest ClassLoader for %s", name);
+                    return clazz;
+                }
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                LOGW("hooked_FindClass: guest ClassLoader failed for %s, trying original", name);
+            }
+        }
+    }
+
+    // 非目标类或 guest ClassLoader 失败，调用原始 FindClass
+    if (g_orig_findclass != nullptr) {
+        using FindClassFn = jclass(*)(JNIEnv*, const char*);
+        return ((FindClassFn)g_orig_findclass)(env, name);
+    }
+
+    // 兜底：不应到达这里
+    return nullptr;
+}
+
+/**
+ * 设置 guest ClassLoader 并安装 FindClass hook
+ *
+ * 必须在 System.loadLibrary("jiagu_vip") 之前调用。
+ * hook 仅在 JNI_OnLoad 执行期间有效（单线程）。
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupFindClassHook(
+    JNIEnv* env, jclass clazz, jobject classLoader, jstring targetClassName)
+{
+    (void)clazz;
+    if (classLoader == nullptr || targetClassName == nullptr) return JNI_FALSE;
+
+    // 保存 guest ClassLoader 全局引用
+    if (g_guest_classloader != nullptr) {
+        env->DeleteGlobalRef(g_guest_classloader);
+    }
+    g_guest_classloader = env->NewGlobalRef(classLoader);
+
+    // 保存目标类名
+    const char* name = env->GetStringUTFChars(targetClassName, nullptr);
+    if (name == nullptr) return JNI_FALSE;
+
+    std::string className(name);
+    env->ReleaseStringUTFChars(targetClassName, name);
+
+    // 转换为 internal 格式: "com.stub.StubApp" -> "Lcom/stub/StubApp;"
+    std::string internalName = "L";
+    for (char c : className) {
+        internalName += (c == '.') ? '/' : c;
+    }
+    internalName += ";";
+    g_findclass_target_internal = internalName;
+
+    // 获取 ClassLoader.loadClass 方法
+    jclass clClass = env->FindClass("java/lang/ClassLoader");
+    if (clClass == nullptr) {
+        LOGE("nativeSetupFindClassHook: ClassLoader class not found");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return JNI_FALSE;
+    }
+    g_classloader_loadclass = env->GetMethodID(
+        clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    env->DeleteLocalRef(clClass);
+
+    if (g_classloader_loadclass == nullptr) {
+        LOGE("nativeSetupFindClassHook: loadClass method not found");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return JNI_FALSE;
+    }
+
+    // 安装 FindClass hook：修改 JNI 函数表
+    // JNI 函数表是一个可写的函数指针数组
+    // FindClass 是第一个函数（index 0 之后，因为第一个是 reserved）
+    // 实际上 JNI 函数表布局：
+    //   reserved0, reserved1, reserved2, reserved3,
+    //   GetVersion, DefineClass, FindClass, ...
+    // FindClass 在 index 6
+
+    void** jniFunctions = *reinterpret_cast<void***>(env);
+    // FindClass 在 JNI 函数表中的位置
+    // JNI 1.6+: index 6 (after 4 reserved + GetVersion + DefineClass)
+    constexpr int FIND_CLASS_INDEX = 6;
+
+    // 保存原始 FindClass 指针（暂时不用，直接用 env 调用）
+    // void* origFindClass = jniFunctions[FIND_CLASS_INDEX];
+
+    // 替换为我们的 hook
+    // 注意：这会影响当前线程的所有 FindClass 调用
+    // 只在 JNI_OnLoad 期间需要，之后应该恢复
+    // 但由于 JNI_OnLoad 是单线程的，我们可以在之后恢复
+
+    // 不直接替换 JNI 函数表（太危险），改用另一种方案：
+    // 在 nativeLoad hook 中，当检测到 libjiagu_vip.so 加载时，
+    // 在调用原始 nativeLoad 之前设置 ClassLoader 上下文
+
+    LOGI("nativeSetupFindClassHook: configured for target class %s (internal: %s)",
+         className.c_str(), internalName.c_str());
+
+    return JNI_TRUE;
+}
+
+/**
+ * 在 JNI 函数表中替换 FindClass
+ * 仅在 libjiagu_vip.so 的 JNI_OnLoad 执行前调用，之后恢复
+ */
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallFindClassHook(
+    JNIEnv* env, jclass clazz)
+{
+    (void)clazz;
+    if (g_guest_classloader == nullptr) {
+        LOGW("nativeInstallFindClassHook: no guest ClassLoader set");
+        return;
+    }
+
+    // 获取 JNI 函数表指针
+    void** jniFunctions = *reinterpret_cast<void***>(env);
+
+    // FindClass 在 JNI 函数表中的位置
+    // JNI 1.6+: reserved0(0), reserved1(1), reserved2(2), reserved3(3),
+    //           GetVersion(4), DefineClass(5), FindClass(6)
+    constexpr int FIND_CLASS_INDEX = 6;
+
+    // 保存原始指针
+    g_orig_findclass = jniFunctions[FIND_CLASS_INDEX];
+
+    // 替换 JNI 函数表中的 FindClass
+    // 需要先 mprotect 修改为可写
+    uintptr_t page_size = sysconf(_SC_PAGESIZE);
+    uintptr_t page_start = (uintptr_t)&jniFunctions[FIND_CLASS_INDEX] & ~(page_size - 1);
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) == 0) {
+        jniFunctions[FIND_CLASS_INDEX] = (void*)hooked_FindClass;
+        // 恢复页面保护
+        mprotect((void*)page_start, page_size, PROT_READ);
+        LOGI("nativeInstallFindClassHook: installed (original=%p)", g_orig_findclass);
+    } else {
+        LOGE("nativeInstallFindClassHook: mprotect failed");
+    }
+}
+
+/**
+ * 手动注册 StubApp 的 native 方法（兜底方案）
+ *
+ * 当 FindClass hook 不生效时，直接用 RegisterNatives 注册 interface20() 等方法。
+ * 返回一个默认值让壳的初始化流程能继续。
+ */
+
+// interface5(Application) 的 stub 实现
+static void JNICALL stub_interface_app(JNIEnv* env, jclass clazz, jobject app) {
+    LOGI("stub_interface_app called (Application param, no-op)");
+}
+
+// interface20 的 stub 实现：返回 true
+static jboolean JNICALL stub_interface_bool(JNIEnv* env, jclass clazz) {
+    LOGI("stub_interface_bool called (returning true)");
+    return JNI_TRUE;
+}
+
+// interface31(String) 的 stub 实现：返回 true
+static jboolean JNICALL stub_interface_str(JNIEnv* env, jclass clazz, jstring s) {
+    LOGI("stub_interface_str called (returning true)");
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterStubMethods(
+    JNIEnv* env, jclass clazz, jobject classLoader, jstring className)
+{
+    (void)clazz;
+    if (classLoader == nullptr || className == nullptr) return JNI_FALSE;
+
+    // 获取类名
+    const char* name = env->GetStringUTFChars(className, nullptr);
+    if (name == nullptr) return JNI_FALSE;
+
+    // 通过 guest ClassLoader 加载类
+    jclass clClass = env->FindClass("java/lang/ClassLoader");
+    jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    jstring jName = env->NewStringUTF(name);
+    env->ReleaseStringUTFChars(className, name);
+
+    jclass targetClass = (jclass)env->CallObjectMethod(classLoader, loadClass, jName);
+    env->DeleteLocalRef(jName);
+    env->DeleteLocalRef(clClass);
+
+    if (targetClass == nullptr) {
+        LOGW("nativeRegisterStubMethods: class not found via guest ClassLoader");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return JNI_FALSE;
+    }
+
+    // 360 加固壳 StubApp 的完整 native 方法签名（从 logcat 错误信息提取）
+    JNINativeMethod methods[] = {
+        // interface5(Application)V
+        {const_cast<char*>("interface5"),  const_cast<char*>("(Landroid/app/Application;)V"), (void*)stub_interface_app},
+        // interface10(Context)V
+        {const_cast<char*>("interface10"), const_cast<char*>("(Landroid/content/Context;)V"), (void*)stub_interface_app},
+        // interface11(int)V
+        {const_cast<char*>("interface11"), const_cast<char*>("(I)V"), (void*)stub_interface_app},
+        // interface12(DexFile)Enumeration
+        {const_cast<char*>("interface12"), const_cast<char*>("(Ldalvik/system/DexFile;)Ljava/util/Enumeration;"), (void*)stub_interface_bool},
+        // interface14(int)String
+        {const_cast<char*>("interface14"), const_cast<char*>("(I)Ljava/lang/String;"), (void*)stub_interface_str},
+        // interface17(AssetManager, String)AssetFileDescriptor
+        {const_cast<char*>("interface17"), const_cast<char*>("(Landroid/content/res/AssetManager;Ljava/lang/String;)Landroid/content/res/AssetFileDescriptor;"), (void*)stub_interface_bool},
+        // interface18(Class, String)InputStream
+        {const_cast<char*>("interface18"), const_cast<char*>("(Ljava/lang/Class;Ljava/lang/String;)Ljava/io/InputStream;"), (void*)stub_interface_bool},
+        // interface19(ClassLoader, String)InputStream
+        {const_cast<char*>("interface19"), const_cast<char*>("(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/io/InputStream;"), (void*)stub_interface_bool},
+        // interface199(AssetManager, String)InputStream
+        {const_cast<char*>("interface199"), const_cast<char*>("(Landroid/content/res/AssetManager;Ljava/lang/String;)Ljava/io/InputStream;"), (void*)stub_interface_bool},
+        // interface20()Z
+        {const_cast<char*>("interface20"), const_cast<char*>("()Z"), (void*)stub_interface_bool},
+        // interface21(Application)V
+        {const_cast<char*>("interface21"), const_cast<char*>("(Landroid/app/Application;)V"), (void*)stub_interface_app},
+        // interface22(int, String[], int[])V
+        {const_cast<char*>("interface22"), const_cast<char*>("(I[Ljava/lang/String;[I)V"), (void*)stub_interface_app},
+        // interface24(Activity, String[], int)V
+        {const_cast<char*>("interface24"), const_cast<char*>("(Landroid/app/Activity;[Ljava/lang/String;I)V"), (void*)stub_interface_app},
+        // interface30(ZipFile, String)ZipEntry
+        {const_cast<char*>("interface30"), const_cast<char*>("(Ljava/util/zip/ZipFile;Ljava/lang/String;)Ljava/util/zip/ZipEntry;"), (void*)stub_interface_bool},
+        // interface51(Resources, int)InputStream
+        {const_cast<char*>("interface51"), const_cast<char*>("(Landroid/content/res/Resources;I)Ljava/io/InputStream;"), (void*)stub_interface_bool},
+    };
+
+    jint result = env->RegisterNatives(targetClass, methods, sizeof(methods)/sizeof(methods[0]));
+    LOGI("nativeRegisterStubMethods: RegisterNatives returned %d for %d methods", result, (int)(sizeof(methods)/sizeof(methods[0])));
+    env->DeleteLocalRef(targetClass);
+
+    if (result == JNI_OK) {
+        LOGI("nativeRegisterStubMethods: registered %d stub methods", (int)(sizeof(methods)/sizeof(methods[0])));
+        return JNI_TRUE;
+    } else {
+        LOGW("nativeRegisterStubMethods: RegisterNatives failed with code %d", result);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return JNI_FALSE;
+    }
 }
 
 } // extern "C"

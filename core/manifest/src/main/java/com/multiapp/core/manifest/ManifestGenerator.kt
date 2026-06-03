@@ -32,7 +32,7 @@ class ManifestGenerator {
             sb.appendLine("""        android:name="${manifest.applicationClass}"""")
         }
         sb.appendLine("""        android:label="${config.stubPackageName}" android:extractNativeLibs="true">""")
-        sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true" android:enabled="true">""")
+        sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true" android:enabled="true"${componentAttrs(launcherActivity)}>""")
         sb.appendLine("""            <intent-filter>""")
         sb.appendLine("""                <action android:name="android.intent.action.MAIN" />""")
         sb.appendLine("""                <category android:name="android.intent.category.LAUNCHER" />""")
@@ -40,17 +40,28 @@ class ManifestGenerator {
         sb.appendLine("""        </activity>""")
         for (activity in manifest.activities) {
             if (activity.name == launcherActivity.name) continue
-            sb.appendLine("""        <activity android:name="${activity.name}" android:exported="${activity.exported}" />""")
+            sb.appendLine("""        <activity android:name="${activity.name}" android:exported="${activity.exported}"${componentAttrs(activity)} />""")
         }
         for (service in manifest.services) {
-            sb.appendLine("""        <service android:name="${service.name}" android:exported="${service.exported}" />""")
+            sb.appendLine("""        <service android:name="${service.name}" android:exported="${service.exported}"${componentAttrs(service)} />""")
         }
         for (receiver in manifest.receivers) {
-            sb.appendLine("""        <receiver android:name="${receiver.name}" android:exported="${receiver.exported}" />""")
+            sb.appendLine("""        <receiver android:name="${receiver.name}" android:exported="${receiver.exported}"${componentAttrs(receiver)} />""")
         }
         val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId, config.authorityMap)
         for (provider in rewrittenProviders) {
-            sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}" />""")
+            val metaDataList = manifest.providerMetaData[provider.name] ?: emptyList()
+            if (metaDataList.isEmpty()) {
+                sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}" />""")
+            } else {
+                sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}">""")
+                for (meta in metaDataList) {
+                    val resourceAttr = meta.resource?.let { """ android:resource="$it"""" } ?: ""
+                    val valueAttr = meta.value?.let { """ android:value="$it"""" } ?: ""
+                    sb.appendLine("""            <meta-data android:name="${meta.name}"$resourceAttr$valueAttr />""")
+                }
+                sb.appendLine("""        </provider>""")
+            }
         }
         sb.appendLine("""    </application>""")
         sb.appendLine("""</manifest>""")
@@ -72,6 +83,25 @@ class ManifestGenerator {
         config: StubConfig
     ): ByteArray {
         return BinaryXmlEncoder().encodeFromManifest(stubPackageName, manifest, launcherActivity, config)
+    }
+
+    /**
+     * 将组件的附加属性序列化为 XML 属性字符串片段（文本 XML 路径，仅调试用）
+     */
+    private fun componentAttrs(c: ManifestParser.ComponentInfo): String = buildString {
+        c.process?.let { append(""" android:process="$it"""") }
+        c.launchMode?.let { append(""" android:launchMode="$it"""") }
+        c.configChanges?.let { append(""" android:configChanges="$it"""") }
+        c.screenOrientation?.let { append(""" android:screenOrientation="$it"""") }
+        c.windowSoftInputMode?.let { append(""" android:windowSoftInputMode="$it"""") }
+        c.taskAffinity?.let { append(""" android:taskAffinity="$it"""") }
+        c.permission?.let { append(""" android:permission="$it"""") }
+        if (c.stateNotNeeded) append(""" android:stateNotNeeded="true"""")
+        if (c.noHistory) append(""" android:noHistory="true"""")
+        if (c.allowTaskReparenting) append(""" android:allowTaskReparenting="true"""")
+        if (c.clearTaskOnLaunch) append(""" android:clearTaskOnLaunch="true"""")
+        if (c.finishOnTaskLaunch) append(""" android:finishOnTaskLaunch="true"""")
+        if (!c.enabled) append(""" android:enabled="false"""")
     }
 }
 

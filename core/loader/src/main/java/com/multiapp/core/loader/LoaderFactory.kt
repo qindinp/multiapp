@@ -310,6 +310,9 @@ class LoaderFactory : AppComponentFactory() {
 
             // 5. 安装 nativeLoad hook，确保加固壳的 JNI_OnLoad/RegisterNatives 能完整执行
             logD("Step 5: Installing nativeLoad hook...")
+            // 标记 native 库已加载（libmultiapp-native.so 在 stub APK 的 lib/ 中，
+            // 被 stub ClassLoader 加载，但 NativeHookBridge 的 init 块用 boot ClassLoader 检测不到）
+            NativeHookBridge.markNativeLibLoaded()
             installNativeLoadHookIfAvailable()
 
             // 6. 替换 ClassLoader
@@ -326,8 +329,14 @@ class LoaderFactory : AppComponentFactory() {
 
     private fun installNativeLoadHookIfAvailable() {
         try {
-            NativeHookBridge.getInstance().hookRuntimeNativeLoad()
-            logD("  Runtime.nativeLoad hook install attempted")
+            val candidates = arrayOf(
+                "com.stub.StubApp",
+                "com.qihoo.util.StubApp",
+                "com.stub.StubApplication",
+                originApplicationClass
+            ).filterNotNull().distinct().toTypedArray()
+            val installed = NativeHookBridge.getInstance().hookRuntimeNativeLoad(candidates)
+            logD("  Runtime.nativeLoad hook installed=$installed, fallbackCallers=${candidates.joinToString()}")
         } catch (e: Throwable) {
             logW("  Runtime.nativeLoad hook unavailable: ${e.javaClass.simpleName}: ${e.message}")
         }
@@ -472,12 +481,14 @@ class LoaderFactory : AppComponentFactory() {
         } catch (_: Exception) { null }
             ?.parent ?: ClassLoader.getSystemClassLoader().parent
         logD("  parentClassLoader: ${parentClassLoader.javaClass.name}")
-        val newClassLoader = PathClassLoader(
+        val realGuestClassLoader = PathClassLoader(
             originApk.absolutePath,
             nativeLibraryPath,
             parentClassLoader
         )
-        logD("  Created PathClassLoader: ${newClassLoader.javaClass.name}")
+        val newClassLoader = StealthClassLoader(realGuestClassLoader, originApk.absolutePath)
+        logD("  Created PathClassLoader: ${realGuestClassLoader.javaClass.name}")
+        logD("  Exposed StealthClassLoader: ${newClassLoader.javaClass.name}")
         logD("  Path: ${originApk.absolutePath}")
 
         // 替换 LoadedApk.mClassLoader
@@ -486,6 +497,16 @@ class LoaderFactory : AppComponentFactory() {
             .apply { isAccessible = true }
             .set(loadedApk, newClassLoader)
         logD("  Replaced LoadedApk.mClassLoader")
+
+        // 不预加载加固壳 native 库！
+        // Android 禁止同一个 .so 被两个 ClassLoader 重复加载。
+        // 让加固壳自己的 StubApp.load() 通过 System.loadLibrary("jiagu_vip") 加载。
+        logD("  Skipping packer native preload (let packer load via System.loadLibrary)")
+
+        // 但加固壳的 StubApp.load() 可能不调用 System.loadLibrary，直接调 JNI 方法。
+        // 所以我们需要主动通过 guest ClassLoader 预加载加固库。
+        // 关键：必须通过 guest ClassLoader 的 System 类调用，使库加载到 guest 命名空间。
+        preloadPackerLibViaGuestClassLoader(realGuestClassLoader)
 
         // 验证 LoadedApk.mApplicationInfo 与 mBound.appInfo 是同一引用
         // 如果不是，需要同步修改
@@ -554,6 +575,170 @@ class LoaderFactory : AppComponentFactory() {
 
         guestClassLoader = newClassLoader
         logD("  swapClassLoader complete")
+    }
+
+    /**
+     * 通过 JNI 调用 Runtime.nativeLoad 加载加固壳 native 库到 guest ClassLoader 命名空间。
+     *
+     * 为什么不能用 System.loadLibrary / System.load：
+     * - System 是 boot class，Class.forName("java.lang.System", false, guestCl) 返回的
+     *   仍是 boot ClassLoader 的 System.class
+     * - System.loadLibrary 用 caller 的 ClassLoader (boot) 查找库 → "not found"
+     * - System.load(path) 用 boot namespace → libstdc++.so 依赖解析失败
+     *
+     * JNI 的 Runtime.nativeLoad(path, classLoader, callerClass) 直接指定 ClassLoader，
+     * 绕过 Java 层 hidden API 限制和 namespace 问题。
+     */
+    /**
+     * Fallback: 通过 JNI Runtime.nativeLoad 预加载加固壳 native 库。
+     * 主要方案已在 StubBuilder.build() 中通过 DEX 注入完成。
+     */
+    private fun preloadPackerLibViaGuestClassLoader(guestCl: ClassLoader) {
+        val libDirPath = originNativeLibDir
+        if (libDirPath == null) {
+            logD("  preloadPackerLib: no origin lib dir, skip (injection should have handled)")
+            return
+        }
+        val originLibDir = java.io.File(libDirPath)
+        if (!originLibDir.isDirectory) return
+
+        val jiaguFile = java.io.File(originLibDir, "libjiagu_vip.so")
+        if (!jiaguFile.exists()) return
+
+        val callerClass = try {
+            Class.forName("com.stub.StubApp", false, guestCl)
+        } catch (_: Throwable) {
+            try { Class.forName("com.qihoo.util.StubApp", false, guestCl) } catch (_: Throwable) { null }
+        } ?: return
+
+        val bridge = NativeHookBridge.getInstance()
+
+        // 安装 FindClass hook（可能在 Android 16 上不生效）
+        val targetClass = callerClass.name
+        logD("  FindClass hook: target=$targetClass, bridge.nativeLibLoaded=${bridge.isNativeLibLoaded()}")
+        val hookReady = bridge.setupFindClassHook(guestCl, targetClass)
+        if (hookReady) {
+            bridge.installFindClassHook()
+            logD("  FindClass hook installed for $targetClass")
+        }
+
+        // 尝试通过 JNI 加载库
+        try {
+            val ok = bridge.loadLibraryForGuest(jiaguFile.absolutePath, guestCl, callerClass)
+            if (ok) logD("  Preloaded OK: ${jiaguFile.name}")
+        } catch (_: Throwable) {}
+
+        // 兜底：手动注册壳的 native 方法 stub 实现
+        logW("  About to register stub methods for $targetClass")
+        try {
+            val registered = bridge.registerStubMethods(guestCl, targetClass)
+            logW("  Stub methods registered: $registered")
+        } catch (e: Throwable) {
+            logW("  registerStubMethods exception: ${e.message}")
+        }
+    }
+
+    /**
+     * Some protected apps register native methods such as StubApp.interface20
+     * from JNI_OnLoad. Loading these libs through the loader/stub caller binds
+     * them to the wrong ClassLoader, so JNI_OnLoad cannot find the protected
+     * StubApp class and RegisterNatives never completes.
+     */
+    private fun preloadPackerNativeLibraries(
+        originLibDir: File?,
+        realGuestClassLoader: ClassLoader
+    ) {
+        if (originLibDir == null || !originLibDir.isDirectory) {
+            logD("  Packer native preload skipped: no origin lib dir")
+            return
+        }
+
+        val candidates = originLibDir.listFiles()
+            ?.filter { file ->
+                file.isFile &&
+                    file.name.endsWith(".so") &&
+                    (file.name.startsWith("libjiagu") || file.name.contains("jiagu", ignoreCase = true))
+            }
+            ?.sortedBy { file ->
+                when {
+                    file.name.contains("vip", ignoreCase = true) -> 0
+                    file.name.startsWith("libjiagu", ignoreCase = true) -> 1
+                    else -> 2
+                }
+            }
+            ?: emptyList()
+
+        if (candidates.isEmpty()) {
+            logD("  Packer native preload skipped: no jiagu libs")
+            return
+        }
+
+        val paths = candidates.map { it.absolutePath }
+        logD("  Packer native preload: ${paths.size} libs found")
+
+        // 策略 1: 通过 JNI 调用 Runtime.nativeLoad（绕过 hidden API，使用 guest ClassLoader）
+        val callerClass = try {
+            Class.forName("com.stub.StubApp", false, realGuestClassLoader)
+        } catch (_: Throwable) { null }
+
+        if (callerClass != null) {
+            val bridge = NativeHookBridge.getInstance()
+            for (lib in candidates) {
+                try {
+                    val ok = bridge.loadLibraryForGuest(lib.absolutePath, realGuestClassLoader, callerClass)
+                    if (ok) {
+                        logD("  Preloaded OK (JNI nativeLoad): ${lib.name}")
+                        return // 成功加载一个就够了
+                    }
+                } catch (e: Throwable) {
+                    logW("  JNI nativeLoad failed for ${lib.name}: ${e.message}")
+                }
+            }
+        }
+
+        // 策略 2: dlopen 直接加载
+        try {
+            val loaded = NativeHookBridge.getInstance().preloadNativeLibraries(paths)
+            if (loaded > 0) {
+                logD("  Packer native preload OK via dlopen: $loaded/${paths.size}")
+                return
+            }
+        } catch (e: Throwable) {
+            logW("  dlopen preload failed: ${e.message}")
+        }
+
+        // 策略 3: 反射 Runtime.nativeLoad
+        val nativeLoad = try {
+            Runtime::class.java.getDeclaredMethod(
+                "nativeLoad",
+                String::class.java,
+                ClassLoader::class.java,
+                Class::class.java
+            ).apply { isAccessible = true }
+        } catch (_: Throwable) { null }
+
+        if (nativeLoad != null && callerClass != null) {
+            for (lib in candidates) {
+                try {
+                    val error = nativeLoad.invoke(null, lib.absolutePath, realGuestClassLoader, callerClass) as? String
+                    if (error == null) { logD("  Preloaded OK (reflection): ${lib.name}"); return }
+                    else logW("  Preload failed for ${lib.name}: $error")
+                } catch (e: Throwable) {
+                    logW("  Preload exception for ${lib.name}: ${e.cause?.message ?: e.message}")
+                }
+            }
+        }
+
+        // 策略 4: System.load() 最终回退
+        logW("  All preload strategies exhausted, trying System.load()")
+        for (lib in candidates) {
+            try {
+                System.load(lib.absolutePath)
+                logD("  Preloaded OK (System.load): ${lib.name}")
+            } catch (e: Throwable) {
+                logW("  System.load failed for ${lib.name}: ${e.message}")
+            }
+        }
     }
 
     private fun rebuildLoadedApkResources(loadedApk: Any, originApk: File) {

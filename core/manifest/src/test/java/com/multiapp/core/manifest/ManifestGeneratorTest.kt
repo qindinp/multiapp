@@ -187,6 +187,79 @@ class ManifestGeneratorTest {
     }
 
     @Test
+    fun `generateBytes should encode launchMode and configChanges as typed values`() {
+        val manifest = createTestManifest().copy(
+            activities = listOf(
+                ManifestParser.ComponentInfo(
+                    name = "com.test.MainActivity",
+                    exported = true,
+                    launchMode = "singleTask",
+                    configChanges = "orientation|screenSize|keyboardHidden",
+                    screenOrientation = "portrait",
+                    windowSoftInputMode = "adjustResize"
+                )
+            )
+        )
+        val config = createTestConfig()
+        val launcherActivity = manifest.activities.first()
+
+        val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
+
+        // 验证字符串池包含属性值
+        assertTrue(containsBytes(bytes, "singleTask".toByteArray(Charsets.UTF_8)), "Should contain singleTask")
+        assertTrue(containsBytes(bytes, "portrait".toByteArray(Charsets.UTF_8)), "Should contain portrait")
+        assertTrue(containsBytes(bytes, "adjustResize".toByteArray(Charsets.UTF_8)), "Should contain adjustResize")
+
+        // 验证 configChanges 管道分隔字符串
+        assertTrue(containsBytes(bytes, "orientation".toByteArray(Charsets.UTF_8)), "Should contain orientation")
+        assertTrue(containsBytes(bytes, "screenSize".toByteArray(Charsets.UTF_8)), "Should contain screenSize")
+        assertTrue(containsBytes(bytes, "keyboardHidden".toByteArray(Charsets.UTF_8)), "Should contain keyboardHidden")
+    }
+
+    @Test
+    fun `generateBytes should encode boolean component attributes`() {
+        val manifest = createTestManifest().copy(
+            activities = listOf(
+                ManifestParser.ComponentInfo(
+                    name = "com.test.MainActivity",
+                    exported = true,
+                    noHistory = true,
+                    clearTaskOnLaunch = true
+                )
+            )
+        )
+        val config = createTestConfig()
+        val launcherActivity = manifest.activities.first()
+
+        val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
+
+        // 验证字符串池包含属性名
+        assertTrue(containsBytes(bytes, "noHistory".toByteArray(Charsets.UTF_8)), "Should contain noHistory attr name")
+        assertTrue(containsBytes(bytes, "clearTaskOnLaunch".toByteArray(Charsets.UTF_8)), "Should contain clearTaskOnLaunch attr name")
+    }
+
+    @Test
+    fun `generateBytes should encode taskAffinity and permission as strings`() {
+        val manifest = createTestManifest().copy(
+            activities = listOf(
+                ManifestParser.ComponentInfo(
+                    name = "com.test.MainActivity",
+                    exported = true,
+                    taskAffinity = "com.tencent.qqreader",
+                    permission = "com.test.READ_BOOKS"
+                )
+            )
+        )
+        val config = createTestConfig()
+        val launcherActivity = manifest.activities.first()
+
+        val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
+
+        assertTrue(containsBytes(bytes, "com.tencent.qqreader".toByteArray(Charsets.UTF_8)), "Should contain taskAffinity")
+        assertTrue(containsBytes(bytes, "com.test.READ_BOOKS".toByteArray(Charsets.UTF_8)), "Should contain permission")
+    }
+
+    @Test
     fun `generateBytes string pool entries should be 4-byte aligned`() {
         val manifest = createTestManifest()
         val config = createTestConfig()
