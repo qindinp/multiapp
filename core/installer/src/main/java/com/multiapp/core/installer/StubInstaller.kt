@@ -223,15 +223,13 @@ class StubInstaller(private val context: Context) {
     }
 
     /**
-     * 使用 FileProvider URI 安装 (备用方案)
-     *
-     * 适用于无法使用 Session API 的场景
+     * 使用系统安装器 Intent 安装 (备用方案)
      *
      * @param stubApk APK 文件
      * @return 安装结果
      */
     fun installWithFileProvider(stubApk: File): InstallResult {
-        Timber.d("$TAG: installing with FileProvider: ${stubApk.name}")
+        Timber.d("$TAG: installing with system installer: ${stubApk.name}")
 
         return try {
             // Copy APK to the shared_apks/ subdirectory (must match file_provider_paths.xml)

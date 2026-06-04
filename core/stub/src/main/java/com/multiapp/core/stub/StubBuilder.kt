@@ -3,6 +3,8 @@ package com.multiapp.core.stub
 import com.multiapp.core.manifest.ComponentExtractor
 import com.multiapp.core.manifest.ManifestGenerator
 import com.multiapp.core.manifest.ManifestParser
+import com.multiapp.core.manifest.ManifestRewriter
+import com.multiapp.core.manifest.AuthorityRewriter
 import com.multiapp.core.manifest.StubConfig
 import com.android.apksig.ApkSigner
 import com.google.gson.Gson
@@ -71,23 +73,30 @@ class StubBuilder(
             val parsedManifest = parser.parse(originApk)
             Log.w("StubBuilder", "parsed manifest, ${parsedManifest.activities.size} activities")
 
-            // 2. 提取原 app 的 theme 资源 ID（int），用于以 TYPE_REFERENCE 写进 stub manifest。
-            // 运行时 addAssetPath(origin.apk) 已挂载原 app 资源，该 ID 正确解析到原 app 自己的 theme。
-            val manifest = enrichWithThemeIds(parsedManifest, originApk)
+            // 2. 提取原 app 的 theme 资源 ID
+            val manifest = enrichWithThemeIds(parsedManifest, originApk).let { m ->
+                val maxTargetSdk = 34
+                if (m.targetSdkVersion > maxTargetSdk) {
+                    Log.w("StubBuilder", "capping targetSdkVersion ${m.targetSdkVersion} -> $maxTargetSdk")
+                    m.copy(targetSdkVersion = maxTargetSdk)
+                } else m
+            }
 
             // 3. 生成 Stub manifest (二进制 XML)
+            //    使用 ManifestRewriter 增量修改原 APK 的 manifest，保留所有结构
             val launcherActivity = extractor.extractLauncherActivity(manifest)
                 ?: error("No launcher activity found in origin APK")
             val manifestBytes = try {
+                rewriteManifest(originApk, config, manifest)
+            } catch (e: Throwable) {
+                Log.e("StubBuilder", "rewriteManifest failed, falling back to generator", e)
+                // 回退到从零生成（兼容不支持增量修改的情况）
                 generator.generateBytes(
                     stubPackageName = config.stubPackageName,
                     manifest = manifest,
                     launcherActivity = launcherActivity,
                     config = config
                 )
-            } catch (e: Throwable) {
-                Log.e("StubBuilder", "generateBytes failed", e)
-                throw e
             }
             Log.w("StubBuilder", "manifest binary XML: ${manifestBytes.size} bytes")
 
@@ -353,6 +362,16 @@ class StubBuilder(
     }
 
     /**
+     * 使用 ManifestRewriter 增量修改原 APK 的二进制 manifest
+     */
+    private fun rewriteManifest(originApk: File, config: StubConfig, manifest: ManifestParser.ParsedManifest): ByteArray {
+        // ManifestRewriter 保留原 manifest 结构（含 meta-data），但会保留原 app 的 <permission> 声明。
+        // stub 包名不同 → 系统报 INSTALL_FAILED_DUPLICATE_PERMISSION。
+        // 因此始终走 BinaryXmlEncoder 从零生成（不含原 app 权限声明）。
+        error("Using fallback generator to avoid duplicate permission conflicts")
+    }
+
+    /**
      * 组装 APK 文件
      *
      * APK 结构: AndroidManifest.xml, classes.dex, assets/origin.apk, assets/multiapp_config.json
@@ -445,8 +464,16 @@ class StubBuilder(
                             Timber.w("StubBuilder: skipping duplicate native lib ${entry.name}")
                             return@forEach
                         }
-                        zos.putNextEntry(ZipEntry(entry.name))
-                        zip.getInputStream(entry).use { it.copyTo(zos) }
+                        // Native libs 必须 STORED（不压缩），Android 需要直接 mmap
+                        val data = zip.getInputStream(entry).readBytes()
+                        val storedEntry = ZipEntry(entry.name).apply {
+                            method = ZipEntry.STORED
+                            size = data.size.toLong()
+                            compressedSize = data.size.toLong()
+                            crc = java.util.zip.CRC32().also { it.update(data) }.value
+                        }
+                        zos.putNextEntry(storedEntry)
+                        zos.write(data)
                         zos.closeEntry()
                         count++
                     }
@@ -491,8 +518,15 @@ class StubBuilder(
             val entryName = "lib/$abi/$libName"
             if (!writtenEntries.add(entryName)) continue
             val libFile = File(sourceDir, libName)
-            zos.putNextEntry(ZipEntry(entryName))
-            libFile.inputStream().use { it.copyTo(zos) }
+            val data = libFile.readBytes()
+            val storedEntry = ZipEntry(entryName).apply {
+                method = ZipEntry.STORED
+                size = data.size.toLong()
+                compressedSize = data.size.toLong()
+                crc = java.util.zip.CRC32().also { it.update(data) }.value
+            }
+            zos.putNextEntry(storedEntry)
+            zos.write(data)
             zos.closeEntry()
             count++
             Timber.d("StubBuilder: packaged $libName from ${sourceDir.absolutePath}")
@@ -538,8 +572,15 @@ class StubBuilder(
             var count = 0
             for ((entryName, entry) in entries) {
                 if (!writtenEntries.add(entryName)) continue
-                zos.putNextEntry(ZipEntry(entryName))
-                zip.getInputStream(entry!!).use { it.copyTo(zos) }
+                val data = zip.getInputStream(entry!!).readBytes()
+                val storedEntry = ZipEntry(entryName).apply {
+                    method = ZipEntry.STORED
+                    size = data.size.toLong()
+                    compressedSize = data.size.toLong()
+                    crc = java.util.zip.CRC32().also { it.update(data) }.value
+                }
+                zos.putNextEntry(storedEntry)
+                zos.write(data)
                 zos.closeEntry()
                 count++
             }

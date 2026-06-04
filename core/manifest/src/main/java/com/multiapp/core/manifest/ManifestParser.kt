@@ -74,7 +74,8 @@ class ManifestParser @Inject constructor(
     data class MetaDataInfo(
         val name: String,
         val resource: String? = null,
-        val value: String? = null
+        val value: String? = null,
+        val resourceId: Int = 0
     )
 
     data class IntentFilterInfo(
@@ -197,10 +198,13 @@ class ManifestParser @Inject constructor(
     fun parse(apkFile: File): ParsedManifest {
         val manifestXml = try {
             ApkFile(apkFile).use { it.manifestXml }
-        } catch (e: java.nio.BufferUnderflowException) {
-            // resources.arsc 为空或损坏时（如最小测试APK），apk-parser 会抛 BufferUnderflowException
-            // 回退到 Android PackageManager 解析（系统原生 parser 不受 resources.arsc 大小影响）
-            android.util.Log.w("ManifestParser", "resources.arsc parse failed, falling back to PackageManager", e)
+        } catch (e: Exception) {
+            // apk-parser 解析失败的常见原因：
+            // - resources.arsc 为空或损坏（BufferUnderflowException）
+            // - 360 加固等壳加密 manifest（二进制 XML 格式异常）
+            // - APK 格式损坏
+            // 回退到 Android PackageManager（系统原生 parser 能处理以上所有情况）
+            android.util.Log.w("ManifestParser", "apk-parser failed, falling back to PackageManager", e)
             return parseViaPackageManager(apkFile)
         }
         return parseFromXml(manifestXml)
@@ -298,7 +302,7 @@ class ManifestParser @Inject constructor(
                 bundle.keySet().mapNotNull { key ->
                     val value = bundle.get(key)
                     when (value) {
-                        is Int -> MetaDataInfo(name = key, resource = "@0x${Integer.toHexString(value)}")
+                        is Int -> MetaDataInfo(name = key, resource = "@0x${Integer.toHexString(value)}", resourceId = value)
                         is String -> MetaDataInfo(name = key, value = value)
                         else -> MetaDataInfo(name = key, value = value?.toString())
                     }

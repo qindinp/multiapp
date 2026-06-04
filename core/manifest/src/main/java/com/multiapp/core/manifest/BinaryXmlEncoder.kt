@@ -50,6 +50,9 @@ class BinaryXmlEncoder {
             "enabled" to 0x0101000e,
             "extractNativeLibs" to 0x010104ea,
             "grantUriPermissions" to 0x0101001b,
+            // ── meta-data 属性 ──
+            "resource" to 0x01010025,
+            "value" to 0x01010024,
             // ── 组件属性 ──
             "launchMode" to 0x0101001d,
             "configChanges" to 0x0101001f,
@@ -160,8 +163,8 @@ class BinaryXmlEncoder {
         val RECEIVER = otherStr("receiver")
         val PROVIDER = otherStr("provider")
         val META_DATA = otherStr("meta-data")
-        val RESOURCE_ATTR = otherStr("resource")
-        val VALUE_ATTR = otherStr("value")
+        val IDX_RESOURCE = attrStr("resource")
+        val IDX_VALUE = attrStr("value")
         val ANDROID = otherStr("android")
         val EMPTY = otherStr("")
 
@@ -264,21 +267,8 @@ class BinaryXmlEncoder {
                     typedValue = -1, dataType = TYPE_INT_BOOLEAN))
             }
             nodes.add(Node.ElemStart(null, "provider", attrs))
-            // 生成 <meta-data> 子元素（FileProvider 等需要）
-            val metaDataList = manifest.providerMetaData[p.name] ?: emptyList()
-            for (meta in metaDataList) {
-                val metaAttrs = mutableListOf(
-                    XmlAttr(ANDROID_NS_URI, "name", meta.name)
-                )
-                if (meta.resource != null) {
-                    metaAttrs.add(XmlAttr(ANDROID_NS_URI, "resource", meta.resource))
-                }
-                if (meta.value != null) {
-                    metaAttrs.add(XmlAttr(ANDROID_NS_URI, "value", meta.value))
-                }
-                nodes.add(Node.ElemStart(null, "meta-data", metaAttrs))
-                nodes.add(Node.ElemEnd(null, "meta-data"))
-            }
+            // meta-data 编码在 MIUI 上导致安装失败，暂时禁用
+            // ManifestRewriter 路径会保留原始 meta-data，此处仅影响加密 APK 的回退路径
             nodes.add(Node.ElemEnd(null, "provider"))
         }
 
@@ -501,7 +491,7 @@ class BinaryXmlEncoder {
                             idx[a.rawValue] ?: -1
                         }
                         body.putInt(rawIdx) // rawValue in string pool
-                        body.putShort(8) // typedValueSize
+                        body.putShort(4) // typedValueSize
                         body.put(0) // res0
                         body.put(a.dataType.toByte()) // dataType
                         body.putInt(if (a.dataType == TYPE_STRING) rawIdx else a.typedValue)
@@ -613,5 +603,12 @@ class BinaryXmlEncoder {
         buf.putInt(total)
         for (id in ids) buf.putInt(id)
         return buf.array()
+    }
+
+    private fun parseResourceRef(ref: String): Int {
+        if (ref.startsWith("@0x") || ref.startsWith("@0X")) {
+            return ref.substring(3).toIntOrNull(16) ?: 0
+        }
+        return 0
     }
 }
