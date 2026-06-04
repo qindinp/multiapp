@@ -75,6 +75,12 @@ class DexPatcher {
 
             for (signature in signatures) {
                 if (matchesClassName(className, signature.classNamePattern)) {
+                    // 跳过白名单 SDK 包中的类（避免误杀广告 SDK 等）
+                    if (DetectionSignatureDatabase.WHITELISTED_PACKAGES.any { pkg ->
+                            className.startsWith(pkg)
+                        }) {
+                        continue
+                    }
                     val methods: List<org.jf.dexlib2.iface.Method> = classDef.methods.toList()
                     for (method in methods) {
                         if (matchesMethodStrings(method, signature.signatureStrings)) {

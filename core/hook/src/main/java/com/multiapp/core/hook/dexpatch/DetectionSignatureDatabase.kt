@@ -99,5 +99,27 @@ object DetectionSignatureDatabase {
         }
     }
 
+    /**
+     * 已知 SDK 包白名单 — 这些包中的方法不应被 neutralize
+     *
+     * Pangle(穿山甲)、字节跳动、腾讯广告等 SDK 内部有安全检查代码，
+     * 包含 /proc/self/maps、XposedBridge 等字符串，会被 universal 签名误杀。
+     */
+    val WHITELISTED_PACKAGES = setOf(
+        "com.bytedance.pangle",       // 穿山甲广告 SDK
+        "com.bytedance.sdk.openadsdk", // 穿山甲广告 SDK
+        "com.bytedance.android.dy.sdk", // 字节跳动 SDK
+        "com.bytedance.android.openliveplugin", // 字节直播插件
+        "com.sigmob",                  // Sigmob 广告 SDK
+        "com.mbridge",                 // Mintegral 广告 SDK
+        "com.unity3d.ads",             // Unity Ads
+        "com.applovin",                // AppLovin 广告 SDK
+        "com.inmobi",                  // InMobi 广告 SDK
+        "com.facebook.ads",            // Facebook 广告 SDK
+        "com.google.android.gms.ads",  // Google Ads
+        "com.qq.e.comm",               // 腾讯广告 SDK
+        "com.huawei.hms.ads"           // 华为广告 SDK
+    )
+
     fun getAll(): List<DetectionSignature> = signatures
 }

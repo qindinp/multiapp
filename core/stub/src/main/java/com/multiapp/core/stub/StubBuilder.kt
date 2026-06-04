@@ -113,7 +113,6 @@ class StubBuilder(
             Log.w("StubBuilder", "loader.dex: ${loaderDex.size} bytes")
 
             // 5.5 注入 System.loadLibrary("jiagu_vip") 到加固壳 StubApp.load()
-            // originApk 在 /data/app/... 是只读的，先复制到 workDir 再注入
             val injectableApk = File(workDir, "origin_inject.apk")
             originApk.copyTo(injectableApk, overwrite = true)
             injectPackerLibLoad(injectableApk)
