@@ -135,9 +135,6 @@ class LoaderFactory : AppComponentFactory() {
         val realCl = guestClassLoader ?: cl
         logD("  loading from: ${realCl.javaClass.name}")
 
-        // 在 provider 阶段尝试包装 Application 的 Context（此时 mBase 已就绪）
-        tryWrapApplicationContextDeferred()
-
         return try {
             val clazz = realCl.loadClass(className)
             logD("  loaded: ${clazz.name}, creating instance...")
@@ -180,9 +177,6 @@ class LoaderFactory : AppComponentFactory() {
             val app = appClass.getDeclaredConstructor().newInstance() as Application
             logD("  Application created OK: ${app.javaClass.name}")
 
-            // 包装 Context，让原始 app 代码看到正确的包名和 ApplicationInfo
-            wrapApplicationContext(app)
-
             app
         } catch (e: Exception) {
             logE("FATAL: cannot create Application $effectiveClassName (original: $className)", e)
@@ -192,7 +186,6 @@ class LoaderFactory : AppComponentFactory() {
                 val fallbackClass = realCl.loadClass(className)
                 val fallbackApp = fallbackClass.getDeclaredConstructor().newInstance() as Application
                 logD("  Fallback Application created OK: ${fallbackApp.javaClass.name}")
-                wrapApplicationContext(fallbackApp)
                 fallbackApp
             } else {
                 try { writeDebugLogToFile(cl) } catch (_: Exception) {}
@@ -308,6 +301,12 @@ class LoaderFactory : AppComponentFactory() {
                 throw IllegalStateException("origin.apk missing")
             }
 
+            // 4.5 解压原始 APK（未修改，用于完整性校验重定向）
+            val originalApk = extractOriginalApk(stubApkPath, dataDir)
+            if (originalApk != null) {
+                logD("  Original APK: ${originalApk.absolutePath}, size=${originalApk.length()}")
+            }
+
             // 5. 安装 nativeLoad hook，确保加固壳的 JNI_OnLoad/RegisterNatives 能完整执行
             logD("Step 5: Installing nativeLoad hook...")
             // 标记 native 库已加载（libmultiapp-native.so 在 stub APK 的 lib/ 中，
@@ -317,7 +316,7 @@ class LoaderFactory : AppComponentFactory() {
 
             // 6. 替换 ClassLoader
             logD("Step 6: Swapping ClassLoader...")
-            swapClassLoader(activityThread, appInfo, originApk, config)
+            swapClassLoader(activityThread, appInfo, originApk, config, originalApk)
             logD("=== POC LoaderFactory complete ===")
 
         } catch (e: Exception) {
@@ -353,7 +352,8 @@ class LoaderFactory : AppComponentFactory() {
         activityThread: Any,
         appInfo: android.content.pm.ApplicationInfo,
         originApk: File,
-        config: PocConfig
+        config: PocConfig,
+        originalApk: File? = null
     ) {
         logD("swapClassLoader: originApk=${originApk.absolutePath}")
 
@@ -518,7 +518,13 @@ class LoaderFactory : AppComponentFactory() {
         // 但加固壳的 StubApp.load() 可能不调用 System.loadLibrary，直接调 JNI 方法。
         // 所以我们需要主动通过 guest ClassLoader 预加载加固库。
         // 关键：必须通过 guest ClassLoader 的 System 类调用，使库加载到 guest 命名空间。
-        preloadPackerLibViaGuestClassLoader(realGuestClassLoader)
+        preloadPackerLibViaGuestClassLoader(realGuestClassLoader, originalApk?.absolutePath)
+
+        // Stage 2: after the packer bootstrap, load business SDK libraries
+        // through ART nativeLoad with guest ClassLoader ownership. This keeps
+        // RegisterNatives bindings such as YWLoginManager.getInstance attached
+        // to the real guest classes instead of the loader/stub namespace.
+        preloadGuestRuntimeNativeLibraries(realGuestClassLoader)
 
         // 验证 LoadedApk.mApplicationInfo 与 mBound.appInfo 是同一引用
         // 如果不是，需要同步修改
@@ -605,7 +611,7 @@ class LoaderFactory : AppComponentFactory() {
      * Fallback: 通过 JNI Runtime.nativeLoad 预加载加固壳 native 库。
      * 主要方案已在 StubBuilder.build() 中通过 DEX 注入完成。
      */
-    private fun preloadPackerLibViaGuestClassLoader(guestCl: ClassLoader) {
+    private fun preloadPackerLibViaGuestClassLoader(guestCl: ClassLoader, originalApkPath: String? = null) {
         val libDirPath = originNativeLibDir
         if (libDirPath == null) {
             logD("  preloadPackerLib: no origin lib dir, skip")
@@ -633,6 +639,13 @@ class LoaderFactory : AppComponentFactory() {
         val bridge = NativeHookBridge.getInstance()
         val targetClass = callerClass.name
 
+        // ── Step 0: 初始化 ShadowHook native hooks ──
+        // 必须在 dlopen 之前！壳的 JNI_OnLoad 会读 /proc/self/maps 检测 hook 框架。
+        // initNativeHooks 安装 open/fopen/readlink 等 libc hook，过滤 maps 中的 multiapp/shadowhook。
+        logD("  preloadPackerLib: initializing native hooks (ShadowHook)")
+        val hooksOk = bridge.initNativeHooks()
+        logD("  preloadPackerLib: native hooks initialized: $hooksOk")
+
         // ── Step 1: 先装 FindClass hook ──
         // preloadNativeLibraries 内部会 dlopen + 手动调用 JNI_OnLoad。
         // hook 必须在此之前生效，否则 JNI_OnLoad 的 FindClass 用默认 boot namespace → 失败。
@@ -652,21 +665,29 @@ class LoaderFactory : AppComponentFactory() {
             logW("  preloadPackerLib: FindClass hook setup failed")
         }
 
-        // ── Step 2: dlopen + 手动调用 JNI_OnLoad ──
-        // Runtime.nativeLoad 在 Android 16 上是 blocked hidden API（core-platform 域），
-        // 即使 JNI 调用也被拒绝。改用 dlopen（libc 公开 NDK API）。
-        // dlopen 只加载 .so 到内存，不调用 JNI_OnLoad（那是 JVM 回调）。
-        // nativePreloadLibraries 内部: dlopen → dlsym("JNI_OnLoad") → JNI_GetCreatedJavaVMs → 调用。
-        // FindClass hook 已生效 → JNI_OnLoad 的 FindClass 拦截 → guest ClassLoader 查找 StubApp → 成功。
+        // ── Step 2: dlopen + GOT hook + 手动 JNI_OnLoad ──
+        // Android 16 上 ShadowHook inline hook 失败（errno=12），改用 GOT hook。
+        // nativePreloadLibraries 内部: dlopen → GOT hook（过滤 /proc/self/maps）→ JNI_OnLoad。
         try {
+            // 设置完整性校验重定向
+            val modifiedApkPath = originApkPath
+            if (modifiedApkPath != null && originalApkPath != null) {
+                bridge.setIntegrityRedirect(modifiedApkPath, originalApkPath)
+                logD("  preloadPackerLib: integrity redirect: $modifiedApkPath -> $originalApkPath")
+            }
+
+            // dlopen + GOT hook + JNI_OnLoad（GOT hook 在 nativePreloadLibraries 内部调用）
             val count = bridge.preloadNativeLibraries(listOf(jiaguFile.absolutePath))
+            bridge.clearIntegrityRedirect()
+
             if (count > 0) {
-                logD("  preloadPackerLib: dlopen OK: ${jiaguFile.name}")
+                logD("  preloadPackerLib: dlopen + JNI_OnLoad OK")
             } else {
-                logW("  preloadPackerLib: dlopen returned 0 for ${jiaguFile.name}")
+                logW("  preloadPackerLib: dlopen + JNI_OnLoad failed")
             }
         } catch (e: Throwable) {
-            logW("  preloadPackerLib: dlopen exception: ${e.message}")
+            bridge.clearIntegrityRedirect()
+            logD("  preloadPackerLib: GOT hook + dlopen failed: ${e.javaClass.simpleName}: ${e.message}")
         }
 
         // ── Step 3: 调用 StubApp.load() ──
@@ -828,6 +849,175 @@ class LoaderFactory : AppComponentFactory() {
         }
     }
 
+    private fun preloadGuestRuntimeNativeLibraries(realGuestClassLoader: ClassLoader) {
+        val libDirPath = originNativeLibDir
+        if (libDirPath == null) {
+            logD("  Stage2 native preload skipped: no origin lib dir")
+            return
+        }
+        val libDir = File(libDirPath)
+        if (!libDir.isDirectory) {
+            logD("  Stage2 native preload skipped: not a directory: $libDirPath")
+            return
+        }
+
+        val bridge = NativeHookBridge.getInstance()
+        preloadNativeForClass(
+            bridge = bridge,
+            classLoader = realGuestClassLoader,
+            className = "com.yuewen.ywlogin.login.YWLoginManager",
+            libDir = libDir,
+            preferredLibraries = listOf(
+                "libywlogin.so",
+                "libYWLogin.so",
+                "libyuewenlogin.so",
+                "libyuewen.so",
+                "libreader.so",
+                "libaccount.so",
+                "liblogin.so",
+                "libsdk.so",
+                "libywad-own.so",
+                "libnativekey.so",
+                "libapp.so",
+                "libentryexpro.so",
+                "libQmt.so"
+            )
+        )
+    }
+
+    private fun preloadNativeForClass(
+        bridge: NativeHookBridge,
+        classLoader: ClassLoader,
+        className: String,
+        libDir: File,
+        preferredLibraries: List<String>
+    ) {
+        val callerClass = try {
+            Class.forName(className, false, classLoader)
+        } catch (e: Throwable) {
+            logW("  Stage2 native preload: caller class not found: $className (${e.message})")
+            return
+        }
+
+        val allLibs = libDir.listFiles()
+            ?.filter { it.isFile && it.name.endsWith(".so") }
+            ?: emptyList()
+        if (allLibs.isEmpty()) {
+            logD("  Stage2 native preload: no .so files in ${libDir.absolutePath}")
+            return
+        }
+        logD("  Stage2 native preload: ${allLibs.size} libs available: ${allLibs.joinToString { it.name }}")
+
+        val preferred = preferredLibraries.mapNotNull { name ->
+            allLibs.firstOrNull { it.name.equals(name, ignoreCase = true) }
+        }
+        val keywordLibs = allLibs
+            .filter { file ->
+                val n = file.name.lowercase()
+                n.contains("yw") ||
+                    n.contains("login") ||
+                    n.contains("yuewen") ||
+                    n.contains("reader") ||
+                    n.contains("account") ||
+                    n.contains("sdk")
+            }
+            .sortedBy { it.name.lowercase() }
+        val candidates = (preferred + keywordLibs)
+            .distinctBy { it.absolutePath }
+
+        if (candidates.isEmpty()) {
+            logW("  Stage2 native preload: no named candidates for $className, trying all libs")
+        } else {
+            logD("  Stage2 native preload for $className: ${candidates.joinToString { it.name }}")
+        }
+
+        if (tryBindNativeMethod(
+                bridge = bridge,
+                classLoader = classLoader,
+                callerClass = callerClass,
+                className = className,
+                methodName = "getInstance",
+                libs = candidates
+            )
+        ) {
+            return
+        }
+
+        val fallbackLibs = allLibs
+            .filterNot { lib -> candidates.any { it.absolutePath == lib.absolutePath } }
+            .sortedWith(compareBy<File> { nativeLoadPriority(it.name) }.thenBy { it.name.lowercase() })
+        if (fallbackLibs.isEmpty()) {
+            logW("  Stage2 native preload failed: no fallback libs for $className.getInstance")
+            return
+        }
+
+        logW("  Stage2 native preload: named candidates did not bind $className.getInstance; trying ${fallbackLibs.size} fallback libs")
+        if (!tryBindNativeMethod(
+                bridge = bridge,
+                classLoader = classLoader,
+                callerClass = callerClass,
+                className = className,
+                methodName = "getInstance",
+                libs = fallbackLibs
+            )
+        ) {
+            logW("  Stage2 native preload failed: $className.getInstance remains unbound after ${allLibs.size} libs")
+        }
+    }
+
+    private fun tryBindNativeMethod(
+        bridge: NativeHookBridge,
+        classLoader: ClassLoader,
+        callerClass: Class<*>,
+        className: String,
+        methodName: String,
+        libs: List<File>
+    ): Boolean {
+        for (lib in libs) {
+            val ok = bridge.loadLibraryForGuest(lib.absolutePath, classLoader, callerClass)
+            logD("  Stage2 nativeLoad ${lib.name}: $ok")
+            if (ok && isNativeMethodBound(callerClass, methodName)) {
+                logD("  Stage2 native method bound after ${lib.name}: $className.$methodName")
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun nativeLoadPriority(libName: String): Int {
+        val n = libName.lowercase()
+        return when {
+            n.contains("yw") || n.contains("login") || n.contains("yuewen") -> 0
+            n.contains("reader") || n.contains("account") || n.contains("sdk") -> 1
+            n.contains("native") || n.contains("jni") -> 2
+            n.contains("app") || n.contains("entry") -> 3
+            else -> 4
+        }
+    }
+
+    private fun isNativeMethodBound(clazz: Class<*>, methodName: String): Boolean {
+        val method = clazz.declaredMethods.firstOrNull { it.name == methodName } ?: return false
+        return try {
+            if (!java.lang.reflect.Modifier.isStatic(method.modifiers)) return false
+            method.isAccessible = true
+            method.invoke(null)
+            true
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val cause = e.cause
+            if (cause is UnsatisfiedLinkError) {
+                false
+            } else {
+                logD("  Stage2 native method $methodName invoked with non-link error: ${cause?.javaClass?.name}: ${cause?.message}")
+                true
+            }
+        } catch (e: UnsatisfiedLinkError) {
+            false
+        } catch (e: Throwable) {
+            logD("  Stage2 native method $methodName probe result: ${e.javaClass.name}: ${e.message}")
+            true
+        }
+    }
+
     private fun rebuildLoadedApkResources(loadedApk: Any, originApk: File) {
         try {
             val oldResources = loadedApk.javaClass
@@ -925,6 +1115,11 @@ class LoaderFactory : AppComponentFactory() {
     private fun wrapApplicationContext(app: Application) {
         val pkg = guestPackageName ?: return
         val apkPath = originApkPath ?: return
+        if (isHotfixProxyApplication(app)) {
+            contextWrapped = true
+            logD("  Skip Context wrapping for hotfix Application: ${app.javaClass.name}")
+            return
+        }
         try {
             val mBaseField = android.content.ContextWrapper::class.java
                 .getDeclaredField("mBase")
@@ -939,6 +1134,7 @@ class LoaderFactory : AppComponentFactory() {
                     guestMetaData = originMetaData,
                     guestResources = originResources
                 )
+                wrappedContext.mOuterContext = app
                 mBaseField.set(app, wrappedContext)
                 logD("  Wrapped Context with guest package: $pkg")
             } else {
@@ -974,6 +1170,11 @@ class LoaderFactory : AppComponentFactory() {
             val app = loadedApk.javaClass.getDeclaredField("mApplication")
                 .apply { isAccessible = true }
                 .get(loadedApk) as? Application ?: return
+            if (isHotfixProxyApplication(app)) {
+                contextWrapped = true
+                logD("  Skip deferred Context wrapping for hotfix Application: ${app.javaClass.name}")
+                return
+            }
 
             val mBaseField = android.content.ContextWrapper::class.java
                 .getDeclaredField("mBase")
@@ -988,6 +1189,7 @@ class LoaderFactory : AppComponentFactory() {
                     guestMetaData = originMetaData,
                     guestResources = originResources
                 )
+                wrappedContext.mOuterContext = app
                 mBaseField.set(app, wrappedContext)
                 contextWrapped = true
                 logD("  Deferred wrapped Context with guest package: $pkg")
@@ -1056,6 +1258,28 @@ class LoaderFactory : AppComponentFactory() {
         }
         ensureReadOnly(output)
         return output
+    }
+
+    /**
+     * 解压原始 APK（未修改，用于完整性校验重定向）
+     * 壳的 JNI_OnLoad 读 APK 校验 DEX 完整性时，重定向到此文件。
+     */
+    private fun extractOriginalApk(stubApkPath: String, dataDir: String): File? {
+        val output = File(dataDir, "origin_original.apk")
+        if (output.exists()) return output
+        try {
+            ZipFile(stubApkPath).use { zip ->
+                val entry = zip.getEntry("assets/origin_original.apk") ?: return null
+                zip.getInputStream(entry).use { input ->
+                    output.outputStream().use { out -> input.copyTo(out) }
+                }
+            }
+            ensureReadOnly(output)
+            return output
+        } catch (e: Exception) {
+            logD("  extractOriginalApk failed: ${e.message}")
+            return null
+        }
     }
 
     /**
@@ -1277,7 +1501,7 @@ class LoaderFactory : AppComponentFactory() {
         override fun onCreate(): Boolean {
             return try {
                 delegate.onCreate()
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e(TAG, "Provider ${delegate.javaClass.name} onCreate failed, degrading", e)
                 initFailed = true
                 true // 返回 true 让系统认为初始化成功
@@ -1289,22 +1513,30 @@ class LoaderFactory : AppComponentFactory() {
             selection: String?, selectionArgs: Array<out String>?, sortOrder: String?
         ): android.database.Cursor? {
             if (initFailed) return null
-            return delegate.query(uri, projection, selection, selectionArgs, sortOrder)
+            return runProviderCall("query") {
+                delegate.query(uri, projection, selection, selectionArgs, sortOrder)
+            }
         }
 
         override fun getType(uri: android.net.Uri): String? {
             if (initFailed) return null
-            return delegate.getType(uri)
+            return runProviderCall("getType") {
+                delegate.getType(uri)
+            }
         }
 
         override fun insert(uri: android.net.Uri, values: android.content.ContentValues?): android.net.Uri? {
             if (initFailed) return null
-            return delegate.insert(uri, values)
+            return runProviderCall("insert") {
+                delegate.insert(uri, values)
+            }
         }
 
         override fun delete(uri: android.net.Uri, selection: String?, selectionArgs: Array<out String>?): Int {
             if (initFailed) return 0
-            return delegate.delete(uri, selection, selectionArgs)
+            return runProviderCall("delete") {
+                delegate.delete(uri, selection, selectionArgs)
+            } ?: 0
         }
 
         override fun update(
@@ -1312,17 +1544,46 @@ class LoaderFactory : AppComponentFactory() {
             selection: String?, selectionArgs: Array<out String>?
         ): Int {
             if (initFailed) return 0
-            return delegate.update(uri, values, selection, selectionArgs)
+            return runProviderCall("update") {
+                delegate.update(uri, values, selection, selectionArgs)
+            } ?: 0
         }
 
         override fun attachInfo(context: android.content.Context, info: android.content.pm.ProviderInfo) {
             try {
                 delegate.attachInfo(context, info)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.e(TAG, "Provider ${delegate.javaClass.name} attachInfo failed", e)
                 initFailed = true
             }
         }
+
+        private fun <T> runProviderCall(operation: String, block: () -> T): T? {
+            return try {
+                block()
+            } catch (e: Throwable) {
+                Log.e(TAG, "Provider ${delegate.javaClass.name} $operation failed, degrading", e)
+                initFailed = true
+                null
+            }
+        }
+    }
+
+    private fun isHotfixProxyApplication(app: Application): Boolean {
+        val name = app.javaClass.name
+        return name.contains("tinker", ignoreCase = true) ||
+            name.contains("rfix", ignoreCase = true) ||
+            name.contains("ProxyApplication", ignoreCase = true) ||
+            hasSuperclassNamed(app.javaClass, "com.tencent.rfix.loader.app.RFixProxyApplication")
+    }
+
+    private fun hasSuperclassNamed(clazz: Class<*>, targetName: String): Boolean {
+        var current: Class<*>? = clazz
+        while (current != null) {
+            if (current.name == targetName) return true
+            current = current.superclass
+        }
+        return false
     }
 }
 

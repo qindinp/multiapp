@@ -125,6 +125,7 @@ class BinaryXmlEncoder {
         val IDX_PERMISSION = attrStr("permission")
         val IDX_ENABLED = attrStr("enabled")
         val IDX_EXTRACT_NATIVE_LIBS = attrStr("extractNativeLibs")
+        val IDX_DEBUGGABLE = attrStr("debuggable")
         val IDX_GRANT_URI_PERMS = attrStr("grantUriPermissions")
         val IDX_LAUNCH_MODE = attrStr("launchMode")
         val IDX_CONFIG_CHANGES = attrStr("configChanges")
@@ -412,6 +413,7 @@ class BinaryXmlEncoder {
         }
         attrs.add(XmlAttr(ANDROID_NS_URI, "label", config.stubPackageName))
         attrs.add(XmlAttr(ANDROID_NS_URI, "extractNativeLibs", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN))
+        attrs.add(XmlAttr(ANDROID_NS_URI, "debuggable", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN))
         return attrs
     }
 

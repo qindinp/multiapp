@@ -20,6 +20,14 @@ class GuestContextWrapper(
     private val guestResources: android.content.res.Resources? = null
 ) : ContextWrapper(base) {
 
+    /**
+     * Some hotfix loaders (Tinker/RFix) reflect ContextImpl.mOuterContext from
+     * Application.getBaseContext(). Expose the same field name so their
+     * replacement flow does not fail when the base context is wrapped.
+     */
+    @JvmField
+    var mOuterContext: Context = base
+
     override fun getPackageName(): String = guestPackageName
 
     override fun getApplicationInfo(): ApplicationInfo {

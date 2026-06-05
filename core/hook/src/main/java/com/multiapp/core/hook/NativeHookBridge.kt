@@ -127,15 +127,16 @@ class NativeHookBridge {
     fun preloadNativeLibraries(libPaths: List<String>): Int {
         if (libPaths.isEmpty()) return 0
         if (!nativeLibLoaded) {
-            Timber.tag(TAG).w("Cannot preload: native lib not loaded")
+            android.util.Log.w(TAG, "preloadNativeLibraries: native lib not loaded")
             return 0
         }
         return try {
+            android.util.Log.i(TAG, "preloadNativeLibraries: calling native with ${libPaths.size} paths: $libPaths")
             val count = nativePreloadLibraries(libPaths.toTypedArray())
-            Timber.tag(TAG).i("Preloaded $count/${libPaths.size} native libraries via dlopen")
+            android.util.Log.i(TAG, "preloadNativeLibraries: returned $count/${libPaths.size}")
             count
         } catch (e: Throwable) {
-            Timber.tag(TAG).w(e, "nativePreloadLibraries failed")
+            android.util.Log.e(TAG, "preloadNativeLibraries: exception: ${e.javaClass.simpleName}: ${e.message}", e)
             0
         }
     }
@@ -226,6 +227,27 @@ class NativeHookBridge {
         pathRedirections.clear(); rebuildPrefixIndex()
         if (nativeHooksAvailable) nativeClearPathRedirections()
         Timber.tag(TAG).d("All path redirections cleared")
+    }
+
+    /**
+     * 设置完整性校验重定向：壳的 JNI_OnLoad 读 APK 校验 DEX 时，重定向到原始 APK。
+     * 必须在调用 System.loadLibrary() 之前设置，之后调用 clearIntegrityRedirect()。
+     */
+    fun setIntegrityRedirect(fromPath: String, toPath: String) {
+        if (nativeHooksAvailable) nativeSetIntegrityRedirect(fromPath, toPath)
+    }
+
+    fun clearIntegrityRedirect() {
+        if (nativeHooksAvailable) nativeClearIntegrityRedirect()
+    }
+
+    /**
+     * GOT hook：修改目标库的 GOT 表，拦截 open/openat/fopen 调用。
+     * 用于过滤 /proc/self/maps 读取，绕过壳的反调试检测。
+     * 不需要 trampoline 内存，Android 16 上可行。
+     */
+    fun gotHookLibrary(libName: String) {
+        if (nativeHooksAvailable) nativeGotHookLibrary(libName)
     }
 
     fun setupAppRedirections(guestPackageName: String, instanceId: String, sandboxDataDir: String) {
@@ -373,6 +395,9 @@ class NativeHookBridge {
     private external fun nativeSetupFindClassHook(classLoader: ClassLoader, targetClassNames: Array<String>): Boolean
     private external fun nativeInstallFindClassHook()
     private external fun nativeRegisterStubMethods(classLoader: ClassLoader, className: String): Boolean
+    private external fun nativeSetIntegrityRedirect(fromPath: String, toPath: String)
+    private external fun nativeClearIntegrityRedirect()
+    private external fun nativeGotHookLibrary(libName: String)
 
     private fun tryLoadNativeLibrary(): Boolean = nativeLibLoaded
 

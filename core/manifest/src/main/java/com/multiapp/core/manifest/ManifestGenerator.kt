@@ -31,7 +31,7 @@ class ManifestGenerator {
         if (manifest.applicationClass != null) {
             sb.appendLine("""        android:name="${manifest.applicationClass}"""")
         }
-        sb.appendLine("""        android:label="${config.stubPackageName}" android:extractNativeLibs="true">""")
+        sb.appendLine("""        android:label="${config.stubPackageName}" android:extractNativeLibs="true" android:debuggable="true">""")
         sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true" android:enabled="true"${componentAttrs(launcherActivity)}>""")
         sb.appendLine("""            <intent-filter>""")
         sb.appendLine("""                <action android:name="android.intent.action.MAIN" />""")

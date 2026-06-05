@@ -32,7 +32,9 @@
 #include <sys/ptrace.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <fcntl.h>
 #include <unistd.h>
+#include <link.h>
 
 #include <cstdio>
 #include <cstring>
@@ -102,6 +104,11 @@ static orig_access_t real_access = nullptr;
 static orig_stat_t real_stat = nullptr;
 static orig_lstat_t real_lstat = nullptr;
 static orig_readlink_t real_readlink = nullptr;
+
+// 完整性校验重定向：壳的 JNI_OnLoad 读 APK 校验 DEX 时，重定向到原始 APK
+static thread_local bool g_integrity_redirect_active = false;
+static std::string g_integrity_redirect_from;  // 修改后的 APK 路径
+static std::string g_integrity_redirect_to;    // 原始 APK 路径
 static orig_fopen_t real_fopen = nullptr;
 static orig_mkdir_t real_mkdir = nullptr;
 static orig_unlink_t real_unlink = nullptr;
@@ -132,6 +139,14 @@ static std::string redirect_path(const char* path) {
     std::string path_str(path);
     if (path_str.compare(0, 13, "/data/user/0/") == 0) {
         path_str = "/data/data/" + path_str.substr(13);
+    }
+
+    // 完整性校验重定向：JNI_OnLoad 期间，壳读 APK 校验 DEX → 重定向到原始 APK
+    if (g_integrity_redirect_active && !g_integrity_redirect_from.empty()) {
+        if (path_str == g_integrity_redirect_from) {
+            LOGI("redirect_path: integrity redirect %s -> %s", path, g_integrity_redirect_to.c_str());
+            return g_integrity_redirect_to;
+        }
     }
 
     std::shared_lock<std::shared_mutex> lock(g_mutex);
@@ -1284,12 +1299,496 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofSystemPropertyStatic(
 }
 
 /**
+ * 设置完整性校验重定向：壳的 JNI_OnLoad 读 APK 校验 DEX 时，重定向到原始 APK。
+ * 必须在调用 System.loadLibrary() 之前设置，之后清除。
+ */
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeSetIntegrityRedirect(
+    JNIEnv* env, jclass clazz, jstring fromPath, jstring toPath)
+{
+    (void)clazz;
+    if (fromPath != nullptr) {
+        const char* s = env->GetStringUTFChars(fromPath, nullptr);
+        g_integrity_redirect_from = s ? s : "";
+        env->ReleaseStringUTFChars(fromPath, s);
+    }
+    if (toPath != nullptr) {
+        const char* s = env->GetStringUTFChars(toPath, nullptr);
+        g_integrity_redirect_to = s ? s : "";
+        env->ReleaseStringUTFChars(toPath, s);
+    }
+    g_integrity_redirect_active = true;
+    LOGI("nativeSetIntegrityRedirect: from=%s -> to=%s",
+        g_integrity_redirect_from.c_str(), g_integrity_redirect_to.c_str());
+}
+
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeClearIntegrityRedirect(
+    JNIEnv* env, jclass clazz)
+{
+    (void)env; (void)clazz;
+    g_integrity_redirect_active = false;
+    g_integrity_redirect_from.clear();
+    g_integrity_redirect_to.clear();
+    LOGI("nativeClearIntegrityRedirect: done");
+}
+
+// ==================== GOT Hook Implementation ====================
+// PLT/GOT hook: 修改目标库的 GOT 表中的函数指针
+// 不需要 trampoline 内存，Android 16 上可行
+
+struct GotHookEntry {
+    const char* symbol_name;
+    void* hook_func;
+    void** orig_func_ptr;
+};
+
+static size_t get_elf_r_sym(uintptr_t r_info);
+
+// 保存原始函数指针
+static orig_open_t got_orig_open = nullptr;
+static orig_openat_t got_orig_openat = nullptr;
+static orig_fopen_t got_orig_fopen = nullptr;
+
+// 检查路径是否是 proc maps 相关
+static bool is_proc_maps_path(const char* path) {
+    if (path == nullptr) return false;
+    return strstr(path, "/proc/self/maps") != nullptr ||
+           strstr(path, "/proc/self/smaps") != nullptr ||
+           strstr(path, "/proc/self/pagemap") != nullptr ||
+           strstr(path, "/proc/./self/maps") != nullptr;
+}
+
+// 创建一个空的 tmpfile fd（返回 dup 后的 fd，FILE* 自动关闭原始 fd）
+static int create_empty_fd() {
+    FILE* tmp = tmpfile();
+    if (tmp) {
+        int fd = fileno(tmp);
+        int dupfd = dup(fd);
+        fclose(tmp); // 关闭原始 FILE*，dupfd 仍然有效
+        if (dupfd >= 0) {
+            lseek(dupfd, 0, SEEK_SET);
+            return dupfd;
+        }
+    }
+    // fallback: 创建空 pipe
+    int pipefd[2];
+    if (pipe(pipefd) == 0) {
+        close(pipefd[1]);
+        return pipefd[0];
+    }
+    errno = ENOENT;
+    return -1;
+}
+
+// GOT hook 函数 — 拦截壳库对 /proc/self/maps 的读取
+// 修复：
+//   1. 用 tmpfile 替代 pipe（pipe 可被 fstat 检测为 S_IFIFO）
+//   2. 正确处理 variadic args（仅在 O_CREAT 时读 mode_t）
+//   3. 扩展覆盖 smaps/pagemap
+
+static int got_hooked_open(const char* path, int flags, ...) {
+    if (is_proc_maps_path(path)) {
+        return create_empty_fd();
+    }
+    // 正确处理 variadic args：仅 O_CREAT 时有 mode_t 参数
+    if (got_orig_open) {
+        if (flags & O_CREAT) {
+            va_list args;
+            va_start(args, flags);
+            mode_t mode = static_cast<mode_t>(va_arg(args, int));
+            va_end(args);
+            return got_orig_open(path, flags, mode);
+        }
+        return got_orig_open(path, flags);
+    }
+    errno = ENOSYS;
+    return -1;
+}
+
+static int got_hooked_openat(int dirfd, const char* path, int flags, ...) {
+    if (is_proc_maps_path(path)) {
+        return create_empty_fd();
+    }
+    if (got_orig_openat) {
+        if (flags & O_CREAT) {
+            va_list args;
+            va_start(args, flags);
+            mode_t mode = static_cast<mode_t>(va_arg(args, int));
+            va_end(args);
+            return got_orig_openat(dirfd, path, flags, mode);
+        }
+        return got_orig_openat(dirfd, path, flags);
+    }
+    errno = ENOSYS;
+    return -1;
+}
+
+static FILE* got_hooked_fopen(const char* path, const char* mode) {
+    if (is_proc_maps_path(path)) {
+        return tmpfile(); // 空 tmpfile
+    }
+    if (got_orig_fopen) return got_orig_fopen(path, mode);
+    return nullptr;
+}
+
+// readlink hook — 拦截 /proc/self/map_files/ 等 readlink 调用
+static orig_readlink_t got_orig_readlink = nullptr;
+static ssize_t got_hooked_readlink(const char* path, char* buf, size_t bufsiz) {
+    if (path != nullptr && strstr(path, "/proc/self/map_files") != nullptr) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (got_orig_readlink) return got_orig_readlink(path, buf, bufsiz);
+    errno = ENOSYS;
+    return -1;
+}
+
+// GOT hook: 修改指定库的 GOT 表
+// hook 策略：对目标库（壳库）和 libc.so 都进行 hook
+// - 壳库 hook：拦截壳自身 PLT 调用
+// - libc hook：拦截壳通过 libc PLT 的调用（覆盖 constructor 时序问题）
+static int got_hook_library_callback(struct dl_phdr_info* info, size_t size, void* data) {
+    const char* target_lib = (const char*)data;
+    const char* lib_name = info->dlpi_name;
+
+    if (lib_name == nullptr) return 0;
+
+    // 匹配目标库或 libc.so
+    bool is_target = (strstr(lib_name, target_lib) != nullptr);
+    bool is_libc = (strstr(lib_name, "libc.so") != nullptr);
+    if (!is_target && !is_libc) return 0;
+
+    LOGI("got_hook: found library %s at %p", lib_name, (void*)info->dlpi_addr);
+
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        if (info->dlpi_phdr[i].p_type != PT_DYNAMIC) continue;
+
+        ElfW(Dyn)* dyn = (ElfW(Dyn)*)(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+        ElfW(Sym)* symtab = nullptr;
+        const char* strtab = nullptr;
+
+        for (ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; d++) {
+            switch (d->d_tag) {
+                case DT_SYMTAB:
+                    symtab = (ElfW(Sym)*)(info->dlpi_addr + d->d_un.d_ptr);
+                    break;
+                case DT_STRTAB:
+                    strtab = (const char*)(info->dlpi_addr + d->d_un.d_ptr);
+                    break;
+            }
+        }
+
+        if (symtab == nullptr || strtab == nullptr) {
+            LOGW("got_hook: missing symtab=%p strtab=%p for %s", symtab, strtab, lib_name);
+            // 遍历 dynamic section 看有哪些条目
+            for (ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; d++) {
+                LOGD("got_hook:   d_tag=0x%lx d_val=0x%lx", (unsigned long)d->d_tag, (unsigned long)d->d_un.d_val);
+            }
+            return 0;
+        }
+
+        for (ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; d++) {
+            if (d->d_tag != DT_JMPREL) continue;
+
+            ElfW(Rel)* rel = (ElfW(Rel)*)(info->dlpi_addr + d->d_un.d_ptr);
+            size_t rel_count = 0;
+
+            for (ElfW(Dyn)* d2 = dyn; d2->d_tag != DT_NULL; d2++) {
+                if (d2->d_tag == DT_PLTRELSZ) {
+                    rel_count = d2->d_un.d_val / sizeof(ElfW(Rel));
+                    break;
+                }
+            }
+
+            LOGI("got_hook: %s checking %zu relocations", lib_name, rel_count);
+            int hooked = 0;
+
+            for (size_t j = 0; j < rel_count; j++) {
+                size_t sym_idx = get_elf_r_sym(rel[j].r_info);
+                const char* sym_name = strtab + symtab[sym_idx].st_name;
+                ElfW(Addr)* got_entry = (ElfW(Addr)*)(info->dlpi_addr + rel[j].r_offset);
+                uintptr_t page = (uintptr_t)got_entry & ~(sysconf(_SC_PAGESIZE) - 1);
+
+                if (strcmp(sym_name, "open") == 0) {
+                    got_orig_open = (orig_open_t)*got_entry;
+                    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ | PROT_WRITE);
+                    *got_entry = (ElfW(Addr))got_hooked_open;
+                    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ);
+                    hooked++;
+                }
+                else if (strcmp(sym_name, "openat") == 0) {
+                    got_orig_openat = (orig_openat_t)*got_entry;
+                    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ | PROT_WRITE);
+                    *got_entry = (ElfW(Addr))got_hooked_openat;
+                    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ);
+                    hooked++;
+                }
+                else if (strcmp(sym_name, "fopen") == 0) {
+                    got_orig_fopen = (orig_fopen_t)*got_entry;
+                    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ | PROT_WRITE);
+                    *got_entry = (ElfW(Addr))got_hooked_fopen;
+                    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ);
+                    hooked++;
+                }
+                else if (strcmp(sym_name, "readlink") == 0) {
+                    got_orig_readlink = (orig_readlink_t)*got_entry;
+                    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ | PROT_WRITE);
+                    *got_entry = (ElfW(Addr))got_hooked_readlink;
+                    mprotect((void*)page, sysconf(_SC_PAGESIZE), PROT_READ);
+                    hooked++;
+                }
+            }
+            if (hooked > 0) {
+                LOGI("got_hook: hooked %d functions in %s", hooked, lib_name);
+            }
+            break;
+        }
+        // 不 return 1 — 继续遍历以 hook 其他库（如 libc.so）
+    }
+    return 0;
+}
+
+/**
+ * 对指定库进行 GOT hook（open/openat/fopen）
+ * 用于过滤 /proc/self/maps 读取，绕过壳的反调试检测
+ *
+ * @param libName 库名（如 "libjiagu_vip.so"）
+ */
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeGotHookLibrary(
+    JNIEnv* env, jclass clazz, jstring libName)
+{
+    (void)clazz;
+    if (libName == nullptr) return;
+    const char* name = env->GetStringUTFChars(libName, nullptr);
+    LOGI("nativeGotHookLibrary: hooking GOT for %s", name);
+    dl_iterate_phdr(got_hook_library_callback, (void*)name);
+    env->ReleaseStringUTFChars(libName, name);
+}
+
+// 从完整路径提取库名并调用 GOT hook
+static void got_hook_library_callback_wrapper(const char* path) {
+    if (path == nullptr) return;
+    const char* name = strrchr(path, '/');
+    if (name != nullptr) name++; else name = path;
+    LOGI("got_hook_wrapper: hooking GOT for %s (from %s)", name, path);
+
+    // 枚举所有已加载的库，检查是否能找到目标
+    int found = 0;
+    dl_iterate_phdr([](struct dl_phdr_info* info, size_t size, void* data) -> int {
+        int* count = (int*)data;
+        if (info->dlpi_name != nullptr && strstr(info->dlpi_name, "libjiagu") != nullptr) {
+            LOGI("got_hook_enum: found %s at %p", info->dlpi_name, (void*)info->dlpi_addr);
+            (*count)++;
+        }
+        return 0;
+    }, &found);
+    LOGI("got_hook_wrapper: found %d jiagu libraries", found);
+
+    dl_iterate_phdr(got_hook_library_callback, (void*)name);
+}
+
+/**
+ * 预解析 ELF 文件，记录 GOT 条目偏移量。
+ * dlopen 返回后立即用这些偏移量 hook GOT（抢在 constructor 读 maps 之前）。
+ */
+struct GotEntryInfo {
+    uintptr_t open_offset;
+    uintptr_t openat_offset;
+    uintptr_t fopen_offset;
+    uintptr_t readlink_offset;
+    bool has_open;
+    bool has_openat;
+    bool has_fopen;
+    bool has_readlink;
+};
+
+static size_t get_elf_r_sym(uintptr_t r_info) {
+#if defined(__LP64__)
+    return ELF64_R_SYM(r_info);
+#else
+    return ELF32_R_SYM(r_info);
+#endif
+}
+
+static uintptr_t elf_vaddr_to_file_offset(
+    const ElfW(Phdr)* phdrs,
+    int phnum,
+    uintptr_t vaddr
+) {
+    for (int i = 0; i < phnum; i++) {
+        const auto& phdr = phdrs[i];
+        if (phdr.p_type != PT_LOAD) continue;
+        uintptr_t start = phdr.p_vaddr;
+        uintptr_t end = phdr.p_vaddr + phdr.p_filesz;
+        if (vaddr >= start && vaddr < end) {
+            return phdr.p_offset + (vaddr - phdr.p_vaddr);
+        }
+    }
+    return 0;
+}
+
+static GotEntryInfo pre_parse_elf_got(const char* so_path) {
+    GotEntryInfo info = {};
+    int fd = open(so_path, O_RDONLY);
+    if (fd < 0) return info;
+
+    struct stat st;
+    fstat(fd, &st);
+    void* mapped = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapped == MAP_FAILED) return info;
+
+    auto* ehdr = (ElfW(Ehdr)*)mapped;
+    if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0) { munmap(mapped, st.st_size); return info; }
+
+    // 找 PT_DYNAMIC
+    auto* phdrs = (ElfW(Phdr)*)((uintptr_t)mapped + ehdr->e_phoff);
+    ElfW(Dyn)* dyn_table = nullptr;
+    size_t dyn_count = 0;
+    for (int i = 0; i < ehdr->e_phnum; i++) {
+        if (phdrs[i].p_type == PT_DYNAMIC) {
+            dyn_table = (ElfW(Dyn)*)((uintptr_t)mapped + phdrs[i].p_offset);
+            dyn_count = phdrs[i].p_filesz / sizeof(ElfW(Dyn));
+            break;
+        }
+    }
+    if (!dyn_table) { munmap(mapped, st.st_size); return info; }
+
+    uintptr_t strtab_off = 0, symtab_off = 0, jmprel_off = 0;
+    size_t jmprel_size = 0;
+    bool jmprel_is_rela = false;
+    for (size_t i = 0; i < dyn_count; i++) {
+        switch (dyn_table[i].d_tag) {
+            case DT_STRTAB: strtab_off = dyn_table[i].d_un.d_ptr; break;
+            case DT_SYMTAB: symtab_off = dyn_table[i].d_un.d_ptr; break;
+            case DT_JMPREL: jmprel_off = dyn_table[i].d_un.d_ptr; break;
+            case DT_PLTRELSZ: jmprel_size = dyn_table[i].d_un.d_val; break;
+            case DT_PLTREL: jmprel_is_rela = dyn_table[i].d_un.d_val == DT_RELA; break;
+        }
+    }
+
+    if (strtab_off && symtab_off && jmprel_off && jmprel_size > 0) {
+        uintptr_t strtab_file_off = elf_vaddr_to_file_offset(phdrs, ehdr->e_phnum, strtab_off);
+        uintptr_t symtab_file_off = elf_vaddr_to_file_offset(phdrs, ehdr->e_phnum, symtab_off);
+        uintptr_t jmprel_file_off = elf_vaddr_to_file_offset(phdrs, ehdr->e_phnum, jmprel_off);
+        if (strtab_file_off == 0 || symtab_file_off == 0 || jmprel_file_off == 0) {
+            LOGW("pre_parse_elf_got: vaddr conversion failed for %s", so_path);
+            munmap(mapped, st.st_size);
+            return info;
+        }
+
+        auto* strtab = (const char*)((uintptr_t)mapped + strtab_file_off);
+        auto* symtab = (ElfW(Sym)*)((uintptr_t)mapped + symtab_file_off);
+
+        auto record_symbol = [&](uintptr_t r_info, uintptr_t r_offset) {
+            size_t sym_idx = get_elf_r_sym(r_info);
+            const char* name = strtab + symtab[sym_idx].st_name;
+
+            if (strcmp(name, "open") == 0) { info.open_offset = r_offset; info.has_open = true; }
+            else if (strcmp(name, "openat") == 0) { info.openat_offset = r_offset; info.has_openat = true; }
+            else if (strcmp(name, "fopen") == 0) { info.fopen_offset = r_offset; info.has_fopen = true; }
+            else if (strcmp(name, "readlink") == 0) { info.readlink_offset = r_offset; info.has_readlink = true; }
+        };
+
+        if (jmprel_is_rela) {
+            auto* jmprel = (ElfW(Rela)*)((uintptr_t)mapped + jmprel_file_off);
+            size_t jmprel_count = jmprel_size / sizeof(ElfW(Rela));
+            for (size_t j = 0; j < jmprel_count; j++) {
+                record_symbol(jmprel[j].r_info, jmprel[j].r_offset);
+            }
+        } else {
+            auto* jmprel = (ElfW(Rel)*)((uintptr_t)mapped + jmprel_file_off);
+            size_t jmprel_count = jmprel_size / sizeof(ElfW(Rel));
+            for (size_t j = 0; j < jmprel_count; j++) {
+                record_symbol(jmprel[j].r_info, jmprel[j].r_offset);
+            }
+        }
+    }
+
+    munmap(mapped, st.st_size);
+    return info;
+}
+
+struct LoadedLibraryLookup {
+    const char* full_path;
+    const char* basename;
+    uintptr_t base_addr;
+};
+
+static int find_loaded_library_base_callback(struct dl_phdr_info* info, size_t size, void* data) {
+    (void)size;
+    auto* lookup = static_cast<LoadedLibraryLookup*>(data);
+    if (info == nullptr || info->dlpi_name == nullptr || info->dlpi_name[0] == '\0') return 0;
+
+    if ((lookup->full_path != nullptr && strcmp(info->dlpi_name, lookup->full_path) == 0) ||
+        (lookup->basename != nullptr && strstr(info->dlpi_name, lookup->basename) != nullptr)) {
+        lookup->base_addr = static_cast<uintptr_t>(info->dlpi_addr);
+        LOGI("find_loaded_library_base: %s base=%p", info->dlpi_name, (void*)lookup->base_addr);
+        return 1;
+    }
+    return 0;
+}
+
+static uintptr_t find_loaded_library_base(const char* path) {
+    if (path == nullptr) return 0;
+    const char* basename = strrchr(path, '/');
+    basename = basename != nullptr ? basename + 1 : path;
+
+    LoadedLibraryLookup lookup {
+        path,
+        basename,
+        0
+    };
+    dl_iterate_phdr(find_loaded_library_base_callback, &lookup);
+    return lookup.base_addr;
+}
+
+// 立即 hook GOT（用预解析的偏移量）
+static void got_hook_immediate(const char* path, const GotEntryInfo& info) {
+    uintptr_t base_addr = find_loaded_library_base(path);
+    if (base_addr == 0) {
+        LOGW("got_hook_immediate: cannot find load base for %s", path ? path : "null");
+        return;
+    }
+
+    int page_size = sysconf(_SC_PAGESIZE);
+
+    auto patch = [&](uintptr_t offset, void* hook_fn, void** orig_ptr) {
+        if (offset == 0) return;
+        ElfW(Addr)* got = (ElfW(Addr)*)(base_addr + offset);
+        *orig_ptr = (void*)*got;
+        uintptr_t page = (uintptr_t)got & ~(page_size - 1);
+        if (mprotect((void*)page, page_size, PROT_READ | PROT_WRITE) != 0) {
+            LOGW("got_hook_immediate: mprotect RW failed for offset=%p errno=%d",
+                 (void*)offset, errno);
+            return;
+        }
+        *got = (ElfW(Addr))hook_fn;
+        if (mprotect((void*)page, page_size, PROT_READ) != 0) {
+            LOGW("got_hook_immediate: mprotect R failed for offset=%p errno=%d",
+                 (void*)offset, errno);
+        }
+    };
+
+    if (info.has_open) { patch(info.open_offset, (void*)got_hooked_open, (void**)&got_orig_open); }
+    if (info.has_openat) { patch(info.openat_offset, (void*)got_hooked_openat, (void**)&got_orig_openat); }
+    if (info.has_fopen) { patch(info.fopen_offset, (void*)got_hooked_fopen, (void**)&got_orig_fopen); }
+    if (info.has_readlink) { patch(info.readlink_offset, (void*)got_hooked_readlink, (void**)&got_orig_readlink); }
+
+    LOGI("got_hook_immediate: base=%p open=%d openat=%d fopen=%d readlink=%d",
+         (void*)base_addr, info.has_open, info.has_openat, info.has_fopen, info.has_readlink);
+}
+
+/**
  * LoaderFactory 专用: 通过 dlopen 直接加载加固壳 native 库，并手动调用 JNI_OnLoad
  *
- * dlopen() 只执行 linker 级 __attribute__((constructor))，不会触发 JVM 的 JNI_OnLoad。
- * 必须手动: dlsym 找到 JNI_OnLoad → JNI_GetCreatedJavaVMs 获取 JVM → 调用 JNI_OnLoad。
- *
- * 调用前必须先安装 FindClass hook，否则 JNI_OnLoad 的 FindClass 用 boot namespace 失败。
+ * 关键时序：
+ * 1. 预解析 ELF（记录 GOT 偏移量）
+ * 2. dlopen（constructor 执行，可能读 /proc/self/maps）
+ * 3. 立即 hook GOT（用预解析偏移量，微秒级）
+ * 4. 手动调用 JNI_OnLoad
  *
  * @param libPaths 要加载的 .so 文件绝对路径数组
  * @return 成功加载并调用 JNI_OnLoad 的数量
@@ -1301,7 +1800,6 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
     (void)clazz;
     if (libPaths == nullptr) return 0;
 
-    // 获取 JavaVM*（进程唯一，用于调用 JNI_OnLoad）
     JavaVM* vm = nullptr;
     if (env->GetJavaVM(&vm) != JNI_OK || vm == nullptr) {
         LOGE("nativePreloadLibraries: GetJavaVM failed");
@@ -1318,7 +1816,12 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
         const char* path = env->GetStringUTFChars(jPath, nullptr);
         if (path == nullptr) { env->DeleteLocalRef(jPath); continue; }
 
-        // Step 1: dlopen 加载 .so 到进程（执行 constructor，不调 JNI_OnLoad）
+        // Step 0: 预解析 ELF，记录 GOT 条目偏移量
+        GotEntryInfo got_info = pre_parse_elf_got(path);
+        LOGI("nativePreloadLibraries: pre-parsed %s (open=%d openat=%d fopen=%d readlink=%d)",
+             path, got_info.has_open, got_info.has_openat, got_info.has_fopen, got_info.has_readlink);
+
+        // Step 1: dlopen 加载 .so（constructor 可能在此执行）
         LOGI("nativePreloadLibraries: dlopen %s", path);
         void* handle = dlopen(path, RTLD_NOW);
         if (handle == nullptr) {
@@ -1330,10 +1833,13 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
         }
         LOGI("nativePreloadLibraries: dlopen OK %s", path);
 
-        // Step 2: dlsym 找到 JNI_OnLoad 入口
+        // Step 1.5: 立即 hook GOT（用预解析偏移量，微秒级完成）
+        // 此时 constructor 可能还在执行，但 GOT hook 会拦截后续的 open/fopen 调用
+        got_hook_immediate(path, got_info);
+
+        // Step 2: dlsym 找到 JNI_OnLoad
         auto jniOnLoad = (jint (*)(JavaVM*, void*))dlsym(handle, "JNI_OnLoad");
         if (jniOnLoad == nullptr) {
-            // 没有 JNI_OnLoad 的库也算成功（纯 native 库，无 Java 绑定）
             LOGI("nativePreloadLibraries: no JNI_OnLoad in %s (pure native)", path);
             loaded++;
             env->ReleaseStringUTFChars(jPath, path);
@@ -1341,12 +1847,10 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
             continue;
         }
 
-        // Step 3: 手动调用 JNI_OnLoad（JVM 不会自动调用）
-        // FindClass hook 必须已安装，否则 JNI_OnLoad 中的 FindClass 用 boot namespace 失败
+        // Step 3: 手动调用 JNI_OnLoad
         LOGI("nativePreloadLibraries: calling JNI_OnLoad for %s", path);
         jint onLoadResult = jniOnLoad(vm, nullptr);
         if (onLoadResult < 0) {
-            // JNI_OnLoad 返回 JNI_ERR (<0) — 壳可能校验 DEX 失败
             LOGW("nativePreloadLibraries: JNI_OnLoad returned %d for %s", onLoadResult, path);
         } else {
             LOGI("nativePreloadLibraries: JNI_OnLoad returned %d (JNI_VERSION_%d) for %s",
@@ -1439,48 +1943,45 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
 }
 
 /**
- * hook_FindClass: 拦截 JNI_OnLoad 中的 FindClass 调用
+ * hook_FindClass: 拦截 JNI_OnLoad 中的所有 FindClass 调用
  *
- * 当查找候选类（如 com.stub.StubApp, com.qihoo.util.StubApp）时，通过 guest ClassLoader 加载。
- * 其他类调用原始 FindClass。
+ * 策略：先试 guest ClassLoader，找不到再走原始路径。
+ * 这样壳的 JNI_OnLoad 无论查找什么类（StubApp、内部工具类等）都能通过。
+ * 系统类（java.lang.* 等）在 guest ClassLoader 中找不到，自动 fallback 到 boot。
  */
 static jclass hooked_FindClass(JNIEnv* env, const char* name) {
-    if (g_guest_classloader != nullptr && name != nullptr) {
-        // 将 "." 转换为 "/" 进行比较
-        std::string slashName(name);
-        for (auto& c : slashName) { if (c == '.') c = '/'; }
+    if (g_guest_classloader != nullptr && name != nullptr && g_classloader_loadclass != nullptr) {
+        // 转换 "/" -> "." 给 ClassLoader.loadClass
+        std::string dotName(name);
+        for (auto& c : dotName) { if (c == '/') c = '.'; }
 
-        // 检查是否匹配任意一个候选类
-        if (g_findclass_targets.count(slashName) > 0) {
-            LOGI("hooked_FindClass: intercepted FindClass(\"%s\"), using guest ClassLoader", name);
+        jstring jClassName = env->NewStringUTF(dotName.c_str());
+        if (jClassName != nullptr) {
+            // 先试 guest ClassLoader（覆盖壳类 + app 类）
+            jclass clazz = (jclass)env->CallObjectMethod(
+                g_guest_classloader, g_classloader_loadclass, jClassName);
+            env->DeleteLocalRef(jClassName);
 
-            // 调用 guest ClassLoader.loadClass(name)
-            std::string dotName(name);
-            for (auto& c : dotName) { if (c == '/') c = '.'; }
-
-            jstring jClassName = env->NewStringUTF(dotName.c_str());
-            if (jClassName != nullptr && g_classloader_loadclass != nullptr) {
-                jclass clazz = (jclass)env->CallObjectMethod(
-                    g_guest_classloader, g_classloader_loadclass, jClassName);
-                env->DeleteLocalRef(jClassName);
-
-                if (clazz != nullptr) {
-                    LOGI("hooked_FindClass: SUCCESS via guest ClassLoader for %s", name);
-                    return clazz;
-                }
-                if (env->ExceptionCheck()) env->ExceptionClear();
-                LOGW("hooked_FindClass: guest ClassLoader failed for %s, trying original", name);
+            if (clazz != nullptr) {
+                LOGI("hooked_FindClass: guest hit \"%s\"", name);
+                return clazz;
             }
+            // loadClass 抛了 ClassNotFoundException，清掉异常走 fallback
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            LOGD("hooked_FindClass: guest miss \"%s\", trying original", name);
         }
     }
 
-    // 非目标类或 guest ClassLoader 失败，调用原始 FindClass
+    // guest 没找到（系统类、内部类等），走原始 FindClass
     if (g_orig_findclass != nullptr) {
         using FindClassFn = jclass(*)(JNIEnv*, const char*);
-        return ((FindClassFn)g_orig_findclass)(env, name);
+        jclass result = ((FindClassFn)g_orig_findclass)(env, name);
+        if (result == nullptr) {
+            LOGW("hooked_FindClass: original also failed for \"%s\"", name ? name : "null");
+        }
+        return result;
     }
 
-    // 兜底：不应到达这里
     return nullptr;
 }
 

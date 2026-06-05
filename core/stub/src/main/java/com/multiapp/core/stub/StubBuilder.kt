@@ -112,11 +112,12 @@ class StubBuilder(
             val loaderDex = getLoaderDex()
             Log.w("StubBuilder", "loader.dex: ${loaderDex.size} bytes")
 
-            // 5.5 不修改 DEX — 360 壳校验 DEX 完整性，修改会导致 JNI_OnLoad 返回 JNI_ERR
-            // namespace 问题通过 loader 的 FindClass hook + loadLibraryForGuest 解决
+            // 5.5 注入 JiaguLoader helper 类到 DEX（用于从 guest ClassLoader 加载 native 库）
+            // 配合 I/O 重定向欺骗壳的完整性校验
             val injectableApk = File(workDir, "origin_inject.apk")
             originApk.copyTo(injectableApk, overwrite = true)
-            Log.w("StubBuilder", "origin APK copied (no DEX modification): ${injectableApk.length()} bytes")
+            injectPackerLibLoad(injectableApk)
+            Log.w("StubBuilder", "injectableApk: ${injectableApk.length()} bytes")
 
             // 6. 组装 APK (含 patched DEX)
             val patchedDexFiles = config.patchedDexPaths.map { File(it) }.filter { it.exists() }
@@ -126,6 +127,7 @@ class StubBuilder(
                 manifestBytes = manifestBytes,
                 loaderDex = loaderDex,
                 originApk = injectableApk,
+                originalApk = originApk,  // 未修改的原始 APK（用于完整性校验重定向）
                 configFile = configFile,
                 iconFile = iconFile,
                 patchedDexFiles = patchedDexFiles
@@ -380,6 +382,7 @@ class StubBuilder(
         manifestBytes: ByteArray,
         loaderDex: ByteArray,
         originApk: File,
+        originalApk: File? = null,
         configFile: File,
         iconFile: File?,
         patchedDexFiles: List<File> = emptyList()
@@ -397,12 +400,22 @@ class StubBuilder(
             zos.write(loaderDex)
             zos.closeEntry()
 
-            // assets/origin.apk (原始 APK 完整副本)
+            // assets/origin.apk (修改后的 APK，含 JiaguLoader)
             zos.putNextEntry(ZipEntry(ORIGIN_APK_ENTRY))
             originApk.inputStream().buffered().use { input ->
                 input.copyTo(zos)
             }
             zos.closeEntry()
+
+            // assets/origin_original.apk (未修改的原始 APK，用于完整性校验重定向)
+            if (originalApk != null && originalApk.exists()) {
+                zos.putNextEntry(ZipEntry("assets/origin_original.apk"))
+                originalApk.inputStream().buffered().use { input ->
+                    input.copyTo(zos)
+                }
+                zos.closeEntry()
+                Timber.d("StubBuilder: embedded original APK: ${originalApk.length()} bytes")
+            }
 
             // assets/multiapp_config.json
             zos.putNextEntry(ZipEntry(CONFIG_JSON_ENTRY))
