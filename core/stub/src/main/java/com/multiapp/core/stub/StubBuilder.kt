@@ -112,11 +112,11 @@ class StubBuilder(
             val loaderDex = getLoaderDex()
             Log.w("StubBuilder", "loader.dex: ${loaderDex.size} bytes")
 
-            // 5.5 注入 System.loadLibrary("jiagu_vip") 到加固壳 StubApp.load()
+            // 5.5 不修改 DEX — 360 壳校验 DEX 完整性，修改会导致 JNI_OnLoad 返回 JNI_ERR
+            // namespace 问题通过 loader 的 FindClass hook + loadLibraryForGuest 解决
             val injectableApk = File(workDir, "origin_inject.apk")
             originApk.copyTo(injectableApk, overwrite = true)
-            injectPackerLibLoad(injectableApk)
-            Log.w("StubBuilder", "injectableApk: ${injectableApk.length()} bytes")
+            Log.w("StubBuilder", "origin APK copied (no DEX modification): ${injectableApk.length()} bytes")
 
             // 6. 组装 APK (含 patched DEX)
             val patchedDexFiles = config.patchedDexPaths.map { File(it) }.filter { it.exists() }
@@ -819,6 +819,15 @@ class StubBuilder(
             )
 
             val patcher = com.multiapp.core.hook.dexpatch.DexPatcher()
+
+            // 注入 helper 类到 guest DEX（从 guest ClassLoader 上下文加载 native 库）
+            try {
+                val helperInjected = patcher.injectHelperClass(dexFiles, "jiagu_vip")
+                Log.w("StubBuilder", "injectPackerLibLoad: helper class injection result=$helperInjected")
+            } catch (e: Throwable) {
+                Log.e("StubBuilder", "injectPackerLibLoad: helper class injection failed", e)
+            }
+
             var injected = false
             for (className in packerClasses) {
                 if (patcher.injectLoadLibrary(dexFiles, className, "load", "jiagu_vip")) {

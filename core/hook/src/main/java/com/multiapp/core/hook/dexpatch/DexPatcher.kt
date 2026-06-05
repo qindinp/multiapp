@@ -5,7 +5,13 @@ import org.jf.dexlib2.Opcode
 import org.jf.dexlib2.iface.instruction.formats.Instruction21c
 import org.jf.dexlib2.writer.io.FileDataStore
 import org.jf.dexlib2.writer.pool.DexPool
+import org.jf.dexlib2.immutable.ImmutableClassDef
+import org.jf.dexlib2.immutable.ImmutableMethod
+import org.jf.dexlib2.immutable.ImmutableMethodImplementation
+import org.jf.dexlib2.immutable.reference.ImmutableMethodReference
+import org.jf.dexlib2.immutable.reference.ImmutableStringReference
 import timber.log.Timber
+import android.util.Log
 import java.io.File
 
 /**
@@ -184,7 +190,7 @@ class DexPatcher {
         methodName: String,
         libName: String
     ): Boolean {
-        Timber.tag(TAG).i("Injecting System.loadLibrary(\"$libName\") into $targetClass->$methodName")
+        Log.i(TAG, "injectLoadLibrary: injecting System.loadLibrary(\"$libName\") into $targetClass->$methodName")
         val internalType = "L${targetClass.replace(".", "/")};"
 
         for (dexFile in dexPaths) {
@@ -223,15 +229,117 @@ class DexPatcher {
                         dexPool.writeTo(FileDataStore(tmpFile))
                         dexFile.delete()
                         tmpFile.renameTo(dexFile)
-                        Timber.tag(TAG).i("Injection complete: ${dexFile.name}")
+                        Log.i(TAG, "injectLoadLibrary: OK -> ${dexFile.name}")
                         return true
                     }
                 }
             } catch (e: Exception) {
-                Timber.tag(TAG).w("Failed to process ${dexFile.name}: ${e.message}")
+                Log.w(TAG, "injectLoadLibrary: failed to process ${dexFile.name}: ${e.message}")
             }
         }
-        Timber.tag(TAG).w("Target $targetClass->$methodName not found in any DEX")
+        Log.w(TAG, "injectLoadLibrary: target $targetClass->$methodName not found in any DEX")
+        return false
+    }
+
+    /**
+     * 注入 helper 类到 DEX 中，用于从 guest ClassLoader 上下文加载 native 库。
+     *
+     * 问题：从 loader 通过反射调用 StubApp.load() 时，System.loadLibrary 的调用者
+     * 是 boot ClassLoader，导致库加载到 boot namespace，JNI_OnLoad 的 FindClass 失败。
+     *
+     * 解决：注入一个 helper 类到 guest DEX 中。helper 类的 loadLibrary() 方法
+     * 从 guest ClassLoader 上下文调用 System.loadLibrary，确保库加载到 guest namespace。
+     *
+     * @param dexPaths DEX 文件列表
+     * @param libName 库名（不含 lib 前缀和 .so 后缀）
+     * @return 注入是否成功
+     */
+    fun injectHelperClass(dexPaths: List<File>, libName: String): Boolean {
+        val helperType = "Lcom/multiapp/JiaguLoader;"
+        val helperClass = helperType.removePrefix("L").removeSuffix(";").replace("/", ".")
+        Log.i(TAG, "injectHelperClass: injecting $helperClass into ${dexPaths.size} DEX files")
+
+        for (dexFile in dexPaths) {
+            try {
+                Log.d(TAG, "injectHelperClass: processing ${dexFile.name} (${dexFile.length()} bytes)")
+                val dex = DexFileFactory.loadDexFile(dexFile, null as org.jf.dexlib2.Opcodes?)
+                val classes = dex.getClasses().toList()
+                val opcodes = dex.getOpcodes()
+                Log.d(TAG, "injectHelperClass:   loaded ${classes.size} classes from ${dexFile.name}")
+
+                // 检查是否已注入
+                if (classes.any { it.type == helperType }) {
+                    Log.i(TAG, "injectHelperClass:   helper class already exists in ${dexFile.name}")
+                    return true
+                }
+
+                // 创建 helper 类：com.multiapp.JiaguLoader
+                // 方法：static void loadLibrary()
+                //
+                // 字节码：
+                //   const-string v0, "jiagu_vip"
+                //   invoke-static {v0}, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V
+                //   return-void
+                //
+                // 关键：MutableMethodImplementation(registerCount) 创建空指令列表，
+                // 必须用 addInstruction 而非 replaceInstruction（后者需要已有指令）。
+                val methodImpl = org.jf.dexlib2.builder.MutableMethodImplementation(1)
+                // 指令 0: const-string v0, "jiagu_vip"
+                methodImpl.addInstruction(0, org.jf.dexlib2.builder.instruction.BuilderInstruction21c(
+                    Opcode.CONST_STRING, 0, ImmutableStringReference(libName)
+                ))
+                // 指令 1: invoke-static {v0}, System.loadLibrary(String)
+                methodImpl.addInstruction(1, org.jf.dexlib2.builder.instruction.BuilderInstruction35c(
+                    Opcode.INVOKE_STATIC,
+                    1, 0, 0, 0, 0, 0,
+                    ImmutableMethodReference(
+                        "Ljava/lang/System;",
+                        "loadLibrary",
+                        listOf("Ljava/lang/String;"),
+                        "V"
+                    )
+                ))
+                // 指令 2: return-void
+                methodImpl.addInstruction(2, org.jf.dexlib2.builder.instruction.BuilderInstruction10x(Opcode.RETURN_VOID))
+
+                val loadLibMethod = ImmutableMethod(
+                    helperType,
+                    "loadLibrary",
+                    emptyList(),
+                    "V",
+                    org.jf.dexlib2.AccessFlags.PUBLIC.value or org.jf.dexlib2.AccessFlags.STATIC.value,
+                    null,
+                    null,
+                    methodImpl
+                )
+
+                val helperClassDef = ImmutableClassDef(
+                    helperType,
+                    org.jf.dexlib2.AccessFlags.PUBLIC.value or org.jf.dexlib2.AccessFlags.FINAL.value,
+                    "Ljava/lang/Object;",
+                    null,
+                    null,
+                    null,
+                    null,
+                    listOf(loadLibMethod)
+                )
+
+                // 写入新的 DEX
+                val newClasses = classes + helperClassDef
+                Log.d(TAG, "injectHelperClass:   writing ${newClasses.size} classes (was ${classes.size})")
+                val tmpFile = File(dexFile.parentFile, dexFile.name + ".helper.tmp")
+                val dexPool = DexPool(opcodes)
+                for (c in newClasses) { dexPool.internClass(c) }
+                dexPool.writeTo(FileDataStore(tmpFile))
+                dexFile.delete()
+                tmpFile.renameTo(dexFile)
+                Log.i(TAG, "injectHelperClass: OK -> ${dexFile.name} (${dexFile.length()} bytes)")
+                return true
+            } catch (e: Exception) {
+                Log.e(TAG, "injectHelperClass: FAILED for ${dexFile.name}: ${e.javaClass.simpleName}: ${e.message}", e)
+            }
+        }
+        Log.w(TAG, "injectHelperClass: no suitable DEX found for helper class injection")
         return false
     }
 }

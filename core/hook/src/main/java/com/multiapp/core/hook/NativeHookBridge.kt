@@ -146,32 +146,32 @@ class NativeHookBridge {
      */
     fun loadLibraryForGuest(libPath: String, classLoader: ClassLoader, callerClass: Class<*>): Boolean {
         if (!nativeLibLoaded) {
-            Timber.tag(TAG).w("Cannot load for guest: native lib not loaded")
+            android.util.Log.w(TAG, "Cannot load for guest: native lib not loaded")
             return false
         }
         return try {
             val result = nativeLoadLibraryForGuest(libPath, classLoader, callerClass)
             if (result == 0) {
-                Timber.tag(TAG).i("loadLibraryForGuest OK: $libPath")
+                android.util.Log.i(TAG, "loadLibraryForGuest OK: $libPath")
                 true
             } else {
-                Timber.tag(TAG).w("loadLibraryForGuest failed ($result): $libPath")
+                android.util.Log.w(TAG, "loadLibraryForGuest failed (code=$result): $libPath")
                 false
             }
         } catch (e: Throwable) {
-            Timber.tag(TAG).w(e, "loadLibraryForGuest exception")
+            android.util.Log.w(TAG, "loadLibraryForGuest exception: ${e.message}", e)
             false
         }
     }
 
     /**
-     * 设置 FindClass hook 的 guest ClassLoader 和目标类名。
-     * 当 JNI_OnLoad 中 FindClass 查找目标类时，通过 guest ClassLoader 加载。
+     * 设置 FindClass hook 的 guest ClassLoader 和候选目标类名列表。
+     * 当 JNI_OnLoad 中 FindClass 查找任一候选类时，通过 guest ClassLoader 加载。
      */
-    fun setupFindClassHook(classLoader: ClassLoader, targetClassName: String): Boolean {
+    fun setupFindClassHook(classLoader: ClassLoader, targetClassNames: Array<String>): Boolean {
         if (!nativeLibLoaded) return false
         return try {
-            nativeSetupFindClassHook(classLoader, targetClassName)
+            nativeSetupFindClassHook(classLoader, targetClassNames)
         } catch (e: Throwable) {
             Timber.tag(TAG).w(e, "setupFindClassHook failed")
             false
@@ -370,7 +370,7 @@ class NativeHookBridge {
     private external fun nativeInstallRuntimeLoadHook(fallbackCallerClasses: Array<String>): Boolean
     private external fun nativePreloadLibraries(libPaths: Array<String>): Int
     private external fun nativeLoadLibraryForGuest(libPath: String, classLoader: ClassLoader, callerClass: Class<*>): Int
-    private external fun nativeSetupFindClassHook(classLoader: ClassLoader, targetClassName: String): Boolean
+    private external fun nativeSetupFindClassHook(classLoader: ClassLoader, targetClassNames: Array<String>): Boolean
     private external fun nativeInstallFindClassHook()
     private external fun nativeRegisterStubMethods(classLoader: ClassLoader, className: String): Boolean
 

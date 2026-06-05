@@ -926,7 +926,7 @@ static std::vector<std::string> g_native_load_fallback_callers;
 // FindClass hook: 在 JNI_OnLoad 中用 guest ClassLoader 查找加固壳类
 static jobject g_guest_classloader = nullptr;
 static jclass g_findclass_target_class = nullptr;
-static std::string g_findclass_target_internal; // e.g. "Lcom/stub/StubApp;"
+static std::unordered_set<std::string> g_findclass_targets; // e.g. {"com/stub/StubApp", "com/qihoo/util/StubApp"}
 static jmethodID g_classloader_loadclass = nullptr;
 static void* g_orig_findclass = nullptr; // 原始 FindClass 函数指针
 
@@ -1284,14 +1284,15 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofSystemPropertyStatic(
 }
 
 /**
- * LoaderFactory 专用: 通过 dlopen 直接加载加固壳 native 库
+ * LoaderFactory 专用: 通过 dlopen 直接加载加固壳 native 库，并手动调用 JNI_OnLoad
  *
- * 绕过 Java 层 Runtime.nativeLoad 的 hidden API 限制。
- * dlopen 会将 .so 加载到进程全局命名空间，JNI_OnLoad 会自动执行，
- * 从而完成 RegisterNatives（如 StubApp.interface20）。
+ * dlopen() 只执行 linker 级 __attribute__((constructor))，不会触发 JVM 的 JNI_OnLoad。
+ * 必须手动: dlsym 找到 JNI_OnLoad → JNI_GetCreatedJavaVMs 获取 JVM → 调用 JNI_OnLoad。
+ *
+ * 调用前必须先安装 FindClass hook，否则 JNI_OnLoad 的 FindClass 用 boot namespace 失败。
  *
  * @param libPaths 要加载的 .so 文件绝对路径数组
- * @return 成功加载的数量
+ * @return 成功加载并调用 JNI_OnLoad 的数量
  */
 JNIEXPORT jint JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
@@ -1299,6 +1300,13 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
 {
     (void)clazz;
     if (libPaths == nullptr) return 0;
+
+    // 获取 JavaVM*（进程唯一，用于调用 JNI_OnLoad）
+    JavaVM* vm = nullptr;
+    if (env->GetJavaVM(&vm) != JNI_OK || vm == nullptr) {
+        LOGE("nativePreloadLibraries: GetJavaVM failed");
+        return 0;
+    }
 
     jsize count = env->GetArrayLength(libPaths);
     jint loaded = 0;
@@ -1310,14 +1318,40 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
         const char* path = env->GetStringUTFChars(jPath, nullptr);
         if (path == nullptr) { env->DeleteLocalRef(jPath); continue; }
 
+        // Step 1: dlopen 加载 .so 到进程（执行 constructor，不调 JNI_OnLoad）
         LOGI("nativePreloadLibraries: dlopen %s", path);
         void* handle = dlopen(path, RTLD_NOW);
-        if (handle != nullptr) {
-            LOGI("nativePreloadLibraries: OK %s", path);
-            loaded++;
-        } else {
+        if (handle == nullptr) {
             const char* err = dlerror();
-            LOGW("nativePreloadLibraries: FAILED %s: %s", path, err ? err : "unknown");
+            LOGW("nativePreloadLibraries: dlopen FAILED %s: %s", path, err ? err : "unknown");
+            env->ReleaseStringUTFChars(jPath, path);
+            env->DeleteLocalRef(jPath);
+            continue;
+        }
+        LOGI("nativePreloadLibraries: dlopen OK %s", path);
+
+        // Step 2: dlsym 找到 JNI_OnLoad 入口
+        auto jniOnLoad = (jint (*)(JavaVM*, void*))dlsym(handle, "JNI_OnLoad");
+        if (jniOnLoad == nullptr) {
+            // 没有 JNI_OnLoad 的库也算成功（纯 native 库，无 Java 绑定）
+            LOGI("nativePreloadLibraries: no JNI_OnLoad in %s (pure native)", path);
+            loaded++;
+            env->ReleaseStringUTFChars(jPath, path);
+            env->DeleteLocalRef(jPath);
+            continue;
+        }
+
+        // Step 3: 手动调用 JNI_OnLoad（JVM 不会自动调用）
+        // FindClass hook 必须已安装，否则 JNI_OnLoad 中的 FindClass 用 boot namespace 失败
+        LOGI("nativePreloadLibraries: calling JNI_OnLoad for %s", path);
+        jint onLoadResult = jniOnLoad(vm, nullptr);
+        if (onLoadResult < 0) {
+            // JNI_OnLoad 返回 JNI_ERR (<0) — 壳可能校验 DEX 失败
+            LOGW("nativePreloadLibraries: JNI_OnLoad returned %d for %s", onLoadResult, path);
+        } else {
+            LOGI("nativePreloadLibraries: JNI_OnLoad returned %d (JNI_VERSION_%d) for %s",
+                 onLoadResult, onLoadResult, path);
+            loaded++;
         }
 
         env->ReleaseStringUTFChars(jPath, path);
@@ -1407,7 +1441,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
 /**
  * hook_FindClass: 拦截 JNI_OnLoad 中的 FindClass 调用
  *
- * 当查找目标类（如 com.stub.StubApp）时，通过 guest ClassLoader 加载。
+ * 当查找候选类（如 com.stub.StubApp, com.qihoo.util.StubApp）时，通过 guest ClassLoader 加载。
  * 其他类调用原始 FindClass。
  */
 static jclass hooked_FindClass(JNIEnv* env, const char* name) {
@@ -1416,13 +1450,8 @@ static jclass hooked_FindClass(JNIEnv* env, const char* name) {
         std::string slashName(name);
         for (auto& c : slashName) { if (c == '.') c = '/'; }
 
-        std::string targetSlash = g_findclass_target_internal;
-        // 去掉 L 前缀和 ; 后缀
-        if (targetSlash.size() >= 3) {
-            targetSlash = targetSlash.substr(1, targetSlash.size() - 2);
-        }
-
-        if (slashName == targetSlash) {
+        // 检查是否匹配任意一个候选类
+        if (g_findclass_targets.count(slashName) > 0) {
             LOGI("hooked_FindClass: intercepted FindClass(\"%s\"), using guest ClassLoader", name);
 
             // 调用 guest ClassLoader.loadClass(name)
@@ -1463,10 +1492,10 @@ static jclass hooked_FindClass(JNIEnv* env, const char* name) {
  */
 JNIEXPORT jboolean JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupFindClassHook(
-    JNIEnv* env, jclass clazz, jobject classLoader, jstring targetClassName)
+    JNIEnv* env, jclass clazz, jobject classLoader, jobjectArray targetClassNames)
 {
     (void)clazz;
-    if (classLoader == nullptr || targetClassName == nullptr) return JNI_FALSE;
+    if (classLoader == nullptr || targetClassNames == nullptr) return JNI_FALSE;
 
     // 保存 guest ClassLoader 全局引用
     if (g_guest_classloader != nullptr) {
@@ -1474,20 +1503,30 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupFindClassHook(
     }
     g_guest_classloader = env->NewGlobalRef(classLoader);
 
-    // 保存目标类名
-    const char* name = env->GetStringUTFChars(targetClassName, nullptr);
-    if (name == nullptr) return JNI_FALSE;
+    // 保存候选类名列表（转换为 slash 格式: "com.stub.StubApp" -> "com/stub/StubApp"）
+    g_findclass_targets.clear();
+    jsize nameCount = env->GetArrayLength(targetClassNames);
+    for (jsize i = 0; i < nameCount; i++) {
+        auto jName = (jstring)env->GetObjectArrayElement(targetClassNames, i);
+        if (jName == nullptr) continue;
+        const char* name = env->GetStringUTFChars(jName, nullptr);
+        if (name == nullptr) { env->DeleteLocalRef(jName); continue; }
 
-    std::string className(name);
-    env->ReleaseStringUTFChars(targetClassName, name);
+        std::string slashName;
+        for (const char* p = name; *p; p++) {
+            slashName += (*p == '.') ? '/' : *p;
+        }
+        g_findclass_targets.insert(slashName);
+        LOGI("nativeSetupFindClassHook: candidate [%d] = %s", i, slashName.c_str());
 
-    // 转换为 internal 格式: "com.stub.StubApp" -> "Lcom/stub/StubApp;"
-    std::string internalName = "L";
-    for (char c : className) {
-        internalName += (c == '.') ? '/' : c;
+        env->ReleaseStringUTFChars(jName, name);
+        env->DeleteLocalRef(jName);
     }
-    internalName += ";";
-    g_findclass_target_internal = internalName;
+
+    if (g_findclass_targets.empty()) {
+        LOGW("nativeSetupFindClassHook: no target classes provided");
+        return JNI_FALSE;
+    }
 
     // 获取 ClassLoader.loadClass 方法
     jclass clClass = env->FindClass("java/lang/ClassLoader");
@@ -1506,34 +1545,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupFindClassHook(
         return JNI_FALSE;
     }
 
-    // 安装 FindClass hook：修改 JNI 函数表
-    // JNI 函数表是一个可写的函数指针数组
-    // FindClass 是第一个函数（index 0 之后，因为第一个是 reserved）
-    // 实际上 JNI 函数表布局：
-    //   reserved0, reserved1, reserved2, reserved3,
-    //   GetVersion, DefineClass, FindClass, ...
-    // FindClass 在 index 6
-
-    void** jniFunctions = *reinterpret_cast<void***>(env);
-    // FindClass 在 JNI 函数表中的位置
-    // JNI 1.6+: index 6 (after 4 reserved + GetVersion + DefineClass)
-    constexpr int FIND_CLASS_INDEX = 6;
-
-    // 保存原始 FindClass 指针（暂时不用，直接用 env 调用）
-    // void* origFindClass = jniFunctions[FIND_CLASS_INDEX];
-
-    // 替换为我们的 hook
-    // 注意：这会影响当前线程的所有 FindClass 调用
-    // 只在 JNI_OnLoad 期间需要，之后应该恢复
-    // 但由于 JNI_OnLoad 是单线程的，我们可以在之后恢复
-
-    // 不直接替换 JNI 函数表（太危险），改用另一种方案：
-    // 在 nativeLoad hook 中，当检测到 libjiagu_vip.so 加载时，
-    // 在调用原始 nativeLoad 之前设置 ClassLoader 上下文
-
-    LOGI("nativeSetupFindClassHook: configured for target class %s (internal: %s)",
-         className.c_str(), internalName.c_str());
-
+    LOGI("nativeSetupFindClassHook: configured with %d candidate classes", (int)g_findclass_targets.size());
     return JNI_TRUE;
 }
 

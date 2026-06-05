@@ -431,6 +431,18 @@ class LoaderFactory : AppComponentFactory() {
         // 包名伪装由 GuestContextWrapper 在应用层处理
         appInfo.sourceDir = originApk.absolutePath
         appInfo.publicSourceDir = originApk.absolutePath
+
+        // 添加 native 文件 I/O 重定向：jiagu shell 通过 /proc/self/maps 或硬编码路径找 APK，
+        // 会尝试打开 stub APK 路径。重定向到 origin APK 让壳能找到正确的加密 DEX。
+        try {
+            val bridge = NativeHookBridge.getInstance()
+            if (stubApkPath != originApk.absolutePath) {
+                bridge.addPathRedirection(stubApkPath, originApk.absolutePath)
+                logD("  APK path redirect: $stubApkPath -> ${originApk.absolutePath}")
+            }
+        } catch (e: Throwable) {
+            logD("  APK path redirect failed: ${e.message}")
+        }
         // 设置 ApplicationInfo.name（android:name 属性）— 原始 app 代码会读取此字段
         if (originApplicationClass != null) {
             appInfo.name = originApplicationClass
@@ -596,45 +608,120 @@ class LoaderFactory : AppComponentFactory() {
     private fun preloadPackerLibViaGuestClassLoader(guestCl: ClassLoader) {
         val libDirPath = originNativeLibDir
         if (libDirPath == null) {
-            logD("  preloadPackerLib: no origin lib dir, skip (injection should have handled)")
+            logD("  preloadPackerLib: no origin lib dir, skip")
             return
         }
         val originLibDir = java.io.File(libDirPath)
         if (!originLibDir.isDirectory) return
 
         val jiaguFile = java.io.File(originLibDir, "libjiagu_vip.so")
-        if (!jiaguFile.exists()) return
+        if (!jiaguFile.exists()) {
+            logD("  preloadPackerLib: libjiagu_vip.so not found at ${originLibDir.absolutePath}")
+            return
+        }
 
         val callerClass = try {
             Class.forName("com.stub.StubApp", false, guestCl)
         } catch (_: Throwable) {
             try { Class.forName("com.qihoo.util.StubApp", false, guestCl) } catch (_: Throwable) { null }
-        } ?: return
-
-        val bridge = NativeHookBridge.getInstance()
-
-        // 安装 FindClass hook（可能在 Android 16 上不生效）
-        val targetClass = callerClass.name
-        logD("  FindClass hook: target=$targetClass, bridge.nativeLibLoaded=${bridge.isNativeLibLoaded()}")
-        val hookReady = bridge.setupFindClassHook(guestCl, targetClass)
-        if (hookReady) {
-            bridge.installFindClassHook()
-            logD("  FindClass hook installed for $targetClass")
+        }
+        if (callerClass == null) {
+            logD("  preloadPackerLib: StubApp not found in guest ClassLoader")
+            return
         }
 
-        // 尝试通过 JNI 加载库
-        try {
-            val ok = bridge.loadLibraryForGuest(jiaguFile.absolutePath, guestCl, callerClass)
-            if (ok) logD("  Preloaded OK: ${jiaguFile.name}")
-        } catch (_: Throwable) {}
+        val bridge = NativeHookBridge.getInstance()
+        val targetClass = callerClass.name
 
-        // 兜底：手动注册壳的 native 方法 stub 实现
-        logW("  About to register stub methods for $targetClass")
+        // ── Step 1: 先装 FindClass hook ──
+        // preloadNativeLibraries 内部会 dlopen + 手动调用 JNI_OnLoad。
+        // hook 必须在此之前生效，否则 JNI_OnLoad 的 FindClass 用默认 boot namespace → 失败。
+        // 传入所有候选类名，JNI_OnLoad 可能查找其中任意一个。
+        val candidateClasses = arrayOf(
+            "com.stub.StubApp",
+            "com.qihoo.util.StubApp",
+            "com.stub.StubApplication",
+            "com.secneo.apkwrapper.ApplicationWrapper"
+        )
+        logD("  preloadPackerLib: setting up FindClass hook for ${candidateClasses.joinToString()}")
+        val hookReady = bridge.setupFindClassHook(guestCl, candidateClasses)
+        if (hookReady) {
+            bridge.installFindClassHook()
+            logD("  preloadPackerLib: FindClass hook installed")
+        } else {
+            logW("  preloadPackerLib: FindClass hook setup failed")
+        }
+
+        // ── Step 2: dlopen + 手动调用 JNI_OnLoad ──
+        // Runtime.nativeLoad 在 Android 16 上是 blocked hidden API（core-platform 域），
+        // 即使 JNI 调用也被拒绝。改用 dlopen（libc 公开 NDK API）。
+        // dlopen 只加载 .so 到内存，不调用 JNI_OnLoad（那是 JVM 回调）。
+        // nativePreloadLibraries 内部: dlopen → dlsym("JNI_OnLoad") → JNI_GetCreatedJavaVMs → 调用。
+        // FindClass hook 已生效 → JNI_OnLoad 的 FindClass 拦截 → guest ClassLoader 查找 StubApp → 成功。
+        try {
+            val count = bridge.preloadNativeLibraries(listOf(jiaguFile.absolutePath))
+            if (count > 0) {
+                logD("  preloadPackerLib: dlopen OK: ${jiaguFile.name}")
+            } else {
+                logW("  preloadPackerLib: dlopen returned 0 for ${jiaguFile.name}")
+            }
+        } catch (e: Throwable) {
+            logW("  preloadPackerLib: dlopen exception: ${e.message}")
+        }
+
+        // ── Step 3: 调用 StubApp.load() ──
+        // 如果 dlopen + FindClass hook 成功，JNI_OnLoad 已通过 RegisterNatives 注册了
+        // native 方法（interface20 等）。StubApp.load() 调用 native 方法 → 壳解密 DEX。
+        try {
+            val loadMethod = callerClass.declaredMethods.firstOrNull { m ->
+                m.name == "load" && m.parameterTypes.isEmpty() && java.lang.reflect.Modifier.isStatic(m.modifiers)
+            }
+            if (loadMethod != null) {
+                loadMethod.isAccessible = true
+                loadMethod.invoke(null)
+                logD("  preloadPackerLib: StubApp.load() invoked — DEX should be decrypted")
+            } else {
+                logD("  preloadPackerLib: StubApp.load() not found (no-arg static)")
+            }
+        } catch (e: Throwable) {
+            logD("  preloadPackerLib: StubApp.load() failed: ${e.javaClass.simpleName}: ${e.message}")
+            var cause = e.cause
+            var depth = 0
+            while (cause != null && depth < 3) {
+                logD("    cause[$depth]: ${cause.javaClass.simpleName}: ${cause.message}")
+                cause = cause.cause
+                depth++
+            }
+        }
+
+        // 诊断：检查 guest ClassLoader 实际加载了哪些 DEX
+        try {
+            val dexPathField = guestCl.javaClass.superclass?.getDeclaredField("pathList")
+            dexPathField?.isAccessible = true
+            val pathList = dexPathField?.get(guestCl)
+            val dexElementsField = pathList?.javaClass?.getDeclaredField("dexElements")
+            dexElementsField?.isAccessible = true
+            val dexElements = dexElementsField?.get(pathList) as? Array<*>
+            val dexPaths = dexElements?.map { elem ->
+                val f = elem?.javaClass?.getDeclaredField("dexFile")
+                f?.isAccessible = true
+                val dexFile = f?.get(elem)
+                dexFile?.toString() ?: "null"
+            } ?: emptyList()
+            logD("  DEX loaded: ${dexPaths.size} files: $dexPaths")
+        } catch (e: Throwable) {
+            logD("  DEX diagnostic failed: ${e.message}")
+        }
+
+        // ── Step 4: 兜底 — 手动注册 native 方法 stub ──
+        // 如果 FindClass hook + dlopen 成功，RegisterNatives 已注册了真实实现，
+        // registerStubMethods 不会覆盖已注册的方法。
+        logD("  preloadPackerLib: registering stub methods as fallback")
         try {
             val registered = bridge.registerStubMethods(guestCl, targetClass)
-            logW("  Stub methods registered: $registered")
+            logD("  preloadPackerLib: stub methods registered: $registered")
         } catch (e: Throwable) {
-            logW("  registerStubMethods exception: ${e.message}")
+            logW("  preloadPackerLib: registerStubMethods exception: ${e.message}")
         }
     }
 
@@ -950,7 +1037,9 @@ class LoaderFactory : AppComponentFactory() {
      * 从 Stub APK 解压 origin.apk
      */
     private fun extractOriginApk(stubApkPath: String, dataDir: String): File {
-        val outputDir = File(dataDir, "cache/origin")
+        // 提取到 dataDir/base.apk — jiagu shell 通过 /proc/self/maps 或硬编码路径找 APK，
+        // 期望在 /data/data/<pkg>/base.apk 位置找到它。
+        val outputDir = File(dataDir)
         outputDir.mkdirs()
         val output = File(outputDir, "base.apk")
         if (output.exists()) {
@@ -965,7 +1054,6 @@ class LoaderFactory : AppComponentFactory() {
                 output.outputStream().use { out -> input.copyTo(out) }
             }
         }
-        // Android 禁止从可写目录加载 dex 文件，必须设为只读
         ensureReadOnly(output)
         return output
     }
