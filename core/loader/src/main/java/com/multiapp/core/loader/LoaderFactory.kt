@@ -3,13 +3,17 @@
 import android.app.AppComponentFactory
 import android.app.Application
 import android.content.ContentProvider
+import android.content.ComponentName
 import android.content.Intent
 import android.content.res.AssetManager
 import android.content.res.Resources
 import android.util.Log
+import android.view.LayoutInflater
+import java.util.Vector
 import com.multiapp.core.hook.NativeHookBridge
 import dalvik.system.PathClassLoader
 import java.io.File
+import java.lang.reflect.Field
 import java.util.zip.ZipFile
 
 /**
@@ -50,6 +54,18 @@ class LoaderFactory : AppComponentFactory() {
             Log.e(TAG, msg, t)
         }
 
+        private fun logSignal(msg: String) {
+            val line = "DIAG-SIGNAL $msg"
+            logE(line)
+            System.err.println("$TAG: $line")
+        }
+
+        private fun md5Hex(value: String): String {
+            val digest = java.security.MessageDigest.getInstance("MD5")
+                .digest(value.toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { byte -> "%02x".format(byte) }
+        }
+
         private fun logW(msg: String) {
             val ts = System.currentTimeMillis()
             val line = "[$ts] W $msg"
@@ -75,9 +91,17 @@ class LoaderFactory : AppComponentFactory() {
     @Volatile
     private var originAppInfo: android.content.pm.ApplicationInfo? = null
 
+    /** 原始 APK 的 PackageInfo（用于 PackageManager 虚拟化返回真实版本信息） */
+    @Volatile
+    private var originPackageInfo: android.content.pm.PackageInfo? = null
+
     /** 原始 APK 路径 */
     @Volatile
     private var originApkPath: String? = null
+
+    /** 完整资源 APK 路径。离线 patched APK 可能破坏 resources.arsc，资源优先走原始 APK。 */
+    @Volatile
+    private var originResourceApkPath: String? = null
 
     /** Origin APK resources used for resolving 0x7f theme IDs. */
     @Volatile
@@ -98,6 +122,9 @@ class LoaderFactory : AppComponentFactory() {
     @Volatile
     private var originMetaData: android.os.Bundle? = null
 
+    /** Origin APK provider metadata keyed by provider class name. */
+    private val originProviderMetaData = mutableMapOf<String, android.os.Bundle>()
+
     /** 原始包名 */
     @Volatile
     private var guestPackageName: String? = null
@@ -105,6 +132,21 @@ class LoaderFactory : AppComponentFactory() {
     /** Stub package name currently running in this process. */
     @Volatile
     private var stubPackageName: String? = null
+
+    @Volatile
+    private var currentConfig: PocConfig? = null
+
+    @Volatile
+    private var packageManagerProxyInstalled = false
+
+    @Volatile
+    private var originSignatures: Array<android.content.pm.Signature>? = null
+
+    @Volatile
+    private var activityTaskManagerProxyInstalled = false
+
+    @Volatile
+    private var notificationManagerProxyInstalled = false
 
     private val initLock = Any()
 
@@ -115,6 +157,7 @@ class LoaderFactory : AppComponentFactory() {
     ): android.app.Activity {
         logD("instantiateActivity: $className")
         ensureClassLoaderSwapped(cl)
+        installActivityStartProxiesIfReady("instantiateActivity")
         val realCl = guestClassLoader ?: cl
         return try {
             val clazz = realCl.loadClass(className)
@@ -135,19 +178,52 @@ class LoaderFactory : AppComponentFactory() {
         val realCl = guestClassLoader ?: cl
         logD("  loading from: ${realCl.javaClass.name}")
 
+        // ★ 在第一个 Provider 初始化时执行延迟包装（此时 attachBaseContext 已完成）
+        // instantiateApplication 时 mBase 为 null，无法包装
+        // instantiateProvider 在 attachBaseContext 之后、onCreate 之前调用
+        if (!contextWrapped) {
+            tryWrapApplicationContextDeferred()
+            // 注册 Activity Context 包装回调
+            try {
+                val at = Class.forName("android.app.ActivityThread")
+                    .getDeclaredMethod("currentActivityThread")
+                    .apply { isAccessible = true }
+                    .invoke(null)
+                val app = at?.javaClass?.getDeclaredMethod("getApplication")
+                    ?.apply { isAccessible = true }?.invoke(at) as? android.app.Application
+                if (app != null) {
+                    registerActivityContextWrapper(app)
+                    logD("  Activity context wrapper registered from instantiateProvider")
+
+                    // ★ 启用 PackageIdentityHook，解决 SecurityException: Caller cannot post for pkg
+                    try {
+                        val config = currentConfig
+                        val stubPkg = config?.stubPkg ?: stubPackageName ?: app.applicationInfo.packageName
+                        val originPkg = config?.originalPkg ?: guestPackageName ?: originAppInfo?.packageName ?: stubPkg
+                        com.multiapp.core.identity.PackageIdentityHook.applyDirect(stubPkg, originPkg)
+                        logD("  PackageIdentityHook installed: $stubPkg -> $originPkg")
+                    } catch (e: Throwable) {
+                        logW("  PackageIdentityHook failed: ${e.message}")
+                    }
+                }
+            } catch (e: Throwable) {
+                logW("  registerActivityContextWrapper from instantiateProvider failed: ${e.message}")
+            }
+        }
+
         return try {
             val clazz = realCl.loadClass(className)
             logD("  loaded: ${clazz.name}, creating instance...")
             val provider = clazz.getDeclaredConstructor().newInstance() as ContentProvider
             logD("  provider created OK: ${provider.javaClass.name}")
             // 包装 provider，在 onCreate 失败时优雅降级
-            SafeProviderWrapper(provider)
+            SafeProviderWrapper(provider, originProviderMetaData[className])
         } catch (e: Exception) {
             logE("instantiateProvider FAILED for $className, falling back to system", e)
             try {
                 val fallback = super.instantiateProvider(cl, className)
                 logD("  fallback OK: ${fallback.javaClass.name}")
-                SafeProviderWrapper(fallback)
+                SafeProviderWrapper(fallback, originProviderMetaData[className])
             } catch (e2: Exception) {
                 logE("instantiateProvider FALLBACK also failed", e2)
                 throw e2
@@ -162,6 +238,27 @@ class LoaderFactory : AppComponentFactory() {
         ensureClassLoaderSwapped(cl)
         val realCl = guestClassLoader ?: cl
         logD("  loading Application from: ${realCl.javaClass.name}")
+
+        // ★ 设置全局异常处理器，catch 通知相关的 SecurityException
+        // 分身包名和原始包名不同，系统不允许为其他包发送/取消通知
+        // 异常可能被 RuntimeException 包装，需要检查 cause 链
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            // 检查 throwable 本身和 cause 链中是否有 SecurityException
+            var cause: Throwable? = throwable
+            while (cause != null) {
+                if (cause is SecurityException &&
+                    cause.message?.contains("cannot post for pkg") == true
+                ) {
+                    android.util.Log.w("MultiApp.UncaughtHandler",
+                        "Suppressed notification SecurityException on ${thread.name}", throwable)
+                    return@setDefaultUncaughtExceptionHandler
+                }
+                cause = cause.cause
+            }
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+        logD("  Global UncaughtExceptionHandler installed (notification SecurityException only)")
 
         // 如果系统传入的是默认 "android.app.Application"，尝试使用原始 APK 的 Application class
         val effectiveClassName = if (className == "android.app.Application" && originApplicationClass != null) {
@@ -210,6 +307,7 @@ class LoaderFactory : AppComponentFactory() {
     }
 
     private fun initializeInternal(cl: ClassLoader) {
+        logSignal("LoaderFactory.initializeInternal entered")
         logD("=== POC LoaderFactory starting ===")
         logD("  Thread: ${Thread.currentThread().name}")
         logD("  ClassLoader: ${cl.javaClass.name}")
@@ -218,8 +316,72 @@ class LoaderFactory : AppComponentFactory() {
         // 保底：安装 UncaughtExceptionHandler，确保崩溃前写日志到文件
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            logSignal("UncaughtException thread=${thread.name} type=${throwable.javaClass.name} msg=${throwable.message}")
             logE("UncaughtException on ${thread.name}", throwable)
+
+            // ★ 诊断：Resources$NotFoundException 时 dump 资源状态
+            // 检查异常链（顶层是 RuntimeException，cause 才是 NotFoundException）
+            var isResourceError = throwable is android.content.res.Resources.NotFoundException
+            if (!isResourceError) {
+                var cause = throwable.cause
+                var depth = 0
+                while (cause != null && depth < 5) {
+                    if (cause is android.content.res.Resources.NotFoundException) {
+                        isResourceError = true
+                        break
+                    }
+                    cause = cause.cause
+                    depth++
+                }
+            }
+            if (isResourceError) {
+                try {
+                    // 1. 提取异常中的 resource ID
+                    logE("DIAG-RESOURCE: === CRASH RESOURCE DIAGNOSTIC ===")
+                    logE("DIAG-RESOURCE: exception message: ${throwable.message}")
+
+                    // 2. 获取 Application 的 Resources
+                    val at = Class.forName("android.app.ActivityThread")
+                        .getDeclaredMethod("currentActivityThread").apply { isAccessible = true }.invoke(null)
+                    val app = at?.javaClass?.getDeclaredMethod("getApplication")?.apply { isAccessible = true }?.invoke(at)
+                    if (app != null) {
+                        val ctx = app as android.content.Context
+                        val res = ctx.resources
+                        logE("DIAG-RESOURCE: app.resources class=${res.javaClass.name}")
+                        logE("DIAG-RESOURCE: app.packageName=${ctx.packageName}")
+                        logE("DIAG-RESOURCE: originPackageName=$guestPackageName")
+
+                        // 3. 用 origin 包名查资源
+                        val originPkg = guestPackageName ?: ctx.packageName
+                        val testId = res.getIdentifier("app_name", "string", originPkg)
+                        logE("DIAG-RESOURCE: getIdentifier(app_name, string, $originPkg) = 0x${Integer.toHexString(testId)}")
+
+                        // 4. 检查 originResources
+                        logE("DIAG-RESOURCE: originResources=${originResources != null}")
+                        if (originResources != null) {
+                            val testId2 = originResources!!.getIdentifier("app_name", "string", originPkg)
+                            logE("DIAG-RESOURCE: originResources.getIdentifier(app_name) = 0x${Integer.toHexString(testId2)}")
+                        }
+                    }
+
+                    // 5. dump ApplicationInfo
+                    val loadedApkField = at?.javaClass?.getDeclaredField("mBoundApplication")
+                    loadedApkField?.isAccessible = true
+                    val data = loadedApkField?.get(at)
+                    val appInfoField = data?.javaClass?.getDeclaredField("appInfo")
+                    appInfoField?.isAccessible = true
+                    val ai = appInfoField?.get(data) as? android.content.pm.ApplicationInfo
+                    logE("DIAG-RESOURCE: appInfo.sourceDir=${ai?.sourceDir}")
+                    logE("DIAG-RESOURCE: appInfo.theme=0x${Integer.toHexString(ai?.theme ?: 0)}")
+
+                    logE("DIAG-RESOURCE: === END DIAGNOSTIC ===")
+                } catch (diagEx: Throwable) {
+                    logE("DIAG-RESOURCE failed: ${diagEx.message}")
+                }
+            }
+
             try { writeDebugLogToFile(cl) } catch (_: Exception) {}
+            dumpDebugLogToLogcat("uncaught")
             defaultHandler?.uncaughtException(thread, throwable)
         }
 
@@ -279,6 +441,9 @@ class LoaderFactory : AppComponentFactory() {
                 logE("FATAL: appInfo is null!")
                 throw IllegalStateException("appInfo is null")
             }
+            // Use a real framework icon. IconCompat.createWithResource crashes
+            // when callers receive 0 or a guest-only resource id under stub resources.
+            appInfo.icon = android.R.drawable.sym_def_app_icon
             val stubApkPath = appInfo.sourceDir
             val dataDir = appInfo.dataDir
             logD("  Stub APK: $stubApkPath")
@@ -290,7 +455,12 @@ class LoaderFactory : AppComponentFactory() {
             // 3. 从 Stub APK assets 读取配置
             logD("Step 3: Reading config...")
             val config = readConfig(stubApkPath)
+            currentConfig = config
+            guestPackageName = config.originalPkg
+            stubPackageName = config.stubPkg
             logD("  originalPkg=${config.originalPkg}, stubPkg=${config.stubPkg}")
+            installActivityStartProxiesIfReady("after-readConfig", activityThread)
+            installNotificationManagerPackageProxy(config)
 
             // 4. 解压 origin.apk
             logD("Step 4: Extracting origin.apk...")
@@ -308,26 +478,32 @@ class LoaderFactory : AppComponentFactory() {
             }
 
             // 5. 安装 nativeLoad hook，确保加固壳的 JNI_OnLoad/RegisterNatives 能完整执行
+            logSignal("before native hook install")
             logD("Step 5: Installing nativeLoad hook...")
             // 标记 native 库已加载（libmultiapp-native.so 在 stub APK 的 lib/ 中，
             // 被 stub ClassLoader 加载，但 NativeHookBridge 的 init 块用 boot ClassLoader 检测不到）
             NativeHookBridge.markNativeLibLoaded()
             installNativeLoadHookIfAvailable()
+            logSignal("after native hook install")
 
             // 6. 替换 ClassLoader
             logD("Step 6: Swapping ClassLoader...")
             swapClassLoader(activityThread, appInfo, originApk, config, originalApk)
+            logSignal("after swapClassLoader")
             logD("=== POC LoaderFactory complete ===")
 
         } catch (e: Exception) {
+            logSignal("initializeInternal failed ${e.javaClass.name}: ${e.message}")
             logE("=== POC LoaderFactory FAILED ===", e)
             try { writeDebugLogToFile(cl) } catch (_: Exception) {}
+            dumpDebugLogToLogcat("init-failed")
             throw e
         }
     }
 
     private fun installNativeLoadHookIfAvailable() {
         try {
+            logSignal("installNativeLoadHookIfAvailable entered")
             val candidates = arrayOf(
                 "com.stub.StubApp",
                 "com.qihoo.util.StubApp",
@@ -336,9 +512,287 @@ class LoaderFactory : AppComponentFactory() {
             ).filterNotNull().distinct().toTypedArray()
             val installed = NativeHookBridge.getInstance().hookRuntimeNativeLoad(candidates)
             logD("  Runtime.nativeLoad hook installed=$installed, fallbackCallers=${candidates.joinToString()}")
+            logSignal("Runtime.nativeLoad hook installed=$installed")
+            val registerLoggerInstalled = NativeHookBridge.getInstance().installRegisterNativesLogger()
+            logD("  RegisterNatives logger installed=$registerLoggerInstalled")
+            logSignal("RegisterNatives logger installed=$registerLoggerInstalled")
         } catch (e: Throwable) {
+            logSignal("installNativeLoadHookIfAvailable failed ${e.javaClass.name}: ${e.message}")
             logW("  Runtime.nativeLoad hook unavailable: ${e.javaClass.simpleName}: ${e.message}")
         }
+    }
+
+    @Volatile
+    private var intentRemappingInstrumentationInstalled = false
+
+    private fun installActivityStartProxiesIfReady(label: String, activityThread: Any? = null) {
+        val config = currentConfig
+        if (config == null) {
+            logW("  Activity start proxy install skipped[$label]: config is null")
+            return
+        }
+        val at = activityThread ?: try {
+            Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentActivityThread")
+                .apply { isAccessible = true }
+                .invoke(null)
+        } catch (e: Throwable) {
+            logW("  Activity start proxy install skipped[$label]: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+        logSignal("installActivityStartProxies[$label] begin")
+        if (at != null) {
+            installIntentRemappingInstrumentation(at, config)
+        }
+        installActivityTaskManagerIntentProxy(config)
+        logSignal("installActivityStartProxies[$label] end")
+    }
+
+    private fun installIntentRemappingInstrumentation(activityThread: Any, config: PocConfig) {
+        if (intentRemappingInstrumentationInstalled) return
+        try {
+            val field = activityThread.javaClass
+                .getDeclaredField("mInstrumentation")
+                .apply { isAccessible = true }
+            val current = field.get(activityThread) as? android.app.Instrumentation
+            if (current == null) {
+                logW("  Intent remap skipped: ActivityThread.mInstrumentation is null")
+                return
+            }
+            if (current is IntentRemappingInstrumentation) {
+                intentRemappingInstrumentationInstalled = true
+                logD("  Intent remap instrumentation already installed")
+                return
+            }
+            field.set(
+                activityThread,
+                IntentRemappingInstrumentation(
+                    base = current,
+                    originalPackageName = config.originalPkg,
+                    stubPackageName = config.stubPkg,
+                    beforeActivityLifecycle = { activity, reason ->
+                        val pkg = guestPackageName ?: config.originalPkg
+                        val apkPath = originApkPath
+                        if (apkPath != null) {
+                            syncActivityResourceContext(activity, pkg, apkPath, reason)
+                        }
+                    },
+                    afterActivityLifecycle = { activity, reason ->
+                        restoreActivityBaseContextAfterLifecycle(activity, reason)
+                    }
+                )
+            )
+            intentRemappingInstrumentationInstalled = true
+            logD("  Intent remap instrumentation installed: ${config.originalPkg} -> ${config.stubPkg}")
+        } catch (e: Throwable) {
+            logW("  Intent remap instrumentation install failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun installActivityTaskManagerIntentProxy(config: PocConfig) {
+        if (activityTaskManagerProxyInstalled) return
+        var installed = false
+        installed = installActivityManagerSingletonProxy(
+            ownerClassName = "android.app.ActivityTaskManager",
+            singletonFieldName = "IActivityTaskManagerSingleton",
+            interfaceClassName = "android.app.IActivityTaskManager",
+            config = config
+        ) || installed
+
+        // Older platform fallback. Harmless when the singleton/interface is absent.
+        installed = installActivityManagerSingletonProxy(
+            ownerClassName = "android.app.ActivityManager",
+            singletonFieldName = "IActivityManagerSingleton",
+            interfaceClassName = "android.app.IActivityManager",
+            config = config
+        ) || installed
+
+        activityTaskManagerProxyInstalled = installed
+        if (installed) {
+            logD("  Activity start intent proxy installed: ${config.originalPkg} -> ${config.stubPkg}")
+        } else {
+            logW("  Activity start intent proxy not installed")
+        }
+    }
+
+    private fun installActivityManagerSingletonProxy(
+        ownerClassName: String,
+        singletonFieldName: String,
+        interfaceClassName: String,
+        config: PocConfig
+    ): Boolean {
+        return try {
+            val ownerClass = Class.forName(ownerClassName)
+            val singletonField = ownerClass.getDeclaredField(singletonFieldName).apply {
+                isAccessible = true
+            }
+            val singleton = singletonField.get(null) ?: return false
+            val singletonClass = Class.forName("android.util.Singleton")
+            val instanceField = singletonClass.getDeclaredField("mInstance").apply {
+                isAccessible = true
+            }
+            var base = instanceField.get(singleton)
+            if (base == null) {
+                base = singleton.javaClass.getDeclaredMethod("get").apply {
+                    isAccessible = true
+                }.invoke(singleton)
+            }
+            if (base == null) {
+                logW("  $ownerClassName.$singletonFieldName proxy skipped: base is null")
+                return false
+            }
+
+            val iface = Class.forName(interfaceClassName)
+            if (java.lang.reflect.Proxy.isProxyClass(base.javaClass)) {
+                logD("  $interfaceClassName already proxied")
+                return true
+            }
+
+            val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                iface.classLoader,
+                arrayOf(iface)
+            ) { _, method, args ->
+                if (args != null && method.name.startsWith("startActiv")) {
+                    remapStartActivityArgs(method.name, args, config)
+                }
+                try {
+                    method.invoke(base, *(args ?: emptyArray()))
+                } catch (e: java.lang.reflect.InvocationTargetException) {
+                    throw e.targetException
+                }
+            }
+            instanceField.set(singleton, proxy)
+            logD("  Installed $interfaceClassName proxy via $ownerClassName.$singletonFieldName")
+            true
+        } catch (e: Throwable) {
+            logW("  $ownerClassName.$singletonFieldName proxy failed: ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
+    }
+
+    private fun installNotificationManagerPackageProxy(config: PocConfig) {
+        if (notificationManagerProxyInstalled) return
+        try {
+            val notificationManagerClass = Class.forName("android.app.NotificationManager")
+            val serviceField = notificationManagerClass.getDeclaredField("sService").apply {
+                isAccessible = true
+            }
+            var base = serviceField.get(null)
+            if (base == null) {
+                base = notificationManagerClass.getDeclaredMethod("getService").apply {
+                    isAccessible = true
+                }.invoke(null)
+            }
+            if (base == null) {
+                logW("  NotificationManager package proxy skipped: service is null")
+                return
+            }
+            if (java.lang.reflect.Proxy.isProxyClass(base.javaClass)) {
+                notificationManagerProxyInstalled = true
+                logD("  NotificationManager package proxy already installed")
+                return
+            }
+
+            val iface = Class.forName("android.app.INotificationManager")
+            val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                iface.classLoader,
+                arrayOf(iface)
+            ) { _, method, args ->
+                val patchedArgs = args?.let { remapNotificationPackageArgs(method.name, it, config) }
+                try {
+                    method.invoke(base, *(patchedArgs ?: emptyArray()))
+                } catch (e: java.lang.reflect.InvocationTargetException) {
+                    throw e.targetException
+                }
+            }
+            serviceField.set(null, proxy)
+            notificationManagerProxyInstalled = true
+            logD("  NotificationManager package proxy installed: ${config.originalPkg} -> ${config.stubPkg}")
+        } catch (e: Throwable) {
+            logW("  NotificationManager package proxy failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun remapNotificationPackageArgs(
+        methodName: String,
+        args: Array<Any?>,
+        config: PocConfig
+    ): Array<Any?> {
+        var changed = false
+        val patched = args.copyOf()
+        for (index in patched.indices) {
+            if (patched[index] == config.originalPkg) {
+                patched[index] = config.stubPkg
+                changed = true
+            }
+        }
+        if (changed) {
+            logD("  NotificationManager.$methodName package remap: ${config.originalPkg} -> ${config.stubPkg}")
+        }
+        return patched
+    }
+
+    private fun remapStartActivityArgs(methodName: String, args: Array<Any?>, config: PocConfig) {
+        for (index in args.indices) {
+            val arg = args[index]
+            when (arg) {
+                is Intent -> {
+                    val remapped = remapActivityIntent(arg, config)
+                    if (remapped !== arg) {
+                        args[index] = remapped
+                        logD("  ActivityTaskManager.$methodName remapped Intent argument #$index")
+                    }
+                }
+                is Array<*> -> {
+                    if (arg.any { it is Intent }) {
+                        @Suppress("UNCHECKED_CAST")
+                        val intents = arg as Array<Any?>
+                        var changed = false
+                        for (intentIndex in intents.indices) {
+                            val intent = intents[intentIndex] as? Intent ?: continue
+                            val remapped = remapActivityIntent(intent, config)
+                            if (remapped !== intent) {
+                                intents[intentIndex] = remapped
+                                changed = true
+                            }
+                        }
+                        if (changed) {
+                            logD("  ActivityTaskManager.$methodName remapped Intent[] argument #$index")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private fun remapActivityIntent(intent: Intent, config: PocConfig): Intent {
+        var changed = false
+        val copy = Intent(intent)
+
+        fun rewriteOne(target: Intent) {
+            val component = target.component
+            if (component?.packageName == config.originalPkg) {
+                val rewritten = ComponentName(config.stubPkg, component.className)
+                target.component = rewritten
+                changed = true
+                logD("  Activity intent component remap: $component -> $rewritten")
+            }
+            if (target.`package` == config.originalPkg) {
+                target.setPackage(config.stubPkg)
+                changed = true
+                logD("  Activity intent package remap: ${config.originalPkg} -> ${config.stubPkg}")
+            }
+        }
+
+        rewriteOne(copy)
+        copy.selector?.let { selector ->
+            val selectorCopy = Intent(selector)
+            rewriteOne(selectorCopy)
+            if (selectorCopy != selector) {
+                copy.selector = selectorCopy
+            }
+        }
+        return if (changed) copy else intent
     }
 
     /**
@@ -355,7 +809,9 @@ class LoaderFactory : AppComponentFactory() {
         config: PocConfig,
         originalApk: File? = null
     ) {
+        val resourceApk = originalApk ?: originApk
         logD("swapClassLoader: originApk=${originApk.absolutePath}")
+        logD("swapClassLoader: resourceApk=${resourceApk.absolutePath}")
 
         // 从 origin APK 的 manifest 解析原始 Application class name 和 meta-data
         try {
@@ -368,9 +824,17 @@ class LoaderFactory : AppComponentFactory() {
             val systemContext = getSystemContext.invoke(at) as android.content.Context
             val pm = systemContext.packageManager
             @Suppress("DEPRECATION")
-            val originInfo = pm.getPackageArchiveInfo(originApk.absolutePath,
-                android.content.pm.PackageManager.GET_META_DATA or android.content.pm.PackageManager.GET_ACTIVITIES)
+            val originInfo = pm.getPackageArchiveInfo(resourceApk.absolutePath,
+                android.content.pm.PackageManager.GET_META_DATA or
+                    android.content.pm.PackageManager.GET_ACTIVITIES or
+                    android.content.pm.PackageManager.GET_PROVIDERS)
             if (originInfo != null) {
+                originPackageInfo = originInfo
+                logD(
+                    "  Origin APK packageInfo: package=${originInfo.packageName}, " +
+                        "versionName=${originInfo.versionName}, versionCode=${originInfo.versionCode}, " +
+                        "longVersionCode=${originInfo.longVersionCode}"
+                )
                 val originAI = originInfo.applicationInfo
                 val originClassName = originAI?.className as? String
                 logD("  Origin APK applicationInfo.className: $originClassName")
@@ -384,13 +848,21 @@ class LoaderFactory : AppComponentFactory() {
                 originAppInfo = originAI
                 originApplicationThemeId = originAI?.theme ?: 0
                 originActivityThemes.clear()
+                originProviderMetaData.clear()
                 originInfo.activities?.forEach { activityInfo ->
                     originActivityThemes[activityInfo.name] = activityInfo.theme
+                }
+                originInfo.providers?.forEach { providerInfo ->
+                    val metaData = providerInfo.metaData
+                    if (providerInfo.name != null && metaData != null && !metaData.isEmpty) {
+                        originProviderMetaData[providerInfo.name] = android.os.Bundle(metaData)
+                    }
                 }
                 logD(
                     "  Origin themes: app=0x${Integer.toHexString(originApplicationThemeId)}, " +
                         "activities=${originActivityThemes.filterValues { it != 0 }.mapValues { "0x${Integer.toHexString(it.value)}" }}"
                 )
+                logD("  Origin provider metaData entries: ${originProviderMetaData.keys}")
             }
         } catch (e: Exception) {
             logW("  Failed to parse origin APK manifest: ${e.message}")
@@ -430,7 +902,15 @@ class LoaderFactory : AppComponentFactory() {
         // 注意：不改 appInfo.packageName！保持 stub 包名，避免 AppOpsManager.checkPackage(uid, pkg) 失败
         // 包名伪装由 GuestContextWrapper 在应用层处理
         appInfo.sourceDir = originApk.absolutePath
-        appInfo.publicSourceDir = originApk.absolutePath
+        appInfo.publicSourceDir = resourceApk.absolutePath
+        applyOriginApplicationInfoFields(appInfo, originApk)
+        appInfo.sourceDir = originApk.absolutePath
+        appInfo.publicSourceDir = resourceApk.absolutePath
+
+        // Origin icon ids belong to the guest resource table. Keep a framework
+        // icon here; IconCompat.createWithResource() crashes on 0 or guest-only
+        // resource ids when the current process still resolves stub resources.
+        appInfo.icon = android.R.drawable.sym_def_app_icon
 
         // 添加 native 文件 I/O 重定向：jiagu shell 通过 /proc/self/maps 或硬编码路径找 APK，
         // 会尝试打开 stub APK 路径。重定向到 origin APK 让壳能找到正确的加密 DEX。
@@ -481,8 +961,15 @@ class LoaderFactory : AppComponentFactory() {
 
         // 保存成员变量供 GuestContextWrapper 使用
         originApkPath = originApk.absolutePath
+        originResourceApkPath = resourceApk.absolutePath
         guestPackageName = config.originalPkg
         stubPackageName = config.stubPkg
+        currentConfig = config
+        logSignal("installing identity and activity start proxies")
+        installApplicationInfoPackageManagerProxy(originApk, config)
+        installActivityStartProxiesIfReady("swapClassLoader", activityThread)
+        installNotificationManagerPackageProxy(config)
+        logSignal("installed identity and activity start proxies")
 
         // 创建指向原始 APK 的 PathClassLoader
         // 使用原始 ClassLoader 的 parent 保留系统设置的中间 ClassLoader 层级
@@ -493,8 +980,25 @@ class LoaderFactory : AppComponentFactory() {
         } catch (_: Exception) { null }
             ?.parent ?: ClassLoader.getSystemClassLoader().parent
         logD("  parentClassLoader: ${parentClassLoader.javaClass.name}")
+
+        // 提取 APK 中的 multidex DEX 文件（classes2.dex ~ classes13.dex）
+        // 360 加固的壳不会自动加载这些 DEX，需要我们手动提取并加入 ClassLoader
+        val extractedDexDir = java.io.File(appInfo.dataDir, "extracted_dex")
+        val additionalDexFiles = extractAdditionalDex(originApk, extractedDexDir)
+        logD("  Extracted ${additionalDexFiles.size} additional DEX files")
+
+        // 构建 dex 路径：origin APK + 所有提取的 DEX 文件
+        val dexPath = buildString {
+            append(originApk.absolutePath)
+            for (dex in additionalDexFiles) {
+                append(File.pathSeparator)
+                append(dex.absolutePath)
+            }
+        }
+        logD("  DexPath entries: ${1 + additionalDexFiles.size}")
+
         val realGuestClassLoader = PathClassLoader(
-            originApk.absolutePath,
+            dexPath,
             nativeLibraryPath,
             parentClassLoader
         )
@@ -518,13 +1022,24 @@ class LoaderFactory : AppComponentFactory() {
         // 但加固壳的 StubApp.load() 可能不调用 System.loadLibrary，直接调 JNI 方法。
         // 所以我们需要主动通过 guest ClassLoader 预加载加固库。
         // 关键：必须通过 guest ClassLoader 的 System 类调用，使库加载到 guest 命名空间。
-        preloadPackerLibViaGuestClassLoader(realGuestClassLoader, originalApk?.absolutePath)
+        preloadPackerLibViaGuestClassLoader(realGuestClassLoader, originalApk?.absolutePath, appInfo.dataDir)
 
         // Stage 2: after the packer bootstrap, load business SDK libraries
         // through ART nativeLoad with guest ClassLoader ownership. This keeps
         // RegisterNatives bindings such as YWLoginManager.getInstance attached
         // to the real guest classes instead of the loader/stub namespace.
-        preloadGuestRuntimeNativeLibraries(realGuestClassLoader)
+        val onlineChapterNativeBound = preloadGuestRuntimeNativeLibraries(realGuestClassLoader)
+        if (!onlineChapterNativeBound) {
+            logW("  Stage2 OnlineChapterDownloadTask.run not bound")
+        }
+        logW("  Installing OnlineChapterDownloadTask background-state fallback stubs")
+        try {
+            val fallbackRegistered =
+                NativeHookBridge.getInstance().registerOnlineChapterDownloadFallbackStubs(realGuestClassLoader)
+            logD("  Stage2 online chapter fallback stubs registered: $fallbackRegistered")
+        } catch (e: Throwable) {
+            logW("  Stage2 online chapter fallback registration failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
 
         // 验证 LoadedApk.mApplicationInfo 与 mBound.appInfo 是同一引用
         // 如果不是，需要同步修改
@@ -536,7 +1051,11 @@ class LoaderFactory : AppComponentFactory() {
             if (loadedApkAppInfo != null && loadedApkAppInfo !== appInfo) {
                 val ai = loadedApkAppInfo as android.content.pm.ApplicationInfo
                 ai.sourceDir = originApk.absolutePath
-                ai.publicSourceDir = originApk.absolutePath
+                ai.publicSourceDir = resourceApk.absolutePath
+                applyOriginApplicationInfoFields(ai, originApk)
+                ai.sourceDir = originApk.absolutePath
+                ai.publicSourceDir = resourceApk.absolutePath
+                ai.icon = android.R.drawable.sym_def_app_icon
                 // 不改 ai.packageName — 保持 stub 身份
                 if (originApplicationClass != null) {
                     ai.name = originApplicationClass
@@ -564,13 +1083,13 @@ class LoaderFactory : AppComponentFactory() {
                 .set(loadedApk, originApk.absolutePath)
             loadedApk.javaClass.getDeclaredField("mResDir")
                 .apply { isAccessible = true }
-                .set(loadedApk, originApk.absolutePath)
-            logD("  Updated mAppDir/mResDir")
+                .set(loadedApk, resourceApk.absolutePath)
+            logD("  Updated mAppDir/mResDir: code=${originApk.absolutePath}, res=${resourceApk.absolutePath}")
         } catch (e: Exception) {
             logW("  mAppDir/mResDir update failed (OK on some Android versions): ${e.message}")
         }
 
-        rebuildLoadedApkResources(loadedApk, originApk)
+        rebuildLoadedApkResources(loadedApk, resourceApk)
 
         // 更新 mPackages 映射
         try {
@@ -595,6 +1114,360 @@ class LoaderFactory : AppComponentFactory() {
         logD("  swapClassLoader complete")
     }
 
+    private fun applyOriginApplicationInfoFields(
+        appInfo: android.content.pm.ApplicationInfo,
+        originApk: File
+    ) {
+        originMetaData?.let { metadata ->
+            appInfo.metaData = android.os.Bundle(metadata)
+            logD("  Applied origin metaData to ApplicationInfo: ${metadata.keySet().size} keys")
+        } ?: logW("  Origin metaData unavailable; ApplicationInfo.metaData=${appInfo.metaData}")
+
+        originApplicationClass?.let { appInfo.name = it }
+        if (originApplicationThemeId != 0) {
+            appInfo.theme = originApplicationThemeId
+        }
+
+        appInfo.sourceDir = originApk.absolutePath
+        appInfo.publicSourceDir = originApk.absolutePath
+
+        // Origin icon ids belong to the guest resource table. Expose a framework
+        // icon so shortcut creation gets a valid resource in every process.
+        appInfo.icon = android.R.drawable.sym_def_app_icon
+        try {
+            val roundIconField = appInfo.javaClass.getDeclaredField("roundIcon")
+            roundIconField.isAccessible = true
+            roundIconField.setInt(appInfo, android.R.drawable.sym_def_app_icon)
+        } catch (_: Throwable) {
+            // roundIcon is version dependent.
+        }
+    }
+
+    private fun installApplicationInfoPackageManagerProxy(originApk: File, config: PocConfig) {
+        if (packageManagerProxyInstalled) return
+        try {
+            val activityThreadClass = Class.forName("android.app.ActivityThread")
+            val sPackageManagerField = activityThreadClass
+                .getDeclaredField("sPackageManager")
+                .apply { isAccessible = true }
+            val originalPm = sPackageManagerField.get(null)
+            if (originalPm == null) {
+                logW("  PackageManager proxy skipped: ActivityThread.sPackageManager is null")
+                return
+            }
+
+            val iPackageManagerClass = Class.forName("android.content.pm.IPackageManager")
+            val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                iPackageManagerClass.classLoader,
+                arrayOf(iPackageManagerClass)
+            ) { _, method, args ->
+                try {
+                    val result = invokePackageManagerWithFallback(
+                        originalPm,
+                        method,
+                        args,
+                        config
+                    )
+                    patchPackageManagerResult(method.name, args, result, originApk, config)
+                } catch (e: java.lang.reflect.InvocationTargetException) {
+                    throw e.targetException ?: e
+                }
+            }
+
+            sPackageManagerField.set(null, proxy)
+            patchApplicationPackageManagerInstance(proxy)
+            packageManagerProxyInstalled = true
+            logD("  PackageManager ApplicationInfo proxy installed for ${config.stubPkg}/${config.originalPkg}")
+        } catch (e: Throwable) {
+            logW("  PackageManager ApplicationInfo proxy install failed: ${e.javaClass.name}: ${e.message}")
+        }
+    }
+
+    private fun invokePackageManagerWithFallback(
+        originalPm: Any,
+        method: java.lang.reflect.Method,
+        args: Array<Any?>?,
+        config: PocConfig
+    ): Any? {
+        val callArgs = args ?: emptyArray()
+        return try {
+            method.invoke(originalPm, *callArgs)
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val queriedPackage = queriedPackageName(callArgs)
+            if (isPackageManagerIdentityMethod(method.name) && queriedPackage == config.originalPkg) {
+                val retryArgs = callArgs.copyOf()
+                retryArgs[0] = rewritePackageQueryArg(retryArgs[0], config.stubPkg)
+                logD("  PM proxy retry ${method.name}: ${config.originalPkg} -> ${config.stubPkg}")
+                method.invoke(originalPm, *retryArgs)
+            } else {
+                throw e
+            }
+        }
+    }
+
+    private fun rewritePackageQueryArg(arg: Any?, packageName: String): Any? {
+        return when (arg) {
+            is String -> packageName
+            is ComponentName -> ComponentName(packageName, arg.className)
+            else -> arg
+        }
+    }
+
+    private fun patchApplicationPackageManagerInstance(proxy: Any) {
+        try {
+            val at = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentActivityThread")
+                .apply { isAccessible = true }
+                .invoke(null)
+            val systemContext = at?.javaClass
+                ?.getDeclaredMethod("getSystemContext")
+                ?.apply { isAccessible = true }
+                ?.invoke(at) as? android.content.Context
+            val pm = systemContext?.packageManager ?: return
+            val mPmField = pm.javaClass.getDeclaredField("mPM").apply { isAccessible = true }
+            mPmField.set(pm, proxy)
+            logD("  Patched existing ApplicationPackageManager.mPM")
+        } catch (e: Throwable) {
+            logW("  Existing PackageManager instance patch failed: ${e.message}")
+        }
+    }
+
+    private fun patchPackageManagerResult(
+        methodName: String,
+        args: Array<Any?>?,
+        result: Any?,
+        originApk: File,
+        config: PocConfig
+    ): Any? {
+        if (result == null) return result
+        if (!isPackageManagerIdentityMethod(methodName)) return result
+        val queriedPackage = queriedPackageName(args) ?: return result
+        if (queriedPackage != config.stubPkg && queriedPackage != config.originalPkg) return result
+
+        when (result) {
+            is android.content.pm.ApplicationInfo -> {
+                applyOriginApplicationInfoFields(result, originApk)
+                originResourceApkPath?.let { result.publicSourceDir = it }
+                if (queriedPackage == config.originalPkg) {
+                    result.packageName = config.originalPkg
+                }
+                logD("  PM proxy patched ApplicationInfo for $queriedPackage, metaData=${result.metaData?.keySet()?.size}")
+            }
+            is android.content.pm.PackageInfo -> {
+                applyOriginPackageInfoFields(result, config, queriedPackage)
+                if (queriedPackage == config.originalPkg) {
+                    result.packageName = config.originalPkg
+                }
+                result.applicationInfo?.let { appInfo ->
+                    applyOriginApplicationInfoFields(appInfo, originApk)
+                    originResourceApkPath?.let { appInfo.publicSourceDir = it }
+                    if (queriedPackage == config.originalPkg) {
+                        appInfo.packageName = config.originalPkg
+                    }
+                    logD("  PM proxy patched PackageInfo.applicationInfo for $queriedPackage")
+                }
+                applyOriginSignaturesToPackageInfo(result, originApk, config, queriedPackage)
+            }
+            is android.content.pm.ComponentInfo -> {
+                patchComponentInfo(result, originApk, config, queriedPackage)
+                logD("  PM proxy patched ComponentInfo for $queriedPackage/${result.name}")
+            }
+        }
+        return result
+    }
+
+    private fun applyOriginPackageInfoFields(
+        packageInfo: android.content.pm.PackageInfo,
+        config: PocConfig,
+        queriedPackage: String
+    ) {
+        val originInfo = originPackageInfo ?: return
+        try {
+            packageInfo.versionName = originInfo.versionName
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode = originInfo.versionCode
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                packageInfo.longVersionCode = originInfo.longVersionCode
+            }
+            packageInfo.sharedUserId = originInfo.sharedUserId
+            packageInfo.firstInstallTime = originInfo.firstInstallTime
+            packageInfo.lastUpdateTime = originInfo.lastUpdateTime
+            packageInfo.gids = originInfo.gids
+            packageInfo.requestedPermissions = originInfo.requestedPermissions
+            packageInfo.requestedPermissionsFlags = originInfo.requestedPermissionsFlags
+            if (queriedPackage == config.originalPkg) {
+                packageInfo.packageName = config.originalPkg
+            }
+            logD(
+                "  PM proxy patched PackageInfo fields for $queriedPackage: " +
+                    "versionName=${packageInfo.versionName}, versionCode=${packageInfo.versionCode}, " +
+                    "longVersionCode=${packageInfo.longVersionCode}"
+            )
+        } catch (e: Throwable) {
+            logW("  PM proxy PackageInfo field patch failed for $queriedPackage: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun isPackageManagerIdentityMethod(methodName: String): Boolean {
+        return methodName == "getApplicationInfo" ||
+            methodName == "getPackageInfo" ||
+            methodName == "getActivityInfo" ||
+            methodName == "getServiceInfo" ||
+            methodName == "getReceiverInfo" ||
+            methodName == "getProviderInfo"
+    }
+
+    private fun queriedPackageName(args: Array<Any?>?): String? {
+        val first = args?.firstOrNull() ?: return null
+        return when (first) {
+            is String -> first
+            is ComponentName -> first.packageName
+            else -> null
+        }
+    }
+
+    private fun patchComponentInfo(
+        componentInfo: android.content.pm.ComponentInfo,
+        originApk: File,
+        config: PocConfig,
+        queriedPackage: String
+    ) {
+        if (queriedPackage == config.originalPkg) {
+            componentInfo.packageName = config.originalPkg
+        }
+        componentInfo.applicationInfo?.let { appInfo ->
+            applyOriginApplicationInfoFields(appInfo, originApk)
+            originResourceApkPath?.let { appInfo.publicSourceDir = it }
+            if (queriedPackage == config.originalPkg) {
+                appInfo.packageName = config.originalPkg
+            }
+        }
+    }
+
+    private fun applyOriginSignaturesToPackageInfo(
+        packageInfo: android.content.pm.PackageInfo,
+        originApk: File,
+        config: PocConfig,
+        queriedPackage: String
+    ) {
+        val signatures = loadOriginSignatures(originApk, config) ?: return
+        try {
+            packageInfo.signatures = signatures
+            patchSigningInfo(packageInfo, signatures)
+            logD("  PM proxy spoofed signatures for $queriedPackage count=${signatures.size}")
+        } catch (e: Throwable) {
+            logW("  PM proxy signature spoof failed for $queriedPackage: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun loadOriginSignatures(
+        originApk: File,
+        config: PocConfig
+    ): Array<android.content.pm.Signature>? {
+        originSignatures?.let { return it }
+        return try {
+            readOriginSignaturesFromPreservedCert(originApk)?.let { signatures ->
+                originSignatures = signatures
+                logD("  PM proxy loaded preserved origin cert for ${config.originalPkg} count=${signatures.size}")
+                return signatures
+            }
+            val at = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentActivityThread")
+                .apply { isAccessible = true }
+                .invoke(null)
+            val systemContext = at?.javaClass
+                ?.getDeclaredMethod("getSystemContext")
+                ?.apply { isAccessible = true }
+                ?.invoke(at) as? android.content.Context
+            val pm = systemContext?.packageManager
+            if (pm == null) {
+                logW("  PM proxy cannot read origin signatures: PackageManager unavailable")
+                return null
+            }
+            val flags = android.content.pm.PackageManager.GET_SIGNATURES or
+                if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+                } else {
+                    0
+                }
+            val info = pm.getPackageArchiveInfo(originApk.absolutePath, flags)
+            val signatures = info?.signatures
+                ?: readSignaturesFromSigningInfo(info)
+            if (signatures.isNullOrEmpty()) {
+                logW("  PM proxy origin signatures empty: ${originApk.absolutePath}")
+                null
+            } else {
+                originSignatures = signatures
+                logD("  PM proxy loaded origin signatures for ${config.originalPkg} count=${signatures.size}")
+                signatures
+            }
+        } catch (e: Throwable) {
+            logW("  PM proxy read origin signatures failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    private fun readOriginSignaturesFromPreservedCert(
+        originApk: File
+    ): Array<android.content.pm.Signature>? {
+        return try {
+            ZipFile(originApk).use { zip ->
+                val entry = zip.getEntry("assets/multiapp_origin_cert.RSA") ?: return null
+                zip.getInputStream(entry).use { input ->
+                    val factory = java.security.cert.CertificateFactory.getInstance("X.509")
+                    val certificates = factory.generateCertificates(input)
+                    if (certificates.isEmpty()) {
+                        logW("  PM proxy preserved cert block has no certificates")
+                        null
+                    } else {
+                        certificates.map { cert ->
+                            android.content.pm.Signature(cert.encoded)
+                        }.toTypedArray()
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            logW("  PM proxy preserved cert read failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+    }
+
+    private fun readSignaturesFromSigningInfo(
+        packageInfo: android.content.pm.PackageInfo?
+    ): Array<android.content.pm.Signature>? {
+        if (packageInfo == null || android.os.Build.VERSION.SDK_INT < 28) return null
+        return try {
+            val signingInfo = packageInfo.signingInfo ?: return null
+            when {
+                signingInfo.hasMultipleSigners() -> signingInfo.apkContentsSigners
+                else -> signingInfo.signingCertificateHistory
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun patchSigningInfo(
+        packageInfo: android.content.pm.PackageInfo,
+        signatures: Array<android.content.pm.Signature>
+    ) {
+        if (android.os.Build.VERSION.SDK_INT < 28) return
+        try {
+            val signingInfo = packageInfo.signingInfo ?: return
+            listOf("mApkContentsSigners", "mPastSigningCertificates").forEach { fieldName ->
+                try {
+                    val field = signingInfo.javaClass.getDeclaredField(fieldName)
+                    field.isAccessible = true
+                    field.set(signingInfo, signatures)
+                } catch (_: Throwable) {
+                    // SigningInfo internals differ by Android release.
+                }
+            }
+        } catch (_: Throwable) {
+            // Best effort only; PackageInfo.signatures is still patched.
+        }
+    }
+
     /**
      * 通过 JNI 调用 Runtime.nativeLoad 加载加固壳 native 库到 guest ClassLoader 命名空间。
      *
@@ -611,7 +1484,7 @@ class LoaderFactory : AppComponentFactory() {
      * Fallback: 通过 JNI Runtime.nativeLoad 预加载加固壳 native 库。
      * 主要方案已在 StubBuilder.build() 中通过 DEX 注入完成。
      */
-    private fun preloadPackerLibViaGuestClassLoader(guestCl: ClassLoader, originalApkPath: String? = null) {
+    private fun preloadPackerLibViaGuestClassLoader(guestCl: ClassLoader, originalApkPath: String? = null, dataDir: String? = null) {
         val libDirPath = originNativeLibDir
         if (libDirPath == null) {
             logD("  preloadPackerLib: no origin lib dir, skip")
@@ -665,9 +1538,12 @@ class LoaderFactory : AppComponentFactory() {
             logW("  preloadPackerLib: FindClass hook setup failed")
         }
 
-        // ── Step 2: dlopen + GOT hook + 手动 JNI_OnLoad ──
-        // Android 16 上 ShadowHook inline hook 失败（errno=12），改用 GOT hook。
-        // nativePreloadLibraries 内部: dlopen → GOT hook（过滤 /proc/self/maps）→ JNI_OnLoad。
+        // ── Step 2: 全局 GOT hook + 让 StubApp.load() 自行加载 ──
+        // 不用 dlopen，不用 loadLibraryForGuest。
+        // 提前对 libc.so 做 GOT hook（过滤 /proc/self/maps），
+        // 然后让 StubApp.load() 中注入的 System.loadLibrary("jiagu_vip") 成为唯一加载入口。
+        // 这样 ART 会做 ClassLoader 绑定 + 调用 JNI_OnLoad，壳的 RegisterNatives 能正常执行。
+        var jiaguLoadedWithGuestClassLoader = false
         try {
             // 设置完整性校验重定向
             val modifiedApkPath = originApkPath
@@ -676,18 +1552,47 @@ class LoaderFactory : AppComponentFactory() {
                 logD("  preloadPackerLib: integrity redirect: $modifiedApkPath -> $originalApkPath")
             }
 
-            // dlopen + GOT hook + JNI_OnLoad（GOT hook 在 nativePreloadLibraries 内部调用）
-            val count = bridge.preloadNativeLibraries(listOf(jiaguFile.absolutePath))
-            bridge.clearIntegrityRedirect()
+            // 全局 GOT hook：对 libc.so 的 open/openat/fopen/readlink 做 hook
+            // 这样壳加载时读 /proc/self/maps 会被拦截
+            bridge.gotHookLibrary("libc.so")
+            logD("  preloadPackerLib: global GOT hook on libc.so installed")
 
-            if (count > 0) {
-                logD("  preloadPackerLib: dlopen + JNI_OnLoad OK")
-            } else {
-                logW("  preloadPackerLib: dlopen + JNI_OnLoad failed")
+            // 尝试通过注入的 JiaguLoader 类加载 .so（guest ClassLoader 命名空间）
+            // JiaguLoader 是 StubBuilder 注入到 guest DEX 中的 helper 类
+            // 它的 loadLibrary() 方法从 guest ClassLoader 上下文调用 System.loadLibrary
+            try {
+                val jiaguFile = java.io.File(originNativeLibDir, "libjiagu_vip.so")
+                logD("  preloadPackerLib: jiagu_vip.so exists=${jiaguFile.exists()} at ${jiaguFile.absolutePath}")
+
+                // 诊断 + 缓存清除 + 重试：验证 Android 16 缓存污染假说
+                // 如果清除缓存后 System.load 成功（elapsed > 10ms 且 JNI_OnLoad 执行），假说成立
+                val guestLoaded = loadGuestLibraryViaInjectedHelper(guestCl, "jiagu_vip")
+                jiaguLoadedWithGuestClassLoader = guestLoaded
+                if (!guestLoaded) {
+                    val nativeLoadOk = try {
+                        bridge.loadLibraryForGuest(jiaguFile.absolutePath, guestCl, callerClass)
+                    } catch (e: Throwable) {
+                        logD("  preloadPackerLib: guest nativeLoad jiagu_vip failed: ${e.javaClass.simpleName}: ${e.message}")
+                        false
+                    }
+                    logD("  preloadPackerLib: guest nativeLoad jiagu_vip result=$nativeLoadOk")
+                }
+                arrayOf("libjiagu_vip.so", "libfockrt.so", "libfock.so").forEach { targetLib ->
+                    try {
+                        bridge.gotHookLibrary(targetLib)
+                        logD("  preloadPackerLib: GOT hook on $targetLib installed after load diagnostic")
+                    } catch (e: Throwable) {
+                        logD("  preloadPackerLib: GOT hook on $targetLib failed after load diagnostic: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                }
+            } catch (e: Throwable) {
+                logD("  preloadPackerLib: load diagnostic failed: ${e.javaClass.simpleName}: ${e.message}")
             }
+
+            bridge.clearIntegrityRedirect()
         } catch (e: Throwable) {
             bridge.clearIntegrityRedirect()
-            logD("  preloadPackerLib: GOT hook + dlopen failed: ${e.javaClass.simpleName}: ${e.message}")
+            logD("  preloadPackerLib: GOT hook setup failed: ${e.javaClass.simpleName}: ${e.message}")
         }
 
         // ── Step 3: 调用 StubApp.load() ──
@@ -699,8 +1604,165 @@ class LoaderFactory : AppComponentFactory() {
             }
             if (loadMethod != null) {
                 loadMethod.isAccessible = true
-                loadMethod.invoke(null)
-                logD("  preloadPackerLib: StubApp.load() invoked — DEX should be decrypted")
+                try {
+                    loadMethod.invoke(null)
+                    logD("  preloadPackerLib: StubApp.load() invoked OK")
+                } catch (e: java.lang.reflect.InvocationTargetException) {
+                    val realCause = e.targetException ?: e.cause ?: e
+                    logW("  preloadPackerLib: StubApp.load() threw: ${realCause.javaClass.simpleName}: ${realCause.message}")
+                    var cause = realCause.cause
+                    var depth = 0
+                    while (cause != null && depth < 5) {
+                        logW("    cause[$depth]: ${cause.javaClass.simpleName}: ${cause.message}")
+                        cause = cause.cause
+                        depth++
+                    }
+                }
+                arrayOf("libjiagu_vip.so", "libfockrt.so", "libfock.so").forEach { targetLib ->
+                    try {
+                        bridge.gotHookLibrary(targetLib)
+                        logD("  preloadPackerLib: GOT hook on $targetLib installed after StubApp.load")
+                    } catch (e: Throwable) {
+                        logD("  preloadPackerLib: GOT hook on $targetLib failed after StubApp.load: ${e.javaClass.simpleName}: ${e.message}")
+                    }
+                }
+
+                try {
+                    val fockRtFile = java.io.File(originNativeLibDir, "libfockrt.so")
+                    if (fockRtFile.exists()) {
+                        val helperClass = Class.forName("com.multiapp.NativeLibLoader", true, guestCl)
+                        val helperMethod = helperClass.getDeclaredMethod("loadLibrary", String::class.java)
+                        helperMethod.isAccessible = true
+                        helperMethod.invoke(null, "fockrt")
+                        logD("  preloadPackerLib: libfockrt.so loaded via NativeLibLoader")
+                    } else {
+                        logD("  preloadPackerLib: libfockrt.so not found at ${fockRtFile.absolutePath}")
+                    }
+                } catch (e: Throwable) {
+                    logD("  preloadPackerLib: libfockrt.so guest load failed: ${e.javaClass.simpleName}: ${e.message}")
+                }
+
+                // ★ 批量注册所有已知 native 类的缺失方法（先注册通用 stub）
+                logD("  preloadPackerLib: registering all missing native methods")
+                try {
+                    val allRegistered = bridge.registerAllMissingNativeMethods(guestCl)
+                    logD("  preloadPackerLib: all missing native methods registered: $allRegistered")
+                } catch (e: Throwable) {
+                    logW("  preloadPackerLib: registerAllMissingNativeMethods exception: ${e.message}")
+                }
+
+                // ★ 再注册关键业务 stub（覆盖批量注册中的 null 返回 stub）
+                logD("  preloadPackerLib: registering business native stubs (after StubApp.load)")
+                try {
+                    val businessRegistered = bridge.registerBusinessStubs(guestCl)
+                    logD("  preloadPackerLib: business stubs registered: $businessRegistered")
+                } catch (e: Throwable) {
+                    logW("  preloadPackerLib: registerBusinessStubs exception: ${e.message}")
+                }
+
+                // ── 初始化 LSPlant 并 hook 有问题的 SDK 初始化 ──
+                val hookEngine = com.multiapp.core.hook.HookEngine.getInstance()
+                val lsplantOk = hookEngine.initLsplant(guestCl)
+                logD("  preloadPackerLib: LSPlant initialized: $lsplantOk")
+
+                // 跳过 Pangle 广告 SDK 初始化（Zeus.init 方法不存在）
+                try {
+                    val zeusUtilsClass = Class.forName(
+                        "com.bytedance.android.dy.sdk.pangle.ZeusPlatformUtils", false, guestCl)
+                    val initZeusMethod = zeusUtilsClass.declaredMethods.firstOrNull { it.name == "initZeus" }
+                    if (initZeusMethod != null && lsplantOk) {
+                        hookEngine.hookMethod(initZeusMethod,
+                            beforeCallback = { _, _ ->
+                                logD("  Hooked ZeusPlatformUtils.initZeus — skipping Pangle init")
+                                null // null = skip original method
+                            }
+                        )
+                        logD("  preloadPackerLib: Pangle initZeus hooked")
+                    }
+                } catch (e: Throwable) {
+                    logD("  preloadPackerLib: Pangle hook skipped: ${e.javaClass.simpleName}: ${e.message}")
+                }
+
+                logD("  preloadPackerLib: keep ReaderApplication.initLoginSDK and Fock.sign original")
+
+                // ★ Hook ShortcutManager.cihai() 跳过快捷方式创建（icon 资源找不到会崩溃）
+                try {
+                    val shortcutClass = Class.forName("com.qq.reader.shortcut.ShortcutManager", false, guestCl)
+                    val cihaiMethod = shortcutClass.declaredMethods.firstOrNull { it.name == "cihai" }
+                    if (cihaiMethod != null && lsplantOk) {
+                        hookEngine.hookMethod(cihaiMethod,
+                            beforeCallback = { _, _ ->
+                                logD("  Hooked ShortcutManager.cihai — skipping shortcut creation")
+                                null
+                            }
+                        )
+                        logD("  preloadPackerLib: ShortcutManager.cihai hooked")
+                    }
+                } catch (e: Throwable) {
+                    logD("  preloadPackerLib: ShortcutManager hook skipped: ${e.javaClass.simpleName}: ${e.message}")
+                }
+
+                // ★ Hook ReaderApplication.initPushSDK() 跳过推送初始化（YWPushSDK Bundle NPE）
+                try {
+                    val readerAppClass2 = Class.forName("com.qq.reader.ReaderApplication", false, guestCl)
+                    val initPushMethod = readerAppClass2.declaredMethods.firstOrNull { it.name == "initPushSDK" }
+                    if (initPushMethod != null && lsplantOk) {
+                        hookEngine.hookMethod(initPushMethod,
+                            beforeCallback = { _, _ ->
+                                logD("  Hooked ReaderApplication.initPushSDK — skipping push init")
+                                null
+                            }
+                        )
+                        logD("  preloadPackerLib: initPushSDK hooked")
+                    }
+                } catch (e: Throwable) {
+                    logD("  preloadPackerLib: initPushSDK hook skipped: ${e.javaClass.simpleName}: ${e.message}")
+                }
+
+                // ── P0: Dump 解密产物（无条件执行）──
+                try {
+                    val dumpBase = java.io.File(dataDir ?: "/data/local/tmp", "dump_output")
+                    dumpBase.mkdirs()
+                    val dexDumpDir = java.io.File(dumpBase, "dex"); dexDumpDir.mkdirs()
+                    val soDumpDir = java.io.File(dumpBase, "lib"); soDumpDir.mkdirs()
+                    logD("  P0 DUMP: dir=${dumpBase.absolutePath}, exists=${dumpBase.exists()}")
+
+                    val dexCount = bridge.dumpDexFromClassLoader(guestCl, dexDumpDir)
+                    val soCount = bridge.dumpLoadedLibraries(soDumpDir)
+
+                    // 兜底：复制壳提取的 extracted_dex/
+                    var fbCount = 0
+                    val extDir = java.io.File(dataDir ?: "/data/local/tmp", "extracted_dex")
+                    if (extDir.exists()) {
+                        extDir.listFiles()?.filter { it.name.endsWith(".dex") }?.forEach { f ->
+                            if (!java.io.File(dexDumpDir, f.name).exists()) {
+                                f.copyTo(java.io.File(dexDumpDir, f.name)); fbCount++
+                            }
+                        }
+                    }
+                    // 复制 origin APK
+                    val origin = java.io.File(dataDir ?: "/data/local/tmp", "base.apk")
+                    if (origin.exists()) origin.copyTo(java.io.File(dumpBase, "origin.apk"), overwrite = true)
+
+                    val total = dexCount + fbCount
+                    java.io.File(dumpBase, "dump_meta.txt").writeText(
+                        "native_dex=$dexCount\nfallback_dex=$fbCount\ntotal_dex=$total\nso=$soCount\ntime=${System.currentTimeMillis()}\n"
+                    )
+                    // 尝试复制到 /sdcard/Download/
+                    try {
+                        val sd = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
+                            android.os.Environment.DIRECTORY_DOWNLOADS), "MultiApp_dump")
+                        sd.mkdirs()
+                        if (sd.exists()) { dumpBase.copyRecursively(sd, overwrite = true); logD("  P0 DUMP: copied to ${sd.absolutePath}") }
+                    } catch (_: Throwable) {}
+                    logD("  P0 DUMP COMPLETE: total_dex=$total, so=$soCount")
+                } catch (e: Throwable) {
+                    logD("  P0 DUMP FAILED: ${e.javaClass.simpleName}: ${e.message}")
+                }
+
+                // 注意：stub 重新注册已由 native stub_interface_app 处理
+                // 当壳调用 interface5(Application) 时，会自动重新注册 YWLoginManager 和 Fock.sign 的 stub
+
             } else {
                 logD("  preloadPackerLib: StubApp.load() not found (no-arg static)")
             }
@@ -734,10 +1796,10 @@ class LoaderFactory : AppComponentFactory() {
             logD("  DEX diagnostic failed: ${e.message}")
         }
 
-        // ── Step 4: 兜底 — 手动注册 native 方法 stub ──
-        // 如果 FindClass hook + dlopen 成功，RegisterNatives 已注册了真实实现，
-        // registerStubMethods 不会覆盖已注册的方法。
-        logD("  preloadPackerLib: registering stub methods as fallback")
+        // ── Step 4: 注册 StubApp native 方法 ──
+        // 当前 QQ 阅读壳在分身运行时没有真正注册 interface11(int)，跳过这里会在
+        // YWLoginManager/OnlineChapterDownloadTask.<clinit>() 直接 UnsatisfiedLinkError。
+        logD("  preloadPackerLib: registering stub methods (jiaguLoaded=$jiaguLoadedWithGuestClassLoader)")
         try {
             val registered = bridge.registerStubMethods(guestCl, targetClass)
             logD("  preloadPackerLib: stub methods registered: $registered")
@@ -849,16 +1911,16 @@ class LoaderFactory : AppComponentFactory() {
         }
     }
 
-    private fun preloadGuestRuntimeNativeLibraries(realGuestClassLoader: ClassLoader) {
+    private fun preloadGuestRuntimeNativeLibraries(realGuestClassLoader: ClassLoader): Boolean {
         val libDirPath = originNativeLibDir
         if (libDirPath == null) {
             logD("  Stage2 native preload skipped: no origin lib dir")
-            return
+            return false
         }
         val libDir = File(libDirPath)
         if (!libDir.isDirectory) {
             logD("  Stage2 native preload skipped: not a directory: $libDirPath")
-            return
+            return false
         }
 
         val bridge = NativeHookBridge.getInstance()
@@ -866,6 +1928,7 @@ class LoaderFactory : AppComponentFactory() {
             bridge = bridge,
             classLoader = realGuestClassLoader,
             className = "com.yuewen.ywlogin.login.YWLoginManager",
+            methodName = "getInstance",
             libDir = libDir,
             preferredLibraries = listOf(
                 "libywlogin.so",
@@ -883,20 +1946,39 @@ class LoaderFactory : AppComponentFactory() {
                 "libQmt.so"
             )
         )
+        val onlineRunBound = preloadNativeForClass(
+            bridge = bridge,
+            classLoader = realGuestClassLoader,
+            className = "com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask",
+            methodName = "run",
+            libDir = libDir,
+            preferredLibraries = listOf(
+                "libapp.so",
+                "libentryexpro.so",
+                "libQmt.so",
+                "libywad-own.so",
+                "libnativekey.so",
+                "libnib.so",
+                "librelax.so",
+                "libjiagu_vip.so"
+            )
+        )
+        return onlineRunBound
     }
 
     private fun preloadNativeForClass(
         bridge: NativeHookBridge,
         classLoader: ClassLoader,
         className: String,
+        methodName: String,
         libDir: File,
         preferredLibraries: List<String>
-    ) {
+    ): Boolean {
         val callerClass = try {
             Class.forName(className, false, classLoader)
         } catch (e: Throwable) {
             logW("  Stage2 native preload: caller class not found: $className (${e.message})")
-            return
+            return false
         }
 
         val allLibs = libDir.listFiles()
@@ -904,7 +1986,7 @@ class LoaderFactory : AppComponentFactory() {
             ?: emptyList()
         if (allLibs.isEmpty()) {
             logD("  Stage2 native preload: no .so files in ${libDir.absolutePath}")
-            return
+            return false
         }
         logD("  Stage2 native preload: ${allLibs.size} libs available: ${allLibs.joinToString { it.name }}")
 
@@ -936,33 +2018,18 @@ class LoaderFactory : AppComponentFactory() {
                 classLoader = classLoader,
                 callerClass = callerClass,
                 className = className,
-                methodName = "getInstance",
+                methodName = methodName,
                 libs = candidates
             )
         ) {
-            return
+            return true
         }
 
-        val fallbackLibs = allLibs
-            .filterNot { lib -> candidates.any { it.absolutePath == lib.absolutePath } }
-            .sortedWith(compareBy<File> { nativeLoadPriority(it.name) }.thenBy { it.name.lowercase() })
-        if (fallbackLibs.isEmpty()) {
-            logW("  Stage2 native preload failed: no fallback libs for $className.getInstance")
-            return
-        }
-
-        logW("  Stage2 native preload: named candidates did not bind $className.getInstance; trying ${fallbackLibs.size} fallback libs")
-        if (!tryBindNativeMethod(
-                bridge = bridge,
-                classLoader = classLoader,
-                callerClass = callerClass,
-                className = className,
-                methodName = "getInstance",
-                libs = fallbackLibs
-            )
-        ) {
-            logW("  Stage2 native preload failed: $className.getInstance remains unbound after ${allLibs.size} libs")
-        }
+        // Do not brute-force every extracted .so here. Several third-party
+        // SDK libraries run constructors on load and can crash outside their
+        // expected initialization order (for example libmsaoaidsec.so).
+        logW("  Stage2 native preload failed: $className.$methodName not bound by named candidates")
+        return false
     }
 
     private fun tryBindNativeMethod(
@@ -976,12 +2043,33 @@ class LoaderFactory : AppComponentFactory() {
         for (lib in libs) {
             val ok = bridge.loadLibraryForGuest(lib.absolutePath, classLoader, callerClass)
             logD("  Stage2 nativeLoad ${lib.name}: $ok")
-            if (ok && isNativeMethodBound(callerClass, methodName)) {
+            if (ok && isNativeMethodBoundAfterSuccessfulLoad(callerClass, methodName, className, lib.name)) {
                 logD("  Stage2 native method bound after ${lib.name}: $className.$methodName")
+                return true
+            }
+
+            val helperOk = loadGuestLibraryViaInjectedHelper(classLoader, lib.name.removePrefix("lib").removeSuffix(".so"))
+            logD("  Stage2 NativeLibLoader ${lib.name}: $helperOk")
+            if (helperOk && isNativeMethodBound(callerClass, methodName)) {
+                logD("  Stage2 native method bound via NativeLibLoader after ${lib.name}: $className.$methodName")
                 return true
             }
         }
         return false
+    }
+
+    private fun isNativeMethodBoundAfterSuccessfulLoad(
+        clazz: Class<*>,
+        methodName: String,
+        className: String,
+        libName: String
+    ): Boolean {
+        val method = clazz.declaredMethods.firstOrNull { it.name == methodName } ?: return false
+        if (!java.lang.reflect.Modifier.isStatic(method.modifiers)) {
+            logD("  Stage2 native method $className.$methodName is instance; nativeLoad succeeded after $libName, assuming RegisterNatives had a chance to bind it")
+            return true
+        }
+        return isNativeMethodBound(clazz, methodName)
     }
 
     private fun nativeLoadPriority(libName: String): Int {
@@ -1020,48 +2108,64 @@ class LoaderFactory : AppComponentFactory() {
 
     private fun rebuildLoadedApkResources(loadedApk: Any, originApk: File) {
         try {
+            val addAssetPath = AssetManager::class.java
+                .getDeclaredMethod("addAssetPath", String::class.java)
+                .apply { isAccessible = true }
+
+            // ★ Priority 1 修复：创建干净的 AssetManager，只包含 origin APK
+            // 不合并 stub 的 resources.arsc，避免资源 ID 冲突导致 getIdentifier() 返回 0
+            val assets = AssetManager::class.java.getDeclaredConstructor().newInstance()
+            val result = addAssetPath.invoke(assets, originApk.absolutePath) as Int
+            logD("  Clean AssetManager.addAssetPath result: $result for ${originApk.absolutePath}")
+
+            if (result == 0) {
+                logW("  addAssetPath returned 0 — resources may not load correctly")
+            }
+
             val oldResources = loadedApk.javaClass
                 .getDeclaredField("mResources")
                 .apply { isAccessible = true }
                 .get(loadedApk) as? Resources
 
-            val assets = AssetManager::class.java.getDeclaredConstructor().newInstance()
-            val addAssetPath = AssetManager::class.java
-                .getDeclaredMethod("addAssetPath", String::class.java)
-                .apply { isAccessible = true }
-            val result = addAssetPath.invoke(assets, originApk.absolutePath) as Int
-            logD("  New AssetManager.addAssetPath result: $result for ${originApk.absolutePath}")
+            val displayMetrics = oldResources?.displayMetrics
+                ?: android.util.DisplayMetrics()
+            val configuration = oldResources?.configuration
+                ?: android.content.res.Configuration()
 
-            val baseResources = oldResources ?: Resources.getSystem()
-            val newResources = Resources(
-                assets,
-                baseResources.displayMetrics,
-                baseResources.configuration
-            )
+            val newResources = Resources(assets, displayMetrics, configuration)
             originResources = newResources
 
+            // 替换 LoadedApk.mResources
             loadedApk.javaClass
                 .getDeclaredField("mResources")
                 .apply { isAccessible = true }
                 .set(loadedApk, newResources)
 
-            logD("  Replaced LoadedApk.mResources with origin Resources")
-            logD("  Origin resources mounted before activity creation")
+            logD("  Replaced LoadedApk.mResources with clean origin Resources")
         } catch (e: Exception) {
             logW("  Rebuilding origin Resources failed: ${e.message}")
         }
     }
 
     private fun applyActivityThemeIfKnown(activity: android.app.Activity, className: String) {
-        val resources = originResources ?: return
         try {
             val themeId = resolveActivityTheme(className)
             if (themeId != 0) {
-                activity.setTheme(themeId)
-                logD("  Activity theme applied: $className -> 0x${Integer.toHexString(themeId)}")
-                probeOriginTheme(resources, themeId)
+                // 设置 ApplicationInfo.theme，让框架在 attach 后自动应用
+                val appInfo = activity.applicationInfo
+                if (appInfo != null) {
+                    appInfo.theme = themeId
+                    logD("  Activity theme set via ApplicationInfo: $className -> 0x${Integer.toHexString(themeId)}")
+                }
             } else {
-                logW("  Activity theme is 0 for $className")
+                // ★ 兜底：用系统主题，避免 theme=0 导致 Resources$NotFoundException
+                val appInfo = activity.applicationInfo
+                if (appInfo != null && appInfo.theme == 0) {
+                    appInfo.theme = android.R.style.Theme_Material_Light_NoActionBar
+                    logD("  Activity theme fallback: $className -> Theme_Material_Light_NoActionBar")
+                } else {
+                    logW("  Activity theme is 0 for $className")
+                }
             }
         } catch (e: Exception) {
             logW("  applyActivityThemeIfKnown failed for $className: ${e.message}")
@@ -1130,6 +2234,7 @@ class LoaderFactory : AppComponentFactory() {
                     base = originalContext,
                     guestPackageName = pkg,
                     guestSourceDir = apkPath,
+                    guestResourceDir = originResourceApkPath ?: apkPath,
                     guestNativeLibDir = originNativeLibDir,
                     guestMetaData = originMetaData,
                     guestResources = originResources
@@ -1185,6 +2290,7 @@ class LoaderFactory : AppComponentFactory() {
                     base = originalContext,
                     guestPackageName = pkg,
                     guestSourceDir = apkPath,
+                    guestResourceDir = originResourceApkPath ?: apkPath,
                     guestNativeLibDir = originNativeLibDir,
                     guestMetaData = originMetaData,
                     guestResources = originResources
@@ -1197,6 +2303,338 @@ class LoaderFactory : AppComponentFactory() {
         } catch (e: Exception) {
             logW("  Deferred context wrapping failed: ${e.message}")
         }
+    }
+
+    /**
+     * 注册 ActivityLifecycleCallbacks，在 Activity.onCreate 前包装 Activity 的 Context。
+     * 解决 Activity.getResources() 绕过 GuestContextWrapper 的问题。
+     *
+     * onActivityPreCreated (API 29+) 在 Activity.attach() 之后、onCreate() 之前调用。
+     * 此时 Activity 的 mBase (ContextImpl) 已设置，可以替换为 GuestContextWrapper。
+     */
+    private fun registerActivityContextWrapper(app: Application) {
+        val pkg = guestPackageName ?: return
+        val apkPath = originApkPath ?: return
+
+        app.registerActivityLifecycleCallbacks(object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityPreCreated(activity: android.app.Activity, savedInstanceState: android.os.Bundle?) {
+                syncActivityResourceContext(activity, pkg, apkPath, "preCreated")
+            }
+            override fun onActivityCreated(a: android.app.Activity, s: android.os.Bundle?) {}
+            override fun onActivityStarted(a: android.app.Activity) {}
+            override fun onActivityResumed(a: android.app.Activity) {}
+            override fun onActivityPaused(a: android.app.Activity) {}
+            override fun onActivityStopped(a: android.app.Activity) {}
+            override fun onActivitySaveInstanceState(a: android.app.Activity, o: android.os.Bundle) {}
+            override fun onActivityDestroyed(a: android.app.Activity) {}
+        })
+    }
+
+    private fun syncActivityResourceContext(
+        activity: android.app.Activity,
+        pkg: String,
+        apkPath: String,
+        reason: String
+    ) {
+        val resources = originResources
+        if (resources == null) {
+            logW("  Activity resource sync skipped, originResources is null: ${activity.javaClass.name}")
+            return
+        }
+
+        try {
+            val wrappedContext = if (shouldWrapActivityBase(activity, reason)) {
+                wrapContextForGuest(activity, pkg, apkPath)
+            } else {
+                logD("  Skip Activity base context wrapping[$reason]: ${activity.javaClass.name}")
+                null
+            }
+            replaceFieldIfPresent(activity, "mResources", resources)
+            patchResourceObjectGraph(activity.resources, resources, "activity.resources")
+            patchResourceObjectGraph(activity.application?.resources, resources, "application.resources")
+            if (wrappedContext != null) {
+                patchResourceObjectGraph(wrappedContext.resources, resources, "wrappedContext.resources")
+            }
+
+            val themeId = originActivityThemes[activity.javaClass.name]
+                ?: originApplicationThemeId
+            applyOriginActivityTheme(activity, wrappedContext, themeId)
+
+            val inflaterContext = if (shouldUseActivityAsInflaterContext(activity)) {
+                activity
+            } else {
+                wrappedContext ?: activity
+            }
+            syncActivityInflater(activity, inflaterContext)
+
+            logD(
+                "  Synced Activity resources[$reason]: ${activity.javaClass.name}, " +
+                    "theme=0x${Integer.toHexString(themeId)}, res=${resources.javaClass.name}"
+            )
+        } catch (e: Throwable) {
+            logW("  Activity resource sync failed: ${activity.javaClass.name}: ${e.message}")
+        }
+    }
+
+    private fun shouldUseActivityAsInflaterContext(activity: android.app.Activity): Boolean {
+        return isReaderPageActivity(activity)
+    }
+
+    private fun isReaderPageActivity(activity: android.app.Activity): Boolean {
+        return activity.javaClass.name == "com.qq.reader.activity.ReaderPageActivity"
+    }
+
+    private fun shouldWrapActivityBase(activity: android.app.Activity, reason: String): Boolean {
+        return reason == "preCreated" ||
+            reason == "callActivityOnCreate" ||
+            reason == "callActivityOnCreatePersistable"
+    }
+
+    private fun restoreActivityBaseContextAfterLifecycle(activity: android.app.Activity, reason: String) {
+        val className = activity.javaClass.name
+        if (reason != "callActivityOnCreate" && reason != "callActivityOnCreatePersistable") return
+        try {
+            val mBaseField = findFieldInHierarchy(android.content.ContextWrapper::class.java, "mBase")
+                ?: return
+            val current = mBaseField.get(activity)
+            if (current is GuestContextWrapper) {
+                mBaseField.set(activity, current.baseContext)
+                logD("  Restored Activity base context after $reason: $className")
+            }
+        } catch (e: Throwable) {
+            logW("  Restore Activity base context failed after $reason: $className: ${e.message}")
+        }
+    }
+
+    private fun applyOriginActivityTheme(
+        activity: android.app.Activity,
+        wrappedContext: android.content.Context?,
+        themeId: Int
+    ) {
+        val resources = originResources ?: return
+        try {
+            (wrappedContext as? GuestContextWrapper)?.setTheme(themeId)
+
+            val theme = resources.newTheme()
+            try {
+                theme.setTo(activity.application?.theme)
+            } catch (_: Throwable) {
+                // Application theme can belong to the stub table; apply the origin style below.
+            }
+            if (themeId != 0) {
+                theme.applyStyle(themeId, true)
+            }
+
+            replaceFieldIfPresent(activity, "mResources", resources)
+            replaceFieldIfPresent(activity, "mTheme", theme)
+            if (themeId != 0) {
+                replaceFieldIfPresent(activity, "mThemeResource", themeId)
+            }
+            logD(
+                "  Applied origin Activity theme: ${activity.javaClass.name}, " +
+                    "theme=0x${Integer.toHexString(themeId)}"
+            )
+        } catch (e: Throwable) {
+            logW("  Apply origin Activity theme failed: ${activity.javaClass.name}: ${e.message}")
+        }
+    }
+
+    private fun wrapContextForGuest(
+        target: android.content.ContextWrapper,
+        pkg: String,
+        apkPath: String
+    ): android.content.Context? {
+        val mBaseField = findFieldInHierarchy(android.content.ContextWrapper::class.java, "mBase")
+            ?: return null
+        val originalContext = mBaseField.get(target) as? android.content.Context ?: return null
+        if (originalContext is GuestContextWrapper) {
+            return originalContext
+        }
+        val wrappedContext = GuestContextWrapper(
+            base = originalContext,
+            guestPackageName = pkg,
+            guestSourceDir = apkPath,
+            guestResourceDir = originResourceApkPath ?: apkPath,
+            guestNativeLibDir = originNativeLibDir,
+            guestMetaData = originMetaData,
+            guestResources = originResources
+        )
+        wrappedContext.mOuterContext = target
+        mBaseField.set(target, wrappedContext)
+        return wrappedContext
+    }
+
+    private fun syncActivityInflater(activity: android.app.Activity, context: android.content.Context) {
+        val field = findFieldInHierarchy(activity.javaClass, "mInflater")
+        if (field == null) {
+            return
+        }
+
+        val current = try {
+            field.get(activity)
+        } catch (_: Throwable) {
+            null
+        }
+        val cloned = try {
+            (current as? LayoutInflater)?.cloneInContext(context)
+                ?: LayoutInflater.from(context).cloneInContext(context)
+        } catch (_: Throwable) {
+            null
+        }
+
+        if (cloned != null && field.type.isInstance(cloned)) {
+            try {
+                patchLayoutInflaterContext(cloned, context, activity.javaClass.name)
+                field.set(activity, cloned)
+                return
+            } catch (e: Throwable) {
+                logW("  Reflect set ${activity.javaClass.name}.mInflater failed: ${e.message}")
+            }
+        }
+
+        if (current != null && cloned == null) {
+            logD("  Kept existing Activity inflater without reflection patch: ${activity.javaClass.name}, inflater=${current.javaClass.name}")
+        } else if (cloned != null && field.type.isAssignableFrom(cloned.javaClass)) {
+            patchLayoutInflaterContext(cloned, context, activity.javaClass.name)
+            field.set(activity, cloned)
+        }
+    }
+
+    private fun patchLayoutInflaterContext(
+        inflater: LayoutInflater,
+        context: android.content.Context,
+        label: String
+    ) {
+        try {
+            replaceFieldIfPresent(inflater, "mContext", context)
+            val constructorArgsField = findFieldInHierarchy(LayoutInflater::class.java, "mConstructorArgs")
+            val args = constructorArgsField?.get(inflater) as? Array<Any?>
+            if (args != null && args.isNotEmpty()) {
+                args[0] = context
+            }
+            logD("  Patched LayoutInflater context for $label -> ${context.javaClass.name}")
+        } catch (e: Throwable) {
+            logW("  Patch LayoutInflater context failed for $label: ${e.message}")
+        }
+    }
+
+    private fun patchResourceObjectGraph(
+        target: Any?,
+        originResources: Resources,
+        label: String,
+        seen: MutableSet<Int> = mutableSetOf()
+    ) {
+        if (target == null) return
+        if (!seen.add(System.identityHashCode(target))) return
+
+        val originImpl = try {
+            findFieldInHierarchy(Resources::class.java, "mResourcesImpl")?.get(originResources)
+        } catch (_: Throwable) {
+            null
+        }
+        val originAssets = originResources.assets
+        val originDisplayMetrics = originResources.displayMetrics
+        val originConfiguration = originResources.configuration
+
+        var patchedAny = false
+        var current: Class<*>? = target.javaClass
+        while (current != null) {
+            for (field in current.declaredFields) {
+                if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+                try {
+                    field.isAccessible = true
+                    val fieldType = field.type
+                    when {
+                        Resources::class.java.isAssignableFrom(fieldType) -> {
+                            if (field.get(target) !== originResources) {
+                                field.set(target, originResources)
+                                patchedAny = true
+                                logD("  Patched $label.${field.name} -> originResources")
+                            }
+                        }
+                        fieldType.name.contains("ResourcesImpl") && originImpl != null -> {
+                            if (field.get(target) !== originImpl) {
+                                field.set(target, originImpl)
+                                patchedAny = true
+                                logD("  Patched $label.${field.name} -> originResourcesImpl")
+                            }
+                        }
+                        AssetManager::class.java.isAssignableFrom(fieldType) -> {
+                            if (field.get(target) !== originAssets) {
+                                field.set(target, originAssets)
+                                patchedAny = true
+                                logD("  Patched $label.${field.name} -> originAssets")
+                            }
+                        }
+                        android.util.DisplayMetrics::class.java.isAssignableFrom(fieldType) -> {
+                            if (field.get(target) !== originDisplayMetrics) {
+                                field.set(target, originDisplayMetrics)
+                                patchedAny = true
+                            }
+                        }
+                        android.content.res.Configuration::class.java.isAssignableFrom(fieldType) -> {
+                            if (field.get(target) !== originConfiguration) {
+                                field.set(target, originConfiguration)
+                                patchedAny = true
+                            }
+                        }
+                    }
+                } catch (_: Throwable) {
+                    // Ignore fields we cannot touch on this platform.
+                }
+            }
+            current = current.superclass
+        }
+
+        if (!patchedAny && target is Resources) {
+            logD("  Resource graph already aligned for $label: ${target.javaClass.name}")
+        }
+
+        // Follow obvious nested resource holders once to catch wrapper stacks.
+        current = target.javaClass
+        while (current != null) {
+            for (field in current.declaredFields) {
+                if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+                try {
+                    field.isAccessible = true
+                    val value = field.get(target) ?: continue
+                    when {
+                        value is Resources && value !== originResources -> {
+                            patchResourceObjectGraph(value, originResources, "$label.${field.name}", seen)
+                        }
+                        value.javaClass.name.startsWith("com.qq.reader.") -> {
+                            patchResourceObjectGraph(value, originResources, "$label.${field.name}", seen)
+                        }
+                    }
+                } catch (_: Throwable) {
+                    // Ignore nested traversal failures.
+                }
+            }
+            current = current.superclass
+        }
+    }
+
+    private fun replaceFieldIfPresent(target: Any, name: String, value: Any?): Boolean {
+        val field = findFieldInHierarchy(target.javaClass, name) ?: return false
+        return try {
+            field.set(target, value)
+            true
+        } catch (e: Throwable) {
+            logW("  Reflect set ${target.javaClass.name}.$name failed: ${e.message}")
+            false
+        }
+    }
+
+    private fun findFieldInHierarchy(type: Class<*>, name: String): Field? {
+        var current: Class<*>? = type
+        while (current != null) {
+            try {
+                return current.getDeclaredField(name).apply { isAccessible = true }
+            } catch (_: NoSuchFieldException) {
+                current = current.superclass
+            }
+        }
+        return null
     }
 
     /**
@@ -1244,16 +2682,36 @@ class LoaderFactory : AppComponentFactory() {
         val outputDir = File(dataDir)
         outputDir.mkdirs()
         val output = File(outputDir, "base.apk")
-        if (output.exists()) {
-            logD("Origin APK already extracted")
-            ensureReadOnly(output)
-            return output
-        }
+        val marker = File(outputDir, "origin_apk.marker")
         ZipFile(stubApkPath).use { zip ->
             val entry = zip.getEntry("assets/origin.apk")
                 ?: throw IllegalStateException("assets/origin.apk not found in stub APK")
+            val markerText = buildString {
+                append("stubLength=").append(File(stubApkPath).length()).append('\n')
+                append("stubLastModified=").append(File(stubApkPath).lastModified()).append('\n')
+                append("originSize=").append(entry.size).append('\n')
+                append("originCrc=").append(entry.crc).append('\n')
+            }
+            if (output.exists() && output.length() == entry.size && marker.exists() && runCatching { marker.readText() }.getOrNull() == markerText) {
+                logD("Origin APK already extracted and marker matches")
+                ensureReadOnly(output)
+                return output
+            }
+
+            logD("Origin APK cache stale or missing, refreshing base.apk")
+            ensureWritableFile(output)
+            if (output.exists() && !output.delete()) {
+                throw IllegalStateException("delete stale origin.apk failed: ${output.absolutePath}")
+            }
+            File(outputDir, "extracted_dex").deleteRecursively()
             zip.getInputStream(entry).use { input ->
                 output.outputStream().use { out -> input.copyTo(out) }
+            }
+            runCatching {
+                marker.writeText(markerText)
+                ensureReadOnly(marker)
+            }.onFailure {
+                logW("Origin APK marker write skipped: ${it.message}")
             }
         }
         ensureReadOnly(output)
@@ -1280,6 +2738,47 @@ class LoaderFactory : AppComponentFactory() {
             logD("  extractOriginalApk failed: ${e.message}")
             return null
         }
+    }
+
+    /**
+     * 从 APK 中提取 classes2.dex ~ classesN.dex（multidex DEX 文件）
+     * 360 加固的壳不会自动加载这些 DEX，需要手动提取并加入 ClassLoader
+     */
+    private fun extractAdditionalDex(apk: File, outputDir: File): List<File> {
+        val result = mutableListOf<File>()
+        try {
+            if (!outputDir.exists()) outputDir.mkdirs()
+            ZipFile(apk).use { zip ->
+                val entries = zip.entries().toList()
+                    .filter {
+                        val name = it.name
+                        // 匹配 classes2.dex ~ classes999.dex（根目录或 assets/patched/ 下）
+                        (name.matches(Regex(".*/classes[2-9]\\d*\\.dex")) ||
+                         name.matches(Regex("classes[2-9]\\d*\\.dex"))) &&
+                        !it.isDirectory
+                    }
+                    .sortedBy { it.name }
+                for (entry in entries) {
+                    val outFile = java.io.File(outputDir, java.io.File(entry.name).name)
+                    if (outFile.exists() && outFile.length() == entry.size) {
+                        result.add(outFile)
+                        continue
+                    }
+                    zip.getInputStream(entry).use { input ->
+                        outFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    // Android 禁止加载可写的 DEX 文件
+                    outFile.setReadOnly()
+                    result.add(outFile)
+                    logD("  Extracted DEX: ${entry.name} -> ${outFile.name} (${entry.size} bytes)")
+                }
+            }
+        } catch (e: Throwable) {
+            logW("  extractAdditionalDex failed: ${e.message}")
+        }
+        return result
     }
 
     /**
@@ -1313,6 +2812,7 @@ class LoaderFactory : AppComponentFactory() {
             val existingSoCount = outputDir.listFiles()?.count { it.isFile && it.extension == "so" } ?: 0
             if (marker.exists() && marker.readText() == markerText && existingSoCount >= entries.size) {
                 logD("Origin native libs already extracted for $abi")
+                patchJiaguSoIfPresent(outputDir)
                 ensureReadOnlyTree(outputDir)
                 return outputDir
             }
@@ -1340,6 +2840,7 @@ class LoaderFactory : AppComponentFactory() {
 
             marker.writeText(markerText)
             ensureReadOnly(marker)
+            patchJiaguSoIfPresent(outputDir)
             ensureReadOnlyTree(outputDir)
             logD("Extracted $extracted origin native libs for $abi to ${outputDir.absolutePath}")
             return outputDir
@@ -1353,6 +2854,236 @@ class LoaderFactory : AppComponentFactory() {
         } catch (e: Exception) {
             logW("ensureWritableDir failed: ${e.message}")
         }
+    }
+
+    /**
+     * Patch libjiagu_vip.so: JNI_OnLoad 的 return -1 改为 return 0
+     * 360 壳的 JNI_OnLoad 内部有环境检测，检测失败返回 JNI_ERR (-1)。
+     * 通过二进制 patch 把 MOV W0, #-1 (0x12800000) 改成 MOV W0, #0 (0x52800000)。
+     */
+    private fun patchJiaguSoIfPresent(libDir: File) {
+        val jiaguSo = File(libDir, "libjiagu_vip.so")
+        if (!jiaguSo.exists()) {
+            logW("  patchJiaguSo: libjiagu_vip.so not found in ${libDir.absolutePath}")
+            return
+        }
+
+        try {
+            val data = jiaguSo.readBytes()
+            logW("  patchJiaguSo: read ${data.size} bytes from ${jiaguSo.absolutePath}")
+            val patched = patchJiaguLoad(data)
+            if (patched !== data) {
+                jiaguSo.setWritable(true, false)
+                Runtime.getRuntime().exec(arrayOf("chmod", "666", jiaguSo.absolutePath)).waitFor()
+                jiaguSo.writeBytes(patched)
+                logW("  patchJiaguSo: PATCHED libjiagu_vip.so (${data.size} bytes)")
+            } else {
+                logW("  patchJiaguSo: pattern not found, no patch applied")
+            }
+        } catch (e: Exception) {
+            logW("  patchJiaguSo: FAILED: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * Patch libjiagu_vip.so: 在 JNI_OnLoad 函数体中找 MOV W0, #-1 后跟 B，
+     * 改成 MOV W0, #0（返回成功）。
+     */
+    private fun patchJiaguLoad(data: ByteArray): ByteArray {
+        val patched = data.copyOf()
+
+        // ELF64 header
+        val ePhoff = readLongLE(patched, 32).toInt()
+        val ePhentsize = readShortLE(patched, 54)
+        val ePhnum = readShortLE(patched, 56)
+        logW("  patchJiaguLoad: ELF64 phoff=$ePhoff phentsize=$ePhentsize phnum=$ePhnum")
+
+        // 找 PT_DYNAMIC 段
+        var dynOffset = -1
+        for (i in 0 until ePhnum) {
+            val phOff = ePhoff + i * ePhentsize
+            if (readIntLE(patched, phOff) == 2) { // PT_DYNAMIC
+                dynOffset = readLongLE(patched, phOff + 8).toInt()
+                break
+            }
+        }
+        if (dynOffset < 0) {
+            logW("  patchJiaguLoad: PT_DYNAMIC not found")
+            return data
+        }
+        logW("  patchJiaguLoad: PT_DYNAMIC at offset $dynOffset")
+
+        // 找 PT_LOAD 段用于 vaddr → file offset 映射
+        data class LoadSeg(val vaddr: Int, val offset: Int, val filesz: Int)
+        val loads = mutableListOf<LoadSeg>()
+        for (i in 0 until ePhnum) {
+            val phOff = ePhoff + i * ePhentsize
+            if (readIntLE(patched, phOff) == 1) {
+                loads.add(LoadSeg(
+                    readLongLE(patched, phOff + 16).toInt(),
+                    readLongLE(patched, phOff + 8).toInt(),
+                    readLongLE(patched, phOff + 32).toInt()
+                ))
+            }
+        }
+
+        fun vaddrToFile(vaddr: Int): Int {
+            for (seg in loads) {
+                if (vaddr >= seg.vaddr && vaddr < seg.vaddr + seg.filesz) {
+                    return seg.offset + (vaddr - seg.vaddr)
+                }
+            }
+            return -1
+        }
+
+        // 解析 dynamic entries
+        var symtabVaddr = -1
+        var strtabVaddr = -1
+        var dynI = dynOffset
+        while (dynI + 16 <= patched.size) {
+            val dTag = readLongLE(patched, dynI)
+            val dVal = readLongLE(patched, dynI + 8).toInt()
+            if (dTag == 0L) break
+            when (dTag) {
+                6L -> symtabVaddr = dVal   // DT_SYMTAB
+                5L -> strtabVaddr = dVal   // DT_STRTAB
+            }
+            dynI += 16
+        }
+
+        if (symtabVaddr < 0 || strtabVaddr < 0) {
+            logW("  patchJiaguLoad: symtab=$symtabVaddr strtab=$strtabVaddr - missing")
+            return data
+        }
+        val symtabFile = vaddrToFile(symtabVaddr)
+        val strtabFile = vaddrToFile(strtabVaddr)
+        if (symtabFile < 0 || strtabFile < 0) {
+            logW("  patchJiaguLoad: symtabFile=$symtabFile strtabFile=$strtabFile - invalid")
+            return data
+        }
+        logW("  patchJiaguLoad: symtab=0x${Integer.toHexString(symtabFile)} strtab=0x${Integer.toHexString(strtabFile)}")
+
+        // 在 .dynstr 中找 "JNI_OnLoad"
+        val jniStrPos = findBytes(patched, "JNI_OnLoad".toByteArray(), strtabFile)
+        if (jniStrPos < 0) {
+            logW("  patchJiaguLoad: JNI_OnLoad not found in .dynstr")
+            return data
+        }
+        val jniNameIdx = jniStrPos - strtabFile
+        logW("  patchJiaguLoad: JNI_OnLoad at strtab[$jniNameIdx]")
+
+        // 在 .dynsym 中找 JNI_OnLoad 符号
+        var jniVaddr = -1
+        var jniSize = -1
+        for (i in 0 until 2000) {
+            val entryOff = symtabFile + i * 24
+            if (entryOff + 24 > patched.size) break
+            if (readIntLE(patched, entryOff) == jniNameIdx) {
+                jniVaddr = readLongLE(patched, entryOff + 8).toInt()
+                jniSize = readLongLE(patched, entryOff + 16).toInt()
+                break
+            }
+        }
+
+        if (jniVaddr < 0 || jniSize <= 0) {
+            logW("  patchJiaguLoad: JNI_OnLoad symbol not found (vaddr=$jniVaddr size=$jniSize)")
+            return data
+        }
+        val jniFileOff = vaddrToFile(jniVaddr)
+        if (jniFileOff < 0) {
+            logW("  patchJiaguLoad: JNI_OnLoad file offset invalid (vaddr=0x${Integer.toHexString(jniVaddr)})")
+            return data
+        }
+        logW("  patchJiaguLoad: JNI_OnLoad at vaddr=0x${Integer.toHexString(jniVaddr)}, file=0x${Integer.toHexString(jniFileOff)}, size=$jniSize")
+        val endOff = jniFileOff + jniSize - 4
+        var patchCount = 0
+        var off = jniFileOff
+
+        // Patch 1: NOP 掉 JNI_OnLoad 函数体内所有 CBZ/CBNZ（环境检测跳转）
+        // JNI_OnLoad 函数体大小为 jniSize 字节，需要覆盖整个函数
+        val scanEnd = minOf(jniFileOff + jniSize, endOff)
+        while (off < scanEnd) {
+            val insn = readIntLE(patched, off)
+            val isCBZ = (insn and 0xFF000000.toInt()) == 0x34000000
+            val isCBNZ = (insn and 0xFF000000.toInt()) == 0x35000000
+            if (isCBZ || isCBNZ) {
+                patched[off] = 0x1F.toByte()
+                patched[off + 1] = 0x20.toByte()
+                patched[off + 2] = 0x03.toByte()
+                patched[off + 3] = 0xD5.toByte()
+                patchCount++
+                val op = if (isCBZ) "CBZ" else "CBNZ"
+                logW("  patchJiaguLoad: NOP'd $op at offset 0x${Integer.toHexString(off)}")
+            }
+            off += 4
+        }
+
+        // Patch 2: MOV W0, #-1 → MOV W0, #0
+        // 诊断：直接检查 0xceaf0 处的字节
+        val expectedMovnOffset = vaddrToFile(0x258af0)  // JNI_OnLoad+0xb8 = MOV W0, #-1
+        if (expectedMovnOffset >= 0 && expectedMovnOffset + 8 <= patched.size) {
+            val b0 = readIntLE(patched, expectedMovnOffset)
+            val b1 = readIntLE(patched, expectedMovnOffset + 4)
+            logW("  patchJiaguLoad: DIAG vaddr 0x258af0 -> file 0x${Integer.toHexString(expectedMovnOffset)}: " +
+                "0x${Integer.toHexString(b0)} 0x${Integer.toHexString(b1)} " +
+                "(expect MOVN=0x12800000, got ${if (b0 == 0x12800000) "MATCH!" else "MISMATCH"})")
+        } else {
+            logW("  patchJiaguLoad: DIAG vaddr 0x258af0 -> file offset $expectedMovnOffset (out of bounds)")
+        }
+
+        off = jniFileOff
+        var patch2Checked = 0
+        while (off <= endOff) {
+            val insn = readIntLE(patched, off)
+            if (insn == 0x12800000) { // MOVN W0, #0 = MOV W0, #-1
+                val nextInsn = readIntLE(patched, off + 4)
+                val isBranch = (nextInsn ushr 26) == 5 // B instruction: 0b000101
+                logW("  patchJiaguLoad: found MOVN at 0x${Integer.toHexString(off)}, " +
+                    "next=0x${Integer.toHexString(nextInsn)}, isBranch=$isBranch")
+                if (isBranch) {
+                    patched[off] = 0x00
+                    patched[off + 1] = 0x00
+                    patched[off + 2] = 0x80.toByte()
+                    patched[off + 3] = 0x52
+                    patchCount++
+                    logW("  patchJiaguLoad: patched MOV W0,#-1 at offset 0x${Integer.toHexString(off)}")
+                }
+            }
+            patch2Checked++
+            off += 4
+        }
+        logW("  patchJiaguLoad: Patch2 checked $patch2Checked instructions (0x${Integer.toHexString(jniFileOff)}..0x${Integer.toHexString(endOff)})")
+
+        return if (patchCount > 0) patched else data
+    }
+
+    private fun findBytes(haystack: ByteArray, needle: ByteArray, startOffset: Int = 0): Int {
+        for (i in startOffset..(haystack.size - needle.size)) {
+            if (haystack[i] == needle[0]) {
+                var match = true
+                for (j in 1 until needle.size) {
+                    if (haystack[i + j] != needle[j]) { match = false; break }
+                }
+                if (match) return i
+            }
+        }
+        return -1
+    }
+
+    private fun readIntLE(data: ByteArray, offset: Int): Int {
+        return (data[offset].toInt() and 0xFF) or
+            ((data[offset + 1].toInt() and 0xFF) shl 8) or
+            ((data[offset + 2].toInt() and 0xFF) shl 16) or
+            ((data[offset + 3].toInt() and 0xFF) shl 24)
+    }
+
+    private fun readLongLE(data: ByteArray, offset: Int): Long {
+        return (readIntLE(data, offset).toLong() and 0xFFFFFFFFL) or
+            ((readIntLE(data, offset + 4).toLong() and 0xFFFFFFFFL) shl 32)
+    }
+
+    private fun readShortLE(data: ByteArray, offset: Int): Int {
+        return (data[offset].toInt() and 0xFF) or ((data[offset + 1].toInt() and 0xFF) shl 8)
     }
 
     private fun findOriginNativeAbi(zip: ZipFile): String? {
@@ -1411,6 +3142,15 @@ class LoaderFactory : AppComponentFactory() {
         }
     }
 
+    private fun ensureWritableFile(file: File) {
+        try {
+            file.setWritable(true, true)
+            Runtime.getRuntime().exec(arrayOf("chmod", "644", file.absolutePath)).waitFor()
+        } catch (e: Exception) {
+            logW("ensureWritableFile failed: ${e.message}")
+        }
+    }
+
     /**
      * Hidden API bypass — 必须在任何反射调用之前执行
      * 使用 VMRuntime.setHiddenApiExemptions 豁免所有 hidden API
@@ -1462,6 +3202,14 @@ class LoaderFactory : AppComponentFactory() {
         }
     }
 
+    private fun dumpDebugLogToLogcat(reason: String) {
+        val snapshot = synchronized(debugLog) { debugLog.toList() }
+        Log.e(TAG, "DIAG-SIGNAL dumpDebugLogToLogcat reason=$reason size=${snapshot.size}")
+        snapshot.takeLast(120).forEachIndexed { index, line ->
+            Log.e(TAG, "DIAG-DUMP[$index] $line")
+        }
+    }
+
     /**
      * 最小配置类
      */
@@ -1493,7 +3241,10 @@ class LoaderFactory : AppComponentFactory() {
      * 但 stub 的资源表中没有原始 APK 的资源，导致 Resources$NotFoundException。
      * 此包装器捕获 onCreate 异常，让 provider 以"空实现"方式存活，不阻塞 app 启动。
      */
-    private class SafeProviderWrapper(private val delegate: ContentProvider) : ContentProvider() {
+    private class SafeProviderWrapper(
+        private val delegate: ContentProvider,
+        private val originMetaData: android.os.Bundle?
+    ) : ContentProvider() {
 
         @Volatile
         private var initFailed = false
@@ -1551,7 +3302,14 @@ class LoaderFactory : AppComponentFactory() {
 
         override fun attachInfo(context: android.content.Context, info: android.content.pm.ProviderInfo) {
             try {
-                delegate.attachInfo(context, info)
+                val patchedInfo = if (info.metaData == null && originMetaData != null) {
+                    android.content.pm.ProviderInfo(info).apply {
+                        metaData = android.os.Bundle(originMetaData)
+                    }
+                } else {
+                    info
+                }
+                delegate.attachInfo(context, patchedInfo)
             } catch (e: Throwable) {
                 Log.e(TAG, "Provider ${delegate.javaClass.name} attachInfo failed", e)
                 initFailed = true
@@ -1584,6 +3342,190 @@ class LoaderFactory : AppComponentFactory() {
             current = current.superclass
         }
         return false
+    }
+
+    // ========================================================================
+    // 诊断工具：nativeLibraries 缓存分析
+    // ========================================================================
+
+    /**
+     * 诊断 ClassLoader 的 nativeLibraries 缓存状态。
+     *
+     * 检查指定库是否已在缓存中，以及 /proc/self/maps 中是否有对应内存映射。
+     * 如果"缓存中有但 maps 中没有"，说明 Android 16 缓存污染假说成立。
+     */
+    private fun diagnoseNativeLibCache(loader: ClassLoader, libKeyword: String, label: String) {
+        // 1. 检查 nativeLibraries 缓存
+        var cacheEntries = listOf<String>()
+        var cacheSize = -1
+        var foundInCache = false
+        try {
+            val field = ClassLoader::class.java.getDeclaredField("nativeLibraries")
+            field.isAccessible = true
+            val nativeLibraries = field.get(loader)
+            if (nativeLibraries is Vector<*>) {
+                cacheSize = nativeLibraries.size
+                cacheEntries = nativeLibraries.mapNotNull { lib ->
+                    try {
+                        val nameField = lib?.javaClass?.getDeclaredField("name")
+                        nameField?.isAccessible = true
+                        nameField?.get(lib) as? String
+                    } catch (_: Exception) { null }
+                }
+                foundInCache = cacheEntries.any { it.contains(libKeyword) }
+            }
+        } catch (e: Throwable) {
+            logD("  DIAG[$label]: nativeLibraries reflection failed: ${e.message}")
+        }
+
+        // 2. 检查 /proc/self/maps
+        var mapsHasLib = false
+        var mapsLines = listOf<String>()
+        try {
+            val maps = java.io.File("/proc/self/maps").readLines()
+            mapsLines = maps.filter { it.contains(libKeyword) }
+            mapsHasLib = mapsLines.isNotEmpty()
+        } catch (_: Exception) {}
+
+        // 3. 诊断结论
+        val verdict = when {
+            foundInCache && mapsHasLib -> "LOADED_NORMALLY"
+            foundInCache && !mapsHasLib -> "CACHE_POLLUTED (缓存有但内存无映射 ← 假说成立!)"
+            !foundInCache && mapsHasLib -> "MAPS_ONLY (内存有映射但缓存无条目 ← 异常)"
+            !foundInCache && !mapsHasLib -> "NOT_LOADED (未加载 ← 预期状态)"
+            else -> "UNKNOWN"
+        }
+
+        logD("  DIAG[$label]: classLoader=${loader.javaClass.name}")
+        logD("  DIAG[$label]: nativeLibraries cacheSize=$cacheSize, foundInCache=$foundInCache")
+        if (cacheEntries.isNotEmpty()) {
+            logD("  DIAG[$label]: cache entries: ${cacheEntries.take(20)}")
+        }
+        logD("  DIAG[$label]: /proc/self/maps has $libKeyword: $mapsHasLib (${mapsLines.size} lines)")
+        if (mapsLines.isNotEmpty()) {
+            mapsLines.take(5).forEach { logD("  DIAG[$label]:   maps: $it") }
+        }
+        logD("  DIAG[$label]: *** VERDICT: $verdict ***")
+
+        if (foundInCache && !mapsHasLib) {
+            logE("  DIAG[$label]: CACHE_POLLUTED — 缓存污染假说确认！" +
+                " 库 '${libKeyword}' 在 nativeLibraries 中有条目，" +
+                "但 /proc/self/maps 中无对应映射。" +
+                " 后续 System.load/loadLibrary 将静默返回而不实际加载。")
+        }
+    }
+
+    /**
+     * 清除 ClassLoader 的 nativeLibraries 缓存中指定库的条目。
+     * 如果缓存污染假说成立，清除后重新调用 System.load 即可正常加载。
+     */
+    private fun clearNativeLibraryCache(loader: ClassLoader, libKeyword: String): Int {
+        var removed = 0
+        try {
+            // Android 16 可能改了字段名，尝试多个候选
+            val candidateFields = listOf("nativeLibraries", "mNativeLibraries", "nativeLibraryCache", "loadedLibraries")
+            var field: java.lang.reflect.Field? = null
+            for (name in candidateFields) {
+                try {
+                    field = ClassLoader::class.java.getDeclaredField(name)
+                    field.isAccessible = true
+                    logD("  clearNativeLibCache: found field '$name'")
+                    break
+                } catch (_: NoSuchFieldException) {
+                    if (envExceptionCheck()) envExceptionClear()
+                }
+            }
+
+            if (field == null) {
+                // 枚举所有字段
+                logW("  clearNativeLibCache: no known field found, enumerating ClassLoader fields:")
+                for (f in ClassLoader::class.java.declaredFields) {
+                    logW("    ${f.name} : ${f.type.name}")
+                }
+                return 0
+            }
+
+            val nativeLibraries = field.get(loader)
+            if (nativeLibraries is Vector<*>) {
+                for (i in nativeLibraries.size - 1 downTo 0) {
+                    val lib = nativeLibraries[i]
+                    val name = try {
+                        val nameField = lib?.javaClass?.getDeclaredField("name")
+                        nameField?.isAccessible = true
+                        nameField?.get(lib) as? String
+                    } catch (_: Exception) { null }
+                    if (name != null && name.contains(libKeyword)) {
+                        nativeLibraries.removeAt(i)
+                        removed++
+                        logD("  clearNativeLibCache: removed '$name' at index $i")
+                    }
+                }
+            }
+            logD("  clearNativeLibCache: removed $removed entries matching '$libKeyword'")
+        } catch (e: Throwable) {
+            logW("  clearNativeLibCache failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        return removed
+    }
+
+    private fun envExceptionCheck(): Boolean = false // placeholder
+    private fun envExceptionClear() {} // placeholder
+
+    private fun loadGuestLibraryViaInjectedHelper(loader: ClassLoader, libName: String): Boolean {
+        try {
+            val helperClass = Class.forName("com.multiapp.NativeLibLoader", true, loader)
+            val helperMethod = helperClass.getDeclaredMethod("loadLibrary", String::class.java)
+            helperMethod.isAccessible = true
+            helperMethod.invoke(null, libName)
+            logD("  preloadPackerLib: $libName loaded via NativeLibLoader")
+            return true
+        } catch (e: Throwable) {
+            val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+            logD("  preloadPackerLib: NativeLibLoader.loadLibrary($libName) failed: ${cause.javaClass.simpleName}: ${cause.message}")
+        }
+
+        try {
+            val helperClass = Class.forName("com.multiapp.JiaguLoader", true, loader)
+            val helperMethod = helperClass.getDeclaredMethod("loadLibrary")
+            helperMethod.isAccessible = true
+            helperMethod.invoke(null)
+            logD("  preloadPackerLib: $libName loaded via JiaguLoader")
+            return true
+        } catch (e: Throwable) {
+            val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+            logD("  preloadPackerLib: JiaguLoader.loadLibrary($libName) failed: ${cause.javaClass.simpleName}: ${cause.message}")
+        }
+
+        return false
+    }
+
+    /**
+     * 组合操作：诊断 → 清除缓存 → 重新加载 → 最终诊断。
+     * 用于验证缓存清除是否能修复 System.loadLibrary 静默失败问题。
+     */
+    private fun diagnoseAndRetryLibLoad(loader: ClassLoader, libPath: String, libKeyword: String) {
+        logD("  === diagnoseAndRetryLibLoad: $libKeyword ===")
+
+        diagnoseNativeLibCache(loader, libKeyword, "PRE-CLEAR")
+
+        val removed = clearNativeLibraryCache(loader, libKeyword)
+        if (removed > 0) {
+            logD("  diagnoseAndRetryLibLoad: cleared $removed stale cache entries, retrying...")
+        }
+
+        diagnoseNativeLibCache(loader, libKeyword, "POST-CLEAR")
+
+        val t0 = System.currentTimeMillis()
+        try {
+            System.load(libPath)
+            val elapsed = System.currentTimeMillis() - t0
+            logD("  diagnoseAndRetryLibLoad: System.load OK in ${elapsed}ms")
+        } catch (e: Throwable) {
+            val elapsed = System.currentTimeMillis() - t0
+            logW("  diagnoseAndRetryLibLoad: System.load FAILED in ${elapsed}ms: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        diagnoseNativeLibCache(loader, libKeyword, "FINAL")
     }
 }
 

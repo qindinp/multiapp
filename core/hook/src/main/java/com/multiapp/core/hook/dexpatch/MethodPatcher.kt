@@ -6,6 +6,7 @@ import org.jf.dexlib2.builder.instruction.BuilderInstruction10x
 import org.jf.dexlib2.builder.instruction.BuilderInstruction11n
 import org.jf.dexlib2.builder.instruction.BuilderInstruction11x
 import org.jf.dexlib2.builder.instruction.BuilderInstruction21c
+import org.jf.dexlib2.builder.instruction.BuilderInstruction21s
 import org.jf.dexlib2.builder.instruction.BuilderInstruction35c
 import timber.log.Timber
 
@@ -85,9 +86,19 @@ object MethodPatcher {
             Timber.tag(TAG).d("Skipping constructor/clinit: ${method.name}")
             return method
         }
+        if (method.returnType == method.definingClass) {
+            Timber.tag(TAG).d("Skipping self-returning method: ${method.definingClass}->${method.name}")
+            return method
+        }
 
         val returnType = method.returnType
-        val regCount = method.implementation?.registerCount ?: 2
+        val originalRegisterCount = method.implementation?.registerCount ?: 2
+        val requiredRegisterCount = when (returnType) {
+            "J", "D" -> 2
+            "V" -> 0
+            else -> 1
+        }
+        val regCount = maxOf(originalRegisterCount, requiredRegisterCount)
 
         try {
             val impl = MutableMethodImplementation(regCount)
@@ -95,23 +106,23 @@ object MethodPatcher {
             // 根据返回类型插入适当的返回指令
             when (returnType) {
                 "V" -> {
-                    impl.replaceInstruction(0, BuilderInstruction10x(Opcode.RETURN_VOID))
+                    impl.addInstruction(0, BuilderInstruction10x(Opcode.RETURN_VOID))
                 }
                 "Z", "I", "S", "B", "C", "F" -> {
-                    impl.replaceInstruction(0, BuilderInstruction11n(Opcode.CONST_4, 0, 0))
-                    impl.replaceInstruction(1, BuilderInstruction11x(Opcode.RETURN, 0))
+                    impl.addInstruction(0, BuilderInstruction11n(Opcode.CONST_4, 0, 0))
+                    impl.addInstruction(1, BuilderInstruction11x(Opcode.RETURN, 0))
                 }
                 "J" -> {
-                    impl.replaceInstruction(0, BuilderInstruction11n(Opcode.CONST_4, 0, 0))
-                    impl.replaceInstruction(1, BuilderInstruction11x(Opcode.RETURN_WIDE, 0))
+                    impl.addInstruction(0, BuilderInstruction21s(Opcode.CONST_WIDE_16, 0, 0))
+                    impl.addInstruction(1, BuilderInstruction11x(Opcode.RETURN_WIDE, 0))
                 }
                 "D" -> {
-                    impl.replaceInstruction(0, BuilderInstruction11n(Opcode.CONST_4, 0, 0))
-                    impl.replaceInstruction(1, BuilderInstruction11x(Opcode.RETURN_WIDE, 0))
+                    impl.addInstruction(0, BuilderInstruction21s(Opcode.CONST_WIDE_16, 0, 0))
+                    impl.addInstruction(1, BuilderInstruction11x(Opcode.RETURN_WIDE, 0))
                 }
                 else -> {
-                    impl.replaceInstruction(0, BuilderInstruction11n(Opcode.CONST_4, 0, 0))
-                    impl.replaceInstruction(1, BuilderInstruction11x(Opcode.RETURN_OBJECT, 0))
+                    impl.addInstruction(0, BuilderInstruction11n(Opcode.CONST_4, 0, 0))
+                    impl.addInstruction(1, BuilderInstruction11x(Opcode.RETURN_OBJECT, 0))
                 }
             }
 

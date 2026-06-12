@@ -417,6 +417,7 @@ class StubBuilderTest {
                 mapOf(
                     "lib/arm64-v8a/libmultiapp-native.so" to "native-hook",
                     "lib/arm64-v8a/libshadowhook.so" to "shadowhook",
+                    "lib/arm64-v8a/liblsplant.so" to "lsplant",
                     "lib/arm64-v8a/libc++_shared.so" to "cxx-runtime"
                 )
             )
@@ -430,19 +431,22 @@ class StubBuilderTest {
                     zos = zos,
                     writtenEntries = writtenEntries
                 )
-                assertEquals(3, count)
+                assertEquals(4, count)
             }
 
             ZipFile(outputFile).use { zip ->
                 val nativeEntry = zip.getEntry("lib/arm64-v8a/libmultiapp-native.so")
                 val shadowHookEntry = zip.getEntry("lib/arm64-v8a/libshadowhook.so")
+                val lsplantEntry = zip.getEntry("lib/arm64-v8a/liblsplant.so")
                 val cxxEntry = zip.getEntry("lib/arm64-v8a/libc++_shared.so")
 
                 assertNotNull(nativeEntry)
                 assertNotNull(shadowHookEntry)
+                assertNotNull(lsplantEntry)
                 assertNotNull(cxxEntry)
                 assertEquals("native-hook", String(zip.getInputStream(nativeEntry!!).readBytes()))
                 assertEquals("shadowhook", String(zip.getInputStream(shadowHookEntry!!).readBytes()))
+                assertEquals("lsplant", String(zip.getInputStream(lsplantEntry!!).readBytes()))
                 assertEquals("cxx-runtime", String(zip.getInputStream(cxxEntry!!).readBytes()))
             }
         }

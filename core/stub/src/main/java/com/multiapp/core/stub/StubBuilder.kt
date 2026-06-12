@@ -39,6 +39,7 @@ class StubBuilder(
         private val HOOK_NATIVE_LIBS = listOf(
             "libmultiapp-native.so",
             "libshadowhook.so",
+            "liblsplant.so",
             "libc++_shared.so"
         )
     }
@@ -446,6 +447,30 @@ class StubBuilder(
                 Timber.d("StubBuilder: embedded patched DEX: $entryName (${dexFile.length()} bytes)")
             }
 
+            // ★ 复制 origin APK 的所有 assets 到 stub APK
+            // 解决：native 代码通过 NDK AAssetManager 读取 assets 时，
+            //       指向 stub APK（没有这些文件）而不是 origin APK。
+            //       直接把 origin 的 assets 复制到 stub 中，确保 native 代码能找到。
+            try {
+                ZipFile(originApk).use { originZip ->
+                    val assetEntries = originZip.entries().toList()
+                        .filter { it.name.startsWith("assets/") && !it.isDirectory }
+                        .filter { !it.name.startsWith("assets/origin") && !it.name.startsWith("assets/multiapp_config") }
+                    for (entry in assetEntries) {
+                        // 跳过已经添加的 patched DEX
+                        if (entry.name.startsWith("assets/patched/")) continue
+                        zos.putNextEntry(ZipEntry(entry.name))
+                        originZip.getInputStream(entry).use { input ->
+                            input.copyTo(zos)
+                        }
+                        zos.closeEntry()
+                    }
+                    Timber.d("StubBuilder: copied ${assetEntries.size} assets from origin APK")
+                }
+            } catch (e: Throwable) {
+                Timber.w(e, "StubBuilder: failed to copy origin assets")
+            }
+
             // lib/ native libraries — 从原始 APK 中提取并打包
             // loader.dex 依赖 libmultiapp-native.so（shadowhook PLT hook）
             // 必须打进 Stub APK 的 lib/ 目录，否则 native hook 全部失效
@@ -477,7 +502,13 @@ class StubBuilder(
                             return@forEach
                         }
                         // Native libs 必须 STORED（不压缩），Android 需要直接 mmap
-                        val data = zip.getInputStream(entry).readBytes()
+                        var data = zip.getInputStream(entry).readBytes()
+
+                        // Patch libjiagu_vip.so: JNI_OnLoad 的 return -1 改为 return 0
+                        if (entry.name.contains("libjiagu_vip.so") && !entry.name.contains("_x86")) {
+                            data = patchJiaguLoad(data, entry.name)
+                        }
+
                         val storedEntry = ZipEntry(entry.name).apply {
                             method = ZipEntry.STORED
                             size = data.size.toLong()
@@ -495,6 +526,223 @@ class StubBuilder(
         }
 
         Timber.d("StubBuilder: packaged $count native libraries")
+    }
+
+    /**
+     * Patch libjiagu_vip.so: JNI_OnLoad 的 return -1 改为 return 0
+     *
+     * 360 壳的 JNI_OnLoad 内部有环境检测，检测失败返回 JNI_ERR (-1)。
+     * 通过二进制 patch 把 MOV W0, #-1 (0x12800000) 改成 MOV W0, #0 (0x52800000)，
+     * 让 JNI_OnLoad 返回成功，使 RegisterNatives 能执行。
+     *
+     * @param data .so 文件内容
+     * @param name 文件名（用于日志）
+     * @return patch 后的 .so 内容
+     */
+    private fun patchJiaguLoad(data: ByteArray, name: String): ByteArray {
+        val patched = data.copyOf()
+
+        // 找 JNI_OnLoad 符号：通过 ELF 动态段找 .dynsym 和 .dynstr
+        val elfClass = patched[4].toInt() and 0xFF
+        if (elfClass != 2) { // 不是 ELF64
+            Log.w("StubBuilder", "patchJiaguLoad: not ELF64, skip")
+            return data
+        }
+
+        // 解析 ELF64 header
+        val ePhoff = readLongLE(patched, 32)
+        val ePhentsize = readShortLE(patched, 54)
+        val ePhnum = readShortLE(patched, 56)
+
+        // 找 PT_DYNAMIC 段
+        var dynOffset = -1L
+        var dynVaddr = -1L
+        for (i in 0 until ePhnum) {
+            val phOff = (ePhoff + i * ePhentsize).toInt()
+            val pType = readIntLE(patched, phOff)
+            if (pType == 2) { // PT_DYNAMIC
+                dynOffset = readLongLE(patched, phOff + 8)
+                dynVaddr = readLongLE(patched, phOff + 16)
+                break
+            }
+        }
+        if (dynOffset < 0) {
+            Log.w("StubBuilder", "patchJiaguLoad: PT_DYNAMIC not found")
+            return data
+        }
+
+        // 找 PT_LOAD 段用于 vaddr → file offset 映射
+        data class LoadSegment(val vaddr: Long, val offset: Long, val filesz: Long)
+        val loads = mutableListOf<LoadSegment>()
+        for (i in 0 until ePhnum) {
+            val phOff = (ePhoff + i * ePhentsize).toInt()
+            val pType = readIntLE(patched, phOff)
+            if (pType == 1) { // PT_LOAD
+                loads.add(LoadSegment(
+                    readLongLE(patched, phOff + 16),
+                    readLongLE(patched, phOff + 8),
+                    readLongLE(patched, phOff + 32)
+                ))
+            }
+        }
+
+        fun vaddrToFile(vaddr: Long): Long {
+            for (seg in loads) {
+                if (vaddr >= seg.vaddr && vaddr < seg.vaddr + seg.filesz) {
+                    return seg.offset + (vaddr - seg.vaddr)
+                }
+            }
+            return -1
+        }
+
+        // 解析 dynamic entries 找 DT_SYMTAB, DT_STRTAB
+        var symtabVaddr = -1L
+        var strtabVaddr = -1L
+        var dynI = dynOffset.toInt()
+        while (dynI + 16 <= patched.size) {
+            val dTag = readLongLE(patched, dynI)
+            val dVal = readLongLE(patched, dynI + 8)
+            if (dTag == 0L) break // DT_NULL
+            when (dTag) {
+                6L -> symtabVaddr = dVal   // DT_SYMTAB
+                5L -> strtabVaddr = dVal   // DT_STRTAB
+            }
+            dynI += 16
+        }
+
+        if (symtabVaddr < 0 || strtabVaddr < 0) {
+            Log.w("StubBuilder", "patchJiaguLoad: symtab/strtab not found")
+            return data
+        }
+
+        val symtabFile = vaddrToFile(symtabVaddr).toInt()
+        val strtabFile = vaddrToFile(strtabVaddr).toInt()
+        if (symtabFile < 0 || strtabFile < 0) {
+            Log.w("StubBuilder", "patchJiaguLoad: can't convert vaddr to file offset")
+            return data
+        }
+
+        // 在 .dynstr 中找 "JNI_OnLoad" 字符串
+        val jniOnLoadStr = "JNI_OnLoad"
+        val jniStrPos = findBytes(patched, jniOnLoadStr.toByteArray(), strtabFile)
+        if (jniStrPos < 0) {
+            Log.w("StubBuilder", "patchJiaguLoad: JNI_OnLoad string not found in .dynstr")
+            return data
+        }
+        val jniNameIdx = jniStrPos - strtabFile
+
+        // 在 .dynsym 中找 JNI_OnLoad 符号（每个 Elf64_Sym = 24 字节）
+        var jniVaddr = -1L
+        var jniSize = -1L
+        val maxSym = 2000
+        for (i in 0 until maxSym) {
+            val entryOff = symtabFile + i * 24
+            if (entryOff + 24 > patched.size) break
+            val stName = readIntLE(patched, entryOff)
+            if (stName == jniNameIdx) {
+                jniVaddr = readLongLE(patched, entryOff + 8)
+                jniSize = readLongLE(patched, entryOff + 16)
+                break
+            }
+        }
+
+        if (jniVaddr < 0 || jniSize <= 0) {
+            Log.w("StubBuilder", "patchJiaguLoad: JNI_OnLoad symbol not found")
+            return data
+        }
+
+        val jniFileOff = vaddrToFile(jniVaddr).toInt()
+        if (jniFileOff < 0) {
+            Log.w("StubBuilder", "patchJiaguLoad: JNI_OnLoad file offset not found")
+            return data
+        }
+
+        Log.w("StubBuilder", "patchJiaguLoad: JNI_OnLoad at vaddr=0x${Integer.toHexString(jniVaddr.toInt())}, file=0x${Integer.toHexString(jniFileOff)}, size=$jniSize")
+
+        // Patch 策略：
+        // 1. NOP 掉 JNI_OnLoad 前 64 字节内的 CBZ/CBNZ 条件跳转（环境检测守卫）
+        // 2. 把 MOV W0, #-1 改成 MOV W0, #0（强制返回成功）
+        var patchCount = 0
+        val endOff = jniFileOff + jniSize.toInt() - 4
+
+        // Patch 1: NOP 掉前 64 字节内的 CBZ/CBNZ（环境检测跳转）
+        // CBZ 编码: 0x34000000 | (imm19 << 5) | Rt
+        // CBNZ 编码: 0x35000000 | (imm19 << 5) | Rt
+        val scanEnd = minOf(jniFileOff + jniSize.toInt(), endOff)
+        var off = jniFileOff
+        while (off < scanEnd) {
+            val insn = readIntLE(patched, off)
+            val isCBZ = (insn and 0xFF000000.toInt()) == 0x34000000
+            val isCBNZ = (insn and 0xFF000000.toInt()) == 0x35000000
+            if (isCBZ || isCBNZ) {
+                // NOP = 0xD503201F
+                patched[off] = 0x1F.toByte()
+                patched[off + 1] = 0x20.toByte()
+                patched[off + 2] = 0x03.toByte()
+                patched[off + 3] = 0xD5.toByte()
+                patchCount++
+                val op = if (isCBZ) "CBZ" else "CBNZ"
+                Log.w("StubBuilder", "patchJiaguLoad: NOP'd $op at offset 0x${Integer.toHexString(off)}")
+            }
+            off += 4
+        }
+
+        // Patch 2: MOV W0, #-1 → MOV W0, #0
+        off = jniFileOff
+        while (off <= endOff) {
+            val insn = readIntLE(patched, off)
+            if (insn == 0x12800000) { // MOV W0, #-1
+                val nextInsn = readIntLE(patched, off + 4)
+                val isBranch = (nextInsn and 0xFF000000.toInt()) == 0x14000000 ||
+                               (nextInsn and 0xFF000000.toInt()) == 0x17000000.toInt()
+                if (isBranch || (nextInsn and 0xFC000000.toInt()) == 0x14000000) {
+                    patched[off] = 0x00
+                    patched[off + 1] = 0x00
+                    patched[off + 2] = 0x80.toByte()
+                    patched[off + 3] = 0x52
+                    patchCount++
+                    Log.w("StubBuilder", "patchJiaguLoad: patched MOV W0,#-1 at offset 0x${Integer.toHexString(off)}")
+                }
+            }
+            off += 4
+        }
+
+        if (patchCount == 0) {
+            Log.w("StubBuilder", "patchJiaguLoad: no MOV W0,#-1 pattern found in JNI_OnLoad")
+            return data
+        }
+
+        Log.w("StubBuilder", "patchJiaguLoad: patched $patchCount instruction(s) in $name")
+        return patched
+    }
+
+    private fun readIntLE(data: ByteArray, offset: Int): Int {
+        return (data[offset].toInt() and 0xFF) or
+            ((data[offset + 1].toInt() and 0xFF) shl 8) or
+            ((data[offset + 2].toInt() and 0xFF) shl 16) or
+            ((data[offset + 3].toInt() and 0xFF) shl 24)
+    }
+
+    private fun readLongLE(data: ByteArray, offset: Int): Long {
+        return (readIntLE(data, offset).toLong() and 0xFFFFFFFFL) or
+            ((readIntLE(data, offset + 4).toLong() and 0xFFFFFFFFL) shl 32)
+    }
+
+    private fun readShortLE(data: ByteArray, offset: Int): Int {
+        return (data[offset].toInt() and 0xFF) or ((data[offset + 1].toInt() and 0xFF) shl 8)
+    }
+
+    private fun findBytes(haystack: ByteArray, needle: ByteArray, startOffset: Int = 0): Int {
+        for (i in startOffset..(haystack.size - needle.size)) {
+            if (haystack[i] == needle[0]) {
+                var match = true
+                for (j in 1 until needle.size) {
+                    if (haystack[i + j] != needle[j]) { match = false; break }
+                }
+                if (match) return i
+            }
+        }
+        return -1
     }
 
     private fun packageHookNativeLibs(
@@ -851,9 +1099,30 @@ class StubBuilder(
             }
 
             if (!injected) {
-                Log.w("StubBuilder", "injectPackerLibLoad: no packer class found")
-                workDir.deleteRecursively()
-                return
+                Log.w("StubBuilder", "injectPackerLibLoad: no packer class found, continue with DEX neutralize")
+            }
+
+            // 中和不需要的初始化方法
+            try {
+                val targets = listOf(
+                    "com.bytedance.android.dy.sdk.pangle.ZeusPlatformUtils->initZeus",
+                    "com.qq.reader.ReaderApplication->initLoginSDK",
+                    "com.qq.reader.ReaderApplication->initPushSDK",
+                    "com.qq.reader.shortcut.ShortcutManager->cihai",
+                    "com.qq.reader.abtest_sdk.qdab->cihai",
+                    "com.qq.reader.common.utils.qdbd->search",
+                    "com.qq.reader.common.utils.qdcg->search",
+                    "com.qq.reader.common.utils.qdeb->search",
+                    "com.qq.reader.common.utils.ae->search",
+                    "com.qq.reader.plugin.qdbh->search",
+                    "com.qq.reader.qrlightdark.LightDarkStatusManager->search",
+                    "com.yuewen.fock.Fock->sign"
+                )
+                Log.w("StubBuilder", "injectPackerLibLoad: neutralize targets: $targets")
+                val neutralized = patcher.neutralizeMethods(dexFiles, targets)
+                Log.w("StubBuilder", "injectPackerLibLoad: neutralized $neutralized methods")
+            } catch (e: Throwable) {
+                Log.w("StubBuilder", "injectPackerLibLoad: neutralize failed: ${e.message}")
             }
 
             // 用 patched DEX 替换 origin APK 中的 DEX

@@ -120,6 +120,21 @@ class NativeHookBridge {
         return false
     }
 
+    fun installRegisterNativesLogger(): Boolean {
+        if (!nativeLibLoaded) {
+            android.util.Log.w(TAG, "RegisterNatives logger not available: native lib not loaded")
+            return false
+        }
+        return try {
+            val result = nativeInstallRegisterNativesLogger()
+            android.util.Log.i(TAG, "RegisterNatives logger installed=$result")
+            result
+        } catch (e: Throwable) {
+            android.util.Log.w(TAG, "RegisterNatives logger install failed: ${e.message}", e)
+            false
+        }
+    }
+
     /**
      * 通过 dlopen 直接加载 native 库（绕过 Java 层 hidden API 限制）
      * 用于加载加固壳的 libjiagu_vip.so 等库
@@ -138,6 +153,25 @@ class NativeHookBridge {
         } catch (e: Throwable) {
             android.util.Log.e(TAG, "preloadNativeLibraries: exception: ${e.javaClass.simpleName}: ${e.message}", e)
             0
+        }
+    }
+
+    /**
+     * 只做 dlopen + GOT hook，不调 JNI_OnLoad。
+     * 用于混合方案：先 dlopen 加载并 hook GOT，再通过 loadLibraryForGuest 让 ART 做 ClassLoader 绑定 + JNI_OnLoad。
+     */
+    fun dlopenOnly(libPath: String): Boolean {
+        if (!nativeLibLoaded) {
+            android.util.Log.w(TAG, "dlopenOnly: native lib not loaded")
+            return false
+        }
+        return try {
+            val result = nativeDlopenOnly(libPath)
+            android.util.Log.i(TAG, "dlopenOnly: $libPath result=$result")
+            result != 0
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "dlopenOnly exception: ${e.javaClass.simpleName}: ${e.message}", e)
+            false
         }
     }
 
@@ -162,6 +196,54 @@ class NativeHookBridge {
         } catch (e: Throwable) {
             android.util.Log.w(TAG, "loadLibraryForGuest exception: ${e.message}", e)
             false
+        }
+    }
+
+    /**
+     * P0: 从 guest ClassLoader 中 dump 所有已加载的 DEX 文件。
+     * 遍历 DexPathList.dexElements，通过 mCookie 提取 DexFile 字节。
+     *
+     * @param classLoader guest ClassLoader (PathClassLoader)
+     * @param dumpDir 输出目录
+     * @return 成功 dump 的 DEX 数量
+     */
+    fun dumpDexFromClassLoader(classLoader: ClassLoader, dumpDir: java.io.File): Int {
+        if (!nativeLibLoaded) {
+            android.util.Log.w(TAG, "dumpDexFromClassLoader: native lib not loaded")
+            return 0
+        }
+        return try {
+            dumpDir.mkdirs()
+            val count = nativeDumpDexFromClassLoader(classLoader, dumpDir.absolutePath)
+            android.util.Log.i(TAG, "dumpDexFromClassLoader: dumped $count DEX to ${dumpDir.absolutePath}")
+            count
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "dumpDexFromClassLoader exception: ${e.message}", e)
+            0
+        }
+    }
+
+    /**
+     * P0: dump 已加载的 native libraries。
+     * 通过 dl_iterate_phdr 遍历所有已加载的 .so，按 PT_LOAD 段重建 ELF。
+     *
+     * @param dumpDir 输出目录
+     * @param targetLib 特定库名（null = dump 所有 app .so）
+     * @return 成功 dump 的 .so 数量
+     */
+    fun dumpLoadedLibraries(dumpDir: java.io.File, targetLib: String? = null): Int {
+        if (!nativeLibLoaded) {
+            android.util.Log.w(TAG, "dumpLoadedLibraries: native lib not loaded")
+            return 0
+        }
+        return try {
+            dumpDir.mkdirs()
+            val count = nativeDumpLoadedLibraries(dumpDir.absolutePath, targetLib)
+            android.util.Log.i(TAG, "dumpLoadedLibraries: dumped $count SO to ${dumpDir.absolutePath}")
+            count
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "dumpLoadedLibraries exception: ${e.message}", e)
+            0
         }
     }
 
@@ -203,6 +285,43 @@ class NativeHookBridge {
         } catch (e: Throwable) {
             Timber.tag(TAG).w(e, "registerStubMethods failed")
             false
+        }
+    }
+
+    /**
+     * 注册最小业务 native 兜底（当前仅 YWLoginManager）。
+     * 内容签名/加密链路必须保留原始实现，否则书城会出现空数据。
+     */
+    fun registerBusinessStubs(classLoader: ClassLoader): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeRegisterBusinessStubs(classLoader)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerBusinessStubs failed")
+            false
+        }
+    }
+
+    fun registerOnlineChapterDownloadFallbackStubs(classLoader: ClassLoader): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeRegisterOnlineChapterDownloadFallbackStubs(classLoader)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerOnlineChapterDownloadFallbackStubs failed")
+            false
+        }
+    }
+
+    /**
+     * 扫描所有已知 native 类，批量注册缺失的 native 方法
+     */
+    fun registerAllMissingNativeMethods(classLoader: ClassLoader): Int {
+        if (!nativeLibLoaded) return 0
+        return try {
+            nativeRegisterAllMissingNativeMethods(classLoader)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerAllMissingNativeMethods failed")
+            0
         }
     }
 
@@ -248,6 +367,144 @@ class NativeHookBridge {
      */
     fun gotHookLibrary(libName: String) {
         if (nativeHooksAvailable) nativeGotHookLibrary(libName)
+    }
+
+    /**
+     * Initialize LSPlant for ART method hooking.
+     * Must be called before hookMethod.
+     * Uses ShadowHook as the inline hooker backend.
+     */
+    fun initLsplant(): Boolean {
+        if (!nativeHooksAvailable) {
+            android.util.Log.w(TAG, "initLsplant: native lib not loaded")
+            return false
+        }
+        return try {
+            // 找到 host APK 的 nativeLibraryDir（liblsplant.so 所在目录）
+            val hostLibDir = findHostNativeLibDir()
+            android.util.Log.i(TAG, "initLsplant: hostLibDir=$hostLibDir")
+            val result = nativeInitLsplant(hostLibDir)
+            android.util.Log.i(TAG, "initLsplant: result=$result")
+            result
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "initLsplant failed: ${e.message}", e)
+            false
+        }
+    }
+
+    /**
+     * 找到 host APK 的 native library 目录
+     * liblsplant.so 在 host APK 的 lib 目录中，不在 guest/stub APK 中
+     */
+    private fun findHostNativeLibDir(): String? {
+        // 方式0: 从 PackageManager 获取 host APK 的 nativeLibraryDir
+        // liblsplant.so 在 host APK（com.multiapp.app）的 lib 目录中，不在 stub 中
+        try {
+            val atClass = Class.forName("android.app.ActivityThread")
+            val ctx = atClass.getMethod("currentApplication").invoke(null) as? android.content.Context
+            if (ctx != null) {
+                val hostInfo = ctx.packageManager.getApplicationInfo("com.multiapp.app", 0)
+                val hostLibDir = hostInfo.nativeLibraryDir
+                android.util.Log.i(TAG, "findHostNativeLibDir: host nativeLibDir=$hostLibDir")
+                if (hostLibDir != null && java.io.File(hostLibDir, "liblsplant.so").exists()) {
+                    return hostLibDir
+                }
+            }
+        } catch (e: Throwable) {
+            android.util.Log.w(TAG, "findHostNativeLibDir via PackageManager failed: ${e.message}")
+        }
+
+        // 方式1: 从 /proc/self/maps 找 libmultiapp-native.so 的路径
+        // liblsplant.so 在同一目录（host APK 的 lib 目录）
+        try {
+            var lineCount = 0
+            var foundMultiapp = false
+            var foundLsplant = false
+            java.io.File("/proc/self/maps").readLines().forEach { line ->
+                lineCount++
+                if (line.contains("libmultiapp-native.so")) {
+                    foundMultiapp = true
+                    val path = line.trim().substringAfterLast(" ")
+                    val dir = path.substringBeforeLast("/")
+                    android.util.Log.i(TAG, "findHostNativeLibDir: found libmultiapp-native.so at: $dir")
+                    val lsplantPath = "$dir/liblsplant.so"
+                    if (java.io.File(lsplantPath).exists()) {
+                        android.util.Log.i(TAG, "findHostNativeLibDir: liblsplant.so exists at: $lsplantPath")
+                        return dir
+                    } else {
+                        android.util.Log.w(TAG, "findHostNativeLibDir: liblsplant.so NOT found at: $lsplantPath")
+                    }
+                }
+                if (line.contains("liblsplant.so")) {
+                    foundLsplant = true
+                    android.util.Log.i(TAG, "findHostNativeLibDir: found liblsplant.so in maps: $line")
+                }
+            }
+            android.util.Log.w(TAG, "findHostNativeLibDir: maps scan done. lines=$lineCount, multiapp=$foundMultiapp, lsplant=$foundLsplant")
+        } catch (e: Throwable) {
+            android.util.Log.w(TAG, "findHostNativeLibDir via maps failed: ${e.message}")
+        }
+
+        // 方式2: 从 HookEngine 的 ClassLoader 获取（可能是 stub 的，作 fallback）
+        try {
+            val cl = HookEngine::class.java.classLoader
+            if (cl is dalvik.system.BaseDexClassLoader) {
+                val pathList = dalvik.system.BaseDexClassLoader::class.java
+                    .getDeclaredField("pathList")
+                    .apply { isAccessible = true }
+                    .get(cl)
+                if (pathList != null) {
+                    val rawDirs = pathList.javaClass
+                        .getDeclaredField("nativeLibraryDirectories")
+                        .apply { isAccessible = true }
+                        .get(pathList)
+                    val nativeLibDirs: List<java.io.File> = when (rawDirs) {
+                        is Array<*> -> rawDirs.filterIsInstance<java.io.File>()
+                        is List<*> -> rawDirs.filterIsInstance<java.io.File>()
+                        else -> emptyList()
+                    }
+                    android.util.Log.i(TAG, "findHostNativeLibDir: nativeLibDirs=$nativeLibDirs")
+                    val result = nativeLibDirs.firstOrNull { dir ->
+                        java.io.File(dir, "liblsplant.so").exists()
+                    }
+                    if (result != null) return result.absolutePath
+                }
+            }
+        } catch (e: Throwable) {
+            android.util.Log.w(TAG, "findHostNativeLibDir via ClassLoader failed: ${e.message}")
+        }
+
+        return null
+    }
+
+    /**
+     * Check if LSPlant is initialized.
+     */
+    fun isLsplantInitialized(): Boolean {
+        return nativeHooksAvailable && nativeIsLsplantInitialized()
+    }
+
+    /**
+     * Hook a Java method using LSPlant.
+     * The hookerObject must have a method: public Object callback(Object[] args)
+     *
+     * @param targetMethod The method to hook
+     * @param hookerObject The object containing the callback method
+     * @return true if hook was successful
+     */
+    fun hookMethod(targetMethod: java.lang.reflect.Executable, hookerObject: Any): Boolean {
+        if (!nativeHooksAvailable) {
+            android.util.Log.w(TAG, "hookMethod: native lib not loaded")
+            return false
+        }
+        return try {
+            val result = nativeHookMethod(targetMethod, hookerObject)
+            android.util.Log.i(TAG, "hookMethod: ${targetMethod.declaringClass.name}.${targetMethod.name} result=$result")
+            result
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "hookMethod failed: ${e.message}", e)
+            false
+        }
     }
 
     fun setupAppRedirections(guestPackageName: String, instanceId: String, sandboxDataDir: String) {
@@ -390,14 +647,28 @@ class NativeHookBridge {
     private external fun nativeGetPropertySpoofCount(): Int
     private external fun nativeIsInitialized(): Boolean
     private external fun nativeInstallRuntimeLoadHook(fallbackCallerClasses: Array<String>): Boolean
+    private external fun nativeInstallRegisterNativesLogger(): Boolean
     private external fun nativePreloadLibraries(libPaths: Array<String>): Int
     private external fun nativeLoadLibraryForGuest(libPath: String, classLoader: ClassLoader, callerClass: Class<*>): Int
+    private external fun nativeDlopenOnly(libPath: String): Int
     private external fun nativeSetupFindClassHook(classLoader: ClassLoader, targetClassNames: Array<String>): Boolean
     private external fun nativeInstallFindClassHook()
     private external fun nativeRegisterStubMethods(classLoader: ClassLoader, className: String): Boolean
+    private external fun nativeRegisterBusinessStubs(classLoader: ClassLoader): Boolean
+    private external fun nativeRegisterOnlineChapterDownloadFallbackStubs(classLoader: ClassLoader): Boolean
+    private external fun nativeRegisterAllMissingNativeMethods(classLoader: ClassLoader): Int
     private external fun nativeSetIntegrityRedirect(fromPath: String, toPath: String)
     private external fun nativeClearIntegrityRedirect()
     private external fun nativeGotHookLibrary(libName: String)
+
+    // LSPlant integration
+    private external fun nativeInitLsplant(libDir: String?): Boolean
+    private external fun nativeIsLsplantInitialized(): Boolean
+    private external fun nativeHookMethod(targetMethod: java.lang.reflect.Executable, hookerObject: Any): Boolean
+
+    // P0: DEX + SO dump
+    private external fun nativeDumpDexFromClassLoader(classLoader: ClassLoader, dumpDir: String): Int
+    private external fun nativeDumpLoadedLibraries(dumpDir: String, targetLib: String?): Int
 
     private fun tryLoadNativeLibrary(): Boolean = nativeLibLoaded
 

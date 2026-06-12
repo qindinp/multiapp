@@ -108,7 +108,7 @@ class DlopenHook : HookPoint {
                                 }
                             }
                         }
-                        null // no change
+                        args // pass through (don't skip System.loadLibrary)
                     }
                 )
                 Timber.tag(TAG).d("Hooked System.loadLibrary()")

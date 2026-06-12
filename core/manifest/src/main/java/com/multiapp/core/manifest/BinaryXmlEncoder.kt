@@ -407,7 +407,9 @@ class BinaryXmlEncoder {
             attrs.add(XmlAttr(ANDROID_NS_URI, "name", applicationClass))
         }
         // theme 以 TYPE_REFERENCE 写入原 app 的资源 ID。运行时 addAssetPath(origin.apk)
-        // 已挂载原 app 资源，该 ID 解析到原 app 自己的 theme。0 表示原 app 未声明，则不写。
+        // 已挂载原 app 资源，该 ID 解析到原 app 自己的 theme。
+        // ★ 不设置兜底系统主题 — 系统主题会用 stub 的资源表，导致 origin 的资源 ID 解析失败。
+        //   theme=0 的问题通过 LoaderFactory.applyActivityThemeIfKnown 在运行时解决。
         if (applicationThemeId != 0) {
             attrs.add(XmlAttr(ANDROID_NS_URI, "theme", "", typedValue = applicationThemeId, dataType = TYPE_REFERENCE))
         }

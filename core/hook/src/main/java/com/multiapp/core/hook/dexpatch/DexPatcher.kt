@@ -342,4 +342,71 @@ class DexPatcher {
         Log.w(TAG, "injectHelperClass: no suitable DEX found for helper class injection")
         return false
     }
+
+    /**
+     * 中和指定类的方法（替换为空实现）
+     * 用于跳过不需要的初始化代码（如广告 SDK 初始化）
+     *
+     * @param dexPaths DEX 文件列表
+     * @param targets 要中和的方法列表，格式为 "className->methodName"
+     * @return 成功中和的方法数
+     */
+    fun neutralizeMethods(dexPaths: List<File>, targets: List<String>): Int {
+        var count = 0
+        for (dexFile in dexPaths) {
+            try {
+                val dex = DexFileFactory.loadDexFile(dexFile, null as org.jf.dexlib2.Opcodes?)
+                val classes = dex.getClasses().toList()
+                val opcodes = dex.getOpcodes()
+                var modified = false
+
+                val newClasses = classes.map { classDef ->
+                    val targetMethods = targets.filter { target ->
+                        val (className, methodName) = target.split("->", limit = 2)
+                        classDef.type == "L${className.replace(".", "/")};" &&
+                        classDef.methods.any { it.name == methodName }
+                    }
+
+                    if (targetMethods.isEmpty()) return@map classDef
+
+                    val newMethods = classDef.methods.map { method ->
+                        val shouldNeutralize = targetMethods.any { target ->
+                            val (_, methodName) = target.split("->", limit = 2)
+                            method.name == methodName
+                        }
+                        if (shouldNeutralize) {
+                            modified = true
+                            count++
+                            Log.w(TAG, "neutralizeMethods: neutralizing ${classDef.type}->${method.name}")
+                            MethodPatcher.neutralize(method)
+                        } else {
+                            method
+                        }
+                    }
+
+                    object : org.jf.dexlib2.iface.ClassDef by classDef {
+                        override fun getMethods(): MutableIterable<org.jf.dexlib2.iface.Method> = newMethods.toMutableList()
+                    }
+                }
+
+                if (modified) {
+                    val tmpFile = File(dexFile.parentFile, dexFile.name + ".neutralize.tmp")
+                    val dexPool = DexPool(opcodes)
+                    for (c in newClasses) { dexPool.internClass(c) }
+                    dexPool.writeTo(FileDataStore(tmpFile))
+                    if (!dexFile.delete()) {
+                        throw IllegalStateException("failed to delete ${dexFile.name} before neutralize write")
+                    }
+                    if (!tmpFile.renameTo(dexFile)) {
+                        throw IllegalStateException("failed to replace ${dexFile.name} with neutralized dex")
+                    }
+                    Log.w(TAG, "neutralizeMethods: wrote ${dexFile.name}")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "neutralizeMethods: failed to process ${dexFile.name}: ${e.message}")
+            }
+        }
+        Log.w(TAG, "neutralizeMethods: neutralized $count methods")
+        return count
+    }
 }

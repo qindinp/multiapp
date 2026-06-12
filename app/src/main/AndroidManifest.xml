@@ -12,6 +12,7 @@
     <application
         android:name=".MultiAppApplication"
         android:allowBackup="false"
+        android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"

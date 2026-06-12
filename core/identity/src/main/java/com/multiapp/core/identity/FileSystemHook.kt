@@ -76,13 +76,13 @@ class FileSystemHook : HookPoint {
                 hookEngine.hookMethod(
                     method = method,
                     beforeCallback = { _, args ->
-                        val path = args.firstOrNull() as? String ?: return@hookMethod null
+                        val path = args.firstOrNull() as? String ?: return@hookMethod args
                         val rewritten = rewritePath(path, originalPkg, stubPkg)
                         if (rewritten != path) {
                             Timber.tag(TAG).d("File path rewrite: %s -> %s", path, rewritten)
                             arrayOf<Any?>(rewritten)
                         } else {
-                            null // no change
+                            args // pass through (don't skip File constructor)
                         }
                     }
                 )

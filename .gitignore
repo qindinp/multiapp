@@ -18,6 +18,13 @@
 *.dex
 *.class
 *.log
+*.idsig
+
+# Local analysis artifacts
+.tmp/
+tmp_apks/
+.mimocode/
+.vscode/
 
 # OS
 .DS_Store

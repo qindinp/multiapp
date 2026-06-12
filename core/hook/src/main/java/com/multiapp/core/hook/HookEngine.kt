@@ -47,39 +47,44 @@ class HookEngine private constructor() {
 
     // LSPlant state
     private var lsplantInitialized = false
-    private val lsplantHooks = ConcurrentHashMap<Executable, Any>() // Executable -> LSPlant.Unhook
+    private val lsplantHooks = ConcurrentHashMap<Executable, Any>() // Executable -> SimpleHooker
 
+    /**
+     * Initialize LSPlant using native JNI implementation.
+     * Uses ShadowHook as the inline hooker backend.
+     */
     fun initLsplant(classLoader: ClassLoader): Boolean {
         if (lsplantInitialized) return true
-        return initLsWithRetry(classLoader)
-    }
 
-    private fun initLsWithRetry(classLoader: ClassLoader, maxRetries: Int = 3): Boolean {
-        var lastException: Exception? = null
-        repeat(maxRetries) { attempt ->
-            try {
-                val lsplantClass = Class.forName("io.github.lsplant.LSPlant")
-                val initMethod = lsplantClass.getMethod("init", ClassLoader::class.java)
-                val result = initMethod.invoke(null, classLoader) as Boolean
-                lsplantInitialized = result
-                if (result) {
-                    Timber.tag(TAG).i("LSPlant initialized successfully")
-                    return true
-                } else {
-                    Timber.tag(TAG).w("LSPlant.init() returned false (attempt ${attempt + 1})")
-                }
-            } catch (e: Exception) {
-                lastException = e
-                Timber.tag(TAG).w("LSPlant init attempt ${attempt + 1} failed: ${e.message}")
-                if (attempt < maxRetries - 1) {
-                    Thread.sleep(100L shl attempt)
-                }
-            }
+        android.util.Log.i(TAG, "=== LSPlant.init() 开始 ===")
+        android.util.Log.i(TAG, "ClassLoader: ${classLoader.javaClass.name}")
+
+        val bridge = NativeHookBridge.getInstance()
+        val result = bridge.initLsplant()
+        lsplantInitialized = result
+
+        if (result) {
+            Timber.tag(TAG).i("LSPlant initialized successfully via native JNI")
+            android.util.Log.i(TAG, "=== LSPlant.init() 成功 ===")
+        } else {
+            Timber.tag(TAG).e("LSPlant initialization failed")
+            android.util.Log.e(TAG, "=== LSPlant.init() 失败 ===")
         }
-        Timber.tag(TAG).e(lastException, "LSPlant init failed after $maxRetries attempts")
-        return false
+
+        return result
     }
 
+    /**
+     * Hook a Java method using LSPlant.
+     *
+     * NOTE: This implementation operates in "skip-mode" only.
+     * - beforeCallback returning null → skip original, return default value
+     * - beforeCallback returning non-null → still skip original (pass-through not supported)
+     * - afterCallback → called with default value, not original result
+     *
+     * For Fock.sign and similar use cases where we want to skip the original method,
+     * this is sufficient. Full pass-through support would require invoking the backup method.
+     */
     fun hookMethod(
         method: Executable,
         beforeCallback: ((receiver: Any?, args: Array<Any?>) -> Array<Any?>?)? = null,
@@ -87,99 +92,70 @@ class HookEngine private constructor() {
     ): Boolean {
         if (!lsplantInitialized) {
             Timber.tag(TAG).w("LSPlant not initialized — cannot hook ${method.name}")
+            android.util.Log.w(TAG, "hookMethod: LSPlant not initialized, cannot hook ${method.name}")
             return false
         }
 
-        return try {
-            val lsplantClass = Class.forName("io.github.lsplant.LSPlant")
+        // Create a SimpleHooker that wraps the before/after callbacks
+        val hooker = SimpleHooker(method) { args ->
+            val receiver = if (args.isNotEmpty() && !java.lang.reflect.Modifier.isStatic(method.modifiers)) {
+                args[0]
+            } else null
 
-            val beforeCallbackImpl = beforeCallback?.let { cb ->
-                createBeforeCallback(cb, method)
-            }
-
-            val afterCallbackImpl = afterCallback?.let { cb ->
-                createAfterCallback(cb, method)
-            }
-
-            val hookMethod = lsplantClass.getMethod(
-                "hook",
-                Executable::class.java,
-                Class.forName("io.github.lsplant.LSPlant\$MethodHookCallback"),
-                Class.forName("io.github.lsplant.LSPlant\$MethodUnhookCallback")
-            )
-
-            val unhook = hookMethod.invoke(null, method, beforeCallbackImpl, afterCallbackImpl)
-            if (unhook != null) {
-                lsplantHooks[method] = unhook
-                installedHooks.add(HookInfo(
-                    type = HookType.LSPLANT_METHOD,
-                    target = "${method.declaringClass.name}.${method.name}",
-                    originalValue = null
-                ))
-                Timber.tag(TAG).d("LSPlant hooked: ${method.declaringClass.name}.${method.name}")
-                true
+            val methodArgs = if (args.isNotEmpty() && !java.lang.reflect.Modifier.isStatic(method.modifiers)) {
+                args.sliceArray(1 until args.size)
             } else {
-                Timber.tag(TAG).w("LSPlant.hook() returned null for ${method.name}")
-                false
+                args
             }
-        } catch (e: Exception) {
-            Timber.tag(TAG).e(e, "Failed to LSPlant hook ${method.declaringClass.name}.${method.name}")
-            false
-        }
-    }
 
-    private fun createBeforeCallback(
-        callback: (receiver: Any?, args: Array<Any?>) -> Array<Any?>?,
-        method: Executable
-    ): Any {
-        val callbackClass = Class.forName("io.github.lsplant.LSPlant\$MethodHookCallback")
-        return java.lang.reflect.Proxy.newProxyInstance(
-            callbackClass.classLoader,
-            arrayOf(callbackClass)
-        ) { _, proxyMethod, proxyArgs ->
-            when (proxyMethod.name) {
-                "before" -> {
-                    val receiver = proxyArgs?.getOrNull(0)
-                    val methodArgs = proxyArgs?.getOrNull(1) as? Array<Any?> ?: emptyArray()
-                    val result = callback(receiver, methodArgs)
-                    if (result != null && result !== methodArgs) {
-                        // Callback returned modified args — copy them back to the original array
-                        // and return false (don't skip the method)
-                        for (i in methodArgs.indices) {
-                            if (i < result.size) {
-                                (proxyArgs[1] as Array<Any?>)[i] = result[i]
-                            }
-                        }
-                        false
-                    } else {
-                        // No changes — return false (don't skip)
-                        false
-                    }
+            // Execute beforeCallback
+            if (beforeCallback != null) {
+                val beforeResult = beforeCallback(receiver, methodArgs)
+                if (beforeResult == null) {
+                    // null = skip original method, return default value
+                    val defaultVal = SimpleHooker.getDefaultValue(
+                        if (method is java.lang.reflect.Method) method.returnType else null
+                    )
+                    android.util.Log.d(TAG, "hookMethod: ${method.name} skipped by beforeCallback")
+                    return@SimpleHooker defaultVal
                 }
-                else -> null
             }
-        }
-    }
 
-    private fun createAfterCallback(
-        callback: (receiver: Any?, args: Array<Any?>, result: Any?) -> Any?,
-        method: Executable
-    ): Any {
-        val callbackClass = Class.forName("io.github.lsplant.LSPlant\$MethodHookCallback")
-        return java.lang.reflect.Proxy.newProxyInstance(
-            callbackClass.classLoader,
-            arrayOf(callbackClass)
-        ) { _, proxyMethod, args ->
-            when (proxyMethod.name) {
-                "after" -> {
-                    val receiver = args?.getOrNull(0)
-                    val methodArgs = args?.getOrNull(1) as? Array<Any?> ?: emptyArray()
-                    val result = args?.getOrNull(2)
-                    callback(receiver, methodArgs, result)
-                }
-                else -> null
+            // For now, we don't call the original method (we're just intercepting)
+            // If afterCallback is provided, call it with a null result
+            if (afterCallback != null) {
+                val defaultVal = SimpleHooker.getDefaultValue(
+                    if (method is java.lang.reflect.Method) method.returnType else null
+                )
+                val afterResult = afterCallback(receiver, methodArgs, defaultVal)
+                android.util.Log.d(TAG, "hookMethod: ${method.name} afterCallback returned: $afterResult")
+                return@SimpleHooker afterResult
             }
+
+            // Return default value
+            SimpleHooker.getDefaultValue(
+                if (method is java.lang.reflect.Method) method.returnType else null
+            )
         }
+
+        val bridge = NativeHookBridge.getInstance()
+        val success = bridge.hookMethod(method, hooker)
+
+        if (success) {
+            lsplantHooks[method] = hooker
+            installedHooks.add(HookInfo(
+                type = HookType.LSPLANT_METHOD,
+                target = "${method.declaringClass.name}.${method.name}",
+                originalValue = null
+            ))
+            Timber.tag(TAG).d("LSPlant hooked: ${method.declaringClass.name}.${method.name}")
+            android.util.Log.i(TAG, "hookMethod: successfully hooked ${method.declaringClass.name}.${method.name}")
+        } else {
+            Timber.tag(TAG).w("LSPlant.hook() failed for ${method.name}")
+            android.util.Log.w(TAG, "hookMethod: failed to hook ${method.name}")
+        }
+
+        return success
     }
 
     fun hookStaticField(className: String, fieldName: String, newValue: Any?): Boolean {
@@ -247,16 +223,9 @@ class HookEngine private constructor() {
     }
 
     fun unhookAll() {
-        for ((method, unhook) in lsplantHooks) {
-            try {
-                val unhookClass = unhook::class.java
-                val unhookMethod = unhookClass.getMethod("unhook")
-                unhookMethod.invoke(unhook)
-                Timber.tag(TAG).d("LSPlant unhooked: ${method.declaringClass.name}.${method.name}")
-            } catch (e: Exception) {
-                Timber.tag(TAG).e(e, "Failed to LSPlant unhook: ${method.name}")
-            }
-        }
+        // Note: LSPlant hooks cannot be easily unhoked in our simplified implementation
+        // The hooks will remain until the process is killed
+        Timber.tag(TAG).d("Clearing ${lsplantHooks.size} LSPlant hooks (hooks remain active until process exit)")
         lsplantHooks.clear()
 
         for (hook in installedHooks.reversed()) {

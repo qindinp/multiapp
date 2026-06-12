@@ -50,6 +50,7 @@ android {
 
     packaging {
         jniLibs {
+            useLegacyPackaging = true
             pickFirsts += "lib/*/libshadowhook.so"
             pickFirsts += "lib/*/liblsplant.so"
         }

@@ -1071,6 +1071,157 @@ class IdentityHookTest {
                 SignatureBypass().apply(config, mockHookEngine)
             }
         }
+
+        // ── 签名替换逻辑验证 ──────────────────────────────────
+
+        @Test
+        fun `interceptPackageInfo skips non-PackageInfo results`() {
+            // interceptPackageInfo 对非 PackageInfo 类型直接返回原值
+            val result = invokeInterceptPackageInfo(
+                result = "not a PackageInfo",
+                args = arrayOf(TEST_ORIGINAL_PKG),
+                originalPkg = TEST_ORIGINAL_PKG
+            )
+            assertEquals("not a PackageInfo", result)
+        }
+
+        @Test
+        fun `interceptPackageInfo skips when queried package does not match original`() {
+            // 壳查询的包名不是 originalPkg 时，不拦截
+            val pkgInfo = android.content.pm.PackageInfo()
+            pkgInfo.signatures = arrayOf(android.content.pm.Signature(byteArrayOf(0x01)))
+
+            val result = invokeInterceptPackageInfo(
+                result = pkgInfo,
+                args = arrayOf("com.other.app"),
+                originalPkg = TEST_ORIGINAL_PKG
+            )
+            // 签名不应被替换（因为包名不匹配）
+            assertNotNull(result)
+            val resultPkgInfo = result as android.content.pm.PackageInfo
+            assertEquals(1, resultPkgInfo.signatures?.size)
+            assertEquals(0x01.toByte(), resultPkgInfo.signatures?.first()?.toByteArray()?.first())
+        }
+
+        @Test
+        fun `interceptPackageInfo skips when args are empty`() {
+            val pkgInfo = android.content.pm.PackageInfo()
+            pkgInfo.signatures = arrayOf(android.content.pm.Signature(byteArrayOf(0x02)))
+
+            val result = invokeInterceptPackageInfo(
+                result = pkgInfo,
+                args = emptyArray(),
+                originalPkg = TEST_ORIGINAL_PKG
+            )
+            // args 为空时 queriedPkg 为 null，直接返回
+            val resultPkgInfo = result as android.content.pm.PackageInfo
+            assertEquals(0x02.toByte(), resultPkgInfo.signatures?.first()?.toByteArray()?.first())
+        }
+
+        @Test
+        fun `interceptPackageInfo skips when recursion guard is active`() {
+            // 模拟递归保护激活状态
+            setRecursionGuard(true)
+            try {
+                val pkgInfo = android.content.pm.PackageInfo()
+                pkgInfo.signatures = arrayOf(android.content.pm.Signature(byteArrayOf(0x03)))
+
+                val result = invokeInterceptPackageInfo(
+                    result = pkgInfo,
+                    args = arrayOf(TEST_ORIGINAL_PKG),
+                    originalPkg = TEST_ORIGINAL_PKG
+                )
+                // 递归保护激活时不应替换签名
+                val resultPkgInfo = result as android.content.pm.PackageInfo
+                assertEquals(0x03.toByte(), resultPkgInfo.signatures?.first()?.toByteArray()?.first())
+            } finally {
+                setRecursionGuard(false)
+            }
+        }
+
+        @Test
+        fun `recursion guard is ThreadLocal - other thread is not affected`() {
+            // 主线程设置递归保护
+            setRecursionGuard(true)
+
+            val otherThreadResult = java.util.concurrent.atomic.AtomicBoolean(false)
+            val latch = java.util.concurrent.CountDownLatch(1)
+
+            val thread = Thread {
+                try {
+                    // 其他线程的递归保护应为 false
+                    val guardValue = getRecursionGuardValue()
+                    otherThreadResult.set(guardValue == false)
+                } finally {
+                    latch.countDown()
+                }
+            }
+            thread.start()
+            latch.await(2, java.util.concurrent.TimeUnit.SECONDS)
+
+            setRecursionGuard(false)
+            assertTrue(otherThreadResult.get(), "Other thread should NOT see recursion guard set by main thread")
+        }
+
+        @Test
+        fun `interceptPackageInfo returns result when first arg is null`() {
+            // args[0] 为 null 时安全处理
+            val pkgInfo = android.content.pm.PackageInfo()
+            val result = invokeInterceptPackageInfo(
+                result = pkgInfo,
+                args = arrayOf(null),
+                originalPkg = TEST_ORIGINAL_PKG
+            )
+            assertSame(pkgInfo, result)
+        }
+
+        // ── Reflection helpers ──────────────────────────────────
+
+        /**
+         * 调用 SignatureBypass.Companion.interceptPackageInfo
+         */
+        private fun invokeInterceptPackageInfo(
+            result: Any?,
+            args: Array<Any?>,
+            originalPkg: String
+        ): Any? {
+            val companionClass = Class.forName(
+                "com.multiapp.core.identity.SignatureBypass\$Companion"
+            )
+            val companionField = SignatureBypass::class.java.declaredFields
+                .firstOrNull { it.name == "Companion" }
+                ?: return null
+            companionField.isAccessible = true
+            val companion = companionField.get(null) ?: return null
+
+            val method = companionClass.declaredMethods
+                .firstOrNull { it.name == "interceptPackageInfo" }
+                ?: return null
+            method.isAccessible = true
+            return method.invoke(companion, result, args, originalPkg)
+        }
+
+        /**
+         * 设置递归保护标志
+         */
+        private fun setRecursionGuard(value: Boolean) {
+            val field = SignatureBypass::class.java.getDeclaredField("recursionGuard")
+            field.isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            val threadLocal = field.get(null) as ThreadLocal<Boolean>
+            threadLocal.set(value)
+        }
+
+        /**
+         * 获取当前线程的递归保护值
+         */
+        private fun getRecursionGuardValue(): Boolean? {
+            val field = SignatureBypass::class.java.getDeclaredField("recursionGuard")
+            field.isAccessible = true
+            @Suppress("UNCHECKED_CAST")
+            val threadLocal = field.get(null) as ThreadLocal<Boolean>
+            return threadLocal.get()
+        }
     }
 
     // endregion
