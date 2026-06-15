@@ -62,8 +62,8 @@ class PackageIdentityHook : HookPoint {
             val stubPkg = config.stubPackageName
 
             hookContextGetPackageName(hookEngine, originalPkg)
-            hookContextGetPackageCodePath(hookEngine, originalPkg)
-            hookContextGetPackageResourcePath(hookEngine, originalPkg)
+            hookContextGetPackageCodePath(hookEngine, originalPkg, stubPkg)
+            hookContextGetPackageResourcePath(hookEngine, originalPkg, stubPkg)
             rewriteApplicationInfoPackageName(originalPkg, stubPkg)
             hookProcessMyPackageName(hookEngine, originalPkg)
 
@@ -105,14 +105,15 @@ class PackageIdentityHook : HookPoint {
          */
         private fun hookContextGetPackageCodePath(
             hookEngine: HookEngine,
-            originalPkg: String
+            originalPkg: String,
+            stubPkg: String
         ) {
             try {
                 val method = Context::class.java.getDeclaredMethod("getPackageCodePath")
                 hookEngine.hookMethod(
                     method = method,
                     afterCallback = { _, _, result ->
-                        rewritePackagePath(result, originalPkg)
+                        rewritePackagePath(result, originalPkg, stubPkg)
                     }
                 )
                 Timber.tag(TAG).d("Hooked Context.getPackageCodePath()")
@@ -126,14 +127,15 @@ class PackageIdentityHook : HookPoint {
          */
         private fun hookContextGetPackageResourcePath(
             hookEngine: HookEngine,
-            originalPkg: String
+            originalPkg: String,
+            stubPkg: String
         ) {
             try {
                 val method = Context::class.java.getDeclaredMethod("getPackageResourcePath")
                 hookEngine.hookMethod(
                     method = method,
                     afterCallback = { _, _, result ->
-                        rewritePackagePath(result, originalPkg)
+                        rewritePackagePath(result, originalPkg, stubPkg)
                     }
                 )
                 Timber.tag(TAG).d("Hooked Context.getPackageResourcePath()")
@@ -212,9 +214,9 @@ class PackageIdentityHook : HookPoint {
          * Rewrite a package path string, replacing stub package directory
          * segments with the original package name.
          */
-        private fun rewritePackagePath(result: Any?, originalPkg: String): Any? {
+        private fun rewritePackagePath(result: Any?, originalPkg: String, stubPkg: String): Any? {
             if (result !is String) return result
-            return result
+            return result.replace(stubPkg, originalPkg)
         }
 
         /**

@@ -417,6 +417,16 @@ class LoaderFactory : AppComponentFactory() {
             logD("Step 0: Hidden API bypass...")
             bypassHiddenApis()
 
+            // Step 0.5: NativeHookBridge 初始化 — 必须在 identity hooks 之前
+            // 安装 open/fopen/readlink 等 libc hook，过滤 /proc/self/maps 中的 multiapp/shadowhook
+            logD("Step 0.5: NativeHookBridge early init...")
+            try {
+                val hooksOk = NativeHookBridge.getInstance().initNativeHooks()
+                logD("  NativeHookBridge.initNativeHooks: $hooksOk")
+            } catch (e: Throwable) {
+                logW("  NativeHookBridge.initNativeHooks failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+
             // 1. 获取 ActivityThread
             logD("Step 1: Getting ActivityThread...")
             val activityThread = try {
@@ -1722,6 +1732,16 @@ class LoaderFactory : AppComponentFactory() {
                 val hookEngine = com.multiapp.core.hook.HookEngine.getInstance()
                 val lsplantOk = hookEngine.initLsplant(guestCl)
                 logD("  preloadPackerLib: LSPlant initialized: $lsplantOk")
+
+                // AntiDetectionEngine 初始化 — 反检测引擎接入启动流程
+                try {
+                    val antiDetect = com.multiapp.core.hook.AntiDetectionEngine(hookEngine, bridge)
+                    antiDetect.initialize()
+                    antiDetect.enableAntiDetection("default", com.multiapp.core.hook.DetectionLevel.MODERATE)
+                    logD("  preloadPackerLib: AntiDetectionEngine initialized and enabled (MODERATE)")
+                } catch (e: Throwable) {
+                    logW("  preloadPackerLib: AntiDetectionEngine init failed: ${e.javaClass.simpleName}: ${e.message}")
+                }
 
                 // 跳过 Pangle 广告 SDK 初始化（Zeus.init 方法不存在）
                 try {
