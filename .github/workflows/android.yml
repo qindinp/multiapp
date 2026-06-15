@@ -42,7 +42,22 @@ jobs:
 
       - name: Lint
         run: ./gradlew lintDebug --continue
+
+      - name: Unit Tests
+        run: ./gradlew testDebugUnitTest --continue
+
+      - name: Generate Code Coverage Report
+        run: ./gradlew jacocoTestReport
         continue-on-error: true
+
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: |
+            **/build/reports/tests/
+            **/build/reports/jacoco/
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug

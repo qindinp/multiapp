@@ -97,7 +97,8 @@ class HookEngine private constructor() {
         }
 
         // Create a SimpleHooker that wraps the before/after callbacks
-        val hooker = SimpleHooker(method) { args ->
+        lateinit var hooker: SimpleHooker
+        hooker = SimpleHooker(method) { args ->
             val receiver = if (args.isNotEmpty() && !java.lang.reflect.Modifier.isStatic(method.modifiers)) {
                 args[0]
             } else null
@@ -156,6 +157,115 @@ class HookEngine private constructor() {
         }
 
         return success
+    }
+
+    fun hookMethodPassThrough(
+        method: Method,
+        beforeCallback: ((receiver: Any?, args: Array<Any?>) -> Array<Any?>?)? = null,
+        afterCallback: ((receiver: Any?, args: Array<Any?>, result: Any?) -> Any?)? = null
+    ): Boolean {
+        if (!lsplantInitialized) {
+            Timber.tag(TAG).w("LSPlant not initialized - cannot pass-through hook ${method.name}")
+            android.util.Log.w(TAG, "hookMethodPassThrough: LSPlant not initialized, cannot hook ${method.name}")
+            return false
+        }
+
+        lateinit var hooker: SimpleHooker
+        hooker = SimpleHooker(method) { args ->
+            val receiver = if (args.isNotEmpty() && !java.lang.reflect.Modifier.isStatic(method.modifiers)) args[0] else null
+            val originalMethodArgs = if (args.isNotEmpty() && !java.lang.reflect.Modifier.isStatic(method.modifiers)) {
+                args.sliceArray(1 until args.size)
+            } else {
+                args
+            }
+
+            val callArgs = if (beforeCallback != null) {
+                val replacementArgs = beforeCallback(receiver, originalMethodArgs)
+                if (replacementArgs != null) {
+                    if (java.lang.reflect.Modifier.isStatic(method.modifiers)) replacementArgs else arrayOf(receiver, *replacementArgs)
+                } else {
+                    args
+                }
+            } else {
+                args
+            }
+
+            val result = try {
+                hooker.callOriginal(callArgs)
+            } catch (e: Throwable) {
+                android.util.Log.e(TAG, "hookMethodPassThrough: callOriginal failed for ${method.name}: ${e.message}", e)
+                throw e
+            }
+
+            if (afterCallback != null) {
+                val afterArgs = if (callArgs.isNotEmpty() && !java.lang.reflect.Modifier.isStatic(method.modifiers)) {
+                    callArgs.sliceArray(1 until callArgs.size)
+                } else {
+                    callArgs
+                }
+                afterCallback(receiver, afterArgs, result)
+            } else {
+                result
+            }
+        }
+
+        val bridge = NativeHookBridge.getInstance()
+        val backup = bridge.hookMethodWithBackup(method, hooker)
+        if (backup != null) {
+            hooker.setBackup(backup)
+            lsplantHooks[method] = hooker
+            installedHooks.add(HookInfo(
+                type = HookType.LSPLANT_METHOD,
+                target = "${method.declaringClass.name}.${method.name}",
+                originalValue = null
+            ))
+            android.util.Log.i(TAG, "hookMethodPassThrough: successfully hooked ${method.declaringClass.name}.${method.name}")
+            return true
+        }
+
+        Timber.tag(TAG).w("LSPlant pass-through hook failed for ${method.name}")
+        android.util.Log.w(TAG, "hookMethodPassThrough: failed to hook ${method.name}")
+        return false
+    }
+
+    fun hookMethodAround(
+        method: Method,
+        callback: (receiver: Any?, args: Array<Any?>, callOriginal: (Array<Any?>) -> Any?) -> Any?
+    ): Boolean {
+        if (!lsplantInitialized) {
+            Timber.tag(TAG).w("LSPlant not initialized - cannot around-hook ${method.name}")
+            android.util.Log.w(TAG, "hookMethodAround: LSPlant not initialized, cannot hook ${method.name}")
+            return false
+        }
+
+        lateinit var hooker: SimpleHooker
+        hooker = SimpleHooker(method) { args ->
+            val isStatic = java.lang.reflect.Modifier.isStatic(method.modifiers)
+            val receiver = if (args.isNotEmpty() && !isStatic) args[0] else null
+            val methodArgs = if (args.isNotEmpty() && !isStatic) args.sliceArray(1 until args.size) else args
+            val originalCaller: (Array<Any?>) -> Any? = { replacementArgs ->
+                val callArgs = if (isStatic) replacementArgs else arrayOf(receiver, *replacementArgs)
+                hooker.callOriginal(callArgs)
+            }
+            callback(receiver, methodArgs, originalCaller)
+        }
+
+        val bridge = NativeHookBridge.getInstance()
+        val backup = bridge.hookMethodWithBackup(method, hooker)
+        if (backup != null) {
+            hooker.setBackup(backup)
+            lsplantHooks[method] = hooker
+            installedHooks.add(HookInfo(
+                type = HookType.LSPLANT_METHOD,
+                target = "${method.declaringClass.name}.${method.name}",
+                originalValue = null
+            ))
+            android.util.Log.i(TAG, "hookMethodAround: successfully hooked ${method.declaringClass.name}.${method.name}")
+            return true
+        }
+
+        android.util.Log.w(TAG, "hookMethodAround: failed to hook ${method.name}")
+        return false
     }
 
     fun hookStaticField(className: String, fieldName: String, newValue: Any?): Boolean {

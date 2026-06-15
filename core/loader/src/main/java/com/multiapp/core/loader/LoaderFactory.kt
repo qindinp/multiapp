@@ -1,4 +1,4 @@
-﻿package com.multiapp.core.loader
+package com.multiapp.core.loader
 
 import android.app.AppComponentFactory
 import android.app.Application
@@ -71,6 +71,33 @@ class LoaderFactory : AppComponentFactory() {
             val line = "[$ts] W $msg"
             synchronized(debugLog) { debugLog.add(line) }
             Log.w(TAG, msg)
+        }
+
+        private fun getSystemProperty(name: String, defaultValue: String = "0"): String {
+            return try {
+                val clazz = Class.forName("android.os.SystemProperties")
+                val get = clazz.getDeclaredMethod("get", String::class.java, String::class.java)
+                get.invoke(null, name, defaultValue) as String
+            } catch (_: Throwable) {
+                defaultValue
+            }
+        }
+
+        private fun isTruthyProperty(name: String, defaultValue: Boolean = false): Boolean {
+            val value = getSystemProperty(name, if (defaultValue) "1" else "0")
+            return value == "1" || value.equals("true", ignoreCase = true)
+        }
+
+        private fun currentProcessName(): String {
+            return try {
+                if (android.os.Build.VERSION.SDK_INT >= 28) {
+                    Application.getProcessName() ?: ""
+                } else {
+                    File("/proc/self/cmdline").readText().trimEnd('\u0000')
+                }
+            } catch (_: Throwable) {
+                ""
+            }
         }
     }
 
@@ -1014,14 +1041,9 @@ class LoaderFactory : AppComponentFactory() {
             .set(loadedApk, newClassLoader)
         logD("  Replaced LoadedApk.mClassLoader")
 
-        // 不预加载加固壳 native 库！
-        // Android 禁止同一个 .so 被两个 ClassLoader 重复加载。
-        // 让加固壳自己的 StubApp.load() 通过 System.loadLibrary("jiagu_vip") 加载。
-        logD("  Skipping packer native preload (let packer load via System.loadLibrary)")
-
-        // 但加固壳的 StubApp.load() 可能不调用 System.loadLibrary，直接调 JNI 方法。
-        // 所以我们需要主动通过 guest ClassLoader 预加载加固库。
-        // 关键：必须通过 guest ClassLoader 的 System 类调用，使库加载到 guest 命名空间。
+        // 先通过 guest ClassLoader 预加载加固壳 native 库，便于后续 JNI 注册和诊断。
+        // 如果壳自己再次调用 System.loadLibrary，同一个命名空间内可能会复用已有句柄。
+        logD("  Preloading packer native libs via guest ClassLoader")
         preloadPackerLibViaGuestClassLoader(realGuestClassLoader, originalApk?.absolutePath, appInfo.dataDir)
 
         // Stage 2: after the packer bootstrap, load business SDK libraries
@@ -1032,13 +1054,17 @@ class LoaderFactory : AppComponentFactory() {
         if (!onlineChapterNativeBound) {
             logW("  Stage2 OnlineChapterDownloadTask.run not bound")
         }
-        logW("  Installing OnlineChapterDownloadTask background-state fallback stubs")
-        try {
-            val fallbackRegistered =
-                NativeHookBridge.getInstance().registerOnlineChapterDownloadFallbackStubs(realGuestClassLoader)
-            logD("  Stage2 online chapter fallback stubs registered: $fallbackRegistered")
-        } catch (e: Throwable) {
-            logW("  Stage2 online chapter fallback registration failed: ${e.javaClass.simpleName}: ${e.message}")
+        if (isTruthyProperty("debug.multiapp.online.state_fallback", true)) {
+            logW("  Installing OnlineChapterDownloadTask background-state fallback stubs")
+            try {
+                val fallbackRegistered =
+                    NativeHookBridge.getInstance().registerOnlineChapterDownloadFallbackStubs(realGuestClassLoader)
+                logD("  Stage2 online chapter fallback stubs registered: $fallbackRegistered")
+            } catch (e: Throwable) {
+                logW("  Stage2 online chapter fallback registration failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        } else {
+            logD("  Stage2 online chapter fallback stubs disabled; preserving shell native bindings")
         }
 
         // 验证 LoadedApk.mApplicationInfo 与 mBound.appInfo 是同一引用
@@ -1557,39 +1583,62 @@ class LoaderFactory : AppComponentFactory() {
             bridge.gotHookLibrary("libc.so")
             logD("  preloadPackerLib: global GOT hook on libc.so installed")
 
-            // 尝试通过注入的 JiaguLoader 类加载 .so（guest ClassLoader 命名空间）
-            // JiaguLoader 是 StubBuilder 注入到 guest DEX 中的 helper 类
-            // 它的 loadLibrary() 方法从 guest ClassLoader 上下文调用 System.loadLibrary
+            // Default: do not explicitly load libjiagu_vip.so from originNativeLibDir.
+            // The shell usually expects StubApp.load() to be the first loader
+            // entry. For QQ Reader diagnostics, debug.multiapp.jiagu.explicit_load=1
+            // forces an early guest load so we can trigger the original
+            // StubApp RegisterNatives path before fallback wrappers are installed.
             try {
                 val jiaguFile = java.io.File(originNativeLibDir, "libjiagu_vip.so")
-                logD("  preloadPackerLib: jiagu_vip.so exists=${jiaguFile.exists()} at ${jiaguFile.absolutePath}")
-
-                // 诊断 + 缓存清除 + 重试：验证 Android 16 缓存污染假说
-                // 如果清除缓存后 System.load 成功（elapsed > 10ms 且 JNI_OnLoad 执行），假说成立
-                val guestLoaded = loadGuestLibraryViaInjectedHelper(guestCl, "jiagu_vip")
-                jiaguLoadedWithGuestClassLoader = guestLoaded
-                if (!guestLoaded) {
-                    val nativeLoadOk = try {
-                        bridge.loadLibraryForGuest(jiaguFile.absolutePath, guestCl, callerClass)
-                    } catch (e: Throwable) {
-                        logD("  preloadPackerLib: guest nativeLoad jiagu_vip failed: ${e.javaClass.simpleName}: ${e.message}")
-                        false
+                val processName = currentProcessName()
+                val explicitLoadRequested = isTruthyProperty("debug.multiapp.jiagu.explicit_load", false)
+                val explicitLoadAllowed = explicitLoadRequested && !processName.contains(":")
+                if (explicitLoadAllowed) {
+                    logD("  preloadPackerLib: jiagu_vip.so exists=${jiaguFile.exists()} at ${jiaguFile.absolutePath}; explicit load enabled process=$processName")
+                    val dlopenOnlyOk = bridge.dlopenOnly(jiaguFile.absolutePath)
+                    logD("  preloadPackerLib: explicit jiagu_vip dlopenOnly result=$dlopenOnlyOk")
+                    if (dlopenOnlyOk) {
+                        bridge.gotHookLibrary("libjiagu_vip.so")
+                        logD("  preloadPackerLib: explicit jiagu_vip GOT hook installed after dlopenOnly")
                     }
-                    logD("  preloadPackerLib: guest nativeLoad jiagu_vip result=$nativeLoadOk")
+                    jiaguLoadedWithGuestClassLoader = bridge.loadLibraryForGuest(
+                        jiaguFile.absolutePath,
+                        guestCl,
+                        callerClass
+                    )
+                    logD("  preloadPackerLib: explicit jiagu_vip nativeLoad guest result=$jiaguLoadedWithGuestClassLoader")
+                    if (!jiaguLoadedWithGuestClassLoader) {
+                        jiaguLoadedWithGuestClassLoader = loadGuestLibraryViaInjectedHelper(guestCl, "jiagu_vip")
+                        logD("  preloadPackerLib: explicit jiagu_vip helper fallback result=$jiaguLoadedWithGuestClassLoader")
+                    }
+                } else if (explicitLoadRequested) {
+                    logD("  preloadPackerLib: jiagu_vip.so exists=${jiaguFile.exists()} at ${jiaguFile.absolutePath}; explicit load skipped for process=$processName")
+                } else {
+                    logD("  preloadPackerLib: jiagu_vip.so exists=${jiaguFile.exists()} at ${jiaguFile.absolutePath}; explicit load skipped process=$processName")
+                    val prehookDlopen = isTruthyProperty("debug.multiapp.jiagu.prehook_dlopen", false)
+                    if (prehookDlopen && jiaguFile.exists() && !processName.contains(":")) {
+                        val dlopenOnlyOk = bridge.dlopenOnly(jiaguFile.absolutePath)
+                        logD("  preloadPackerLib: prehook jiagu_vip dlopenOnly result=$dlopenOnlyOk")
+                        if (dlopenOnlyOk) {
+                            bridge.gotHookLibrary("libjiagu_vip.so")
+                            logD("  preloadPackerLib: prehook jiagu_vip GOT hook installed before StubApp.load")
+                        }
+                    } else {
+                        logD("  preloadPackerLib: prehook jiagu_vip dlopenOnly skipped prehook=$prehookDlopen process=$processName")
+                    }
                 }
-                arrayOf("libjiagu_vip.so", "libfockrt.so", "libfock.so").forEach { targetLib ->
+                arrayOf("libc.so", "libfockrt.so", "libfock.so").forEach { targetLib ->
                     try {
                         bridge.gotHookLibrary(targetLib)
-                        logD("  preloadPackerLib: GOT hook on $targetLib installed after load diagnostic")
+                        logD("  preloadPackerLib: GOT hook on $targetLib installed before StubApp.load")
                     } catch (e: Throwable) {
-                        logD("  preloadPackerLib: GOT hook on $targetLib failed after load diagnostic: ${e.javaClass.simpleName}: ${e.message}")
+                        logD("  preloadPackerLib: GOT hook on $targetLib failed before StubApp.load: ${e.javaClass.simpleName}: ${e.message}")
                     }
                 }
             } catch (e: Throwable) {
-                logD("  preloadPackerLib: load diagnostic failed: ${e.javaClass.simpleName}: ${e.message}")
+                logD("  preloadPackerLib: pre-load hook setup failed: ${e.javaClass.simpleName}: ${e.message}")
             }
 
-            bridge.clearIntegrityRedirect()
         } catch (e: Throwable) {
             bridge.clearIntegrityRedirect()
             logD("  preloadPackerLib: GOT hook setup failed: ${e.javaClass.simpleName}: ${e.message}")
@@ -1607,6 +1656,7 @@ class LoaderFactory : AppComponentFactory() {
                 try {
                     loadMethod.invoke(null)
                     logD("  preloadPackerLib: StubApp.load() invoked OK")
+                    jiaguLoadedWithGuestClassLoader = true
                 } catch (e: java.lang.reflect.InvocationTargetException) {
                     val realCause = e.targetException ?: e.cause ?: e
                     logW("  preloadPackerLib: StubApp.load() threw: ${realCause.javaClass.simpleName}: ${realCause.message}")
@@ -1660,6 +1710,14 @@ class LoaderFactory : AppComponentFactory() {
                     logW("  preloadPackerLib: registerBusinessStubs exception: ${e.message}")
                 }
 
+                logD("  preloadPackerLib: registering qrencrypt native stubs")
+                try {
+                    val qrencryptRegistered = bridge.registerQrencryptStubs(guestCl)
+                    logD("  preloadPackerLib: qrencrypt stubs registered: $qrencryptRegistered")
+                } catch (e: Throwable) {
+                    logW("  preloadPackerLib: registerQrencryptStubs exception: ${e.message}")
+                }
+
                 // ── 初始化 LSPlant 并 hook 有问题的 SDK 初始化 ──
                 val hookEngine = com.multiapp.core.hook.HookEngine.getInstance()
                 val lsplantOk = hookEngine.initLsplant(guestCl)
@@ -1684,6 +1742,20 @@ class LoaderFactory : AppComponentFactory() {
                 }
 
                 logD("  preloadPackerLib: keep ReaderApplication.initLoginSDK and Fock.sign original")
+                try {
+                    if (lsplantOk) {
+                        val fileDiagOk = com.multiapp.core.hook.QqReaderFileJavaDiag.install(hookEngine)
+                        logD("  preloadPackerLib: QQReader java file diag installed: $fileDiagOk")
+                        val providerDiagOk = com.multiapp.core.hook.QqReaderProviderDiag.install(hookEngine, guestCl)
+                        logD("  preloadPackerLib: QQReader provider diag installed: $providerDiagOk")
+                        val protocolDiagOk = com.multiapp.core.hook.QqReaderProtocolDiag.install(hookEngine, guestCl)
+                        logD("  preloadPackerLib: QQReader protocol diag installed: $protocolDiagOk")
+                        val eqctCompatOk = com.multiapp.core.hook.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
+                        logD("  preloadPackerLib: QQReader eqct plaintext compat installed: $eqctCompatOk")
+                    }
+                } catch (e: Throwable) {
+                    logD("  preloadPackerLib: QQReader java file diag skipped: ${e.javaClass.simpleName}: ${e.message}")
+                }
 
                 // ★ Hook ShortcutManager.cihai() 跳过快捷方式创建（icon 资源找不到会崩溃）
                 try {
@@ -1719,43 +1791,50 @@ class LoaderFactory : AppComponentFactory() {
                     logD("  preloadPackerLib: initPushSDK hook skipped: ${e.javaClass.simpleName}: ${e.message}")
                 }
 
-                // ── P0: Dump 解密产物（无条件执行）──
+                // ── P0: Dump 解密产物（仅 debug 开关开启时执行）──
                 try {
-                    val dumpBase = java.io.File(dataDir ?: "/data/local/tmp", "dump_output")
-                    dumpBase.mkdirs()
-                    val dexDumpDir = java.io.File(dumpBase, "dex"); dexDumpDir.mkdirs()
-                    val soDumpDir = java.io.File(dumpBase, "lib"); soDumpDir.mkdirs()
-                    logD("  P0 DUMP: dir=${dumpBase.absolutePath}, exists=${dumpBase.exists()}")
+                    if (
+                        java.lang.Boolean.getBoolean("multiapp.dump.enabled") ||
+                        isTruthyProperty("debug.multiapp.dump", false)
+                    ) {
+                        val dumpBase = java.io.File(dataDir ?: "/data/local/tmp", "dump_output")
+                        dumpBase.mkdirs()
+                        val dexDumpDir = java.io.File(dumpBase, "dex"); dexDumpDir.mkdirs()
+                        val soDumpDir = java.io.File(dumpBase, "lib"); soDumpDir.mkdirs()
+                        logD("  P0 DUMP: dir=${dumpBase.absolutePath}, exists=${dumpBase.exists()}")
 
-                    val dexCount = bridge.dumpDexFromClassLoader(guestCl, dexDumpDir)
-                    val soCount = bridge.dumpLoadedLibraries(soDumpDir)
+                        val dexCount = bridge.dumpDexFromClassLoader(guestCl, dexDumpDir)
+                        val soCount = bridge.dumpLoadedLibraries(soDumpDir)
 
-                    // 兜底：复制壳提取的 extracted_dex/
-                    var fbCount = 0
-                    val extDir = java.io.File(dataDir ?: "/data/local/tmp", "extracted_dex")
-                    if (extDir.exists()) {
-                        extDir.listFiles()?.filter { it.name.endsWith(".dex") }?.forEach { f ->
-                            if (!java.io.File(dexDumpDir, f.name).exists()) {
-                                f.copyTo(java.io.File(dexDumpDir, f.name)); fbCount++
+                        // 兜底：复制壳提取的 extracted_dex/
+                        var fbCount = 0
+                        val extDir = java.io.File(dataDir ?: "/data/local/tmp", "extracted_dex")
+                        if (extDir.exists()) {
+                            extDir.listFiles()?.filter { it.name.endsWith(".dex") }?.forEach { f ->
+                                if (!java.io.File(dexDumpDir, f.name).exists()) {
+                                    f.copyTo(java.io.File(dexDumpDir, f.name)); fbCount++
+                                }
                             }
                         }
-                    }
-                    // 复制 origin APK
-                    val origin = java.io.File(dataDir ?: "/data/local/tmp", "base.apk")
-                    if (origin.exists()) origin.copyTo(java.io.File(dumpBase, "origin.apk"), overwrite = true)
+                        // 复制 origin APK
+                        val origin = java.io.File(dataDir ?: "/data/local/tmp", "base.apk")
+                        if (origin.exists()) origin.copyTo(java.io.File(dumpBase, "origin.apk"), overwrite = true)
 
-                    val total = dexCount + fbCount
-                    java.io.File(dumpBase, "dump_meta.txt").writeText(
-                        "native_dex=$dexCount\nfallback_dex=$fbCount\ntotal_dex=$total\nso=$soCount\ntime=${System.currentTimeMillis()}\n"
-                    )
-                    // 尝试复制到 /sdcard/Download/
-                    try {
-                        val sd = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
-                            android.os.Environment.DIRECTORY_DOWNLOADS), "MultiApp_dump")
-                        sd.mkdirs()
-                        if (sd.exists()) { dumpBase.copyRecursively(sd, overwrite = true); logD("  P0 DUMP: copied to ${sd.absolutePath}") }
-                    } catch (_: Throwable) {}
-                    logD("  P0 DUMP COMPLETE: total_dex=$total, so=$soCount")
+                        val total = dexCount + fbCount
+                        java.io.File(dumpBase, "dump_meta.txt").writeText(
+                            "native_dex=$dexCount\nfallback_dex=$fbCount\ntotal_dex=$total\nso=$soCount\ntime=${System.currentTimeMillis()}\n"
+                        )
+                        // 尝试复制到 /sdcard/Download/
+                        try {
+                            val sd = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
+                                android.os.Environment.DIRECTORY_DOWNLOADS), "MultiApp_dump")
+                            sd.mkdirs()
+                            if (sd.exists()) { dumpBase.copyRecursively(sd, overwrite = true); logD("  P0 DUMP: copied to ${sd.absolutePath}") }
+                        } catch (_: Throwable) {}
+                        logD("  P0 DUMP COMPLETE: total_dex=$total, so=$soCount")
+                    } else {
+                        logD("  P0 DUMP disabled (set -Dmultiapp.dump.enabled=true to enable)")
+                    }
                 } catch (e: Throwable) {
                     logD("  P0 DUMP FAILED: ${e.javaClass.simpleName}: ${e.message}")
                 }
@@ -1775,6 +1854,8 @@ class LoaderFactory : AppComponentFactory() {
                 cause = cause.cause
                 depth++
             }
+        } finally {
+            bridge.clearIntegrityRedirect()
         }
 
         // 诊断：检查 guest ClassLoader 实际加载了哪些 DEX
@@ -1796,15 +1877,57 @@ class LoaderFactory : AppComponentFactory() {
             logD("  DEX diagnostic failed: ${e.message}")
         }
 
-        // ── Step 4: 注册 StubApp native 方法 ──
-        // 当前 QQ 阅读壳在分身运行时没有真正注册 interface11(int)，跳过这里会在
-        // YWLoginManager/OnlineChapterDownloadTask.<clinit>() 直接 UnsatisfiedLinkError。
-        logD("  preloadPackerLib: registering stub methods (jiaguLoaded=$jiaguLoadedWithGuestClassLoader)")
-        try {
-            val registered = bridge.registerStubMethods(guestCl, targetClass)
-            logD("  preloadPackerLib: stub methods registered: $registered")
-        } catch (e: Throwable) {
-            logW("  preloadPackerLib: registerStubMethods exception: ${e.message}")
+        // ── Step 4: StubApp native fallback ──
+        // Default off for QQ Reader: broad stubs replace shell entry points and
+        // can prevent the protected
+        // runtime from registering business natives like OnlineChapterDownloadTask.
+        val stubFallbackMode = getSystemProperty("debug.multiapp.stubapp.fallback", "0")
+        if (jiaguLoadedWithGuestClassLoader &&
+            stubFallbackMode.equals("core", ignoreCase = true)
+        ) {
+            logD("  preloadPackerLib: registering StubApp core bootstrap methods (interface5/interface11/interface20/interface21)")
+            try {
+                val registered = bridge.registerStubCoreBootstrapMethods(guestCl, targetClass)
+                logD("  preloadPackerLib: StubApp core bootstrap methods registered: $registered")
+            } catch (e: Throwable) {
+                logW("  preloadPackerLib: registerStubCoreBootstrapMethods exception: ${e.message}")
+            }
+        } else if (stubFallbackMode.equals("bootstrap", ignoreCase = true) ||
+            stubFallbackMode.equals("bootstrap_only", ignoreCase = true) ||
+            !jiaguLoadedWithGuestClassLoader
+        ) {
+            val reason = if (!jiaguLoadedWithGuestClassLoader) {
+                "jiagu native registration unavailable"
+            } else {
+                "explicit property"
+            }
+            logD("  preloadPackerLib: registering StubApp bootstrap methods only (jiaguLoaded=$jiaguLoadedWithGuestClassLoader, reason=$reason)")
+            try {
+                val registered = bridge.registerStubBootstrapMethods(guestCl, targetClass)
+                logD("  preloadPackerLib: StubApp bootstrap methods registered: $registered")
+            } catch (e: Throwable) {
+                logW("  preloadPackerLib: registerStubBootstrapMethods exception: ${e.message}")
+            }
+        } else if (stubFallbackMode.equals("interface20", ignoreCase = true) ||
+            stubFallbackMode.equals("interface20_only", ignoreCase = true)
+        ) {
+            logD("  preloadPackerLib: registering StubApp interface20 only (jiaguLoaded=$jiaguLoadedWithGuestClassLoader)")
+            try {
+                val registered = bridge.registerStubInterface20Only(guestCl, targetClass)
+                logD("  preloadPackerLib: StubApp interface20-only registered: $registered")
+            } catch (e: Throwable) {
+                logW("  preloadPackerLib: registerStubInterface20Only exception: ${e.message}")
+            }
+        } else if (isTruthyProperty("debug.multiapp.stubapp.fallback", false)) {
+            logD("  preloadPackerLib: registering full stub methods (jiaguLoaded=$jiaguLoadedWithGuestClassLoader)")
+            try {
+                val registered = bridge.registerStubMethods(guestCl, targetClass)
+                logD("  preloadPackerLib: full stub methods registered: $registered")
+            } catch (e: Throwable) {
+                logW("  preloadPackerLib: registerStubMethods exception: ${e.message}")
+            }
+        } else {
+            logD("  preloadPackerLib: StubApp native fallback disabled; preserving shell registrations")
         }
     }
 
@@ -1959,8 +2082,7 @@ class LoaderFactory : AppComponentFactory() {
                 "libywad-own.so",
                 "libnativekey.so",
                 "libnib.so",
-                "librelax.so",
-                "libjiagu_vip.so"
+                "librelax.so"
             )
         )
         return onlineRunBound
@@ -2066,8 +2188,8 @@ class LoaderFactory : AppComponentFactory() {
     ): Boolean {
         val method = clazz.declaredMethods.firstOrNull { it.name == methodName } ?: return false
         if (!java.lang.reflect.Modifier.isStatic(method.modifiers)) {
-            logD("  Stage2 native method $className.$methodName is instance; nativeLoad succeeded after $libName, assuming RegisterNatives had a chance to bind it")
-            return true
+            logD("  Stage2 native method $className.$methodName is instance; cannot prove binding after $libName")
+            return false
         }
         return isNativeMethodBound(clazz, methodName)
     }
@@ -2152,11 +2274,12 @@ class LoaderFactory : AppComponentFactory() {
             val themeId = resolveActivityTheme(className)
             if (themeId != 0) {
                 // 设置 ApplicationInfo.theme，让框架在 attach 后自动应用
-                val appInfo = activity.applicationInfo
-                if (appInfo != null) {
+                activity.setTheme(themeId)
+                activity.applicationInfo?.let { appInfo ->
                     appInfo.theme = themeId
-                    logD("  Activity theme set via ApplicationInfo: $className -> 0x${Integer.toHexString(themeId)}")
                 }
+                replaceFieldIfPresent(activity, "mThemeResource", themeId)
+                logD("  Activity theme set early: $className -> 0x${Integer.toHexString(themeId)}")
             } else {
                 // ★ 兜底：用系统主题，避免 theme=0 导致 Resources$NotFoundException
                 val appInfo = activity.applicationInfo
@@ -2807,13 +2930,16 @@ class LoaderFactory : AppComponentFactory() {
                 append("apkLength=").append(originApk.length()).append('\n')
                 append("apkLastModified=").append(originApk.lastModified()).append('\n')
                 append("count=").append(entries.size).append('\n')
+                append("patchJiagu=").append(shouldPatchJiaguSo()).append('\n')
+                append("patchJiaguMode=").append(getSystemProperty("debug.multiapp.patch_jiagu_mode", "legacy")).append('\n')
+                append("nativeLibsWritable=").append(shouldKeepOriginNativeLibsWritable()).append('\n')
             }
 
             val existingSoCount = outputDir.listFiles()?.count { it.isFile && it.extension == "so" } ?: 0
             if (marker.exists() && marker.readText() == markerText && existingSoCount >= entries.size) {
                 logD("Origin native libs already extracted for $abi")
-                patchJiaguSoIfPresent(outputDir)
-                ensureReadOnlyTree(outputDir)
+                patchJiaguSoIfEnabled(outputDir)
+                finalizeOriginNativeLibPermissions(outputDir)
                 return outputDir
             }
 
@@ -2833,15 +2959,13 @@ class LoaderFactory : AppComponentFactory() {
                 zip.getInputStream(entry).use { input ->
                     outFile.outputStream().use { output -> input.copyTo(output) }
                 }
-                ensureReadOnly(outFile)
                 extracted++
                 logD("  Extracted origin native lib: ${outFile.name}")
             }
 
             marker.writeText(markerText)
-            ensureReadOnly(marker)
-            patchJiaguSoIfPresent(outputDir)
-            ensureReadOnlyTree(outputDir)
+            patchJiaguSoIfEnabled(outputDir)
+            finalizeOriginNativeLibPermissions(outputDir)
             logD("Extracted $extracted origin native libs for $abi to ${outputDir.absolutePath}")
             return outputDir
         }
@@ -2856,10 +2980,38 @@ class LoaderFactory : AppComponentFactory() {
         }
     }
 
+    private fun shouldPatchJiaguSo(): Boolean {
+        if (java.lang.Boolean.getBoolean("multiapp.patch.jiagu.enabled")) {
+            return true
+        }
+        return isTruthyProperty("debug.multiapp.patch_jiagu", false)
+    }
+
+    private fun shouldKeepOriginNativeLibsWritable(): Boolean {
+        return isTruthyProperty("debug.multiapp.origin_libs.writable", false)
+    }
+
+    private fun finalizeOriginNativeLibPermissions(dir: File) {
+        if (shouldKeepOriginNativeLibsWritable()) {
+            ensureWritableTree(dir)
+            logD("Origin native libs kept writable: ${dir.absolutePath}")
+        } else {
+            ensureReadOnlyTree(dir)
+        }
+    }
+
+    private fun patchJiaguSoIfEnabled(libDir: File) {
+        if (!shouldPatchJiaguSo()) {
+            logD("  patchJiaguSo: disabled; preserving original libjiagu_vip.so")
+            return
+        }
+        patchJiaguSoIfPresent(libDir)
+    }
+
     /**
-     * Patch libjiagu_vip.so: JNI_OnLoad 的 return -1 改为 return 0
-     * 360 壳的 JNI_OnLoad 内部有环境检测，检测失败返回 JNI_ERR (-1)。
-     * 通过二进制 patch 把 MOV W0, #-1 (0x12800000) 改成 MOV W0, #0 (0x52800000)。
+     * Patch libjiagu_vip.so only when explicitly enabled for diagnostics.
+     * Default runtime keeps the original shell library intact because protected
+     * QQ Reader methods depend on the shell's real JNI registration path.
      */
     private fun patchJiaguSoIfPresent(libDir: File) {
         val jiaguSo = File(libDir, "libjiagu_vip.so")
@@ -2999,23 +3151,48 @@ class LoaderFactory : AppComponentFactory() {
         var patchCount = 0
         var off = jniFileOff
 
-        // Patch 1: NOP 掉 JNI_OnLoad 函数体内所有 CBZ/CBNZ（环境检测跳转）
-        // JNI_OnLoad 函数体大小为 jniSize 字节，需要覆盖整个函数
-        val scanEnd = minOf(jniFileOff + jniSize, endOff)
-        while (off < scanEnd) {
-            val insn = readIntLE(patched, off)
-            val isCBZ = (insn and 0xFF000000.toInt()) == 0x34000000
-            val isCBNZ = (insn and 0xFF000000.toInt()) == 0x35000000
-            if (isCBZ || isCBNZ) {
-                patched[off] = 0x1F.toByte()
-                patched[off + 1] = 0x20.toByte()
-                patched[off + 2] = 0x03.toByte()
-                patched[off + 3] = 0xD5.toByte()
-                patchCount++
-                val op = if (isCBZ) "CBZ" else "CBNZ"
-                logW("  patchJiaguLoad: NOP'd $op at offset 0x${Integer.toHexString(off)}")
+        val patchMode = getSystemProperty("debug.multiapp.patch_jiagu_mode", "legacy")
+        logW("  patchJiaguLoad: mode=$patchMode")
+
+        fun nopInstruction(targetOff: Int, reason: String): Boolean {
+            if (targetOff < jniFileOff || targetOff > endOff) {
+                logW("  patchJiaguLoad: skip NOP for $reason; offset 0x${Integer.toHexString(targetOff)} outside JNI_OnLoad")
+                return false
             }
-            off += 4
+            patched[targetOff] = 0x1F.toByte()
+            patched[targetOff + 1] = 0x20.toByte()
+            patched[targetOff + 2] = 0x03.toByte()
+            patched[targetOff + 3] = 0xD5.toByte()
+            patchCount++
+            logW("  patchJiaguLoad: NOP'd $reason at offset 0x${Integer.toHexString(targetOff)}")
+            return true
+        }
+
+        when (patchMode.lowercase()) {
+            "skip_stage1", "preserve_stage2" -> {
+                // JNI_OnLoad+0x54: cbz w2, sub_2586d4. The unpatched stage-1 path
+                // registers StubApp natives but then hangs inside Runtime.nativeLoad on
+                // this clone. Keep stage-2 callbacks reachable so original native
+                // registration still has a chance to run.
+                nopInstruction(jniFileOff + 0x54, "stage1 cbz -> sub_2586d4")
+            }
+            "legacy" -> {
+                // Legacy diagnostic patch: NOP every CBZ/CBNZ in JNI_OnLoad. This
+                // makes JNI_OnLoad return but skips original StubApp registrations.
+                val scanEnd = minOf(jniFileOff + jniSize, endOff)
+                while (off < scanEnd) {
+                    val insn = readIntLE(patched, off)
+                    val isCBZ = (insn and 0xFF000000.toInt()) == 0x34000000
+                    val isCBNZ = (insn and 0xFF000000.toInt()) == 0x35000000
+                    if (isCBZ || isCBNZ) {
+                        nopInstruction(off, if (isCBZ) "CBZ" else "CBNZ")
+                    }
+                    off += 4
+                }
+            }
+            else -> {
+                logW("  patchJiaguLoad: unknown mode=$patchMode; using MOVN return patch only")
+            }
         }
 
         // Patch 2: MOV W0, #-1 → MOV W0, #0
@@ -3125,6 +3302,18 @@ class LoaderFactory : AppComponentFactory() {
             Runtime.getRuntime().exec(arrayOf("chmod", "555", dir.absolutePath)).waitFor()
         } catch (e: Exception) {
             logW("ensureReadOnlyTree failed: ${e.message}")
+        }
+    }
+
+    private fun ensureWritableTree(dir: File) {
+        try {
+            dir.setWritable(true, true)
+            dir.walkTopDown().forEach { file ->
+                if (file.isFile) ensureWritableFile(file)
+            }
+            Runtime.getRuntime().exec(arrayOf("chmod", "755", dir.absolutePath)).waitFor()
+        } catch (e: Exception) {
+            logW("ensureWritableTree failed: ${e.message}")
         }
     }
 

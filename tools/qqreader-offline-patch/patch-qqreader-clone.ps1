@@ -264,6 +264,20 @@ Copy-Item -LiteralPath $InputCloneApk -Destination $outerUnsigned -Force
 $outerZip = [System.IO.Compression.ZipFile]::Open($outerUnsigned, [System.IO.Compression.ZipArchiveMode]::Update)
 try {
     Remove-ZipEntries $outerZip { param($entry) $entry.FullName -like "META-INF/*" }
+    $outerJiaguEntries = @(
+        $outerZip.Entries |
+            Where-Object { $_.FullName -match "^lib/[^/]+/libjiagu_vip.*\.so$" } |
+            Select-Object -ExpandProperty FullName
+    )
+    foreach ($entryName in $outerJiaguEntries) {
+        $entry = $outerZip.GetEntry($entryName)
+        if ($entry) {
+            $entry.Delete()
+        }
+    }
+    if ($outerJiaguEntries.Count -gt 0) {
+        Write-Host "Removed outer jiagu libs: $($outerJiaguEntries -join ', ')"
+    }
 } finally {
     $outerZip.Dispose()
 }
@@ -323,27 +337,25 @@ if ($NativeLibDir -ne "") {
         throw "NativeLibDir not found: $NativeLibDir"
     }
 
-    $nativeEntries = @()
-    $outerZip = [System.IO.Compression.ZipFile]::OpenRead($outerUnsigned)
-    try {
-        $nativeEntries = @(
-            $outerZip.Entries |
-                Where-Object { $_.FullName -match "^lib/[^/]+/(libmultiapp-native|liblsplant)\.so$" } |
-                Select-Object -ExpandProperty FullName
-        )
-    } finally {
-        $outerZip.Dispose()
+    $nativeLibNames = @(
+        "libmultiapp-native.so",
+        "liblsplant.so",
+        "libshadowhook.so",
+        "libshadowhook_nothing.so",
+        "libc++_shared.so"
+    )
+    $abiDirs = Get-ChildItem -LiteralPath $NativeLibDir -Directory | Where-Object {
+        $_.Name -in @("arm64-v8a", "armeabi-v7a")
     }
 
-    foreach ($entryName in $nativeEntries) {
-        $abi = ($entryName -split "/")[1]
-        $libName = Split-Path $entryName -Leaf
-        $nativeLib = Join-Path $NativeLibDir (Join-Path $abi $libName)
-        if (Test-Path $nativeLib) {
-            Write-Host "Inject native lib: $entryName <- $nativeLib"
-            Replace-ZipEntry $outerUnsigned $entryName $nativeLib ([System.IO.Compression.CompressionLevel]::NoCompression)
-        } else {
-            Write-Warning "Missing native lib for $abi under $NativeLibDir"
+    foreach ($abiDir in $abiDirs) {
+        foreach ($libName in $nativeLibNames) {
+            $nativeLib = Join-Path $abiDir.FullName $libName
+            if (Test-Path $nativeLib -PathType Leaf) {
+                $entryName = "lib/$($abiDir.Name)/$libName"
+                Write-Host "Inject native lib: $entryName <- $nativeLib"
+                Replace-ZipEntry $outerUnsigned $entryName $nativeLib ([System.IO.Compression.CompressionLevel]::NoCompression)
+            }
         }
     }
 }

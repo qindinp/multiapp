@@ -19,6 +19,7 @@ import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
 import org.jf.dexlib2.iface.reference.MethodReference;
 import org.jf.dexlib2.iface.reference.Reference;
 import org.jf.dexlib2.immutable.reference.ImmutableMethodReference;
+import org.jf.dexlib2.immutable.reference.ImmutableStringReference;
 import org.jf.dexlib2.immutable.ImmutableClassDef;
 import org.jf.dexlib2.immutable.ImmutableField;
 import org.jf.dexlib2.immutable.ImmutableMethod;
@@ -44,6 +45,7 @@ public class NeutralizeDex {
 
     private static final Set<String> TARGETS = new HashSet<>(Arrays.asList(
             "Lcom/qq/reader/ReaderApplication;->initPushSDK",
+            "Lcom/qq/reader/ReaderApplication;->initOaidSo",
             "Lcom/qq/reader/shortcut/ShortcutManager;->cihai",
             "Lcom/qq/reader/abtest_sdk/qdab;->cihai",
             "Lcom/qq/reader/view/qded;->search",
@@ -223,7 +225,11 @@ public class NeutralizeDex {
     }
 
     private static Method maybePatchMethod(File dexPath, ClassDef classDef, Method method) {
-        Method patched = maybePatchFockSign(dexPath, classDef, method);
+        Method patched = maybeInjectJiaguLoad(dexPath, classDef, method);
+        if (patched != method) {
+            return patched;
+        }
+        patched = maybePatchFockSign(dexPath, classDef, method);
         if (patched != method) {
             return patched;
         }
@@ -232,6 +238,43 @@ public class NeutralizeDex {
             return patched;
         }
         return maybeNeutralize(dexPath, classDef, method);
+    }
+
+    private static Method maybeInjectJiaguLoad(File dexPath, ClassDef classDef, Method method) {
+        if (!Boolean.getBoolean("multiapp.injectJiaguLoad")) {
+            return method;
+        }
+        String type = classDef.getType();
+        if (!("Lcom/stub/StubApp;".equals(type)
+                || "Lcom/qihoo/util/StubApp;".equals(type)
+                || "Lcom/stub/StubApplication;".equals(type))
+                || !"load".equals(method.getName())
+                || !method.getParameterTypes().isEmpty()
+                || !"V".equals(method.getReturnType())) {
+            return method;
+        }
+
+        MethodImplementation original = method.getImplementation();
+        if (original == null || original.getRegisterCount() < 1) {
+            return method;
+        }
+
+        MutableMethodImplementation impl = new MutableMethodImplementation(original);
+        ImmutableMethodReference loadLibrary = new ImmutableMethodReference(
+                NATIVE_LIB_LOADER_TYPE,
+                "loadLibrary",
+                Collections.singletonList("Ljava/lang/String;"),
+                "V");
+        impl.addInstruction(0, new BuilderInstruction21c(
+                Opcode.CONST_STRING,
+                0,
+                new ImmutableStringReference("jiagu_vip")));
+        impl.addInstruction(1, new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC,
+                1, 0, 0, 0, 0, 0,
+                loadLibrary));
+        System.out.println("injected jiagu load " + dexPath.getName() + " " + type + "->load");
+        return new MethodWrapper(method, impl);
     }
 
     private static Method maybePatchFockSign(File dexPath, ClassDef classDef, Method method) {

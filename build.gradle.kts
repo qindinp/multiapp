@@ -7,6 +7,7 @@ plugins {
     alias(libs.plugins.ksp) apply false
     alias(libs.plugins.hilt) apply false
     alias(libs.plugins.detekt) apply false
+    id("jacoco") apply false
 }
 
 // Workaround for KSP2 multi-round duplicate class issue with Hilt

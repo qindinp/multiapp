@@ -20,6 +20,21 @@ class SimpleHooker(
 ) {
     private val isStatic = Modifier.isStatic(method.modifiers)
     private val returnType = if (method is Method) method.returnType else null
+    @Volatile
+    private var backup: Executable? = null
+
+    fun setBackup(backup: Executable) {
+        backup.isAccessible = true
+        this.backup = backup
+    }
+
+    fun callOriginal(args: Array<Any?>): Any? {
+        val backupMethod = backup as? Method
+            ?: throw IllegalStateException("Only Method backup is supported for ${method.name}")
+        val receiver = if (isStatic) null else args.firstOrNull()
+        val methodArgs = if (isStatic) args else args.drop(1).toTypedArray()
+        return backupMethod.invoke(receiver, *methodArgs)
+    }
 
     /**
      * Called by LSPlant when the hooked method is invoked.

@@ -12,6 +12,7 @@ import android.os.PersistableBundle
 import android.os.UserHandle
 import android.util.Log
 import java.lang.reflect.InvocationTargetException
+import java.util.TreeSet
 
 class IntentRemappingInstrumentation(
     private val base: Instrumentation,
@@ -30,6 +31,7 @@ class IntentRemappingInstrumentation(
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
+        logStartIntent("Activity", who, target, intent, requestCode)
         return callBase(
             arrayOf(
                 Context::class.java,
@@ -59,6 +61,7 @@ class IntentRemappingInstrumentation(
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
+        logStartIntent("String", who, target, intent, requestCode)
         return callBase(
             arrayOf(
                 Context::class.java,
@@ -89,6 +92,7 @@ class IntentRemappingInstrumentation(
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
+        logStartIntent("Fragment", who, target, intent, requestCode)
         return callBase(
             arrayOf(
                 Context::class.java,
@@ -119,6 +123,7 @@ class IntentRemappingInstrumentation(
         options: Bundle?,
         user: UserHandle?
     ): ActivityResult? {
+        logStartIntent("ActivityUser", who, target, intent, requestCode)
         return callBase(
             arrayOf(
                 Context::class.java,
@@ -163,6 +168,47 @@ class IntentRemappingInstrumentation(
         if (intent.`package` == originalPackageName) {
             intent.setPackage(stubPackageName)
             Log.d(TAG, "remap package: $originalPackageName -> $stubPackageName")
+        }
+    }
+
+    private fun logStartIntent(kind: String, who: Context?, target: Any?, intent: Intent?, requestCode: Int) {
+        if (intent == null) {
+            Log.d(TAG, "execStartActivity[$kind]: null intent who=${who?.packageName} target=$target requestCode=$requestCode")
+            return
+        }
+        try {
+            Log.i(
+                TAG,
+                "execStartActivity[$kind]: who=${who?.packageName} target=${targetDesc(target)} requestCode=$requestCode " +
+                    "component=${intent.component} package=${intent.`package`} action=${intent.action} data=${intent.data} " +
+                    "type=${intent.type} flags=0x${Integer.toHexString(intent.flags)} categories=${intent.categories} " +
+                    "extras=${extrasKeys(intent.extras)}"
+            )
+            intent.selector?.let { selector ->
+                Log.i(
+                    TAG,
+                    "execStartActivity[$kind]: selector component=${selector.component} package=${selector.`package`} " +
+                        "action=${selector.action} data=${selector.data} flags=0x${Integer.toHexString(selector.flags)} " +
+                        "extras=${extrasKeys(selector.extras)}"
+                )
+            }
+        } catch (e: Throwable) {
+            Log.w(TAG, "execStartActivity[$kind]: logging failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    private fun targetDesc(target: Any?): String = when (target) {
+        is Activity -> target.javaClass.name
+        is Fragment -> target.javaClass.name
+        else -> target?.toString() ?: "null"
+    }
+
+    private fun extrasKeys(extras: Bundle?): String {
+        if (extras == null) return "null"
+        return try {
+            TreeSet(extras.keySet()).joinToString(prefix = "[", postfix = "]")
+        } catch (e: Throwable) {
+            "<${e.javaClass.simpleName}:${e.message}>"
         }
     }
 

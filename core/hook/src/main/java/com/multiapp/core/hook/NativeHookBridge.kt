@@ -12,10 +12,10 @@ import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * NativeHookBridge — Native 层 hook 引擎
+ * NativeHookBridge 鈥?Native 灞?hook 寮曟搸
  *
- * 不使用 Hilt @Singleton/@Inject，因为 LoaderFactory 在 AppComponentFactory 阶段
- * 直接构造实例，此时 Hilt 尚未初始化。统一用 getInstance() 获取全局单例。
+ * 涓嶄娇鐢?Hilt @Singleton/@Inject锛屽洜涓?LoaderFactory 鍦?AppComponentFactory 闃舵
+ * 鐩存帴鏋勯€犲疄渚嬶紝姝ゆ椂 Hilt 灏氭湭鍒濆鍖栥€傜粺涓€鐢?getInstance() 鑾峰彇鍏ㄥ眬鍗曚緥銆?
  */
 class NativeHookBridge {
 
@@ -47,7 +47,7 @@ class NativeHookBridge {
         @Volatile private var nativeLibLoaded = false
 
         /**
-         * 全局单例
+         * 鍏ㄥ眬鍗曚緥
          */
         @Volatile
         private var instance: NativeHookBridge? = null
@@ -59,9 +59,9 @@ class NativeHookBridge {
         }
 
         /**
-         * 手动标记 native 库已加载。
-         * 当库被其他 ClassLoader 加载时（如 stub ClassLoader），
-         * NativeHookBridge 的 init 块无法检测到，需要手动标记。
+         * 鎵嬪姩鏍囪 native 搴撳凡鍔犺浇銆?
+         * 褰撳簱琚叾浠?ClassLoader 鍔犺浇鏃讹紙濡?stub ClassLoader锛夛紝
+         * NativeHookBridge 鐨?init 鍧楁棤娉曟娴嬪埌锛岄渶瑕佹墜鍔ㄦ爣璁般€?
          */
         fun markNativeLibLoaded() {
             nativeLibLoaded = true
@@ -85,7 +85,7 @@ class NativeHookBridge {
     private val pathRedirections = ConcurrentHashMap<String, String>()
     private val pathTrie = PathTrie()
     /**
-     * LRU 路径缓存，最大 2048 条，超出自动淘汰最旧条目
+     * LRU 璺緞缂撳瓨锛屾渶澶?2048 鏉★紝瓒呭嚭鑷姩娣樻卑鏈€鏃ф潯鐩?
      */
     private val pathCache = object : LinkedHashMap<String, String>(256, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean = size > 2048
@@ -136,8 +136,8 @@ class NativeHookBridge {
     }
 
     /**
-     * 通过 dlopen 直接加载 native 库（绕过 Java 层 hidden API 限制）
-     * 用于加载加固壳的 libjiagu_vip.so 等库
+     * 閫氳繃 dlopen 鐩存帴鍔犺浇 native 搴擄紙缁曡繃 Java 灞?hidden API 闄愬埗锛?
+     * 鐢ㄤ簬鍔犺浇鍔犲浐澹崇殑 libjiagu_vip.so 绛夊簱
      */
     fun preloadNativeLibraries(libPaths: List<String>): Int {
         if (libPaths.isEmpty()) return 0
@@ -157,8 +157,8 @@ class NativeHookBridge {
     }
 
     /**
-     * 只做 dlopen + GOT hook，不调 JNI_OnLoad。
-     * 用于混合方案：先 dlopen 加载并 hook GOT，再通过 loadLibraryForGuest 让 ART 做 ClassLoader 绑定 + JNI_OnLoad。
+     * 鍙仛 dlopen + GOT hook锛屼笉璋?JNI_OnLoad銆?
+     * 鐢ㄤ簬娣峰悎鏂规锛氬厛 dlopen 鍔犺浇骞?hook GOT锛屽啀閫氳繃 loadLibraryForGuest 璁?ART 鍋?ClassLoader 缁戝畾 + JNI_OnLoad銆?
      */
     fun dlopenOnly(libPath: String): Boolean {
         if (!nativeLibLoaded) {
@@ -176,8 +176,8 @@ class NativeHookBridge {
     }
 
     /**
-     * 通过 JNI 调用 Runtime.nativeLoad，将库加载到 guest ClassLoader 命名空间
-     * JNI 层面调用绕过 Java hidden API 限制
+     * 閫氳繃 JNI 璋冪敤 Runtime.nativeLoad锛屽皢搴撳姞杞藉埌 guest ClassLoader 鍛藉悕绌洪棿
+     * JNI 灞傞潰璋冪敤缁曡繃 Java hidden API 闄愬埗
      */
     fun loadLibraryForGuest(libPath: String, classLoader: ClassLoader, callerClass: Class<*>): Boolean {
         if (!nativeLibLoaded) {
@@ -200,12 +200,12 @@ class NativeHookBridge {
     }
 
     /**
-     * P0: 从 guest ClassLoader 中 dump 所有已加载的 DEX 文件。
-     * 遍历 DexPathList.dexElements，通过 mCookie 提取 DexFile 字节。
+     * P0: 浠?guest ClassLoader 涓?dump 鎵€鏈夊凡鍔犺浇鐨?DEX 鏂囦欢銆?
+     * 閬嶅巻 DexPathList.dexElements锛岄€氳繃 mCookie 鎻愬彇 DexFile 瀛楄妭銆?
      *
      * @param classLoader guest ClassLoader (PathClassLoader)
-     * @param dumpDir 输出目录
-     * @return 成功 dump 的 DEX 数量
+     * @param dumpDir 杈撳嚭鐩綍
+     * @return 鎴愬姛 dump 鐨?DEX 鏁伴噺
      */
     fun dumpDexFromClassLoader(classLoader: ClassLoader, dumpDir: java.io.File): Int {
         if (!nativeLibLoaded) {
@@ -224,12 +224,12 @@ class NativeHookBridge {
     }
 
     /**
-     * P0: dump 已加载的 native libraries。
-     * 通过 dl_iterate_phdr 遍历所有已加载的 .so，按 PT_LOAD 段重建 ELF。
+     * P0: dump 宸插姞杞界殑 native libraries銆?
+     * 閫氳繃 dl_iterate_phdr 閬嶅巻鎵€鏈夊凡鍔犺浇鐨?.so锛屾寜 PT_LOAD 娈甸噸寤?ELF銆?
      *
-     * @param dumpDir 输出目录
-     * @param targetLib 特定库名（null = dump 所有 app .so）
-     * @return 成功 dump 的 .so 数量
+     * @param dumpDir 杈撳嚭鐩綍
+     * @param targetLib 鐗瑰畾搴撳悕锛坣ull = dump 鎵€鏈?app .so锛?
+     * @return 鎴愬姛 dump 鐨?.so 鏁伴噺
      */
     fun dumpLoadedLibraries(dumpDir: java.io.File, targetLib: String? = null): Int {
         if (!nativeLibLoaded) {
@@ -248,8 +248,8 @@ class NativeHookBridge {
     }
 
     /**
-     * 设置 FindClass hook 的 guest ClassLoader 和候选目标类名列表。
-     * 当 JNI_OnLoad 中 FindClass 查找任一候选类时，通过 guest ClassLoader 加载。
+     * 璁剧疆 FindClass hook 鐨?guest ClassLoader 鍜屽€欓€夌洰鏍囩被鍚嶅垪琛ㄣ€?
+     * 褰?JNI_OnLoad 涓?FindClass 鏌ユ壘浠讳竴鍊欓€夌被鏃讹紝閫氳繃 guest ClassLoader 鍔犺浇銆?
      */
     fun setupFindClassHook(classLoader: ClassLoader, targetClassNames: Array<String>): Boolean {
         if (!nativeLibLoaded) return false
@@ -262,8 +262,8 @@ class NativeHookBridge {
     }
 
     /**
-     * 安装 FindClass hook（修改 JNI 函数表）。
-     * 必须在 setupFindClassHook 之后、System.loadLibrary 之前调用。
+     * 瀹夎 FindClass hook锛堜慨鏀?JNI 鍑芥暟琛級銆?
+     * 蹇呴』鍦?setupFindClassHook 涔嬪悗銆丼ystem.loadLibrary 涔嬪墠璋冪敤銆?
      */
     fun installFindClassHook() {
         if (!nativeLibLoaded) return
@@ -275,8 +275,8 @@ class NativeHookBridge {
     }
 
     /**
-     * 手动注册壳的 native 方法 stub 实现。
-     * 当 FindClass hook 不生效时，用 RegisterNatives 直接注册。
+     * 鎵嬪姩娉ㄥ唽澹崇殑 native 鏂规硶 stub 瀹炵幇銆?
+     * 褰?FindClass hook 涓嶇敓鏁堟椂锛岀敤 RegisterNatives 鐩存帴娉ㄥ唽銆?
      */
     fun registerStubMethods(classLoader: ClassLoader, className: String): Boolean {
         if (!nativeLibLoaded) return false
@@ -289,15 +289,53 @@ class NativeHookBridge {
     }
 
     /**
-     * 注册最小业务 native 兜底（当前仅 YWLoginManager）。
-     * 内容签名/加密链路必须保留原始实现，否则书城会出现空数据。
-     */
+     * 娉ㄥ唽鏈€灏忎笟鍔?native 鍏滃簳锛堝綋鍓嶄粎 YWLoginManager锛夈€?     * 鍐呭绛惧悕/鍔犲瘑閾捐矾蹇呴』淇濈暀鍘熷瀹炵幇锛屽惁鍒欎功鍩庝細鍑虹幇绌烘暟鎹€?     */
+    fun registerStubInterface20Only(classLoader: ClassLoader, className: String): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeRegisterStubInterface20Only(classLoader, className)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerStubInterface20Only failed")
+            false
+        }
+    }
+
+    fun registerStubCoreBootstrapMethods(classLoader: ClassLoader, className: String): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeRegisterStubCoreBootstrapMethods(classLoader, className)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerStubCoreBootstrapMethods failed")
+            false
+        }
+    }
+
+    fun registerStubBootstrapMethods(classLoader: ClassLoader, className: String): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeRegisterStubBootstrapMethods(classLoader, className)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerStubBootstrapMethods failed")
+            false
+        }
+    }
+
     fun registerBusinessStubs(classLoader: ClassLoader): Boolean {
         if (!nativeLibLoaded) return false
         return try {
             nativeRegisterBusinessStubs(classLoader)
         } catch (e: Throwable) {
             Timber.tag(TAG).w(e, "registerBusinessStubs failed")
+            false
+        }
+    }
+
+    fun registerQrencryptStubs(classLoader: ClassLoader): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeRegisterQrencryptStubs(classLoader)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerQrencryptStubs failed")
             false
         }
     }
@@ -313,7 +351,7 @@ class NativeHookBridge {
     }
 
     /**
-     * 扫描所有已知 native 类，批量注册缺失的 native 方法
+     * 鎵弿鎵€鏈夊凡鐭?native 绫伙紝鎵归噺娉ㄥ唽缂哄け鐨?native 鏂规硶
      */
     fun registerAllMissingNativeMethods(classLoader: ClassLoader): Int {
         if (!nativeLibLoaded) return 0
@@ -349,8 +387,8 @@ class NativeHookBridge {
     }
 
     /**
-     * 设置完整性校验重定向：壳的 JNI_OnLoad 读 APK 校验 DEX 时，重定向到原始 APK。
-     * 必须在调用 System.loadLibrary() 之前设置，之后调用 clearIntegrityRedirect()。
+     * 璁剧疆瀹屾暣鎬ф牎楠岄噸瀹氬悜锛氬３鐨?JNI_OnLoad 璇?APK 鏍￠獙 DEX 鏃讹紝閲嶅畾鍚戝埌鍘熷 APK銆?
+     * 蹇呴』鍦ㄨ皟鐢?System.loadLibrary() 涔嬪墠璁剧疆锛屼箣鍚庤皟鐢?clearIntegrityRedirect()銆?
      */
     fun setIntegrityRedirect(fromPath: String, toPath: String) {
         if (nativeHooksAvailable) nativeSetIntegrityRedirect(fromPath, toPath)
@@ -360,10 +398,14 @@ class NativeHookBridge {
         if (nativeHooksAvailable) nativeClearIntegrityRedirect()
     }
 
+    fun setSuppressSelfSigkill(enabled: Boolean) {
+        if (nativeHooksAvailable) nativeSetSuppressSelfSigkill(enabled)
+    }
+
     /**
-     * GOT hook：修改目标库的 GOT 表，拦截 open/openat/fopen 调用。
-     * 用于过滤 /proc/self/maps 读取，绕过壳的反调试检测。
-     * 不需要 trampoline 内存，Android 16 上可行。
+     * GOT hook锛氫慨鏀圭洰鏍囧簱鐨?GOT 琛紝鎷︽埅 open/openat/fopen 璋冪敤銆?
+     * 鐢ㄤ簬杩囨护 /proc/self/maps 璇诲彇锛岀粫杩囧３鐨勫弽璋冭瘯妫€娴嬨€?
+     * 涓嶉渶瑕?trampoline 鍐呭瓨锛孉ndroid 16 涓婂彲琛屻€?
      */
     fun gotHookLibrary(libName: String) {
         if (nativeHooksAvailable) nativeGotHookLibrary(libName)
@@ -380,7 +422,9 @@ class NativeHookBridge {
             return false
         }
         return try {
-            // 找到 host APK 的 nativeLibraryDir（liblsplant.so 所在目录）
+            // 鎵惧埌 host APK 鐨?nativeLibraryDir锛坙iblsplant.so 鎵€鍦ㄧ洰褰曪級
+            val hiddenApiOk = AndroidCompat.bypassHiddenApis()
+            android.util.Log.i(TAG, "initLsplant: hiddenApiBypass=$hiddenApiOk")
             val hostLibDir = findHostNativeLibDir()
             android.util.Log.i(TAG, "initLsplant: hostLibDir=$hostLibDir")
             val result = nativeInitLsplant(hostLibDir)
@@ -393,12 +437,12 @@ class NativeHookBridge {
     }
 
     /**
-     * 找到 host APK 的 native library 目录
-     * liblsplant.so 在 host APK 的 lib 目录中，不在 guest/stub APK 中
+     * 鎵惧埌 host APK 鐨?native library 鐩綍
+     * liblsplant.so 鍦?host APK 鐨?lib 鐩綍涓紝涓嶅湪 guest/stub APK 涓?
      */
     private fun findHostNativeLibDir(): String? {
-        // 方式0: 从 PackageManager 获取 host APK 的 nativeLibraryDir
-        // liblsplant.so 在 host APK（com.multiapp.app）的 lib 目录中，不在 stub 中
+        // 鏂瑰紡0: 浠?PackageManager 鑾峰彇 host APK 鐨?nativeLibraryDir
+        // liblsplant.so 鍦?host APK锛坈om.multiapp.app锛夌殑 lib 鐩綍涓紝涓嶅湪 stub 涓?
         try {
             val atClass = Class.forName("android.app.ActivityThread")
             val ctx = atClass.getMethod("currentApplication").invoke(null) as? android.content.Context
@@ -414,8 +458,8 @@ class NativeHookBridge {
             android.util.Log.w(TAG, "findHostNativeLibDir via PackageManager failed: ${e.message}")
         }
 
-        // 方式1: 从 /proc/self/maps 找 libmultiapp-native.so 的路径
-        // liblsplant.so 在同一目录（host APK 的 lib 目录）
+        // 鏂瑰紡1: 浠?/proc/self/maps 鎵?libmultiapp-native.so 鐨勮矾寰?
+        // liblsplant.so 鍦ㄥ悓涓€鐩綍锛坔ost APK 鐨?lib 鐩綍锛?
         try {
             var lineCount = 0
             var foundMultiapp = false
@@ -445,7 +489,7 @@ class NativeHookBridge {
             android.util.Log.w(TAG, "findHostNativeLibDir via maps failed: ${e.message}")
         }
 
-        // 方式2: 从 HookEngine 的 ClassLoader 获取（可能是 stub 的，作 fallback）
+        // 鏂瑰紡2: 浠?HookEngine 鐨?ClassLoader 鑾峰彇锛堝彲鑳芥槸 stub 鐨勶紝浣?fallback锛?
         try {
             val cl = HookEngine::class.java.classLoader
             if (cl is dalvik.system.BaseDexClassLoader) {
@@ -493,17 +537,21 @@ class NativeHookBridge {
      * @return true if hook was successful
      */
     fun hookMethod(targetMethod: java.lang.reflect.Executable, hookerObject: Any): Boolean {
+        return hookMethodWithBackup(targetMethod, hookerObject) != null
+    }
+
+    fun hookMethodWithBackup(targetMethod: java.lang.reflect.Executable, hookerObject: Any): java.lang.reflect.Executable? {
         if (!nativeHooksAvailable) {
-            android.util.Log.w(TAG, "hookMethod: native lib not loaded")
-            return false
+            android.util.Log.w(TAG, "hookMethodWithBackup: native lib not loaded")
+            return null
         }
         return try {
-            val result = nativeHookMethod(targetMethod, hookerObject)
-            android.util.Log.i(TAG, "hookMethod: ${targetMethod.declaringClass.name}.${targetMethod.name} result=$result")
-            result
+            val backup = nativeHookMethodWithBackup(targetMethod, hookerObject)
+            android.util.Log.i(TAG, "hookMethodWithBackup: ${targetMethod.declaringClass.name}.${targetMethod.name} backup=$backup")
+            backup
         } catch (e: Throwable) {
-            android.util.Log.e(TAG, "hookMethod failed: ${e.message}", e)
-            false
+            android.util.Log.e(TAG, "hookMethodWithBackup failed: ${e.message}", e)
+            null
         }
     }
 
@@ -605,11 +653,11 @@ class NativeHookBridge {
                 if (effectiveDataDir != null) {
                     nativeSetHostDataPrefix(effectiveDataDir)
                 } else {
-                    Timber.tag(TAG).w("No dataDir available — native path redirection may not work")
+                    Timber.tag(TAG).w("No dataDir available 鈥?native path redirection may not work")
                 }
             } catch (e: Exception) { Timber.tag(TAG).e(e, "Native hook init failed"); nativeHooksAvailable = false }
         } else {
-            Timber.tag(TAG).e("Native library not loaded — native hooks DISABLED")
+            Timber.tag(TAG).e("Native library not loaded 鈥?native hooks DISABLED")
         }
         ROOT_PATHS.forEach { hiddenPaths.add(it) }
         EMULATOR_PATHS.forEach { hiddenPaths.add(it) }
@@ -654,17 +702,23 @@ class NativeHookBridge {
     private external fun nativeSetupFindClassHook(classLoader: ClassLoader, targetClassNames: Array<String>): Boolean
     private external fun nativeInstallFindClassHook()
     private external fun nativeRegisterStubMethods(classLoader: ClassLoader, className: String): Boolean
+    private external fun nativeRegisterStubInterface20Only(classLoader: ClassLoader, className: String): Boolean
+    private external fun nativeRegisterStubCoreBootstrapMethods(classLoader: ClassLoader, className: String): Boolean
+    private external fun nativeRegisterStubBootstrapMethods(classLoader: ClassLoader, className: String): Boolean
     private external fun nativeRegisterBusinessStubs(classLoader: ClassLoader): Boolean
+    private external fun nativeRegisterQrencryptStubs(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterOnlineChapterDownloadFallbackStubs(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterAllMissingNativeMethods(classLoader: ClassLoader): Int
     private external fun nativeSetIntegrityRedirect(fromPath: String, toPath: String)
     private external fun nativeClearIntegrityRedirect()
+    private external fun nativeSetSuppressSelfSigkill(enabled: Boolean)
     private external fun nativeGotHookLibrary(libName: String)
 
     // LSPlant integration
     private external fun nativeInitLsplant(libDir: String?): Boolean
     private external fun nativeIsLsplantInitialized(): Boolean
     private external fun nativeHookMethod(targetMethod: java.lang.reflect.Executable, hookerObject: Any): Boolean
+    private external fun nativeHookMethodWithBackup(targetMethod: java.lang.reflect.Executable, hookerObject: Any): java.lang.reflect.Executable?
 
     // P0: DEX + SO dump
     private external fun nativeDumpDexFromClassLoader(classLoader: ClassLoader, dumpDir: String): Int

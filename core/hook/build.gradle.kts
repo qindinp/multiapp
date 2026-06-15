@@ -8,7 +8,7 @@ plugins {
 android {
     namespace = "com.multiapp.core.hook"
     compileSdk = 36
-    ndkVersion = "27.1.12297006"
+    ndkVersion = "29.0.13599879"
 
     defaultConfig {
         minSdk = 28

@@ -60,6 +60,8 @@ dependencies {
     loaderRuntimeFiles(libs.timber)
     loaderRuntimeFiles(libs.coroutines.core)
     loaderRuntimeFiles(libs.coroutines.android)
+    loaderRuntimeFiles(libs.hiddenapibypass)
+    loaderRuntimeFiles(libs.shadowhook)
 }
 
 val generateLoaderDex by tasks.registering {

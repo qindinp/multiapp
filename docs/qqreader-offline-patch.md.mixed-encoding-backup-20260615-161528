@@ -1,4 +1,4 @@
-ï»¿# QQ Reader Offline Clone Patch
+# QQ Reader Offline Clone Patch
 
 This workflow is for isolating QQ Reader clone crashes from the MultiApp UI build path.
 It starts from an already built clone APK, patches the embedded `assets/origin.apk`,
@@ -2237,11 +2237,11 @@ Then open a known free chapter and inspect QqReaderProtocolDiag output for
 queryChapterLoad/chapterOver/other chapter endpoints.
 ```
 
-## 2026-06-15 v172-v174: mini æ­£æ–‡è½åœ°ä¸ `.eqct` è¯»å–å…¼å®¹
+## 2026-06-15 v172-v174: mini ÕıÎÄÂäµØÓë `.eqct` ¶ÁÈ¡¼æÈİ
 
-### v172 `EasyEncrypt.decrypt([B)[B` ç¼ºå¤±ä¿®å¤
+### v172 `EasyEncrypt.decrypt([B)[B` È±Ê§ĞŞ¸´
 
-åŸºäº v171 æ—¥å¿—ï¼š
+»ùÓÚ v171 ÈÕÖ¾£º
 
 ```text
 mini content shape status=200 ... fockEncrypt=false ... contentLen=2617
@@ -2249,14 +2249,14 @@ mini materialize failed java.lang.UnsatisfiedLinkError:
 No implementation found for byte[] com.qq.reader.common.utils.crypto.EasyEncrypt.decrypt(byte[])
 ```
 
-åœ¨ `core/hook/src/main/cpp/native-hook.cpp` è¡¥é½ï¼š
+ÔÚ `core/hook/src/main/cpp/native-hook.cpp` ²¹Æë£º
 
 ```text
 EasyEncrypt.decrypt([B)[B -> byte[] identity copy
 EasyEncrypt.encrypt([B)[B -> byte[] identity copy
 ```
 
-v172 æ„å»ºå¹¶å®‰è£…åï¼Œ`qdae.search(sourcePath, expectedEqct, bid, cid)` èƒ½ç»§ç»­æ‰§è¡Œï¼Œæ—¥å¿—è¯æ˜ `.eqct` è¢«ç”Ÿæˆï¼š
+v172 ¹¹½¨²¢°²×°ºó£¬`qdae.search(sourcePath, expectedEqct, bid, cid)` ÄÜ¼ÌĞøÖ´ĞĞ£¬ÈÕÖ¾Ö¤Ã÷ `.eqct` ±»Éú³É£º
 
 ```text
 stub_easyencrypt_bytes_identity: len=7757
@@ -2264,20 +2264,20 @@ mini materialize result expectedEqct=.../QQReader/Online/58172870/16.eqct size=7
 completed via mini materialized eqct resultCode=0 .../16.eqct size=7757
 ```
 
-ä½†åŒä¸€è½®éšå `.eqct` åˆå˜æˆä¸å­˜åœ¨ï¼š
+µ«Í¬Ò»ÂÖËæºó `.eqct` ÓÖ±ä³É²»´æÔÚ£º
 
 ```text
 provider_path cid=16 .../16.eqct file=exists=false length=0
 completed via mini materialized eqct ... size=-1
 ```
 
-ç»“è®ºï¼šv172 å·²è·¨è¿‡â€œä¸‹è½½ mini æ­£æ–‡â€å’Œ `EasyEncrypt.decrypt` ç¼ºå¤±ï¼Œä½† `.eqct` è¢«åç»­é˜…è¯»è§£æé“¾åˆ é™¤ã€‚
+½áÂÛ£ºv172 ÒÑ¿ç¹ı¡°ÏÂÔØ mini ÕıÎÄ¡±ºÍ `EasyEncrypt.decrypt` È±Ê§£¬µ« `.eqct` ±»ºóĞøÔÄ¶Á½âÎöÁ´É¾³ı¡£
 
-### v173 åˆ é™¤æ ˆå®šä½
+### v173 É¾³ıÕ»¶¨Î»
 
-åœ¨ `QqReaderFileJavaDiag` å¢åŠ  `File.delete()` hookï¼Œå¹¶å¯¹ `.eqct/.eres/.mini_*` æ‰“çŸ­è°ƒç”¨æ ˆã€‚
+ÔÚ `QqReaderFileJavaDiag` Ôö¼Ó `File.delete()` hook£¬²¢¶Ô `.eqct/.eres/.mini_*` ´ò¶Ìµ÷ÓÃÕ»¡£
 
-v173 çœŸæœºæ—¥å¿—å®šä½åˆ°åˆ é™¤è€…ï¼š
+v173 Õæ»úÈÕÖ¾¶¨Î»µ½É¾³ıÕß£º
 
 ```text
 java_file_diag method=delete path=.../QQReader/Online/58172870/30.eqct result=true
@@ -2294,7 +2294,7 @@ java_file_diag delete_stack path=.../30.eqct
   com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask.run:-2
 ```
 
-åç¼–è¯‘ç¡®è®¤ï¼š
+·´±àÒëÈ·ÈÏ£º
 
 ```text
 com.qq.reader.cservice.onlineread.qdae.search(String sourcePath, String bookId, int cid): byte[]
@@ -2305,32 +2305,32 @@ com.qq.reader.cservice.onlineread.qdae.search(String sourcePath, String bookId, 
     delete source .eqct
 ```
 
-ç»“è®ºï¼šé˜…è¯»å¼•æ“æ‰“å¼€ `.eqct` åä¼šèµ° QQ é˜…è¯»åŸåŠ å¯†/Fock/GZIP è§£åŒ…æµç¨‹ï¼›æˆ‘ä»¬ç”Ÿæˆçš„æ˜¯ mini æ˜æ–‡å­—èŠ‚è½åœ°æ–‡ä»¶ï¼Œä¸æ»¡è¶³åŸ `.eqct` åŠ å¯†å°è£…ï¼Œæ‰€ä»¥åŸè§£å¯†å¤±è´¥å¹¶åˆ é™¤æ–‡ä»¶ã€‚
+½áÂÛ£ºÔÄ¶ÁÒıÇæ´ò¿ª `.eqct` ºó»á×ß QQ ÔÄ¶ÁÔ­¼ÓÃÜ/Fock/GZIP ½â°üÁ÷³Ì£»ÎÒÃÇÉú³ÉµÄÊÇ mini Ã÷ÎÄ×Ö½ÚÂäµØÎÄ¼ş£¬²»Âú×ãÔ­ `.eqct` ¼ÓÃÜ·â×°£¬ËùÒÔÔ­½âÃÜÊ§°Ü²¢É¾³ıÎÄ¼ş¡£
 
-### v174 `.eqct` æ˜æ–‡è¯»å–å…¼å®¹
+### v174 `.eqct` Ã÷ÎÄ¶ÁÈ¡¼æÈİ
 
-æ–°å¢ï¼š
+ĞÂÔö£º
 
 ```text
 core/hook/src/main/java/com/multiapp/core/hook/QqReaderEqctPlaintextCompat.kt
 ```
 
-åŒæ—¶åœ¨ `HookEngine.kt` å¢åŠ  `hookMethodAround(...)`ï¼Œæ”¯æŒæ¡ä»¶è°ƒç”¨åŸæ–¹æ³•æˆ–è·³è¿‡åŸæ–¹æ³•ã€‚
+Í¬Ê±ÔÚ `HookEngine.kt` Ôö¼Ó `hookMethodAround(...)`£¬Ö§³ÖÌõ¼şµ÷ÓÃÔ­·½·¨»òÌø¹ıÔ­·½·¨¡£
 
-å®‰è£…ç‚¹ï¼š
+°²×°µã£º
 
 ```text
-LoaderFactory.kt -> QQReader loader åˆå§‹åŒ–é˜¶æ®µ
+LoaderFactory.kt -> QQReader loader ³õÊ¼»¯½×¶Î
 QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
 ```
 
-hook ç›®æ ‡ï¼š
+hook Ä¿±ê£º
 
 ```text
 com.qq.reader.cservice.onlineread.qdae.search(String sourcePath, String bookId, int cid): byte[]
 ```
 
-æ¡ä»¶ï¼š
+Ìõ¼ş£º
 
 ```text
 sourcePath contains /QQReader/Online/<bookId>/
@@ -2339,9 +2339,9 @@ same directory has .mini_<cid>.txt marker
 .eqct exists and length > 0
 ```
 
-æ»¡è¶³æ¡ä»¶æ—¶ç›´æ¥è¿”å› `.eqct` æ–‡ä»¶å­—èŠ‚ï¼›å…¶å®ƒè°ƒç”¨ç»§ç»­ `callOriginal(args)`ã€‚
+Âú×ãÌõ¼şÊ±Ö±½Ó·µ»Ø `.eqct` ÎÄ¼ş×Ö½Ú£»ÆäËüµ÷ÓÃ¼ÌĞø `callOriginal(args)`¡£
 
-v174 è¯æ®ï¼š
+v174 Ö¤¾İ£º
 
 ```text
 QqReaderEqctCompat: eqct plaintext compat installed=true
@@ -2350,7 +2350,7 @@ QqReaderEqctCompat: eqct plaintext return path=.../9.eqct bookId=58172870 cid=9 
 completed via mini materialized eqct resultCode=0 .../9.eqct size=7188
 ```
 
-æ–‡ä»¶çŠ¶æ€è¯æ˜ `.eqct` å·²ä¿ç•™ï¼š
+ÎÄ¼ş×´Ì¬Ö¤Ã÷ `.eqct` ÒÑ±£Áô£º
 
 ```text
 .../QQReader/Online/58172870/1.eqct  7845
@@ -2366,23 +2366,23 @@ completed via mini materialized eqct resultCode=0 .../9.eqct size=7188
 .../QQReader/Online/58172870/11.eqct 7794
 ```
 
-è¿›ç¨‹çŠ¶æ€ï¼š
+½ø³Ì×´Ì¬£º
 
 ```text
 pidof com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8 -> 10495
 mLastPausedActivity: .../com.qq.reader.activity.ReaderPageActivity
 ```
 
-å½“å‰ç»“è®ºï¼š
+µ±Ç°½áÂÛ£º
 
-- v174 å·²è§£å†³ v173 æ˜ç¡®å®šä½çš„ `.eqct` è¢«äºŒæ¬¡è§£å¯†å¤±è´¥åˆ é™¤é—®é¢˜ã€‚
-- å½“å‰æ—¥å¿—æ²¡æœ‰ QQ é˜…è¯»ä¸»è¿›ç¨‹ `FATAL EXCEPTION`ã€‚
-- ä»éœ€äººå·¥ç¡®è®¤ UI æ˜¯å¦å·²èƒ½çœ‹åˆ°æ­£æ–‡ï¼›å¦‚æœ UI ä»ç©ºç™½ï¼Œä¸‹ä¸€æ­¥åº”æŠ“ `QTxtEngineSDK/openOnlineChapterFile/chaptermanager` ç›¸å…³æ—¥å¿—ï¼Œè€Œä¸æ˜¯å›åˆ°ç½‘ç»œ URL æˆ–å£³åŠ è½½é¡ºåºã€‚
+- v174 ÒÑ½â¾ö v173 Ã÷È·¶¨Î»µÄ `.eqct` ±»¶ş´Î½âÃÜÊ§°ÜÉ¾³ıÎÊÌâ¡£
+- µ±Ç°ÈÕÖ¾Ã»ÓĞ QQ ÔÄ¶ÁÖ÷½ø³Ì `FATAL EXCEPTION`¡£
+- ÈÔĞèÈË¹¤È·ÈÏ UI ÊÇ·ñÒÑÄÜ¿´µ½ÕıÎÄ£»Èç¹û UI ÈÔ¿Õ°×£¬ÏÂÒ»²½Ó¦×¥ `QTxtEngineSDK/openOnlineChapterFile/chaptermanager` Ïà¹ØÈÕÖ¾£¬¶ø²»ÊÇ»Øµ½ÍøÂç URL »ò¿Ç¼ÓÔØË³Ğò¡£
 
-ä¸‹ä¸€æ­¥éªŒè¯å»ºè®®ï¼š
+ÏÂÒ»²½ÑéÖ¤½¨Òé£º
 
-1. æ‰“å¼€å·²ç”Ÿæˆ `.eqct` çš„ç« èŠ‚ï¼Œä¾‹å¦‚ `58172870` ç¬¬ `9/10/11` ç« ã€‚
-2. æŠ“ 30 ç§’æ—¥å¿—ï¼Œåªç­›ï¼š
+1. ´ò¿ªÒÑÉú³É `.eqct` µÄÕÂ½Ú£¬ÀıÈç `58172870` µÚ `9/10/11` ÕÂ¡£
+2. ×¥ 30 ÃëÈÕÖ¾£¬Ö»É¸£º
 
 ```text
 QqReaderEqctCompat
@@ -2394,66 +2394,66 @@ java_file_diag method=length .*\.eqct
 FATAL EXCEPTION
 ```
 
-3. å¦‚æœé¡µé¢ä»ä¸æ˜¾ç¤ºæ­£æ–‡ï¼Œæ£€æŸ¥å¼•æ“æ˜¯å¦è¦æ±‚ç« èŠ‚ model/cache åˆ·æ–°æˆ– `.eres` æ–‡ä»¶ï¼Œè€Œä¸æ˜¯ç»§ç»­å¤„ç† `.eqct` ç”Ÿæˆã€‚
+3. Èç¹ûÒ³ÃæÈÔ²»ÏÔÊ¾ÕıÎÄ£¬¼ì²éÒıÇæÊÇ·ñÒªÇóÕÂ½Ú model/cache Ë¢ĞÂ»ò `.eres` ÎÄ¼ş£¬¶ø²»ÊÇ¼ÌĞø´¦Àí `.eqct` Éú³É¡£
 
-### v174 UI éªŒè¯è¡¥å……
+### v174 UI ÑéÖ¤²¹³ä
 
-é€šè¿‡æ‰‹æœºæˆªå›¾ç¡®è®¤æ­£æ–‡å·²ç»æ˜¾ç¤ºï¼š
+Í¨¹ıÊÖ»ú½ØÍ¼È·ÈÏÕıÎÄÒÑ¾­ÏÔÊ¾£º
 
 ```text
 .tmp/v174-current-screen-pull.png
 ```
 
-æˆªå›¾å†…å®¹æ˜¾ç¤º QQ é˜…è¯»é˜…è¯»é¡µå·²è¿›å…¥æ­£æ–‡ï¼Œé¡¶éƒ¨ä¸ºï¼š
+½ØÍ¼ÄÚÈİÏÔÊ¾ QQ ÔÄ¶ÁÔÄ¶ÁÒ³ÒÑ½øÈëÕıÎÄ£¬¶¥²¿Îª£º
 
 ```text
-é‡ç”Ÿæˆå¦–ï¼Œæˆ‘ä¿®æˆçœŸé¾™
+ÖØÉú³ÉÑı£¬ÎÒĞŞ³ÉÕæÁú
 ```
 
-æ­£æ–‡ç‰‡æ®µå¯è§ï¼Œè¯´æ˜ v174 ä¸åªæ˜¯ç”Ÿæˆ `.eqct` æ–‡ä»¶ï¼Œé˜…è¯»å¼•æ“ä¹Ÿå·²ç»èƒ½ä»å…¼å®¹è·¯å¾„è¯»å‡ºå†…å®¹å¹¶æ¸²æŸ“ã€‚
+ÕıÎÄÆ¬¶Î¿É¼û£¬ËµÃ÷ v174 ²»Ö»ÊÇÉú³É `.eqct` ÎÄ¼ş£¬ÔÄ¶ÁÒıÇæÒ²ÒÑ¾­ÄÜ´Ó¼æÈİÂ·¾¶¶Á³öÄÚÈİ²¢äÖÈ¾¡£
 
-å½“å‰å®æœºçŠ¶æ€ï¼š
+µ±Ç°Êµ»ú×´Ì¬£º
 
 ```text
 pidof com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8 -> 16919
 topResumedActivity -> com.qq.reader.activity.MainFlutterActivity
-screenshot -> æ­£æ–‡é˜…è¯»é¡µå¯è§
+screenshot -> ÕıÎÄÔÄ¶ÁÒ³¿É¼û
 ```
 
-é˜¶æ®µç»“è®ºæ›´æ–°ï¼š
+½×¶Î½áÂÛ¸üĞÂ£º
 
-- QQ é˜…è¯»åˆ†èº«â€œæ­£æ–‡åŠ è½½ä¸å‡ºæ¥â€çš„æ ¸å¿ƒé˜»å¡å·²è¢« v174 æ‰“é€šã€‚
-- å½“å‰æ–¹æ¡ˆä¾èµ– mini å…è´¹ç« èŠ‚æ¥å£ + æœ¬åœ° `.eqct` materialize + `.eqct` æ˜æ–‡è¯»å–å…¼å®¹ã€‚
-- è¯¥æ–¹æ¡ˆå·²éªŒè¯å…è´¹æ­£æ–‡æ˜¾ç¤ºï¼›åç»­é‡ç‚¹è½¬ä¸ºç¨³å®šæ€§ã€ç¿»ç« ã€ä»˜è´¹ç« èŠ‚è¾¹ç•Œã€è¯Šæ–­å¼€å…³æ”¶æ•›ã€‚
+- QQ ÔÄ¶Á·ÖÉí¡°ÕıÎÄ¼ÓÔØ²»³öÀ´¡±µÄºËĞÄ×èÈûÒÑ±» v174 ´òÍ¨¡£
+- µ±Ç°·½°¸ÒÀÀµ mini Ãâ·ÑÕÂ½Ú½Ó¿Ú + ±¾µØ `.eqct` materialize + `.eqct` Ã÷ÎÄ¶ÁÈ¡¼æÈİ¡£
+- ¸Ã·½°¸ÒÑÑéÖ¤Ãâ·ÑÕıÎÄÏÔÊ¾£»ºóĞøÖØµã×ªÎªÎÈ¶¨ĞÔ¡¢·­ÕÂ¡¢¸¶·ÑÕÂ½Ú±ß½ç¡¢Õï¶Ï¿ª¹ØÊÕÁ²¡£
 
-### v174 ç«¯å£ 32973 ç»­æµ‹
+### v174 ¶Ë¿Ú 32973 Ğø²â
 
-è®¾å¤‡é‡æ–°è¿æ¥ï¼š
+Éè±¸ÖØĞÂÁ¬½Ó£º
 
 ```text
 adb connect 192.168.2.44:32973 -> device
 ```
 
-å‰å°çŠ¶æ€ï¼š
+Ç°Ì¨×´Ì¬£º
 
 ```text
 pidof com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8 -> 17083
 topResumedActivity -> com.qq.reader.activity.ReaderPageActivity
 ```
 
-æœ¬åœ° `.eqct` æ•°é‡ç»§ç»­å¢åŠ ï¼š
+±¾µØ `.eqct` ÊıÁ¿¼ÌĞøÔö¼Ó£º
 
 ```text
 find .../QQReader/Online -name "*.eqct" | wc -l -> 24
 ```
 
-é˜…è¯»é¡µ 60 ç§’æ¸©å’Œç¿»é¡µéªŒè¯æ—¥å¿—ï¼š
+ÔÄ¶ÁÒ³ 60 ÃëÎÂºÍ·­Ò³ÑéÖ¤ÈÕÖ¾£º
 
 ```text
 .tmp/qqreader-v174-port32973-readpage-60s-logcat.txt
 ```
 
-å…³é”®å‘½ä¸­ï¼š
+¹Ø¼üÃüÖĞ£º
 
 ```text
 file_validity .../QQReader/Online/58192983/10.eqct result=false file=exists=false length=0
@@ -2462,7 +2462,7 @@ QqReaderEqctCompat: eqct plaintext return path=.../58192983/10.eqct bookId=58192
 completed via mini materialized eqct resultCode=0 expectedEqct=.../58192983/10.eqct size=7824
 ```
 
-è´Ÿå‘æ£€æŸ¥ï¼š
+¸ºÏò¼ì²é£º
 
 ```text
 FATAL EXCEPTION: none
@@ -2473,7 +2473,7 @@ UnsatisfiedLinkError: none in this 60s readpage window
 method=delete *.eqct: none
 ```
 
-æ–‡ä»¶çŠ¶æ€ï¼š
+ÎÄ¼ş×´Ì¬£º
 
 ```text
 .../QQReader/Online/58192983/5.eqct  6671
@@ -2484,81 +2484,81 @@ method=delete *.eqct: none
 .../QQReader/Online/58192983/10.eqct 7824
 ```
 
-æˆªå›¾è¯æ®ï¼š
+½ØÍ¼Ö¤¾İ£º
 
 ```text
 .tmp/v174-port32973-readpage.png
 ```
 
-æˆªå›¾æ˜¾ç¤º QQ é˜…è¯»åˆ†èº«åœç•™åœ¨é˜…è¯»é¡µï¼Œç¬¬ 9 ç« æ­£æ–‡æ­£å¸¸æ¸²æŸ“ã€‚
+½ØÍ¼ÏÔÊ¾ QQ ÔÄ¶Á·ÖÉíÍ£ÁôÔÚÔÄ¶ÁÒ³£¬µÚ 9 ÕÂÕıÎÄÕı³£äÖÈ¾¡£
 
-å½“å‰é˜¶æ®µåˆ¤æ–­ï¼š
+µ±Ç°½×¶ÎÅĞ¶Ï£º
 
-- å…è´¹ç« èŠ‚æ­£æ–‡é“¾è·¯å·²å¯è¿ç»­ç”Ÿæˆã€ä¿ç•™ã€è¯»å–å’Œæ¸²æŸ“ã€‚
-- v174 å½“å‰æ²¡æœ‰å¤ç°æ­£æ–‡åŠ è½½é—ªé€€ï¼Œä¹Ÿæ²¡æœ‰å¤ç° `.eqct` è¢«åˆ é™¤ã€‚
-- åç»­è¿›å…¥æ”¶æ•›é˜¶æ®µï¼šå…³æ‰ä¸å¿…è¦çš„è¯Šæ–­æ—¥å¿—ï¼Œä¿ç•™å¿…è¦å…¼å®¹ï¼›å†æµ‹åº”ç”¨å†·å¯åŠ¨ã€æ¢ä¹¦ã€ç¿»åˆ°æœªç¼“å­˜ç« èŠ‚ã€ä»˜è´¹ç« èŠ‚æç¤ºè¾¹ç•Œã€‚
+- Ãâ·ÑÕÂ½ÚÕıÎÄÁ´Â·ÒÑ¿ÉÁ¬ĞøÉú³É¡¢±£Áô¡¢¶ÁÈ¡ºÍäÖÈ¾¡£
+- v174 µ±Ç°Ã»ÓĞ¸´ÏÖÕıÎÄ¼ÓÔØÉÁÍË£¬Ò²Ã»ÓĞ¸´ÏÖ `.eqct` ±»É¾³ı¡£
+- ºóĞø½øÈëÊÕÁ²½×¶Î£º¹Øµô²»±ØÒªµÄÕï¶ÏÈÕÖ¾£¬±£Áô±ØÒª¼æÈİ£»ÔÙ²âÓ¦ÓÃÀäÆô¶¯¡¢»»Êé¡¢·­µ½Î´»º´æÕÂ½Ú¡¢¸¶·ÑÕÂ½ÚÌáÊ¾±ß½ç¡£
 
-### v175 æ ‡é¢˜ä¿®å¤ä¸é»˜è®¤å¯ç”¨æ”¶æ•›
+### v175 ±êÌâĞŞ¸´ÓëÄ¬ÈÏÆôÓÃÊÕÁ²
 
-ç”¨æˆ·åé¦ˆé˜…è¯»é¡µæ ‡é¢˜æ¶ˆå¤±ï¼Œæ˜¾ç¤ºæˆæ­£æ–‡ç¬¬ä¸€å¥è¯ã€‚v175 çš„ä¿®å¤ç‚¹ï¼š
+ÓÃ»§·´À¡ÔÄ¶ÁÒ³±êÌâÏûÊ§£¬ÏÔÊ¾³ÉÕıÎÄµÚÒ»¾ä»°¡£v175 µÄĞŞ¸´µã£º
 
 ```text
 core/hook/src/main/java/com/multiapp/core/hook/QqReaderOnlineProtocolFallback.java
 ```
 
-mini æ¥å£è¿”å› `data.title` åï¼Œå†™å…¥æœ¬åœ°æºæ–‡æœ¬æ—¶æ”¹ä¸ºï¼š
+mini ½Ó¿Ú·µ»Ø `data.title` ºó£¬Ğ´Èë±¾µØÔ´ÎÄ±¾Ê±¸ÄÎª£º
 
 ```text
 title + "\n\n" + content
 ```
 
-éªŒè¯è¯æ®ï¼š
+ÑéÖ¤Ö¤¾İ£º
 
 ```text
 .tmp/v175-title-check.png
 .tmp/qqreader-v175-title-default-read-60s-logcat.txt
 ```
 
-å…³é”®æ—¥å¿—ï¼š
+¹Ø¼üÈÕÖ¾£º
 
 ```text
 mini materialize result ... titleLen=9 contentLen=4135
 QqReaderEqctCompat ... eqct plaintext return ... size=11966
 ```
 
-æˆªå›¾æ˜¾ç¤ºæ ‡é¢˜æ¢å¤ä¸ºï¼š
+½ØÍ¼ÏÔÊ¾±êÌâ»Ö¸´Îª£º
 
 ```text
-ç¬¬2ç«  æˆ‘å”æ€»åŸéš
+µÚ2ÕÂ ÎÒÊå×Ü³ÇÚò
 ```
 
-v175 åŒæ—¶å°†æ­£æ–‡ fallback é»˜è®¤å¯ç”¨ï¼š
+v175 Í¬Ê±½«ÕıÎÄ fallback Ä¬ÈÏÆôÓÃ£º
 
 ```text
-debug.multiapp.online.run_fallback=0/false/off æ‰å…³é—­
-debug.multiapp.online.materialize_eqct=0/false/off æ‰å…³é—­
-QqReaderEqctPlaintextCompat é»˜è®¤å¯ç”¨
+debug.multiapp.online.run_fallback=0/false/off ²Å¹Ø±Õ
+debug.multiapp.online.materialize_eqct=0/false/off ²Å¹Ø±Õ
+QqReaderEqctPlaintextCompat Ä¬ÈÏÆôÓÃ
 ```
 
-é˜¶æ®µç»“è®ºï¼šå…è´¹ç« èŠ‚æ­£æ–‡ä¸æ ‡é¢˜é“¾è·¯å·²éªŒè¯å¯ç”¨ï¼Œå‰©ä½™é‡ç‚¹è½¬ä¸ºç™»å½•å’Œæ›´å¤šé¡µé¢å…¼å®¹ã€‚
+½×¶Î½áÂÛ£ºÃâ·ÑÕÂ½ÚÕıÎÄÓë±êÌâÁ´Â·ÒÑÑéÖ¤¿ÉÓÃ£¬Ê£ÓàÖØµã×ªÎªµÇÂ¼ºÍ¸ü¶àÒ³Ãæ¼æÈİ¡£
 
-### v176 ç™»å½•é—ªé€€å®šä½
+### v176 µÇÂ¼ÉÁÍË¶¨Î»
 
-è®¾å¤‡ç«¯å£ï¼š
+Éè±¸¶Ë¿Ú£º
 
 ```text
 adb connect 192.168.2.44:33547 -> device
 ```
 
-v175 ç™»å½•é‡‡é›†çª—å£æ²¡æœ‰çœ‹åˆ°æ–°çš„ QQ é˜…è¯» `FATAL EXCEPTION`ï¼Œä½†ç³»ç»Ÿ activity æ ˆæ˜¾ç¤ºå­˜åœ¨å¾®ä¿¡ `MMWebViewUI` å†å²ä»»åŠ¡ï¼Œè¯´æ˜ç™»å½•é“¾è·¯æ¶‰åŠå¤–éƒ¨å¾®ä¿¡/ç½‘é¡µè·³è½¬ã€‚ä¸ºè¿›ä¸€æ­¥å®šä½ï¼Œv176 åŠ å…¥ `IntentRemappingInstrumentation` è¯Šæ–­æ—¥å¿—ï¼Œè®°å½• `execStartActivity*` çš„ callerã€targetã€requestCodeã€componentã€packageã€actionã€dataã€categoriesã€extras keyã€‚
+v175 µÇÂ¼²É¼¯´°¿ÚÃ»ÓĞ¿´µ½ĞÂµÄ QQ ÔÄ¶Á `FATAL EXCEPTION`£¬µ«ÏµÍ³ activity Õ»ÏÔÊ¾´æÔÚÎ¢ĞÅ `MMWebViewUI` ÀúÊ·ÈÎÎñ£¬ËµÃ÷µÇÂ¼Á´Â·Éæ¼°Íâ²¿Î¢ĞÅ/ÍøÒ³Ìø×ª¡£Îª½øÒ»²½¶¨Î»£¬v176 ¼ÓÈë `IntentRemappingInstrumentation` Õï¶ÏÈÕÖ¾£¬¼ÇÂ¼ `execStartActivity*` µÄ caller¡¢target¡¢requestCode¡¢component¡¢package¡¢action¡¢data¡¢categories¡¢extras key¡£
 
-v176 æ„å»ºäº§ç‰©ï¼š
+v176 ¹¹½¨²úÎï£º
 
 ```text
 .tmp/qqreader-c9f8-neutralized-v176-login-intent-diag-signed.apk
 ```
 
-å®‰è£…å¹¶å¯åŠ¨åï¼ŒæŠ“åˆ°æ˜ç¡®å´©æºƒï¼š
+°²×°²¢Æô¶¯ºó£¬×¥µ½Ã÷È·±ÀÀ££º
 
 ```text
 .tmp/qqreader-v176-postinstall-launch-crash.txt
@@ -2567,7 +2567,7 @@ v176 æ„å»ºäº§ç‰©ï¼š
 .tmp/qqreader-v176-postinstall-launch-activities.txt
 ```
 
-å…³é”®å´©æºƒæ ˆï¼š
+¹Ø¼ü±ÀÀ£Õ»£º
 
 ```text
 FATAL EXCEPTION: main
@@ -2580,26 +2580,26 @@ Caused by: java.lang.IllegalStateException: You need to use a Theme.AppCompat th
     at com.qq.reader.login.scanqrcode.ui.QRLoginScanQrCodeActivity.onCreate
 ```
 
-ç³»ç»Ÿä¾§å¯åŠ¨è®°å½•ä¹Ÿæ˜¾ç¤ºç™»å½• Activity çš„å¤–å±‚ manifest theme ä¸º 0ï¼š
+ÏµÍ³²àÆô¶¯¼ÇÂ¼Ò²ÏÔÊ¾µÇÂ¼ Activity µÄÍâ²ã manifest theme Îª 0£º
 
 ```text
 Try to add startingWindow ... QRLoginActivity ... resolvedTheme = 0 theme = 0
 Try to add startingWindow ... QRLoginScanQrCodeActivity ... resolvedTheme = 0 theme = 0
 ```
 
-é˜¶æ®µåˆ¤æ–­ï¼šè¿™æ¬¡â€œç™»å½•é—ªé€€â€çš„ç›´æ¥åŸå› ä¸æ˜¯æ­£æ–‡ fallbackã€å¾®ä¿¡å›è°ƒæˆ– YWLogin nativeï¼Œè€Œæ˜¯åˆ†èº«å¤–å±‚ manifest/è¿è¡ŒæœŸä¸»é¢˜è¡¥é½ä¸å®Œæ•´ï¼Œå¯¼è‡´ `QRLoginScanQrCodeActivity` ä½œä¸º AppCompat Activity å¯åŠ¨æ—¶æ²¡æœ‰ AppCompat themeã€‚
+½×¶ÎÅĞ¶Ï£ºÕâ´Î¡°µÇÂ¼ÉÁÍË¡±µÄÖ±½ÓÔ­Òò²»ÊÇÕıÎÄ fallback¡¢Î¢ĞÅ»Øµ÷»ò YWLogin native£¬¶øÊÇ·ÖÉíÍâ²ã manifest/ÔËĞĞÆÚÖ÷Ìâ²¹Æë²»ÍêÕû£¬µ¼ÖÂ `QRLoginScanQrCodeActivity` ×÷Îª AppCompat Activity Æô¶¯Ê±Ã»ÓĞ AppCompat theme¡£
 
-### v177 ç™»å½•ä¸»é¢˜ä¿®å¤
+### v177 µÇÂ¼Ö÷ÌâĞŞ¸´
 
-åªè¯»æ’æŸ¥ç¡®è®¤ï¼šå½“å‰ QQ é˜…è¯»ç¦»çº¿ patch è·¯å¾„æ˜¯åŸºäºå·²æœ‰ clone å¤–å£³æ›¿æ¢ `assets/origin.apk`ã€loader dex å’Œ native lib åé‡ç­¾åï¼Œæ²¡æœ‰é‡æ–°è·‘ `StubBuilder.enrichWithThemeIds()` / `BinaryXmlEncoder`ï¼Œå› æ­¤ä¸ä¼šåˆ·æ–°å¤–å±‚ `AndroidManifest.xml` çš„ activity themeã€‚è¿è¡ŒæœŸåªèƒ½ä¾èµ– `LoaderFactory` ä»å†…ç½® `origin.apk` è¯»å–å¹¶è¡¥ themeã€‚
+Ö»¶ÁÅÅ²éÈ·ÈÏ£ºµ±Ç° QQ ÔÄ¶ÁÀëÏß patch Â·¾¶ÊÇ»ùÓÚÒÑÓĞ clone Íâ¿ÇÌæ»» `assets/origin.apk`¡¢loader dex ºÍ native lib ºóÖØÇ©Ãû£¬Ã»ÓĞÖØĞÂÅÜ `StubBuilder.enrichWithThemeIds()` / `BinaryXmlEncoder`£¬Òò´Ë²»»áË¢ĞÂÍâ²ã `AndroidManifest.xml` µÄ activity theme¡£ÔËĞĞÆÚÖ»ÄÜÒÀÀµ `LoaderFactory` ´ÓÄÚÖÃ `origin.apk` ¶ÁÈ¡²¢²¹ theme¡£
 
-v177 ä¿®æ”¹ï¼š
+v177 ĞŞ¸Ä£º
 
 ```text
 core/loader/src/main/java/com/multiapp/core/loader/LoaderFactory.kt
 ```
 
-åœ¨ `applyActivityThemeIfKnown(activity, className)` ä¸­ï¼Œéé›¶ `themeId` æ—¶ä¸å†åªæ”¹ `activity.applicationInfo.theme`ï¼Œè€Œæ˜¯æ›´æ—©ç›´æ¥æ‰§è¡Œï¼š
+ÔÚ `applyActivityThemeIfKnown(activity, className)` ÖĞ£¬·ÇÁã `themeId` Ê±²»ÔÙÖ»¸Ä `activity.applicationInfo.theme`£¬¶øÊÇ¸üÔçÖ±½ÓÖ´ĞĞ£º
 
 ```text
 activity.setTheme(themeId)
@@ -2607,24 +2607,24 @@ activity.applicationInfo.theme = themeId
 replaceFieldIfPresent(activity, "mThemeResource", themeId)
 ```
 
-ç†ç”±ï¼šAppCompat çš„æ£€æŸ¥è¯»å–å½“å‰ Activity themeã€‚åªä¿®æ”¹ `ApplicationInfo.theme` å¯¹å·²å®ä¾‹åŒ– Activity ä¸ä¸€å®šç”Ÿæ•ˆï¼Œå®¹æ˜“æ™šäº `AppCompatActivity.setContentView()`ã€‚
+ÀíÓÉ£ºAppCompat µÄ¼ì²é¶ÁÈ¡µ±Ç° Activity theme¡£Ö»ĞŞ¸Ä `ApplicationInfo.theme` ¶ÔÒÑÊµÀı»¯ Activity ²»Ò»¶¨ÉúĞ§£¬ÈİÒ×ÍíÓÚ `AppCompatActivity.setContentView()`¡£
 
-v177 æ„å»ºå·²å®Œæˆï¼š
+v177 ¹¹½¨ÒÑÍê³É£º
 
 ```text
 .tmp/qqreader-c9f8-neutralized-v177-login-appcompat-theme-early-signed.apk
 ```
 
-å¾…éªŒè¯é¡¹ï¼š
+´ıÑéÖ¤Ïî£º
 
-1. å®‰è£… v177 åå†æ¬¡å¯åŠ¨ QQ é˜…è¯»åˆ†èº«ã€‚
-2. ç‚¹å‡»ç™»å½•/æ‰«ç ç™»å½•å…¥å£ã€‚
-3. ç¡®è®¤ä¸å†å‡ºç°ï¼š
+1. °²×° v177 ºóÔÙ´ÎÆô¶¯ QQ ÔÄ¶Á·ÖÉí¡£
+2. µã»÷µÇÂ¼/É¨ÂëµÇÂ¼Èë¿Ú¡£
+3. È·ÈÏ²»ÔÙ³öÏÖ£º
 
 ```text
 You need to use a Theme.AppCompat theme (or descendant) with this activity.
 ```
 
-4. å¦‚æœç™»å½•é¡µèƒ½æ‰“å¼€ï¼Œå†ç»§ç»­æŠ“å¾®ä¿¡/QQ ç™»å½•è·³è½¬å’Œå›è°ƒé“¾è·¯ã€‚
+4. Èç¹ûµÇÂ¼Ò³ÄÜ´ò¿ª£¬ÔÙ¼ÌĞø×¥Î¢ĞÅ/QQ µÇÂ¼Ìø×ªºÍ»Øµ÷Á´Â·¡£
 
-åç»­æ›´æ ¹æœ¬çš„ä¿®å¤æ–¹å‘ï¼šç¦»çº¿ patch è„šæœ¬åº”å¢åŠ é‡å»ºå¤–å±‚ manifest çš„æ­¥éª¤ï¼Œç”¨ patched/original `origin.apk` é‡æ–°ç”Ÿæˆ activity themeï¼Œè€Œä¸æ˜¯é•¿æœŸä¾èµ–è¿è¡ŒæœŸè¡¥ themeã€‚
+ºóĞø¸ü¸ù±¾µÄĞŞ¸´·½Ïò£ºÀëÏß patch ½Å±¾Ó¦Ôö¼ÓÖØ½¨Íâ²ã manifest µÄ²½Öè£¬ÓÃ patched/original `origin.apk` ÖØĞÂÉú³É activity theme£¬¶ø²»ÊÇ³¤ÆÚÒÀÀµÔËĞĞÆÚ²¹ theme¡£

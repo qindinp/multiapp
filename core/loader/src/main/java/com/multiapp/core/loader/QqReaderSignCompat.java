@@ -30,15 +30,16 @@ public final class QqReaderSignCompat {
             String raw = md5(normalized);
             String valueThenKey = md5(normalized + MD5_KEY);
             String keyThenValue = md5(MD5_KEY + normalized);
-            Log.w(TAG, "sign FockRT unavailable, fallback md5 len=" + normalized.length()
+            Log.w(TAG, "sign FockRT unavailable len=" + normalized.length()
                     + " sample=" + sample(normalized)
                     + " md5=" + raw
                     + " valueKey=" + valueThenKey
                     + " keyValue=" + keyThenValue);
+            Log.w(TAG, "returning md5 fallback");
             return raw;
         } catch (Throwable throwable) {
-            Log.w(TAG, "sign fallback len=" + normalized.length(), throwable);
-            return normalized;
+            Log.w(TAG, "sign failed len=" + normalized.length(), throwable);
+            return "";
         }
     }
 
