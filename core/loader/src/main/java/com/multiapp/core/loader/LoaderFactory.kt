@@ -10,7 +10,12 @@ import android.content.res.Resources
 import android.util.Log
 import android.view.LayoutInflater
 import java.util.Vector
+import com.multiapp.core.hook.HookPipeline
+import com.multiapp.core.hook.HookStageContext
 import com.multiapp.core.hook.NativeHookBridge
+import com.multiapp.core.loader.stages.NativeBaseHooksStage
+import com.multiapp.core.loader.stages.PackageIdentityHooksStage
+import com.multiapp.core.loader.stages.RuntimeConfigStage
 import dalvik.system.PathClassLoader
 import java.io.File
 import java.lang.reflect.Field
@@ -490,6 +495,36 @@ class LoaderFactory : AppComponentFactory() {
             logD("  packageName: ${appInfo.packageName}")
             logD("  appComponentFactory: ${appInfo.appComponentFactory}")
             logD("  className: ${appInfo.className}")
+
+            // ── HookPipeline: 阶段化 Hook 编排（渐进式集成，与原有代码并行） ──
+            logD("Step 2.5: HookPipeline execute...")
+            try {
+                val pipeline = HookPipeline.getInstance()
+                pipeline.registerStages(
+                    RuntimeConfigStage(),
+                    NativeBaseHooksStage(),
+                    PackageIdentityHooksStage()
+                )
+                val pipelineExtras = mutableMapOf<String, Any?>("stubApkPath" to stubApkPath)
+                val pipelineContext = HookStageContext(
+                    hookEngine = com.multiapp.core.hook.HookEngine.getInstance(),
+                    nativeBridge = NativeHookBridge.getInstance(),
+                    extras = pipelineExtras
+                )
+                val pipelineResult = pipeline.execute(pipelineContext)
+                logD("  HookPipeline result: ${pipelineResult.status}, stages=${pipelineResult.stageResults.size}")
+                for (record in pipelineResult.stageResults) {
+                    logD("    [${record.stagePriority}] ${record.stageName}: ${record.result.status} (${record.elapsedMs}ms)")
+                }
+
+                // 从 pipeline extras 回读 config（渐进式：同时保留原有 readConfig 调用）
+                val pipelineConfig = pipelineExtras[RuntimeConfigStage.KEY_CONFIG]
+                if (pipelineConfig != null) {
+                    logD("  HookPipeline RuntimeConfig loaded via pipeline")
+                }
+            } catch (e: Throwable) {
+                logW("  HookPipeline execute failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
 
             // 3. 从 Stub APK assets 读取配置
             logD("Step 3: Reading config...")

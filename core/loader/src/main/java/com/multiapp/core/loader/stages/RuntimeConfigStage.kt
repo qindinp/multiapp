@@ -40,10 +40,10 @@ class RuntimeConfigStage : HookStage {
                 config.originalPkg, config.stubPkg
             )
 
-            // Store config in mutable extras for downstream stages
-            val mutableExtras = context.extras as? MutableMap<String, Any?>
-                ?: mutableMapOf<String, Any?>().also { it.putAll(context.extras) }
-            mutableExtras[KEY_CONFIG] = config
+            // Store config in shared mutable extras for downstream stages
+            @Suppress("UNCHECKED_CAST")
+            val extras = context.extras as? MutableMap<String, Any?>
+            extras?.set(KEY_CONFIG, config)
 
             HookStageResult.success(
                 "Config loaded: ${config.originalPkg} / ${config.stubPkg}",
