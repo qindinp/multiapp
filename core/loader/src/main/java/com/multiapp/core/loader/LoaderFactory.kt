@@ -1055,10 +1055,27 @@ class LoaderFactory : AppComponentFactory() {
             .set(loadedApk, newClassLoader)
         logD("  Replaced LoadedApk.mClassLoader")
 
-        // 先通过 guest ClassLoader 预加载加固壳 native 库，便于后续 JNI 注册和诊断。
-        // 如果壳自己再次调用 System.loadLibrary，同一个命名空间内可能会复用已有句柄。
-        logD("  Preloading packer native libs via guest ClassLoader")
-        preloadPackerLibViaGuestClassLoader(realGuestClassLoader, originalApk?.absolutePath, appInfo.dataDir)
+        // 通过 PackerRuntimeDispatcher 自动检测加固壳并执行加载流程
+        // 替代原先的 preloadPackerLibViaGuestClassLoader() 直接调用
+        logD("  Preloading packer native libs via PackerRuntimeDispatcher")
+        val packerContext = com.multiapp.core.hook.PackerRuntimeContext(
+            guestClassLoader = realGuestClassLoader,
+            originLibDir = originLibDir?.absolutePath,
+            originApkPath = originApk.absolutePath,
+            originalApkPath = originalApk?.absolutePath,
+            dataDir = appInfo.dataDir,
+            stubApkPath = appInfo.sourceDir,
+            bridge = com.multiapp.core.hook.NativeHookBridge.getInstance(),
+            hookEngine = com.multiapp.core.hook.HookEngine.getInstance(),
+        )
+        val packerResult = try {
+            com.multiapp.core.hook.PackerRuntimeDispatcher.getInstance().execute(packerContext)
+        } catch (e: Throwable) {
+            logW("  PackerRuntimeDispatcher.execute failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+        logD("  PackerRuntimeDispatcher result: jiaguLoaded=${packerResult?.jiaguLoaded}, stubLoad=${packerResult?.stubAppLoadSucceeded}")
+        installAppSpecificPostLoadHooks(realGuestClassLoader, packerResult, appInfo.dataDir)
 
         // Stage 2: after the packer bootstrap, load business SDK libraries
         // through ART nativeLoad with guest ClassLoader ownership. This keeps
@@ -1509,6 +1526,208 @@ class LoaderFactory : AppComponentFactory() {
     }
 
     /**
+     * PackerRuntimeDispatcher 加载完成后，安装应用特定的 hook 和诊断逻辑。
+     *
+     * 包含原先 preloadPackerLibViaGuestClassLoader() 中不属于通用壳加载流程的部分：
+     * - Pangle 广告 SDK 跳过初始化
+     * - ShortcutManager.cihai() 跳过快捷方式创建
+     * - ReaderApplication.initPushSDK() 跳过推送初始化
+     * - QQReader 文件/Provider/协议诊断 hook
+     * - StubApp native fallback 注册
+     * - 解密产物 dump（debug 开关控制）
+     */
+    private fun installAppSpecificPostLoadHooks(
+        guestCl: ClassLoader,
+        packerResult: com.multiapp.core.hook.PackerLoadResult?,
+        dataDir: String?
+    ) {
+        val bridge = com.multiapp.core.hook.NativeHookBridge.getInstance()
+        val hookEngine = com.multiapp.core.hook.HookEngine.getInstance()
+        val lsplantOk = try { hookEngine.initLsplant(guestCl) } catch (_: Throwable) { false }
+        val jiaguLoaded = packerResult?.jiaguLoaded == true
+
+        // ── QQReader 文件/Provider/协议诊断 hook ──
+        try {
+            if (lsplantOk) {
+                val fileDiagOk = com.multiapp.core.hook.QqReaderFileJavaDiag.install(hookEngine)
+                logD("  QQReader java file diag installed: $fileDiagOk")
+                val providerDiagOk = com.multiapp.core.hook.QqReaderProviderDiag.install(hookEngine, guestCl)
+                logD("  QQReader provider diag installed: $providerDiagOk")
+                val protocolDiagOk = com.multiapp.core.hook.QqReaderProtocolDiag.install(hookEngine, guestCl)
+                logD("  QQReader protocol diag installed: $protocolDiagOk")
+                val eqctCompatOk = com.multiapp.core.hook.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
+                logD("  QQReader eqct plaintext compat installed: $eqctCompatOk")
+            }
+        } catch (e: Throwable) {
+            logD("  QQReader diag hooks skipped: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        // ── 跳过 Pangle 广告 SDK 初始化 ──
+        try {
+            val zeusUtilsClass = Class.forName(
+                "com.bytedance.android.dy.sdk.pangle.ZeusPlatformUtils", false, guestCl)
+            val initZeusMethod = zeusUtilsClass.declaredMethods.firstOrNull { it.name == "initZeus" }
+            if (initZeusMethod != null && lsplantOk) {
+                hookEngine.hookMethod(initZeusMethod,
+                    beforeCallback = { _, _ ->
+                        logD("  Hooked ZeusPlatformUtils.initZeus — skipping Pangle init")
+                        null
+                    }
+                )
+                logD("  Pangle initZeus hooked")
+            }
+        } catch (e: Throwable) {
+            logD("  Pangle hook skipped: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        // ── Hook ShortcutManager.cihai() 跳过快捷方式创建 ──
+        try {
+            val shortcutClass = Class.forName("com.qq.reader.shortcut.ShortcutManager", false, guestCl)
+            val cihaiMethod = shortcutClass.declaredMethods.firstOrNull { it.name == "cihai" }
+            if (cihaiMethod != null && lsplantOk) {
+                hookEngine.hookMethod(cihaiMethod,
+                    beforeCallback = { _, _ ->
+                        logD("  Hooked ShortcutManager.cihai — skipping shortcut creation")
+                        null
+                    }
+                )
+                logD("  ShortcutManager.cihai hooked")
+            }
+        } catch (e: Throwable) {
+            logD("  ShortcutManager hook skipped: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        // ── Hook ReaderApplication.initPushSDK() 跳过推送初始化 ──
+        try {
+            val readerAppClass = Class.forName("com.qq.reader.ReaderApplication", false, guestCl)
+            val initPushMethod = readerAppClass.declaredMethods.firstOrNull { it.name == "initPushSDK" }
+            if (initPushMethod != null && lsplantOk) {
+                hookEngine.hookMethod(initPushMethod,
+                    beforeCallback = { _, _ ->
+                        logD("  Hooked ReaderApplication.initPushSDK — skipping push init")
+                        null
+                    }
+                )
+                logD("  initPushSDK hooked")
+            }
+        } catch (e: Throwable) {
+            logD("  initPushSDK hook skipped: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        // ── StubApp native fallback ──
+        val callerClass = try {
+            Class.forName("com.stub.StubApp", false, guestCl)
+        } catch (_: Throwable) {
+            try { Class.forName("com.qihoo.util.StubApp", false, guestCl) } catch (_: Throwable) { null }
+        }
+        if (callerClass != null) {
+            val targetClass = callerClass.name
+            val stubFallbackMode = getSystemProperty("debug.multiapp.stubapp.fallback", "0")
+            if (jiaguLoaded && stubFallbackMode.equals("core", ignoreCase = true)) {
+                logD("  Registering StubApp core bootstrap methods")
+                try {
+                    bridge.registerStubCoreBootstrapMethods(guestCl, targetClass)
+                } catch (e: Throwable) {
+                    logW("  registerStubCoreBootstrapMethods exception: ${e.message}")
+                }
+            } else if (stubFallbackMode.equals("bootstrap", ignoreCase = true) ||
+                stubFallbackMode.equals("bootstrap_only", ignoreCase = true) ||
+                !jiaguLoaded
+            ) {
+                val reason = if (!jiaguLoaded) "jiagu native registration unavailable" else "explicit property"
+                logD("  Registering StubApp bootstrap methods only (jiaguLoaded=$jiaguLoaded, reason=$reason)")
+                try {
+                    bridge.registerStubBootstrapMethods(guestCl, targetClass)
+                } catch (e: Throwable) {
+                    logW("  registerStubBootstrapMethods exception: ${e.message}")
+                }
+            } else if (stubFallbackMode.equals("interface20", ignoreCase = true) ||
+                stubFallbackMode.equals("interface20_only", ignoreCase = true)
+            ) {
+                logD("  Registering StubApp interface20 only (jiaguLoaded=$jiaguLoaded)")
+                try {
+                    bridge.registerStubInterface20Only(guestCl, targetClass)
+                } catch (e: Throwable) {
+                    logW("  registerStubInterface20Only exception: ${e.message}")
+                }
+            } else if (isTruthyProperty("debug.multiapp.stubapp.fallback", false)) {
+                logD("  Registering full stub methods (jiaguLoaded=$jiaguLoaded)")
+                try {
+                    bridge.registerStubMethods(guestCl, targetClass)
+                } catch (e: Throwable) {
+                    logW("  registerStubMethods exception: ${e.message}")
+                }
+            } else {
+                logD("  StubApp native fallback disabled; preserving shell registrations")
+            }
+        }
+
+        // ── 解密产物 dump（仅 debug 开关开启时执行）──
+        try {
+            if (
+                java.lang.Boolean.getBoolean("multiapp.dump.enabled") ||
+                isTruthyProperty("debug.multiapp.dump", false)
+            ) {
+                val dumpBase = java.io.File(dataDir ?: "/data/local/tmp", "dump_output")
+                dumpBase.mkdirs()
+                val dexDumpDir = java.io.File(dumpBase, "dex"); dexDumpDir.mkdirs()
+                val soDumpDir = java.io.File(dumpBase, "lib"); soDumpDir.mkdirs()
+                logD("  P0 DUMP: dir=${dumpBase.absolutePath}, exists=${dumpBase.exists()}")
+
+                val dexCount = bridge.dumpDexFromClassLoader(guestCl, dexDumpDir)
+                val soCount = bridge.dumpLoadedLibraries(soDumpDir)
+
+                var fbCount = 0
+                val extDir = java.io.File(dataDir ?: "/data/local/tmp", "extracted_dex")
+                if (extDir.exists()) {
+                    extDir.listFiles()?.filter { it.name.endsWith(".dex") }?.forEach { f ->
+                        if (!java.io.File(dexDumpDir, f.name).exists()) {
+                            f.copyTo(java.io.File(dexDumpDir, f.name)); fbCount++
+                        }
+                    }
+                }
+                val origin = java.io.File(dataDir ?: "/data/local/tmp", "base.apk")
+                if (origin.exists()) origin.copyTo(java.io.File(dumpBase, "origin.apk"), overwrite = true)
+
+                val total = dexCount + fbCount
+                java.io.File(dumpBase, "dump_meta.txt").writeText(
+                    "native_dex=$dexCount\nfallback_dex=$fbCount\ntotal_dex=$total\nso=$soCount\ntime=${System.currentTimeMillis()}\n"
+                )
+                try {
+                    val sd = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOWNLOADS), "MultiApp_dump")
+                    sd.mkdirs()
+                    if (sd.exists()) { dumpBase.copyRecursively(sd, overwrite = true); logD("  P0 DUMP: copied to ${sd.absolutePath}") }
+                } catch (_: Throwable) {}
+                logD("  P0 DUMP COMPLETE: total_dex=$total, so=$soCount")
+            } else {
+                logD("  P0 DUMP disabled (set -Dmultiapp.dump.enabled=true to enable)")
+            }
+        } catch (e: Throwable) {
+            logD("  P0 DUMP FAILED: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        // DEX 诊断：检查 guest ClassLoader 实际加载了哪些 DEX
+        try {
+            val dexPathField = guestCl.javaClass.superclass?.getDeclaredField("pathList")
+            dexPathField?.isAccessible = true
+            val pathList = dexPathField?.get(guestCl)
+            val dexElementsField = pathList?.javaClass?.getDeclaredField("dexElements")
+            dexElementsField?.isAccessible = true
+            val dexElements = dexElementsField?.get(pathList) as? Array<*>
+            val dexPaths = dexElements?.map { elem ->
+                val f = elem?.javaClass?.getDeclaredField("dexFile")
+                f?.isAccessible = true
+                val dexFile = f?.get(elem)
+                dexFile?.toString() ?: "null"
+            } ?: emptyList()
+            logD("  DEX loaded: ${dexPaths.size} files: $dexPaths")
+        } catch (e: Throwable) {
+            logD("  DEX diagnostic failed: ${e.message}")
+        }
+    }
+
+    /**
      * 通过 JNI 调用 Runtime.nativeLoad 加载加固壳 native 库到 guest ClassLoader 命名空间。
      *
      * 为什么不能用 System.loadLibrary / System.load：
@@ -1532,6 +1751,15 @@ class LoaderFactory : AppComponentFactory() {
         }
         val originLibDir = java.io.File(libDirPath)
         if (!originLibDir.isDirectory) return
+
+        // ── PackerRuntime 诊断调用（与原有逻辑并行，仅记录结果） ──
+        try {
+            val dispatcher = com.multiapp.core.hook.PackerRuntimeDispatcher.getInstance()
+            val detected = dispatcher.detect(originLibDir, originApkPath)
+            logD("  PackerRuntime detection: ${detected?.name ?: "none"}")
+        } catch (e: Throwable) {
+            logD("  PackerRuntime detection skipped: ${e.javaClass.simpleName}: ${e.message}")
+        }
 
         val jiaguFile = java.io.File(originLibDir, "libjiagu_vip.so")
         if (!jiaguFile.exists()) {
