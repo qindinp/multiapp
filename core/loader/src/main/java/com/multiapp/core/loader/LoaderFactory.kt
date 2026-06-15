@@ -229,6 +229,8 @@ class LoaderFactory : AppComponentFactory() {
                         val originPkg = config?.originalPkg ?: guestPackageName ?: originAppInfo?.packageName ?: stubPkg
                         com.multiapp.core.identity.PackageIdentityHook.applyDirect(stubPkg, originPkg)
                         logD("  PackageIdentityHook installed: $stubPkg -> $originPkg")
+                        com.multiapp.core.identity.VirtualPackageManager.install(stubPkg, originPkg)
+                        logD("  VirtualPackageManager installed: $stubPkg -> $originPkg")
                     } catch (e: Throwable) {
                         logW("  PackageIdentityHook failed: ${e.message}")
                     }
@@ -1004,6 +1006,8 @@ class LoaderFactory : AppComponentFactory() {
         currentConfig = config
         logSignal("installing identity and activity start proxies")
         installApplicationInfoPackageManagerProxy(originApk, config)
+        com.multiapp.core.identity.VirtualPackageManager.install(config.stubPkg, config.originalPkg)
+        logD("  VirtualPackageManager installed in swapClassLoader")
         installActivityStartProxiesIfReady("swapClassLoader", activityThread)
         installNotificationManagerPackageProxy(config)
         logSignal("installed identity and activity start proxies")
