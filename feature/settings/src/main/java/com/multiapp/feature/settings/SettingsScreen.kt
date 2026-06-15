@@ -66,7 +66,31 @@ fun SettingsScreen(
                 buildType = uiState.buildType
             )
 
-            // Device identity section — real system data
+            // Theme section
+            SettingsSection(
+                title = "外观",
+                icon = Icons.Default.Palette,
+                iconTint = MaterialTheme.colorScheme.primary
+            ) {
+                ThemeSettingContent(
+                    currentMode = uiState.themeMode,
+                    onModeSelected = viewModel::setThemeMode
+                )
+            }
+
+            // Language section
+            SettingsSection(
+                title = "语言",
+                icon = Icons.Default.Language,
+                iconTint = MaterialTheme.colorScheme.secondary
+            ) {
+                LanguageSettingContent(
+                    currentLanguage = uiState.language,
+                    onLanguageSelected = viewModel::setLanguage
+                )
+            }
+
+            // Device identity section
             SettingsSection(
                 title = "设备身份模板",
                 icon = Icons.Default.PhoneAndroid,
@@ -75,13 +99,17 @@ fun SettingsScreen(
                 DeviceIdentityContent()
             }
 
-            // About section — storage usage instead of tech stack
+            // Storage section
             SettingsSection(
-                title = "存储使用",
+                title = "存储管理",
                 icon = Icons.Default.Storage,
                 iconTint = MaterialTheme.colorScheme.tertiary
             ) {
-                StorageContent()
+                StorageManageContent(
+                    cacheSize = uiState.cacheSize,
+                    isClearing = uiState.isCacheClearing,
+                    onClearCache = viewModel::clearCache
+                )
             }
 
             Spacer(modifier = Modifier.height(32.dp))
@@ -211,6 +239,111 @@ private fun InfoChip(
 }
 
 @Composable
+private fun ThemeSettingContent(
+    currentMode: ThemeMode,
+    onModeSelected: (ThemeMode) -> Unit
+) {
+    val options = listOf(
+        ThemeMode.SYSTEM to "跟随系统",
+        ThemeMode.LIGHT to "浅色",
+        ThemeMode.DARK to "深色"
+    )
+
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            options.forEach { (mode, label) ->
+                val selected = currentMode == mode
+                FilterChip(
+                    selected = selected,
+                    onClick = { onModeSelected(mode) },
+                    label = {
+                        Text(
+                            text = label,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal
+                        )
+                    },
+                    leadingIcon = if (selected) {
+                        { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                    } else null,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LanguageSettingContent(
+    currentLanguage: Language,
+    onLanguageSelected: (Language) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val options = listOf(
+        Language.SYSTEM to "跟随系统",
+        Language.CHINESE to "简体中文",
+        Language.ENGLISH to "English"
+    )
+    val currentLabel = options.firstOrNull { it.first == currentLanguage }?.second ?: "跟随系统"
+
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "应用语言",
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier.weight(1f)
+            )
+            Box {
+                OutlinedButton(
+                    onClick = { expanded = true },
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text(
+                        text = currentLabel,
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Icon(
+                        Icons.Default.ArrowDropDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = expanded,
+                    onDismissRequest = { expanded = false }
+                ) {
+                    options.forEach { (lang, label) ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = label,
+                                    fontWeight = if (currentLanguage == lang) FontWeight.Bold else FontWeight.Normal
+                                )
+                            },
+                            onClick = {
+                                onLanguageSelected(lang)
+                                expanded = false
+                            },
+                            leadingIcon = if (currentLanguage == lang) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp)) }
+                            } else null
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun DeviceIdentityContent() {
     Column {
         DeviceIdentityItem(
@@ -280,7 +413,11 @@ private fun DeviceIdentityItem(
 }
 
 @Composable
-private fun StorageContent() {
+private fun StorageManageContent(
+    cacheSize: String,
+    isClearing: Boolean,
+    onClearCache: () -> Unit
+) {
     val storageInfo = remember {
         try {
             val stat = StatFs(Environment.getDataDirectory().path)
@@ -345,6 +482,61 @@ private fun StorageContent() {
             label = "可用空间",
             value = formatBytes(availableBytes)
         )
+
+        SettingsDivider()
+
+        // Cache section
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    Icons.Default.CleaningServices,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "应用缓存",
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    text = cacheSize.ifEmpty { "计算中..." },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            OutlinedButton(
+                onClick = onClearCache,
+                enabled = !isClearing && cacheSize.isNotEmpty() && cacheSize != "0 B",
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                if (isClearing) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+                Text(
+                    text = if (isClearing) "清理中" else "清除缓存",
+                    style = MaterialTheme.typography.labelLarge
+                )
+            }
+        }
     }
 }
 
@@ -387,7 +579,5 @@ private fun StorageItem(
         )
     }
 }
-
-
 
 // SettingsSection, SettingsDivider 已提取到 core/designsystem/CommonComponents.kt
