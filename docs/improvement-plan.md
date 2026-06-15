@@ -385,3 +385,63 @@ private fun rewritePackagePath(result: Any?, originalPkg: String): Any? {
 | 阶段四 | Week 7-8 | 集成测试、文档完善 |
 
 **总计**: 8 周，从 Alpha 推进到 Beta
+
+---
+
+## 新增特性：LSPatch/LSPosed 模块兼容
+
+### 需求背景
+
+用户希望 MultiApp 能够兼容 LSPosed 模块，将 LSPatch 的功能集成进来。
+
+### 能力差距分析
+
+| 层次 | LSPatch | MultiApp | 差距 |
+|------|---------|----------|------|
+| ART Hook 引擎 | LSPlant | LSPlant 6.4 + ShadowHook | ✅ 已对齐 |
+| Hidden API 绕过 | HiddenApiBypass | 同一库 (6.1) | ✅ 已对齐 |
+| **Xposed API 实现** | XposedBridge + XC_MethodHook | **完全没有** | ❌ 核心缺失 |
+| **模块加载机制** | ModuleLoader + xposed_init | **没有** | ❌ 核心缺失 |
+| 应用虚拟化 | 无 | StubBuilder + LoaderFactory | ✅ MultiApp 独有 |
+
+### 三阶段实现方案
+
+**阶段一：最小可用（嵌入式模块）**
+- 新增 `core/xposed/` 模块
+- 实现 XposedBridge、XC_MethodHook、XC_LoadPackage、XposedHelpers
+- 实现 ModuleLoader（读取 xposed_init，InMemoryDexClassLoader 加载）
+- 扩展 StubBuilder 支持嵌入模块 APK
+- 工作量：16h
+
+**阶段二：完善 API 兼容**
+- findAndHookMethod() 等便利方法
+- invokeOriginalMethod() 桥接
+- 模块 SharedPreferences 隔离
+- 工作量：11h
+
+**阶段三：Manager 集成（可选）**
+- ILSPApplicationService 接口实现
+- 远程模块加载
+- 工作量：11h
+
+### 架构设计
+
+```
+Xposed API Layer (XposedBridge / XC_MethodHook)
+        ↓ 桥接
+MultiApp HookEngine (hookMethodPassThrough → LSPlant)
+        ↓
+NativeHookBridge (LSPlant + ShadowHook + GOT Hook)
+```
+
+### 时间线
+
+| 阶段 | 时间 | 交付物 |
+|------|------|--------|
+| Xposed 阶段一 | Week 9-10 | core/xposed 模块、嵌入式模块加载 |
+| Xposed 阶段二 | Week 11-12 | API 兼容完善 |
+| Xposed 阶段三 | Week 13-14 | Manager 集成（可选） |
+
+### 优先级
+
+建议先完成阶段一，验证核心架构后再扩展。
