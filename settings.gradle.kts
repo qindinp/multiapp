@@ -36,6 +36,7 @@ include(":core:loader")
 include(":core:stub")
 include(":core:instance")
 include(":core:installer")
+include(":core:workprofile")
 
 // Feature modules
 include(":feature:launcher")
