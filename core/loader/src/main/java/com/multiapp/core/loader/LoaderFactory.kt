@@ -17,6 +17,8 @@ import com.multiapp.core.loader.stages.NativeBaseHooksStage
 import com.multiapp.core.loader.stages.PackageIdentityHooksStage
 import com.multiapp.core.loader.stages.RuntimeConfigStage
 import dalvik.system.PathClassLoader
+import de.robv.android.xposed.ModuleLoader
+import de.robv.android.xposed.XposedBridgeImpl
 import java.io.File
 import java.lang.reflect.Field
 import java.util.zip.ZipFile
@@ -178,6 +180,9 @@ class LoaderFactory : AppComponentFactory() {
     private var activityTaskManagerProxyInstalled = false
 
     @Volatile
+    private var moduleLoader: ModuleLoader? = null
+
+    @Volatile
     private var notificationManagerProxyInstalled = false
 
     private val initLock = Any()
@@ -308,6 +313,9 @@ class LoaderFactory : AppComponentFactory() {
             val app = appClass.getDeclaredConstructor().newInstance() as Application
             logD("  Application created OK: ${app.javaClass.name}")
 
+            // ★ ModuleLoader 集成：加载 Xposed 模块并分发 loadPackage 事件
+            tryInitModuleLoader(realCl, app)
+
             app
         } catch (e: Exception) {
             logE("FATAL: cannot create Application $effectiveClassName (original: $className)", e)
@@ -322,6 +330,57 @@ class LoaderFactory : AppComponentFactory() {
                 try { writeDebugLogToFile(cl) } catch (_: Exception) {}
                 throw RuntimeException("LoaderFactory POC failed: ${e.message}", e)
             }
+        }
+    }
+
+    private fun tryInitModuleLoader(classLoader: ClassLoader, app: Application) {
+        if (moduleLoader != null) return
+        try {
+            val config = currentConfig
+            if (config == null) {
+                logD("  ModuleLoader skipped: config is null")
+                return
+            }
+
+            val hookEngine = com.multiapp.core.hook.HookEngine.getInstance()
+            val bridgeImpl = XposedBridgeImpl(hookEngine)
+            val loader = ModuleLoader(app, bridgeImpl)
+            moduleLoader = loader
+
+            val modulesDir = File(app.applicationInfo.dataDir, "xposed_modules")
+            if (!modulesDir.isDirectory) {
+                logD("  ModuleLoader: no modules directory at ${modulesDir.absolutePath}")
+                return
+            }
+
+            val moduleApks = modulesDir.listFiles { f -> f.isFile && f.name.endsWith(".apk") }
+            if (moduleApks.isNullOrEmpty()) {
+                logD("  ModuleLoader: no module APKs in ${modulesDir.absolutePath}")
+                return
+            }
+
+            var loadedCount = 0
+            for (apk in moduleApks) {
+                try {
+                    val ok = loader.loadModule(apk.absolutePath, classLoader)
+                    if (ok) loadedCount++
+                    logD("  ModuleLoader: ${apk.name} loaded=$ok")
+                } catch (e: Throwable) {
+                    logW("  ModuleLoader: failed to load ${apk.name}: ${e.javaClass.simpleName}: ${e.message}")
+                }
+            }
+
+            if (loadedCount > 0) {
+                val packageName = config.originalPkg
+                val processName = currentProcessName()
+                val appInfo = app.applicationInfo
+                loader.dispatchLoadPackage(packageName, processName, classLoader, appInfo)
+                logD("  ModuleLoader: dispatchLoadPackage for $packageName, $loadedCount module(s) dispatched")
+            } else {
+                logD("  ModuleLoader: no modules loaded, skipping dispatchLoadPackage")
+            }
+        } catch (e: Throwable) {
+            logW("  ModuleLoader init failed: ${e.javaClass.simpleName}: ${e.message}")
         }
     }
 
@@ -1204,6 +1263,9 @@ class LoaderFactory : AppComponentFactory() {
 
         guestClassLoader = newClassLoader
         logD("  swapClassLoader complete")
+
+        // 加载嵌入的 Xposed 模块（ClassLoader 已就绪）
+        loadXposedModules(config, realGuestClassLoader)
     }
 
     private fun applyOriginApplicationInfoFields(
@@ -3684,6 +3746,104 @@ class LoaderFactory : AppComponentFactory() {
         snapshot.takeLast(120).forEachIndexed { index, line ->
             Log.e(TAG, "DIAG-DUMP[$index] $line")
         }
+    }
+
+    /**
+     * 加载嵌入的 Xposed 模块
+     *
+     * 从 Stub APK 的 assets/xposed_modules/ 目录提取模块 APK，
+     * 使用 ModuleLoader 读取 xposed_init 并加载模块类。
+     * 模块的 dispatchLoadPackage 在 instantiateApplication 中触发。
+     */
+    private fun loadXposedModules(config: PocConfig, guestCl: ClassLoader) {
+        try {
+            val apkInfo = try {
+                val at = Class.forName("android.app.ActivityThread")
+                    .getDeclaredMethod("currentActivityThread")
+                    .apply { isAccessible = true }
+                    .invoke(null)
+                val mBound = at?.javaClass?.getDeclaredField("mBoundApplication")
+                    ?.apply { isAccessible = true }?.get(at)
+                val ai = mBound?.javaClass?.getDeclaredField("appInfo")
+                    ?.apply { isAccessible = true }?.get(mBound) as? android.content.pm.ApplicationInfo
+                ai
+            } catch (_: Throwable) { null }
+
+            if (apkInfo == null) {
+                logD("  Xposed: cannot determine stub APK info, skip")
+                return
+            }
+
+            val extractedModules = extractXposedModules(apkInfo.sourceDir, apkInfo.dataDir)
+            if (extractedModules.isEmpty()) {
+                logD("  Xposed: no embedded modules found")
+                return
+            }
+
+            val bridgeImpl = XposedBridgeImpl(com.multiapp.core.hook.HookEngine.getInstance())
+            val context = try {
+                val at = Class.forName("android.app.ActivityThread")
+                    .getDeclaredMethod("currentActivityThread")
+                    .apply { isAccessible = true }
+                    .invoke(null)
+                at?.javaClass?.getDeclaredMethod("getSystemContext")
+                    ?.apply { isAccessible = true }?.invoke(at) as? android.content.Context
+            } catch (_: Throwable) { null }
+
+            if (context == null) {
+                logW("  Xposed: system context unavailable, skip module loading")
+                return
+            }
+
+            val loader = ModuleLoader(context, bridgeImpl)
+            var loadedCount = 0
+            for (moduleApk in extractedModules) {
+                val ok = loader.loadModule(moduleApk.absolutePath, guestCl)
+                if (ok) loadedCount++
+                logD("  Xposed: loaded ${moduleApk.name}: $ok")
+            }
+
+            if (loadedCount > 0) {
+                moduleLoader = loader
+                logD("  Xposed: $loadedCount module(s) loaded, dispatching loadPackage...")
+                loader.dispatchLoadPackage(
+                    packageName = config.originalPkg,
+                    processName = currentProcessName(),
+                    classLoader = guestCl,
+                    appInfo = apkInfo
+                )
+                logD("  Xposed: dispatchLoadPackage done for ${config.originalPkg}")
+            }
+        } catch (e: Throwable) {
+            logW("  Xposed module loading failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * 从 Stub APK 中提取嵌入的 Xposed 模块 APK 到 dataDir/xposed_modules/
+     */
+    private fun extractXposedModules(stubApkPath: String, dataDir: String): List<File> {
+        val outputDir = File(dataDir, "xposed_modules")
+        outputDir.mkdirs()
+        val extracted = mutableListOf<File>()
+        try {
+            ZipFile(stubApkPath).use { zip ->
+                zip.entries().toList()
+                    .filter { it.name.startsWith("assets/xposed_modules/") && it.name.endsWith(".apk") }
+                    .forEach { entry ->
+                        val outFile = File(outputDir, File(entry.name).name)
+                        if (!outFile.exists() || outFile.length() != entry.size) {
+                            zip.getInputStream(entry).use { input ->
+                                outFile.outputStream().use { output -> input.copyTo(output) }
+                            }
+                        }
+                        extracted.add(outFile)
+                    }
+            }
+        } catch (e: Throwable) {
+            logW("  Xposed: module extraction failed: ${e.message}")
+        }
+        return extracted
     }
 
     /**

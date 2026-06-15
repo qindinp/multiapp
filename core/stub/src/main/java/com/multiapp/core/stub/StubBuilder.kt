@@ -36,6 +36,8 @@ class StubBuilder(
         private const val CONFIG_JSON_ENTRY = "assets/multiapp_config.json"
         private const val MANIFEST_ENTRY = "AndroidManifest.xml"
         private const val DEX_ENTRY = "classes.dex"
+        private const val XPOSED_MODULES_DIR = "assets/xposed_modules/"
+        private const val XPOSED_INIT_ENTRY = "assets/xposed_init"
         private val HOOK_NATIVE_LIBS = listOf(
             "libmultiapp-native.so",
             "libshadowhook.so",
@@ -122,6 +124,9 @@ class StubBuilder(
 
             // 6. 组装 APK (含 patched DEX)
             val patchedDexFiles = config.patchedDexPaths.map { File(it) }.filter { it.exists() }
+            val xposedModuleFiles = config.xposedModules.map { File(it) }.filter { it.exists() }
+            val xposedInitEntries = collectXposedInitEntries(xposedModuleFiles)
+            Log.w("StubBuilder", "xposed modules: ${xposedModuleFiles.size}, init entries: $xposedInitEntries")
             val unsignedApk = File(workDir, "stub-unsigned.apk")
             assembleApk(
                 outputFile = unsignedApk,
@@ -131,7 +136,9 @@ class StubBuilder(
                 originalApk = originApk,  // 未修改的原始 APK（用于完整性校验重定向）
                 configFile = configFile,
                 iconFile = iconFile,
-                patchedDexFiles = patchedDexFiles
+                patchedDexFiles = patchedDexFiles,
+                xposedModuleFiles = xposedModuleFiles,
+                xposedInitEntries = xposedInitEntries
             )
 
             // 7. zipalign 对齐（必须在签名前）
@@ -364,6 +371,29 @@ class StubBuilder(
     }
 
     /**
+     * 从 Xposed 模块 APK 中读取 xposed_init 入口类名
+     *
+     * @param moduleFiles 模块 APK 文件列表
+     * @return 入口类名列表
+     */
+    private fun collectXposedInitEntries(moduleFiles: List<File>): List<String> {
+        val entries = mutableListOf<String>()
+        for (moduleApk in moduleFiles) {
+            try {
+                ZipFile(moduleApk).use { zip ->
+                    val entry = zip.getEntry("assets/xposed_init") ?: return@use
+                    zip.getInputStream(entry).bufferedReader().readLines()
+                        .filter { it.isNotBlank() && !it.startsWith("#") }
+                        .forEach { entries.add(it.trim()) }
+                }
+            } catch (e: Throwable) {
+                Log.w("StubBuilder", "Failed to read xposed_init from ${moduleApk.name}: ${e.message}")
+            }
+        }
+        return entries
+    }
+
+    /**
      * 使用 ManifestRewriter 增量修改原 APK 的二进制 manifest
      */
     private fun rewriteManifest(originApk: File, config: StubConfig, manifest: ManifestParser.ParsedManifest): ByteArray {
@@ -386,7 +416,9 @@ class StubBuilder(
         originalApk: File? = null,
         configFile: File,
         iconFile: File?,
-        patchedDexFiles: List<File> = emptyList()
+        patchedDexFiles: List<File> = emptyList(),
+        xposedModuleFiles: List<File> = emptyList(),
+        xposedInitEntries: List<String> = emptyList()
     ) {
         Timber.d("StubBuilder: assembling APK -> ${outputFile.name}")
 
@@ -445,6 +477,26 @@ class StubBuilder(
                 }
                 zos.closeEntry()
                 Timber.d("StubBuilder: embedded patched DEX: $entryName (${dexFile.length()} bytes)")
+            }
+
+            // assets/xposed_modules/*.apk (嵌入的 Xposed 模块)
+            for (moduleApk in xposedModuleFiles) {
+                val entryName = "$XPOSED_MODULES_DIR${moduleApk.name}"
+                zos.putNextEntry(ZipEntry(entryName))
+                moduleApk.inputStream().buffered().use { input ->
+                    input.copyTo(zos)
+                }
+                zos.closeEntry()
+                Timber.d("StubBuilder: embedded Xposed module: $entryName (${moduleApk.length()} bytes)")
+            }
+
+            // assets/xposed_init (模块入口类名列表)
+            if (xposedInitEntries.isNotEmpty()) {
+                val initContent = xposedInitEntries.joinToString("\n")
+                zos.putNextEntry(ZipEntry(XPOSED_INIT_ENTRY))
+                zos.write(initContent.toByteArray())
+                zos.closeEntry()
+                Timber.d("StubBuilder: wrote xposed_init with ${xposedInitEntries.size} entries")
             }
 
             // ★ 复制 origin APK 的所有 assets 到 stub APK

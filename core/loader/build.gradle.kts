@@ -27,6 +27,8 @@ dependencies {
     implementation(project(":core:hook"))
     implementation(project(":core:identity"))
     implementation(project(":core:manifest"))
+    implementation(project(":core:xposed"))
+    implementation(project(":core:xposed"))
 
     implementation(libs.core.ktx)
     implementation(libs.timber)

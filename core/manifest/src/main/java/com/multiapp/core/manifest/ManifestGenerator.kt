@@ -113,7 +113,8 @@ data class StubConfig(
     val originalSignatures: List<String>,
     val authorityMap: Map<String, String>,
     val deviceIdentity: DeviceIdentityConfig,
-    val patchedDexPaths: List<String> = emptyList()
+    val patchedDexPaths: List<String> = emptyList(),
+    val xposedModules: List<String> = emptyList()
 )
 
 data class DeviceIdentityConfig(
