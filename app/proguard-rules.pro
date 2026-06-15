@@ -16,6 +16,7 @@
 
 # --- LoaderFactory (appComponentFactory, called by system via reflection) ---
 -keep class com.multiapp.core.loader.LoaderFactory { *; }
+-keep class com.multiapp.core.loader.LoaderFactory$SignatureDisguiseManager { *; }
 -keep class com.multiapp.core.loader.LoadedApkSwapper { *; }
 -keep class com.multiapp.core.loader.NativeLibHandler { *; }
 

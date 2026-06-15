@@ -1199,3 +1199,44 @@ TtsPreloadChapterInfoTask URL retry
 OnlineTag.f trustedId retry
 copying *_ALL_o or zero-byte *_s
 ```
+
+## 2026-06-15 QQ Reader 收敛总结 (v174-v177)
+
+### 关键突破
+
+v174-v177 打通了 QQ 阅读分身免费章节正文加载的完整链路：
+
+| 版本 | 突破 | 证据 |
+|------|------|------|
+| v172 | `EasyEncrypt.decrypt` native 补齐 | `.eqct` 文件成功生成 (7757 bytes) |
+| v173 | 定位 `.eqct` 被二次解密删除 | delete_stack 指向 `qdae.search` 失败删除 |
+| **v174** | **`.eqct` 明文读取兼容** | **正文首次显示：截图确认 "重生成妖，我修成真龙"** |
+| v175 | 标题修复 + 默认启用收敛 | 标题恢复正常显示 |
+| v176 | 登录闪退定位 | `Theme.AppCompat` 主题缺失 |
+| v177 | 登录主题早期修复 | `activity.setTheme(themeId)` 先于 AppCompat 检查 |
+
+### v174 核心技术方案
+
+```text
+wxmini 免费章节接口 → 明文正文 → 写入 .eqct
+  ↓
+QqReaderEqctPlaintextCompat hook
+  ↓
+绕过原解密流程，直接返回 .eqct 字节
+  ↓
+阅读引擎正常渲染
+```
+
+### 当前状态
+
+- 免费章节正文链路已连续可用：下载 → materialize → 保留 → 读取 → 渲染
+- 无 FATAL EXCEPTION、无 .eqct 删除、无 UnsatisfiedLinkError
+- 已验证多本书、多章节连续翻页
+
+### 后续重点
+
+1. 登录链路验证 (v177 待测)
+2. 付费章节边界处理
+3. 诊断开关收敛 (关闭冗余日志)
+4. 冷启动 / 换书 / 未缓存章节稳定性
+5. 离线 patch 脚本增加 manifest 主题重建步骤

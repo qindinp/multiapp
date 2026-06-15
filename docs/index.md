@@ -15,6 +15,11 @@ Use this page as the current documentation entry point.
   `LoaderFactory`, `Runtime.nativeLoad`, native search paths, and provider
   fallback.
 
+## Architecture
+
+- `ARCHITECTURE.md`: 项目架构图、模块职责说明、核心流程说明。
+- `docs\architecture-review.md`: 架构审查报告、依赖分析、改进建议。
+
 ## Historical Analysis
 
 - `docs\jiagu-bypass-analysis.md`: Jiagu/360 shell loading experiments and

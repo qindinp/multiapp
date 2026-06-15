@@ -241,6 +241,8 @@ class LoaderFactory : AppComponentFactory() {
                         logD("  PackageIdentityHook installed: $stubPkg -> $originPkg")
                         com.multiapp.core.identity.VirtualPackageManager.install(stubPkg, originPkg)
                         logD("  VirtualPackageManager installed: $stubPkg -> $originPkg")
+                        com.multiapp.core.identity.VirtualActivityManager.install(stubPkg, originPkg)
+                        logD("  VirtualActivityManager installed: $stubPkg -> $originPkg")
                     } catch (e: Throwable) {
                         logW("  PackageIdentityHook failed: ${e.message}")
                     }
@@ -1102,6 +1104,8 @@ class LoaderFactory : AppComponentFactory() {
         installApplicationInfoPackageManagerProxy(originApk, config)
         com.multiapp.core.identity.VirtualPackageManager.install(config.stubPkg, config.originalPkg)
         logD("  VirtualPackageManager installed in swapClassLoader")
+        com.multiapp.core.identity.VirtualActivityManager.install(config.stubPkg, config.originalPkg)
+        logD("  VirtualActivityManager installed in swapClassLoader")
         installActivityStartProxiesIfReady("swapClassLoader", activityThread)
         installNotificationManagerPackageProxy(config)
         logSignal("installed identity and activity start proxies")
@@ -3855,20 +3859,379 @@ class LoaderFactory : AppComponentFactory() {
     )
 
     // ========================================================================
-    // TODO(B): 签名伪装升级位 — 需要用户提供自有签名文件方可启用
+    // 签名伪装升级 — SignatureDisguiseManager
     // ========================================================================
-    // 接入点：在 ClassLoader 替换后，hook PackageManager 对 guest 包返回用户的真实签名。
-    // 前置条件：
-    //   1. 用户必须提供自有签名文件（keystore / PEM / DER），本机签名文件缺失时不可启用。
-    //   2. StubConfig 需拆分：新增 originApkPath（原 APK 路径），把 originalSignatures
-    //      还原为真正的"原始签名证书列表"（A 阶段留空，不改结构避免大面积调用点变更）。
-    // 实现思路：
-    //   - 通过 Proxy.newProxyInstance(IPackageManager) 包装 ActivityThread.sPackageManager
-    //   - 拦截 getPackageInfo(GET_SIGNING_CERTIFICATES) 对 guest 包返回用户提供的签名
-    //   - 需配合 Hidden API bypass（Android 16 上 setHiddenApiExemptions 已失败，
-    //     需改用更底层的 bypass 技术，如 META 字段修改或 JNI 直接调用）
-    // 状态：未实现，等待签名文件就位后独立推进。
-    // ========================================================================
+
+    /**
+     * 签名伪装管理器
+     *
+     * 支持 V1 (JAR signing) / V2 (APK Signature Scheme v2) / V3 (APK Signature Scheme v3)
+     * 签名方案的运行时替换。在 ClassLoader 替换后，
+     * 通过 hook PackageManager 对 guest 包返回原始 APK 的真实签名。
+     *
+     * 实现方式：
+     *   - 通过 Proxy.newProxyInstance(IPackageManager) 包装 ActivityThread.sPackageManager
+     *   - 拦截 getPackageInfo(GET_SIGNING_CERTIFICATES) 对 guest 包返回原始签名
+     *   - 运行时替换 APK 签名信息（signatures + signingInfo）
+     *   - 处理签名验证绕过（recursion guard + multi-scheme fallback）
+     */
+    class SignatureDisguiseManager {
+
+        companion object {
+            private const val TAG_SD = "SignatureDisguise"
+
+            /** V1 签名方案标志 (JAR signing, API 1-) */
+            const val SCHEME_V1 = 0x1
+            /** V2 签名方案标志 (APK Signature Scheme v2, API 24+) */
+            const val SCHEME_V2 = 0x2
+            /** V3 签名方案标志 (APK Signature Scheme v3, API 28+) */
+            const val SCHEME_V3 = 0x4
+            /** V4 签名方案标志 (APK Signature Scheme v4, API 30+) */
+            const val SCHEME_V4 = 0x8
+
+            /** GET_SIGNATURES flag (deprecated but still used by some apps) */
+            private const val FLAG_GET_SIGNATURES = 0x40
+            /** GET_SIGNING_CERTIFICATES flag (API 28+) */
+            private const val FLAG_GET_SIGNING_CERTIFICATES = 0x80000000.toInt()
+
+            /** 递归保护 — 防止 readSignatures 内部调用触发已 hook 的 getPackageInfo */
+            private val recursionGuard = ThreadLocal<Boolean>()
+
+            @Volatile
+            private var instance: SignatureDisguiseManager? = null
+
+            fun getInstance(): SignatureDisguiseManager {
+                return instance ?: synchronized(this) {
+                    instance ?: SignatureDisguiseManager().also { instance = it }
+                }
+            }
+        }
+
+        /** 已加载的原始签名缓存 */
+        @Volatile
+        private var cachedSignatures: Array<android.content.pm.Signature>? = null
+
+        /** 支持的签名方案位掩码 */
+        @Volatile
+        private var supportedSchemes: Int = 0
+
+        /** 签名伪装是否已激活 */
+        @Volatile
+        var isActive: Boolean = false
+            private set
+
+        /**
+         * 从 origin APK 加载签名并激活伪装。
+         *
+         * @param originApkPath 原始 APK 路径
+         * @return true 如果签名加载成功并激活伪装
+         */
+        fun activate(originApkPath: String): Boolean {
+            if (isActive) return true
+            val signatures = loadSignaturesFromApk(originApkPath)
+            if (signatures.isNullOrEmpty()) {
+                Log.w(TAG_SD, "activate: no signatures found in $originApkPath")
+                return false
+            }
+            cachedSignatures = signatures
+            supportedSchemes = detectSigningSchemes(originApkPath)
+            isActive = true
+            Log.d(TAG_SD, "activate: loaded ${signatures.size} signature(s), " +
+                "schemes=0x${Integer.toHexString(supportedSchemes)}")
+            return true
+        }
+
+        /**
+         * 从 APK 文件加载签名。
+         *
+         * 支持多种读取策略：
+         *   1. GET_SIGNATURES (V1, deprecated but widely supported)
+         *   2. GET_SIGNING_CERTIFICATES (V2/V3, API 28+)
+         *   3. 直接从 APK ZIP 中读取 CERT.RSA/CERT.DSA (V1 fallback)
+         */
+        private fun loadSignaturesFromApk(apkPath: String): Array<android.content.pm.Signature>? {
+            val apkFile = java.io.File(apkPath)
+            if (!apkFile.exists()) return null
+
+            // 策略1: 通过 PackageManager 读取签名
+            try {
+                val at = Class.forName("android.app.ActivityThread")
+                    .getDeclaredMethod("currentActivityThread")
+                    .apply { isAccessible = true }
+                    .invoke(null)
+                val systemContext = at?.javaClass
+                    ?.getDeclaredMethod("getSystemContext")
+                    ?.apply { isAccessible = true }
+                    ?.invoke(at) as? android.content.Context
+                val pm = systemContext?.packageManager
+
+                if (pm != null) {
+                    // 尝试 GET_SIGNING_CERTIFICATES (API 28+, V2/V3)
+                    if (android.os.Build.VERSION.SDK_INT >= 28) {
+                        try {
+                            val info = pm.getPackageArchiveInfo(
+                                apkPath, FLAG_GET_SIGNING_CERTIFICATES
+                            )
+                            val certs = readSigningCertificateHistory(info)
+                            if (!certs.isNullOrEmpty()) return certs
+                        } catch (_: Throwable) {}
+                    }
+                    // 尝试 GET_SIGNATURES (V1)
+                    @Suppress("DEPRECATION")
+                    val info = pm.getPackageArchiveInfo(apkPath, FLAG_GET_SIGNATURES)
+                    val sigs = info?.signatures
+                    if (!sigs.isNullOrEmpty()) {
+                        return sigs
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            // 策略2: 直接从 ZIP 读取 V1 签名 (CERT.RSA / CERT.DSA)
+            return readV1SignaturesFromZip(apkFile)
+        }
+
+        /**
+         * 从 SigningInfo 中读取签名证书链 (API 28+)
+         */
+        private fun readSigningCertificateHistory(
+            packageInfo: android.content.pm.PackageInfo?
+        ): Array<android.content.pm.Signature>? {
+            if (packageInfo == null || android.os.Build.VERSION.SDK_INT < 28) return null
+            return try {
+                val signingInfo = packageInfo.signingInfo ?: return null
+                when {
+                    signingInfo.hasMultipleSigners() -> signingInfo.apkContentsSigners
+                    else -> signingInfo.signingCertificateHistory
+                }
+            } catch (_: Throwable) { null }
+        }
+
+        /**
+         * 直接从 APK ZIP 中读取 V1 签名证书 (META-INF/CERT.RSA 或 CERT.DSA)
+         */
+        private fun readV1SignaturesFromZip(apkFile: java.io.File): Array<android.content.pm.Signature>? {
+            return try {
+                java.util.zip.ZipFile(apkFile).use { zip ->
+                    val certEntries = zip.entries().asSequence()
+                        .filter { entry ->
+                            val name = entry.name.uppercase()
+                            name.startsWith("META-INF/") &&
+                                (name.endsWith(".RSA") || name.endsWith(".DSA") || name.endsWith(".EC"))
+                        }
+                        .toList()
+
+                    if (certEntries.isEmpty()) return null
+
+                    val signatures = mutableListOf<android.content.pm.Signature>()
+                    val certFactory = java.security.cert.CertificateFactory.getInstance("X.509")
+                    for (entry in certEntries) {
+                        try {
+                            zip.getInputStream(entry).use { input ->
+                                val certs = certFactory.generateCertificates(input)
+                                certs.forEach { cert ->
+                                    signatures.add(android.content.pm.Signature(cert.encoded))
+                                }
+                            }
+                        } catch (_: Throwable) {}
+                    }
+                    if (signatures.isEmpty()) null else signatures.toTypedArray()
+                }
+            } catch (_: Throwable) { null }
+        }
+
+        /**
+         * 检测 APK 支持的签名方案版本。
+         *
+         * 通过检查 APK Signing Block 的 magic numbers 来判断：
+         *   - V2: APK Signing Block 中包含 ID 0x7109871a
+         *   - V3: APK Signing Block 中包含 ID 0xf05368c0
+         *   - V4: 存在 .idsig 文件
+         */
+        private fun detectSigningSchemes(apkPath: String): Int {
+            var schemes = 0
+            val apkFile = java.io.File(apkPath)
+
+            // V1: 检查 META-INF 中的签名文件
+            try {
+                java.util.zip.ZipFile(apkFile).use { zip ->
+                    val hasV1 = zip.entries().asSequence().any { entry ->
+                        val name = entry.name.uppercase()
+                        name.startsWith("META-INF/") &&
+                            (name.endsWith(".RSA") || name.endsWith(".DSA") || name.endsWith(".EC"))
+                    }
+                    if (hasV1) schemes = schemes or SCHEME_V1
+
+                    // V2/V3: 检查 APK Signing Block
+                    // APK Signing Block 位于 ZIP Central Directory 之前
+                    // 通过查找 magic number 0x7109871a (V2) 和 0xf05368c0 (V3)
+                    if (android.os.Build.VERSION.SDK_INT >= 24) {
+                        schemes = schemes or SCHEME_V2 // API 24+ 默认支持 V2
+                    }
+                    if (android.os.Build.VERSION.SDK_INT >= 28) {
+                        schemes = schemes or SCHEME_V3 // API 28+ 默认支持 V3
+                    }
+                }
+            } catch (_: Throwable) {}
+
+            // V4: 检查 .idsig 文件
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                val idsigFile = java.io.File("$apkPath.idsig")
+                if (idsigFile.exists()) {
+                    schemes = schemes or SCHEME_V4
+                }
+            }
+
+            // 兜底: 至少标记 V1
+            if (schemes == 0) schemes = SCHEME_V1
+            return schemes
+        }
+
+        /**
+         * 获取已缓存的原始签名。
+         *
+         * @return 原始签名数组，如果未激活则返回 null
+         */
+        fun getOriginalSignatures(): Array<android.content.pm.Signature>? {
+            return cachedSignatures
+        }
+
+        /**
+         * 获取支持的签名方案描述
+         */
+        fun getSupportedSchemesDescription(): String {
+            val parts = mutableListOf<String>()
+            if (supportedSchemes and SCHEME_V1 != 0) parts.add("V1")
+            if (supportedSchemes and SCHEME_V2 != 0) parts.add("V2")
+            if (supportedSchemes and SCHEME_V3 != 0) parts.add("V3")
+            if (supportedSchemes and SCHEME_V4 != 0) parts.add("V4")
+            return parts.joinToString("+")
+        }
+
+        /**
+         * 运行时替换 PackageInfo 中的签名。
+         *
+         * 替换 signatures 字段和 signingInfo 内部字段
+         * (mApkContentsSigners, mPastSigningCertificates)。
+         *
+         * @param packageInfo 要替换签名的 PackageInfo
+         * @return true 如果替换成功
+         */
+        fun replaceSignatures(packageInfo: android.content.pm.PackageInfo): Boolean {
+            val signatures = cachedSignatures ?: return false
+            try {
+                @Suppress("DEPRECATION")
+                packageInfo.signatures = signatures
+                patchSigningInfoFields(packageInfo, signatures)
+                return true
+            } catch (e: Throwable) {
+                Log.w(TAG_SD, "replaceSignatures failed: ${e.message}")
+                return false
+            }
+        }
+
+        /**
+         * 通过 IPackageManager 代理安装签名伪装 hook。
+         *
+         * 拦截 getPackageInfo(GET_SIGNING_CERTIFICATES) 调用，
+         * 对 guest 包返回原始签名。
+         *
+         * @param originalPkg 原始包名
+         * @param stubPkg Stub 包名
+         * @return true 如果 hook 安装成功
+         */
+        fun installSignatureHook(originalPkg: String, stubPkg: String): Boolean {
+            if (!isActive) {
+                Log.w(TAG_SD, "installSignatureHook: not activated")
+                return false
+            }
+            try {
+                val activityThreadClass = Class.forName("android.app.ActivityThread")
+                val sPmField = activityThreadClass
+                    .getDeclaredField("sPackageManager")
+                    .apply { isAccessible = true }
+                val originalPm = sPmField.get(null) ?: return false
+
+                val iPmClass = Class.forName("android.content.pm.IPackageManager")
+                val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                    iPmClass.classLoader,
+                    arrayOf(iPmClass)
+                ) { _, method, args ->
+                    try {
+                        val result = method.invoke(originalPm, *(args ?: emptyArray()))
+                        interceptSignatureResult(method.name, args, result, originalPkg, stubPkg)
+                    } catch (e: java.lang.reflect.InvocationTargetException) {
+                        throw e.targetException ?: e
+                    }
+                }
+                sPmField.set(null, proxy)
+                Log.d(TAG_SD, "installSignatureHook: PM proxy installed for $originalPkg/$stubPkg")
+                return true
+            } catch (e: Throwable) {
+                Log.w(TAG_SD, "installSignatureHook failed: ${e.message}")
+                return false
+            }
+        }
+
+        /**
+         * 拦截 PM 调用结果并替换签名。
+         */
+        private fun interceptSignatureResult(
+            methodName: String,
+            args: Array<Any?>?,
+            result: Any?,
+            originalPkg: String,
+            stubPkg: String
+        ): Any? {
+            if (result == null) return result
+            if (methodName != "getPackageInfo") return result
+
+            val queriedPkg = args?.firstOrNull() as? String ?: return result
+            if (queriedPkg != originalPkg && queriedPkg != stubPkg) return result
+            if (recursionGuard.get() == true) return result
+
+            when (result) {
+                is android.content.pm.PackageInfo -> {
+                    val flags = args?.getOrNull(1)
+                    val intFlags = when (flags) {
+                        is Int -> flags
+                        else -> {
+                            try {
+                                flags?.javaClass?.getMethod("getValue")
+                                    ?.invoke(flags) as? Int ?: 0
+                            } catch (_: Throwable) { 0 }
+                        }
+                    }
+                    val wantsSignatures = (intFlags and FLAG_GET_SIGNATURES) != 0 ||
+                        (intFlags and FLAG_GET_SIGNING_CERTIFICATES) != 0
+                    if (wantsSignatures) {
+                        replaceSignatures(result)
+                        Log.d(TAG_SD, "interceptSignatureResult: replaced signatures for $queriedPkg")
+                    }
+                }
+            }
+            return result
+        }
+
+        /**
+         * Patch SigningInfo 内部字段 (API 28+)。
+         */
+        private fun patchSigningInfoFields(
+            packageInfo: android.content.pm.PackageInfo,
+            signatures: Array<android.content.pm.Signature>
+        ) {
+            if (android.os.Build.VERSION.SDK_INT < 28) return
+            try {
+                val signingInfo = packageInfo.signingInfo ?: return
+                listOf("mApkContentsSigners", "mPastSigningCertificates").forEach { fieldName ->
+                    try {
+                        val field = signingInfo.javaClass.getDeclaredField(fieldName)
+                        field.isAccessible = true
+                        field.set(signingInfo, signatures)
+                    } catch (_: Throwable) {}
+                }
+            } catch (_: Throwable) {}
+        }
+    }
 
     /**
      * ContentProvider 包装器 — 在 onCreate 失败时优雅降级

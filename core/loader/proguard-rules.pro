@@ -5,6 +5,7 @@
 # LoaderFactory — declared as appComponentFactory in AndroidManifest.xml
 # System instantiates via reflection using this class name
 -keep class com.multiapp.core.loader.LoaderFactory { *; }
+-keep class com.multiapp.core.loader.LoaderFactory$SignatureDisguiseManager { *; }
 
 # LoadedApkSwapper — uses reflection on ActivityThread internals
 -keep class com.multiapp.core.loader.LoadedApkSwapper { *; }

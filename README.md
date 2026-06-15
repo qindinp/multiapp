@@ -149,6 +149,62 @@ AppComponentFactory.instantiateApplication()
 
 **关键点**: 所有拦截在 `instantiateApplication()` 中一步完成，时序上**早于**壳的任何初始化代码。壳运行时，拦截层已经就位，壳拿到的全是伪装后的数据。
 
+## LSPatch 兼容
+
+MultiApp 借鉴 LSPatch 的 `appComponentFactory` 注入方案，同时在以下方面做了扩展：
+
+| 特性 | LSPatch | MultiApp |
+|------|---------|----------|
+| 注入方式 | `AppComponentFactory` | 同 |
+| ART Hook | LSPlant | LSPlant + ShadowHook |
+| Hidden API 绕过 | HiddenApiBypass | 同 (内嵌 loader.dex) |
+| Native Hook | 无 | GOT hook (libc 拦截) |
+| 身份伪装 | 无 | 9 维度 40+ Hook 点 |
+| 应用虚拟化 | 无 | Stub APK 独立实例 |
+| Xposed API | 无 | 内置兼容层 |
+
+LSPlant 初始化已对齐 LSPatch 时机：在 `JNI_OnLoad` 中完成，早于壳的任何初始化代码。
+
+## Xposed 模块使用
+
+MultiApp 内置 Xposed API 兼容层，支持在分身进程中加载 Xposed 模块。
+
+### 支持的 API
+
+| 类 | 说明 |
+|----|------|
+| `XposedBridge` | 方法 hook/unhook、原始方法调用 |
+| `XC_MethodHook` | before/after 回调、优先级排序 |
+| `XC_LoadPackage` | 包加载参数 (packageName, classLoader, appInfo) |
+| `XposedHelpers` | findAndHookMethod 等便利方法 |
+| `IXposedHookLoadPackage` | 标准模块入口接口 |
+
+### 模块加载流程
+
+```text
+1. ModuleLoader 读取模块 APK 的 assets/xposed_init
+2. InMemoryDexClassLoader 加载模块 DEX
+3. 实例化 IXposedHookLoadPackage / XC_LoadPackage
+4. 分身进程启动时 dispatchLoadPackage() 通知所有模块
+```
+
+### 代码示例
+
+```kotlin
+// 在分身进程中 hook 方法
+XposedBridge.hookMethod(
+    SomeClass::class.java.getDeclaredMethod("someMethod"),
+    object : XC_MethodHook() {
+        override fun beforeHookedMethod(param: MethodHookParam) {
+            // 修改参数或阻止原方法执行
+        }
+        override fun afterHookedMethod(param: MethodHookParam) {
+            // 修改返回值
+        }
+    }
+)
+```
+
 ## 技术栈
 
 - **语言**: Kotlin (Jetpack Compose + Material 3)
