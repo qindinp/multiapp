@@ -1,0 +1,118 @@
+{
+  "packageName": "com.qq.reader",
+
+  "packer": {
+    "type": "JIAGU_360"
+  },
+
+  "packerStubClasses": [
+    "com.stub.StubApp",
+    "com.qihoo.util.StubApp",
+    "com.stub.StubApplication",
+    "com.secneo.apkwrapper.ApplicationWrapper"
+  ],
+
+  "packerInterfaceMethods": {
+    "interface5":  "(Landroid/app/Application;)V",
+    "interface10": "(Landroid/content/Context;)V",
+    "interface11": "(I)V",
+    "interface12": "(Ldalvik/system/DexFile;)Ljava/util/Enumeration;",
+    "interface14": "(I)Ljava/lang/String;",
+    "interface17": "(Landroid/content/res/AssetManager;Ljava/lang/String;)Landroid/content/res/AssetFileDescriptor;",
+    "interface18": "(Ljava/lang/Class;Ljava/lang/String;)Ljava/io/InputStream;",
+    "interface19": "(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/io/InputStream;",
+    "interface199": "(Landroid/content/res/AssetManager;Ljava/lang/String;)Ljava/io/InputStream;",
+    "interface20": "()Z",
+    "interface21": "(Landroid/app/Application;)V",
+    "interface22": "(I[Ljava/lang/String;[I)V",
+    "interface24": "(Landroid/app/Activity;[Ljava/lang/String;I)V",
+    "interface30": "(Ljava/util/zip/ZipFile;Ljava/lang/String;)Ljava/util/zip/ZipEntry;",
+    "interface51": "(Landroid/content/res/Resources;I)Ljava/io/InputStream;"
+  },
+
+  "nativeMethodStubs": {
+    "com.yuewen.ywlogin.login.YWLoginManager": [
+      { "name": "getInstance",           "signature": "()Lcom/yuewen/ywlogin/login/YWLoginManager;", "role": "singleton" },
+      { "name": "registerParameter",     "signature": "(Lcom/yuewen/ywlogin/login/IParameterGetter;)V", "role": "config" },
+      { "name": "resetParameter",        "signature": "(Ljava/lang/String;Ljava/lang/String;)V", "role": "config" },
+      { "name": "setDefaultParameters",  "signature": "(Landroid/app/Application;Landroid/content/ContentValues;)V", "role": "config" },
+      { "name": "fetchSettings",         "signature": "(Lcom/yuewen/ywlogin/callbacks/DefaultYWCallback;)V", "role": "settings" }
+    ],
+    "com.qq.reader.common.utils.crypto.EasyEncrypt": [
+      { "name": "getMd5Key", "signature": "()Ljava/lang/String;", "role": "crypto" }
+    ],
+    "com.qq.reader.qrencrypt.fock.FockKeyPoolCache": [
+      { "name": "getEncryptPool",         "signature": "(Ljava/lang/String;)Ljava/lang/String;", "role": "keyPool" },
+      { "name": "getFockEncryptBean",     "signature": "(Ljava/lang/String;)Lcom/qq/reader/qrencrypt/fock/FockEncryptBean;", "role": "keyPool" },
+      { "name": "saveEncryptPool",        "signature": "(Ljava/lang/String;Lcom/qq/reader/qrencrypt/fock/FockEncryptBean;)V", "role": "keyPool" },
+      { "name": "updateForckEncryptBean", "signature": "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", "role": "keyPool" }
+    ],
+    "com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask": [
+      { "name": "getDownloadChap",        "signature": "()Ljava/util/ArrayList;", "role": "download" },
+      { "name": "getDownloadChapters",    "signature": "()Ljava/util/HashSet;", "role": "download" },
+      { "name": "setToDownloadChapters",  "signature": "(Ljava/util/List;)V", "role": "download" },
+      { "name": "isBackgroundRun",        "signature": "()Z", "role": "state" },
+      { "name": "setBackgroundRun",       "signature": "(Z)V", "role": "state" },
+      { "name": "hasRetryTag",            "signature": "()Z", "role": "state" },
+      { "name": "setRetryTag",            "signature": "()V", "role": "state" },
+      { "name": "getListener",            "signature": "()Lcom/qq/reader/cservice/onlineread/qdaf;", "role": "callback" },
+      { "name": "setListener",            "signature": "(Lcom/qq/reader/cservice/onlineread/qdaf;)V", "role": "callback" },
+      { "name": "getScene",               "signature": "()Ljava/lang/String;", "role": "state" },
+      { "name": "setScene",               "signature": "(Ljava/lang/String;)V", "role": "state" },
+      { "name": "buildUrl",               "signature": "(Lcom/qq/reader/common/conn/search/qdac;)Ljava/lang/String;", "role": "network" },
+      { "name": "obtainHeaders",          "signature": "()Ljava/util/HashMap;", "role": "network" },
+      { "name": "downloadChapterFile",    "signature": "(Ljava/lang/String;)Ljava/io/File;", "role": "download" }
+    ]
+  },
+
+  "registerNativesInterceptClasses": {
+    "com.yuewen.fock.Fock": [
+      { "name": "it",  "signature": "([BI)I",                     "role": "encrypt" },
+      { "name": "ak",  "signature": "([BI[B)V",                   "role": "addKeys" },
+      { "name": "sn",  "signature": "([BI)Ljava/lang/String;",    "role": "sign" },
+      { "name": "urk", "signature": "()Ljava/lang/String;",       "role": "userKey" }
+    ]
+  },
+
+  "registerNativesLogClasses": [
+    "com.yuewen.ywlogin.login.YWLoginManager",
+    "com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask"
+  ],
+
+  "obfuscatedTypeMap": {
+    "com.qq.reader.cservice.onlineread.qdaf":                  "OnlineChapterListener",
+    "com.qq.reader.cservice.onlineread.qdae":                  "OnlineChapterWriter",
+    "com.qq.reader.common.conn.search.qdac":                   "SearchParam",
+    "com.qq.reader.common.conn.http.search.qdaf.qdaa":         "DownloadListener",
+    "com.qq.reader.common.readertask.ordinal.qdaa":            "HeaderProvider",
+    "com.yuewen.component.businesstask.ordinal.ReaderProtocolJSONTask": "ProtocolJSONTask",
+    "com.yuewen.component.businesstask.ordinal.ReaderProtocolTask":     "ProtocolTask",
+    "com.yuewen.component.task.ordinal.qdab":                  "TaskListener",
+    "com.yuewen.reader.framework.utils.qdag":                  "FrameworkUtils",
+    "com.qq.reader.ywreader.component.compatible.qdaf":        "CompatLayer",
+    "com.qq.reader.common.protocol.ReadOnline":                "ReadOnline",
+    "com.qq.reader.cservice.onlineread.OnlineTag":             "OnlineTag"
+  },
+
+  "onlineReading": {
+    "headerProviderClass": "com.qq.reader.common.readertask.ordinal.qdaa"
+  },
+
+  "crypto": {
+    "easyEncryptMd5Key": "51076a5fd0b1fd440c06277855f27311"
+  },
+
+  "findClassTargets": [
+    "com.stub.StubApp",
+    "com.qihoo.util.StubApp",
+    "com.stub.StubApplication",
+    "com.secneo.apkwrapper.ApplicationWrapper"
+  ],
+
+  "protocolFallbackClasses": {
+    "protocolTask":   "com.yuewen.component.businesstask.ordinal.ReaderProtocolTask",
+    "taskListener":   "com.yuewen.component.task.ordinal.qdab",
+    "readOnline":     "com.qq.reader.common.protocol.ReadOnline",
+    "onlineTag":      "com.qq.reader.cservice.onlineread.OnlineTag"
+  }
+}
