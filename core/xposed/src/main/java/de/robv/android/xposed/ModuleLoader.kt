@@ -8,6 +8,7 @@ import java.io.File
 import java.nio.ByteBuffer
 import java.util.zip.ZipFile
 
+
 class ModuleLoader(
     private val context: Context,
     private val bridgeImpl: XposedBridgeImpl
@@ -15,6 +16,7 @@ class ModuleLoader(
     companion object {
         private const val TAG = "ModuleLoader"
         private const val XPOSED_INIT = "assets/xposed_init"
+        private const val NATIVE_INIT = "assets/native_init"
     }
 
     private val loadedModules = mutableListOf<XC_LoadPackage>()
@@ -24,10 +26,18 @@ class ModuleLoader(
             Timber.tag(TAG).i("Loading Xposed module: $apkPath")
 
             val initClasses = readXposedInit(apkPath)
-            if (initClasses.isEmpty()) {
-                Timber.tag(TAG).w("No xposed_init found in $apkPath")
+            val nativeLibs = readNativeInit(apkPath)
+
+            if (initClasses.isEmpty() && nativeLibs.isEmpty()) {
+                Timber.tag(TAG).w("No xposed_init or native_init found in $apkPath")
                 return false
             }
+
+            if (nativeLibs.isNotEmpty()) {
+                loadNativeLibraries(apkPath, nativeLibs, classLoader)
+            }
+
+            if (initClasses.isEmpty()) return true
 
             val dexBytes = extractDex(apkPath)
             if (dexBytes.isEmpty()) {
@@ -128,6 +138,64 @@ class ModuleLoader(
         } catch (e: Throwable) {
             Timber.tag(TAG).e(e, "Failed to extract DEX from $apkPath")
             emptyList()
+        }
+    }
+
+    private fun readNativeInit(apkPath: String): List<String> {
+        return try {
+            ZipFile(apkPath).use { zip ->
+                val entry = zip.getEntry(NATIVE_INIT) ?: return emptyList()
+                zip.getInputStream(entry).bufferedReader().readLines()
+                    .filter { it.isNotBlank() && !it.startsWith("#") }
+                    .map { it.trim() }
+            }
+        } catch (e: Throwable) {
+            Timber.tag(TAG).e(e, "Failed to read native_init from $apkPath")
+            emptyList()
+        }
+    }
+
+    private fun loadNativeLibraries(apkPath: String, nativeLibs: List<String>, classLoader: ClassLoader) {
+        val nativeDir = File(context.applicationInfo.nativeLibraryDir)
+        for (libName in nativeLibs) {
+            val soName = if (libName.startsWith("lib") && libName.endsWith(".so")) {
+                libName
+            } else {
+                "lib${libName}.so"
+            }
+
+            val libFile = File(nativeDir, soName)
+            if (libFile.exists()) {
+                try {
+                    System.load(libFile.absolutePath)
+                    Timber.tag(TAG).i("Loaded native library: $soName")
+                } catch (e: Throwable) {
+                    Timber.tag(TAG).e(e, "Failed to load native library: $soName")
+                }
+            } else {
+                val extracted = File(context.cacheDir, soName)
+                try {
+                    ZipFile(apkPath).use { zip ->
+                        val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
+                        val entryPath = "lib/$abi/$soName"
+                        val entry = zip.getEntry(entryPath) ?: run {
+                            Timber.tag(TAG).w("Native lib not found in APK: $entryPath")
+                            return@use
+                        }
+                        zip.getInputStream(entry).use { input ->
+                            extracted.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                    }
+                    if (extracted.exists()) {
+                        System.load(extracted.absolutePath)
+                        Timber.tag(TAG).i("Loaded extracted native library: $soName")
+                    }
+                } catch (e: Throwable) {
+                    Timber.tag(TAG).e(e, "Failed to extract/load native library: $soName")
+                }
+            }
         }
     }
 }

@@ -80,9 +80,10 @@ class ManifestGenerator {
         stubPackageName: String,
         manifest: ManifestParser.ParsedManifest,
         launcherActivity: ManifestParser.ComponentInfo,
-        config: StubConfig
+        config: StubConfig,
+        encodeProviderMetaData: Boolean = true
     ): ByteArray {
-        return BinaryXmlEncoder().encodeFromManifest(stubPackageName, manifest, launcherActivity, config)
+        return BinaryXmlEncoder().encodeFromManifest(stubPackageName, manifest, launcherActivity, config, encodeProviderMetaData)
     }
 
     /**

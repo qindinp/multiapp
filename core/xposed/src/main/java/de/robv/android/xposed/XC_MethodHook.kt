@@ -24,6 +24,18 @@ abstract class XC_MethodHook(priority: Int = 0) : Comparable<XC_MethodHook> {
         var invokeOriginal: ((Array<out Any?>?) -> Any?)? = null
         internal var hookedMethod: Member? = null
 
+        fun getThisObject(): Any = thisObject
+            ?: throw IllegalStateException("thisObject is null (static method?)")
+
+        fun getArgs(): Array<Any?> = args?.let {
+            @Suppress("UNCHECKED_CAST")
+            it as Array<Any?>
+        } ?: arrayOf()
+
+        fun setResult(result: Any?) {
+            this.result = result
+        }
+
         fun invokeOriginalMethod(): Any? {
             val originalArgs = args ?: arrayOf()
             return invokeOriginal?.invoke(originalArgs) ?: throw IllegalStateException(

@@ -91,7 +91,8 @@ class BinaryXmlEncoder {
         stubPackageName: String,
         manifest: ManifestParser.ParsedManifest,
         launcherActivity: ManifestParser.ComponentInfo,
-        config: StubConfig
+        config: StubConfig,
+        encodeProviderMetaData: Boolean = true
     ): ByteArray {
         // 属性名必须在 StringPool 前面，与 ResourceMap 对应
         val attrNames = mutableListOf<String>()
@@ -268,8 +269,26 @@ class BinaryXmlEncoder {
                     typedValue = -1, dataType = TYPE_INT_BOOLEAN))
             }
             nodes.add(Node.ElemStart(null, "provider", attrs))
-            // meta-data 编码在 MIUI 上导致安装失败，暂时禁用
-            // ManifestRewriter 路径会保留原始 meta-data，此处仅影响加密 APK 的回退路径
+            if (encodeProviderMetaData) {
+                val metaDataList = manifest.providerMetaData[p.name] ?: emptyList()
+                for (meta in metaDataList) {
+                    val metaAttrs = mutableListOf(XmlAttr(ANDROID_NS_URI, "name", meta.name))
+                    if (meta.resource != null) {
+                        val resId = parseResourceRef(meta.resource)
+                        if (resId != 0) {
+                            metaAttrs.add(XmlAttr(ANDROID_NS_URI, "resource", meta.resource,
+                                typedValue = resId, dataType = TYPE_REFERENCE))
+                        } else {
+                            metaAttrs.add(XmlAttr(ANDROID_NS_URI, "resource", meta.resource))
+                        }
+                    }
+                    if (meta.value != null) {
+                        metaAttrs.add(XmlAttr(ANDROID_NS_URI, "value", meta.value))
+                    }
+                    nodes.add(Node.ElemStart(null, "meta-data", metaAttrs))
+                    nodes.add(Node.ElemEnd(null, "meta-data"))
+                }
+            }
             nodes.add(Node.ElemEnd(null, "provider"))
         }
 

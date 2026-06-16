@@ -1,7 +1,9 @@
 package de.robv.android.xposed
 
 import timber.log.Timber
+
 import java.lang.reflect.Member
+
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -47,6 +49,39 @@ object XposedBridge {
     fun invokeOriginalMethod(method: Member, thisObj: Any?, args: Array<out Any?>?): Any? {
         return bridgeImpl?.invokeOriginal(method, thisObj, args)
             ?: throw IllegalStateException("Bridge not initialized")
+    }
+
+    @JvmStatic
+    fun hookAllMethods(
+        hookClass: Class<*>,
+        methodName: String,
+        callback: XC_MethodHook
+    ): Set<XC_MethodHook.Unhook> {
+        val unhooks = mutableSetOf<XC_MethodHook.Unhook>()
+        var current: Class<*>? = hookClass
+        while (current != null && current != Any::class.java) {
+            for (method in current.declaredMethods) {
+                if (method.name == methodName) {
+                    method.isAccessible = true
+                    unhooks.add(hookMethod(method, callback))
+                }
+            }
+            current = current.superclass
+        }
+        return unhooks
+    }
+
+    @JvmStatic
+    fun hookAllConstructors(
+        hookClass: Class<*>,
+        callback: XC_MethodHook
+    ): Set<XC_MethodHook.Unhook> {
+        val unhooks = mutableSetOf<XC_MethodHook.Unhook>()
+        for (constructor in hookClass.declaredConstructors) {
+            constructor.isAccessible = true
+            unhooks.add(hookMethod(constructor, callback))
+        }
+        return unhooks
     }
 
     internal fun getCallbacks(method: Member): List<XC_MethodHook> {
