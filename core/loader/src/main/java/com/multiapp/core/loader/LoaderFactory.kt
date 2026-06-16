@@ -1110,6 +1110,21 @@ class LoaderFactory : AppComponentFactory() {
         installNotificationManagerPackageProxy(config)
         logSignal("installed identity and activity start proxies")
 
+        // 初始化数据隔离：为每个实例建立独立数据根
+        try {
+            val instanceId = "${config.originalPkg}_${System.currentTimeMillis()}"
+            val dataRoot = com.multiapp.core.model.InstanceDataRoot.fromBaseDir(
+                instanceId = instanceId,
+                originalPackageName = config.originalPkg,
+                stubPackageName = config.stubPkg,
+                baseDataDir = appInfo.dataDir
+            )
+            val dataIsolated = com.multiapp.core.identity.DataIsolationManager.initialize(dataRoot)
+            logD("  DataIsolationManager initialized: instanceId=$instanceId, dataDir=${appInfo.dataDir}, success=$dataIsolated")
+        } catch (e: Throwable) {
+            logW("  DataIsolationManager init failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
+
         // 创建指向原始 APK 的 PathClassLoader
         // 使用原始 ClassLoader 的 parent 保留系统设置的中间 ClassLoader 层级
         val parentClassLoader = try {

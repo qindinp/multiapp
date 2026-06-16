@@ -5,24 +5,24 @@
  * native-level path redirection for guest app file isolation.
  *
  * Hooks (installed via ShadowHook inline hooking):
- *   - open/openat     鈫?redirect file paths to sandbox
- *   - access          鈫?check sandbox path instead
- *   - stat/lstat      鈫?stat sandbox path instead
- *   - readlink        鈫?return sandbox path
- *   - fopen           鈫?redirect file paths to sandbox, spoof /proc files
- *   - mkdir           鈫?redirect directory creation to sandbox
- *   - unlink          鈫?redirect file deletion to sandbox
- *   - rename          鈫?redirect file/directory rename to sandbox
- *   - __system_property_get 鈫?spoof device properties
- *   - ptrace          鈫?bypass anti-debug PTRACE_TRACEME checks (libc.so)
- *   - dlopen          鈫?hide hook framework libraries (libdl.so)
+ *   - open/openat     → redirect file paths to sandbox
+ *   - access          → check sandbox path instead
+ *   - stat/lstat      → stat sandbox path instead
+ *   - readlink        → return sandbox path
+ *   - fopen           → redirect file paths to sandbox, spoof /proc files
+ *   - mkdir           → redirect directory creation to sandbox
+ *   - unlink          → redirect file deletion to sandbox
+ *   - rename          → redirect file/directory rename to sandbox
+ *   - __system_property_get → spoof device properties
+ *   - ptrace          → bypass anti-debug PTRACE_TRACEME checks (libc.so)
+ *   - dlopen          → hide hook framework libraries (libdl.so)
  *
  * Architecture:
  *   Java (NativeHookBridge.kt)
- *     鈫?JNI
+ *     ↓ JNI
  *   native-hook.cpp (this file)
- *     鈫?ShadowHook inline hooking (shadowhook_hook_sym_name)
- *   hooked libc functions 鈫愨啋 original libc functions (via saved pointers)
+ *     ↓ ShadowHook inline hooking (shadowhook_hook_sym_name)
+ *   hooked libc functions ←→ original libc functions (via saved pointers)
  */
 
 #include <jni.h>
@@ -52,12 +52,13 @@
 #include <cerrno>
 #include <cstdint>
 #include <atomic>
+#include <chrono>
 #include <fstream>
 
-// ShadowHook 鈥?Android 16 compatible inline hook library (ByteDance)
+// ShadowHook — Android 16 compatible inline hook library (ByteDance)
 #include "shadowhook.h"
 
-// LSPlant 鈥?ART method hooking framework
+// LSPlant — ART method hooking framework
 #include "lsplant.hpp"
 
 #define LOG_TAG "MultiApp-Native"
@@ -68,16 +69,16 @@
 
 // ==================== Global State ====================
 
-static bool g_initialized = false;
+static std::atomic_bool g_initialized{false};
 static bool g_hooks_installed = false;
 static std::shared_mutex g_mutex;
 static std::atomic_bool g_suppress_self_sigkill{false};
 static std::mutex g_online_materialize_mutex;
 
-// Path redirection: source prefix 鈫?target prefix
+// Path redirection: source prefix → target prefix
 static std::unordered_map<std::string, std::string> g_path_redirects;
 
-// Property spoofing: property name 鈫?spoofed value
+// Property spoofing: property name → spoofed value
 static std::unordered_map<std::string, std::string> g_property_spoofs;
 
 // Hidden paths: paths that should appear non-existent
@@ -126,10 +127,10 @@ static orig_stat_t real_stat = nullptr;
 static orig_lstat_t real_lstat = nullptr;
 static orig_readlink_t real_readlink = nullptr;
 
-// 瀹屾暣鎬ф牎楠岄噸瀹氬悜锛氬３鐨?JNI_OnLoad 璇?APK 鏍￠獙 DEX 鏃讹紝閲嶅畾鍚戝埌鍘熷 APK
+// 完整性校验重定向：壳的 JNI_OnLoad 读 APK 校验 DEX 时，重定向到原始 APK
 static thread_local bool g_integrity_redirect_active = false;
-static std::string g_integrity_redirect_from;  // 淇敼鍚庣殑 APK 璺緞
-static std::string g_integrity_redirect_to;    // 鍘熷 APK 璺緞
+static std::string g_integrity_redirect_from;  // 修改后的 APK 路径
+static std::string g_integrity_redirect_to;    // 原始 APK 路径
 static orig_fopen_t real_fopen = nullptr;
 static orig_mkdir_t real_mkdir = nullptr;
 static orig_unlink_t real_unlink = nullptr;
@@ -170,7 +171,7 @@ static std::string redirect_path(const char* path) {
         path_str = "/data/data/" + path_str.substr(13);
     }
 
-    // 瀹屾暣鎬ф牎楠岄噸瀹氬悜锛欽NI_OnLoad 鏈熼棿锛屽３璇?APK 鏍￠獙 DEX 鈫?閲嶅畾鍚戝埌鍘熷 APK
+    // 完整性校验重定向：JNI_OnLoad 期间，壳读 APK 校验 DEX → 重定向到原始 APK
     if (g_integrity_redirect_active && !g_integrity_redirect_from.empty()) {
         if (path_str == g_integrity_redirect_from) {
             LOGI("redirect_path: integrity redirect %s -> %s", path, g_integrity_redirect_to.c_str());
@@ -208,74 +209,13 @@ static bool is_proc_self_path(const char* path) {
     return strncmp(path, "/proc/self/", 11) == 0;
 }
 
-static bool online_file_diag_enabled() {
-    char value[PROP_VALUE_MAX] = {0};
-    int len = __system_property_get("debug.multiapp.online.file_diag", value);
-    if (len <= 0) return false;
-    return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0;
-}
-
-static bool is_online_chapter_file_path(const char* path) {
-    if (path == nullptr || path[0] == '\0') return false;
-    std::string value(path);
-    if (value.find("/QQReader/Online/") == std::string::npos) return false;
-    return value.find(".eqct") != std::string::npos ||
-           value.find(".eres") != std::string::npos ||
-           value.find("_s") != std::string::npos ||
-           value.find("chapter.q") != std::string::npos ||
-           value.find("book.meta") != std::string::npos;
-}
-
-static int online_file_diag_tid() {
-#if defined(__NR_gettid)
-    return static_cast<int>(syscall(__NR_gettid));
-#else
-    return static_cast<int>(getpid());
-#endif
-}
-
-static long long online_file_size_for_diag(const char* path) {
-    if (path == nullptr || real_stat == nullptr) return -1;
-    struct stat st{};
-    if (real_stat(path, &st) != 0) return -1;
-    return static_cast<long long>(st.st_size);
-}
-
-static void log_online_file_diag_int(const char* op, const char* path, const char* actual_path,
-                                     int result, int err, int arg) {
-    if (!online_file_diag_enabled()) return;
-    if (!is_online_chapter_file_path(path) && !is_online_chapter_file_path(actual_path)) return;
-    LOGW("online_file_diag: op=%s tid=%d arg=%d result=%d errno=%d path=%s actual=%s size=%lld",
-         op,
-         online_file_diag_tid(),
-         arg,
-         result,
-         err,
-         path != nullptr ? path : "null",
-         actual_path != nullptr ? actual_path : "null",
-         online_file_size_for_diag(actual_path));
-}
-
-static void log_online_file_diag_ptr(const char* op, const char* path, const char* actual_path,
-                                     const void* result, int err, const char* arg) {
-    if (!online_file_diag_enabled()) return;
-    if (!is_online_chapter_file_path(path) && !is_online_chapter_file_path(actual_path)) return;
-    LOGW("online_file_diag: op=%s tid=%d arg=%s result=%p errno=%d path=%s actual=%s size=%lld",
-         op,
-         online_file_diag_tid(),
-         arg != nullptr ? arg : "null",
-         result,
-         err,
-         path != nullptr ? path : "null",
-         actual_path != nullptr ? actual_path : "null",
-         online_file_size_for_diag(actual_path));
-}
 // ==================== Hook Implementations ====================
 
 /**
- * Hooked open() 鈥?redirects file paths to sandbox, hides paths.
+ * Hooked open() — redirects file paths to sandbox, hides paths.
  */
 static int hooked_open(const char* path, int flags, ...) {
+    // Check hidden paths
     if (is_path_hidden(path)) {
         errno = ENOENT;
         return -1;
@@ -288,22 +228,18 @@ static int hooked_open(const char* path, int flags, ...) {
         LOGD("open: %s -> %s", path, actual_path);
     }
 
-    int result;
     if (flags & O_CREAT) {
         va_list args;
         va_start(args, flags);
         mode_t mode = static_cast<mode_t>(va_arg(args, int));
         va_end(args);
-        result = real_open(actual_path, flags, mode);
-    } else {
-        result = real_open(actual_path, flags);
+        return real_open(actual_path, flags, mode);
     }
-    log_online_file_diag_int("open", path, actual_path, result, result < 0 ? errno : 0, flags);
-    return result;
+    return real_open(actual_path, flags);
 }
 
 /**
- * Hooked openat() 鈥?redirects file paths to sandbox, hides paths.
+ * Hooked openat() — redirects file paths to sandbox, hides paths.
  */
 static int hooked_openat(int dirfd, const char* path, int flags, ...) {
     if (is_path_hidden(path)) {
@@ -318,22 +254,18 @@ static int hooked_openat(int dirfd, const char* path, int flags, ...) {
         LOGD("openat: %s -> %s", path, actual_path);
     }
 
-    int result;
     if (flags & O_CREAT) {
         va_list args;
         va_start(args, flags);
         mode_t mode = static_cast<mode_t>(va_arg(args, int));
         va_end(args);
-        result = real_openat(dirfd, actual_path, flags, mode);
-    } else {
-        result = real_openat(dirfd, actual_path, flags);
+        return real_openat(dirfd, actual_path, flags, mode);
     }
-    log_online_file_diag_int("openat", path, actual_path, result, result < 0 ? errno : 0, flags);
-    return result;
+    return real_openat(dirfd, actual_path, flags);
 }
 
 /**
- * Hooked access() 鈥?checks sandbox path instead, hides paths.
+ * Hooked access() — checks sandbox path instead, hides paths.
  */
 static int hooked_access(const char* path, int mode) {
     if (is_path_hidden(path)) {
@@ -344,13 +276,11 @@ static int hooked_access(const char* path, int mode) {
     std::string redirected = redirect_path(path);
     const char* actual_path = redirected.empty() ? path : redirected.c_str();
 
-    int result = real_access(actual_path, mode);
-    log_online_file_diag_int("access", path, actual_path, result, result < 0 ? errno : 0, mode);
-    return result;
+    return real_access(actual_path, mode);
 }
 
 /**
- * Hooked stat() 鈥?stats sandbox path instead, hides paths.
+ * Hooked stat() — stats sandbox path instead, hides paths.
  */
 static int hooked_stat(const char* path, struct stat* buf) {
     if (is_path_hidden(path)) {
@@ -361,13 +291,11 @@ static int hooked_stat(const char* path, struct stat* buf) {
     std::string redirected = redirect_path(path);
     const char* actual_path = redirected.empty() ? path : redirected.c_str();
 
-    int result = real_stat(actual_path, buf);
-    log_online_file_diag_int("stat", path, actual_path, result, result < 0 ? errno : 0, 0);
-    return result;
+    return real_stat(actual_path, buf);
 }
 
 /**
- * Hooked lstat() 鈥?lstats sandbox path instead, hides paths.
+ * Hooked lstat() — lstats sandbox path instead, hides paths.
  */
 static int hooked_lstat(const char* path, struct stat* buf) {
     if (is_path_hidden(path)) {
@@ -378,13 +306,11 @@ static int hooked_lstat(const char* path, struct stat* buf) {
     std::string redirected = redirect_path(path);
     const char* actual_path = redirected.empty() ? path : redirected.c_str();
 
-    int result = real_lstat(actual_path, buf);
-    log_online_file_diag_int("lstat", path, actual_path, result, result < 0 ? errno : 0, 0);
-    return result;
+    return real_lstat(actual_path, buf);
 }
 
 /**
- * Hooked readlink() 鈥?returns sandbox path instead.
+ * Hooked readlink() — returns sandbox path instead.
  */
 static ssize_t hooked_readlink(const char* path, char* buf, size_t bufsiz) {
     if (is_path_hidden(path)) {
@@ -412,7 +338,7 @@ static ssize_t hooked_readlink(const char* path, char* buf, size_t bufsiz) {
 }
 
 /**
- * Hooked fopen() 鈥?redirects file paths to sandbox, hides paths.
+ * Hooked fopen() — redirects file paths to sandbox, hides paths.
  */
 static FILE* hooked_fopen(const char* path, const char* mode) {
     if (is_path_hidden(path)) {
@@ -434,7 +360,7 @@ static FILE* hooked_fopen(const char* path, const char* mode) {
         }
     }
 
-    // Spoof /proc/self/status 鈥?replace TracerPid with 0
+    // Spoof /proc/self/status — replace TracerPid with 0
     if (is_proc_self_path(path) && strcmp(path, "/proc/self/status") == 0) {
         FILE* real_status = real_fopen(path, mode);
         if (real_status) {
@@ -464,13 +390,11 @@ static FILE* hooked_fopen(const char* path, const char* mode) {
         LOGD("fopen: %s -> %s", path, actual_path);
     }
 
-    FILE* result = real_fopen(actual_path, mode);
-    log_online_file_diag_ptr("fopen", path, actual_path, result, result == nullptr ? errno : 0, mode);
-    return result;
+    return real_fopen(actual_path, mode);
 }
 
 /**
- * Hooked mkdir() 鈥?redirects directory creation to sandbox.
+ * Hooked mkdir() — redirects directory creation to sandbox.
  */
 static int hooked_mkdir(const char* path, mode_t mode) {
     if (is_path_hidden(path)) {
@@ -489,7 +413,7 @@ static int hooked_mkdir(const char* path, mode_t mode) {
 }
 
 /**
- * Hooked unlink() 鈥?redirects file deletion to sandbox.
+ * Hooked unlink() — redirects file deletion to sandbox.
  */
 static int hooked_unlink(const char* path) {
     if (is_path_hidden(path)) {
@@ -508,7 +432,7 @@ static int hooked_unlink(const char* path) {
 }
 
 /**
- * Hooked rename() 鈥?redirects file/directory rename to sandbox.
+ * Hooked rename() — redirects file/directory rename to sandbox.
  * Both source and destination paths may need redirection.
  */
 static int hooked_rename(const char* oldpath, const char* newpath) {
@@ -530,7 +454,7 @@ static int hooked_rename(const char* oldpath, const char* newpath) {
 }
 
 /**
- * Hooked __system_property_get() 鈥?returns spoofed device properties.
+ * Hooked __system_property_get() — returns spoofed device properties.
  */
 static int hooked_system_property_get(const char* name, char* value) {
     // Check if we have a spoofed value for this property (thread-safe)
@@ -542,7 +466,7 @@ static int hooked_system_property_get(const char* name, char* value) {
             if (it != g_property_spoofs.end()) {
                 const std::string& spoofed = it->second;
                 size_t len = spoofed.length();
-                if (len > 91) len = 91; // PROP_VALUE_MAX - 1
+                if (len >= PROP_VALUE_MAX) len = PROP_VALUE_MAX - 1;
                 memcpy(value, spoofed.c_str(), len);
                 value[len] = '\0';
                 LOGD("property_get: %s -> %s (spoofed)", name, value);
@@ -551,12 +475,12 @@ static int hooked_system_property_get(const char* name, char* value) {
         }
     }
 
-    // No spoof 鈥?call real implementation
+    // No spoof — call real implementation
     return real_system_property_get(name, value);
 }
 
 /**
- * Hooked ptrace() 鈥?bypass anti-debug self-ptrace checks.
+ * Hooked ptrace() — bypass anti-debug self-ptrace checks.
  * When request == PTRACE_TRACEME, return 0 (no debugger attached).
  * Other requests are forwarded to the real ptrace.
  */
@@ -569,7 +493,7 @@ static long hooked_ptrace(int request, pid_t pid, void* addr, void* data) {
 }
 
 /**
- * Hooked dlopen() 鈥?hide hook framework libraries.
+ * Hooked dlopen() — hide hook framework libraries.
  * If the filename contains known hook framework keywords, return nullptr
  * (load failure) to prevent detection of shadowhook/lsplant/multiapp.
  */
@@ -658,25 +582,25 @@ static constexpr int g_hook_count = sizeof(g_hook_entries) / sizeof(g_hook_entri
 static void* g_hook_stubs[g_hook_count] = {};
 
 // ==================== Inline Hook Restore Mode ====================
-// 360 鍔犲浐浼氱洿鎺ヨ鍑芥暟鍏ュ彛鎸囦护锛屾娴嬫槸鍚︽湁 inline hook trampoline銆?
-// 瀵圭瓥: hook 瀹屾垚鍚庝复鏃舵仮澶嶅嚱鏁板叆鍙ｏ紝妫€娴嬫椂杩斿洖鍘熷鎸囦护锛屾娴嬪畬鍐?patch 鍥炲幓銆?
-// 浣跨敤 shadowhook 鐨?shadowhook_unhook / shadowhook_hook_sym_name 瀹炵幇銆?
+// 360 加固会直接读函数入口指令，检测是否有 inline hook trampoline。
+// 对策: hook 完成后临时恢复函数入口，检测时返回原始指令，检测完再 patch 回去。
+// 使用 shadowhook 的 shadowhook_unhook / shadowhook_hook_sym_name 实现。
 
-// 姣忎釜 hook 鐨勫師濮嬪嚱鏁板叆鍙ｅ浠斤紙鐢ㄤ簬鎭㈠锛?
+// 每个 hook 的原始函数入口备份（用于恢复）
 struct HookBackup {
     void* stub;           // shadowhook stub
     const char* lib_name;
     const char* symbol;
     void* hook_func;
     void** original_func;
-    bool is_restored;     // 褰撳墠鏄惁澶勪簬鎭㈠鐘舵€?
+    bool is_restored;     // 当前是否处于恢复状态
 };
 
 static HookBackup g_hook_backups[g_hook_count] = {};
 
 /**
- * 鎭㈠鎵€鏈?hook 鐨勫嚱鏁板叆鍙ｏ紙瀵规姉 360 inline hook 妫€娴嬶級
- * 360 鍦?JNI_OnLoad 涓皟鐢ㄦ娴嬪嚱鏁版椂锛屽嚱鏁板叆鍙ｅ凡缁忔槸鍘熷鎸囦护
+ * 恢复所有 hook 的函数入口（对抗 360 inline hook 检测）
+ * 360 在 JNI_OnLoad 中调用检测函数时，函数入口已经是原始指令
  */
 static void restore_all_hooks() {
     for (int i = 0; i < g_hook_count; i++) {
@@ -691,7 +615,7 @@ static void restore_all_hooks() {
 }
 
 /**
- * 閲嶆柊瀹夎鎵€鏈?hook锛?60 妫€娴嬪畬鎴愬悗锛?
+ * 重新安装所有 hook（360 检测完成后）
  */
 static void reinstall_all_hooks() {
     for (int i = 0; i < g_hook_count; i++) {
@@ -789,7 +713,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInit(
     (void)env; (void)thiz;
     std::unique_lock<std::shared_mutex> lock(g_mutex);
 
-    if (g_initialized) {
+    if (g_initialized.load()) {
         LOGI("Native hook engine already initialized");
         return JNI_TRUE;
     }
@@ -799,10 +723,10 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInit(
     bool shadowhookReady = init_shadowhook_for_runtime("nativeInit");
     g_hooks_installed = shadowhookReady && install_shadowhook_hooks();
     if (!g_hooks_installed) {
-        LOGW("ShadowHook installation failed 鈥?falling back to Java-level hooks only");
+        LOGW("ShadowHook installation failed — falling back to Java-level hooks only");
     }
 
-    g_initialized = true;
+    g_initialized.store(true);
     LOGI("Native hook engine initialized");
     return JNI_TRUE;
 }
@@ -1041,7 +965,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeIsInitialized(
     JNIEnv* env, jobject thiz)
 {
     (void)env; (void)thiz;
-    return g_initialized ? JNI_TRUE : JNI_FALSE;
+    return g_initialized.load() ? JNI_TRUE : JNI_FALSE;
 }
 
 // ==================== Runtime.nativeLoad Hook ====================
@@ -1053,7 +977,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeIsInitialized(
 // from a thread where the caller class cannot be resolved.
 //
 // ART's CheckJNI mode then calls GetObjectArrayElement on NULL (the
-// ProtectionDomain array derived from the null caller) 鈫?SIGABRT.
+// ProtectionDomain array derived from the null caller) → SIGABRT.
 //
 // Fix: Hook Runtime.nativeLoad at JNI registration level via RegisterNatives.
 // If caller==null, synthesize a non-null Class from the classLoader or use
@@ -1066,7 +990,7 @@ static void* g_orig_register_natives = nullptr;
 static bool g_register_natives_logger_installed = false;
 static std::atomic_int g_online_chapter_register_count{0};
 
-// FindClass hook: 鍦?JNI_OnLoad 涓敤 guest ClassLoader 鏌ユ壘鍔犲浐澹崇被
+// FindClass hook: 在 JNI_OnLoad 中用 guest ClassLoader 查找加固壳类
 static void patch_loaded_jiagu_vip_self_kill_callsites();
 static bool patch_jiagu_self_kill_from_return_address(void* caller);
 
@@ -1074,7 +998,7 @@ static jobject g_guest_classloader = nullptr;
 static jobject g_hook_classloader = nullptr;
 static jclass g_findclass_target_class = nullptr;
 static std::unordered_set<std::string> g_findclass_targets; // e.g. {"com/stub/StubApp", "com/qihoo/util/StubApp"}
-static jmethodID g_classloader_loadclass = nullptr;
+我的意思是现在你的验证QQ阅读分身的阻塞点是什么，全都改成可调试的，还是你的文档进展呢static jmethodID g_classloader_loadclass = nullptr;
 
 static bool ensure_classloader_loadclass(JNIEnv* env) {
     if (g_classloader_loadclass != nullptr) return true;
@@ -1092,48 +1016,6 @@ static bool ensure_classloader_loadclass(JNIEnv* env) {
         return false;
     }
     return true;
-}
-
-static jclass load_class_with_loader(JNIEnv* env, jobject classLoader, const char* dotName, const char* label) {
-    if (classLoader == nullptr || dotName == nullptr || dotName[0] == '\0') {
-        LOGW("%s: missing classLoader/name", label ? label : "load_class_with_loader");
-        return nullptr;
-    }
-
-    jclass clClass = env->FindClass("java/lang/ClassLoader");
-    if (clClass == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        LOGW("%s: java.lang.ClassLoader not found", label ? label : "load_class_with_loader");
-        return nullptr;
-    }
-
-    jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
-    env->DeleteLocalRef(clClass);
-    if (loadClass == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        LOGW("%s: ClassLoader.loadClass not found", label ? label : "load_class_with_loader");
-        return nullptr;
-    }
-
-    jstring name = env->NewStringUTF(dotName);
-    if (name == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        LOGW("%s: NewStringUTF failed for %s", label ? label : "load_class_with_loader", dotName);
-        return nullptr;
-    }
-
-    auto result = reinterpret_cast<jclass>(env->CallObjectMethod(classLoader, loadClass, name));
-    env->DeleteLocalRef(name);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        LOGW("%s: loadClass failed for %s", label ? label : "load_class_with_loader", dotName);
-        return nullptr;
-    }
-
-    if (result == nullptr) {
-        LOGW("%s: loadClass returned null for %s", label ? label : "load_class_with_loader", dotName);
-    }
-    return result;
 }
 
 static void remember_hook_classloader(JNIEnv* env, jclass bridgeClass) {
@@ -1165,21 +1047,7 @@ static void remember_hook_classloader(JNIEnv* env, jclass bridgeClass) {
         LOGW("remember_hook_classloader: hook ClassLoader is null");
     }
 }
-static void remember_hook_classloader_from_object(JNIEnv* env, jobject bridgeObject) {
-    if (g_hook_classloader != nullptr || bridgeObject == nullptr) return;
-
-    jclass bridgeClass = env->GetObjectClass(bridgeObject);
-    if (bridgeClass == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        LOGW("remember_hook_classloader_from_object: bridge object class not found");
-        return;
-    }
-
-    remember_hook_classloader(env, bridgeClass);
-    env->DeleteLocalRef(bridgeClass);
-}
-
-static void* g_orig_findclass = nullptr; // 鍘熷 FindClass 鍑芥暟鎸囬拡
+static void* g_orig_findclass = nullptr; // 原始 FindClass 函数指针
 
 // Type alias matching ART's native signature for Runtime.nativeLoad
 // static jni: (JNIEnv*, jclass, jstring filename, jobject classLoader, jclass caller) -> jstring
@@ -1208,6 +1076,22 @@ static StubInterfaceAppFn g_orig_stub_interface5 = nullptr;
 static StubInterface11Fn g_orig_stub_interface11 = nullptr;
 static StubInterface20Fn g_orig_stub_interface20 = nullptr;
 static StubInterfaceAppFn g_orig_stub_interface21 = nullptr;
+
+static std::atomic<long long> s_diag_last_check{0};
+static std::atomic_bool s_diag_cached{false};
+
+bool online_file_diag_enabled() {
+    auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now_ms - s_diag_last_check.load() < 5000) {
+        return s_diag_cached.load();
+    }
+    char val[PROP_VALUE_MAX];
+    __system_property_get("debug.multiapp.online.file_diag", val);
+    s_diag_cached.store(strcmp(val, "1") == 0);
+    s_diag_last_check.store(now_ms);
+    return s_diag_cached.load();
+}
 
 static bool should_call_original_fock_sn() {
     char value[PROP_VALUE_MAX] = {0};
@@ -1524,7 +1408,7 @@ static bool installRegisterNativesLogger(JNIEnv* env) {
 }
 
 /**
- * Runtime.nativeLoad hook 鈥?fixes a null caller Class and then forwards to
+ * Runtime.nativeLoad hook — fixes a null caller Class and then forwards to
  * ART's original nativeLoad.
  *
  * ART's nativeLoad accesses caller.getProtectionDomain() internally and
@@ -1691,7 +1575,7 @@ static bool installNativeLoadHook(JNIEnv* env) {
         // then rely on RegisterNatives to stash the original internally.
         // We'll use a JNI trick: register, then we ARE the native now.
         // To call original, we need the old function pointer.
-        // Without it, we try a different approach 鈥?call doLoad on Runtime directly.
+        // Without it, we try a different approach — call doLoad on Runtime directly.
 
         // Try using JNI GetStaticMethodID to verify method exists
         jmethodID nativeLoadMethod = env->GetStaticMethodID(
@@ -1730,7 +1614,7 @@ static bool installNativeLoadHook(JNIEnv* env) {
         return false;
     }
 
-    LOGI("installNativeLoadHook: SUCCESS 鈥?Runtime.nativeLoad hooked via RegisterNatives");
+    LOGI("installNativeLoadHook: SUCCESS — Runtime.nativeLoad hooked via RegisterNatives");
     return true;
 }
 
@@ -1773,10 +1657,10 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallRegisterNativesLogger(
 // ==================== LoaderFactory Static JNI Methods ====================
 
 /**
- * LoaderFactory 涓撶敤: 涓€娆℃€у畬鎴?shadowhook 鍒濆鍖?+ /proc/self 浼 + 灞炴€т吉瑁?
- * Static JNI 鈥?涓嶉渶瑕?NativeHookBridge 瀹炰緥
+ * LoaderFactory 专用: 一次性完成 shadowhook 初始化 + /proc/self 伪装 + 属性伪装
+ * Static JNI — 不需要 NativeHookBridge 实例
  *
- * 鏃跺簭: 蹇呴』鍦?instantiateApplication() 涓€丆lassLoader 鏇挎崲鍓嶈皟鐢?
+ * 时序: 必须在 instantiateApplication() 中、ClassLoader 替换前调用
  */
 JNIEXPORT jboolean JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
@@ -1784,14 +1668,14 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
 {
     (void)clazz;
 
-    // 1. 鍒濆鍖?shadowhook + 瀹夎 PLT/GOT Hook
+    // 1. 初始化 shadowhook + 安装 PLT/GOT Hook
     {
         std::unique_lock<std::shared_mutex> lock(g_mutex);
-        if (!g_initialized) {
+        if (!g_initialized.load()) {
             LOGI("nativeSetupForLoader: initializing shadowhook...");
             bool shadowhookReady = init_shadowhook_for_runtime("nativeSetupForLoader");
             g_hooks_installed = shadowhookReady && install_shadowhook_hooks();
-            g_initialized = true;
+            g_initialized.store(true);
             if (g_hooks_installed) {
                 LOGI("nativeSetupForLoader: PLT/GOT hooks installed");
             } else {
@@ -1800,7 +1684,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
         }
     }
 
-    // 2. 閰嶇疆 /proc/self 浼
+    // 2. 配置 /proc/self 伪装
     if (packageName != nullptr) {
         const char* pkg = env->GetStringUTFChars(packageName, nullptr);
         if (pkg) {
@@ -1812,7 +1696,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
         }
     }
 
-    // 3. 閰嶇疆绯荤粺灞炴€т吉瑁?
+    // 3. 配置系统属性伪装
     if (propKeys != nullptr && propValues != nullptr) {
         int count = env->GetArrayLength(propKeys);
         int valCount = env->GetArrayLength(propValues);
@@ -1842,7 +1726,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
 }
 
 /**
- * LoaderFactory 涓撶敤: 閰嶇疆 /proc/self 浼 (static JNI)
+ * LoaderFactory 专用: 配置 /proc/self 伪装 (static JNI)
  */
 JNIEXPORT void JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofProcSelfStatic(
@@ -1860,7 +1744,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofProcSelfStatic(
 }
 
 /**
- * LoaderFactory 涓撶敤: 閰嶇疆绯荤粺灞炴€т吉瑁?(static JNI)
+ * LoaderFactory 专用: 配置系统属性伪装 (static JNI)
  */
 JNIEXPORT void JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofSystemPropertyStatic(
@@ -1881,8 +1765,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofSystemPropertyStatic(
 }
 
 /**
- * 璁剧疆瀹屾暣鎬ф牎楠岄噸瀹氬悜锛氬３鐨?JNI_OnLoad 璇?APK 鏍￠獙 DEX 鏃讹紝閲嶅畾鍚戝埌鍘熷 APK銆?
- * 蹇呴』鍦ㄨ皟鐢?System.loadLibrary() 涔嬪墠璁剧疆锛屼箣鍚庢竻闄ゃ€?
+ * 设置完整性校验重定向：壳的 JNI_OnLoad 读 APK 校验 DEX 时，重定向到原始 APK。
+ * 必须在调用 System.loadLibrary() 之前设置，之后清除。
  */
 JNIEXPORT void JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeSetIntegrityRedirect(
@@ -1925,8 +1809,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetSuppressSelfSigkill(
 }
 
 // ==================== GOT Hook Implementation ====================
-// PLT/GOT hook: 淇敼鐩爣搴撶殑 GOT 琛ㄤ腑鐨勫嚱鏁版寚閽?
-// 涓嶉渶瑕?trampoline 鍐呭瓨锛孉ndroid 16 涓婂彲琛?
+// PLT/GOT hook: 修改目标库的 GOT 表中的函数指针
+// 不需要 trampoline 内存，Android 16 上可行
 
 struct GotHookEntry {
     const char* symbol_name;
@@ -1936,7 +1820,7 @@ struct GotHookEntry {
 
 static size_t get_elf_r_sym(uintptr_t r_info);
 
-// 淇濆瓨鍘熷鍑芥暟鎸囬拡
+// 保存原始函数指针
 static orig_open_t got_orig_open = nullptr;
 static orig_openat_t got_orig_openat = nullptr;
 static orig_fopen_t got_orig_fopen = nullptr;
@@ -1947,7 +1831,7 @@ static orig_kill_t got_orig_kill = nullptr;
 static orig_tgkill_t got_orig_tgkill = nullptr;
 static thread_local bool g_filtering_proc_maps = false;
 
-// 妫€鏌ヨ矾寰勬槸鍚︽槸 proc maps 鐩稿叧
+// 检查路径是否是 proc maps 相关
 static bool is_proc_maps_path(const char* path) {
     if (path == nullptr) return false;
     return strstr(path, "/proc/self/maps") != nullptr ||
@@ -2031,19 +1915,19 @@ static int create_filtered_maps_fd(const char* path) {
     return -1;
 }
 
-// 鍒涘缓涓€涓┖鐨?tmpfile fd锛堣繑鍥?dup 鍚庣殑 fd锛孎ILE* 鑷姩鍏抽棴鍘熷 fd锛?
+// 创建一个空的 tmpfile fd（返回 dup 后的 fd，FILE* 自动关闭原始 fd）
 static int create_empty_fd() {
     FILE* tmp = tmpfile();
     if (tmp) {
         int fd = fileno(tmp);
         int dupfd = dup(fd);
-        fclose(tmp); // 鍏抽棴鍘熷 FILE*锛宒upfd 浠嶇劧鏈夋晥
+        fclose(tmp); // 关闭原始 FILE*，dupfd 仍然有效
         if (dupfd >= 0) {
             lseek(dupfd, 0, SEEK_SET);
             return dupfd;
         }
     }
-    // fallback: 鍒涘缓绌?pipe
+    // fallback: 创建空 pipe
     int pipefd[2];
     if (pipe(pipefd) == 0) {
         close(pipefd[1]);
@@ -2053,11 +1937,11 @@ static int create_empty_fd() {
     return -1;
 }
 
-// GOT hook 鍑芥暟 鈥?鎷︽埅澹冲簱瀵?/proc/self/maps 鐨勮鍙?
-// 淇锛?
-//   1. 鐢?tmpfile 鏇夸唬 pipe锛坧ipe 鍙 fstat 妫€娴嬩负 S_IFIFO锛?
-//   2. 姝ｇ‘澶勭悊 variadic args锛堜粎鍦?O_CREAT 鏃惰 mode_t锛?
-//   3. 鎵╁睍瑕嗙洊 smaps/pagemap
+// GOT hook 函数 — 拦截壳库对 /proc/self/maps 的读取
+// 修复：
+//   1. 用 tmpfile 替代 pipe（pipe 可被 fstat 检测为 S_IFIFO）
+//   2. 正确处理 variadic args（仅在 O_CREAT 时读 mode_t）
+//   3. 扩展覆盖 smaps/pagemap
 
 static int got_hooked_open(const char* path, int flags, ...) {
     if (is_proc_maps_path(path)) {
@@ -2069,7 +1953,7 @@ static int got_hooked_open(const char* path, int flags, ...) {
         }
         return create_empty_fd();
     }
-    // 姝ｇ‘澶勭悊 variadic args锛氫粎 O_CREAT 鏃舵湁 mode_t 鍙傛暟
+    // 正确处理 variadic args：仅 O_CREAT 时有 mode_t 参数
     if (got_orig_open) {
         if (flags & O_CREAT) {
             va_list args;
@@ -2116,13 +2000,13 @@ static FILE* got_hooked_fopen(const char* path, const char* mode) {
         if (is_proc_maps_text_path(path)) {
             return create_filtered_maps_file(path);
         }
-        return tmpfile(); // 绌?tmpfile
+        return tmpfile(); // 空 tmpfile
     }
     if (got_orig_fopen) return got_orig_fopen(path, mode);
     return nullptr;
 }
 
-// readlink hook 鈥?鎷︽埅 /proc/self/map_files/ 绛?readlink 璋冪敤
+// readlink hook — 拦截 /proc/self/map_files/ 等 readlink 调用
 static orig_readlink_t got_orig_readlink = nullptr;
 static ssize_t got_hooked_readlink(const char* path, char* buf, size_t bufsiz) {
     if (path != nullptr && strstr(path, "/proc/self/map_files") != nullptr) {
@@ -2223,10 +2107,10 @@ static int got_hooked_tgkill(pid_t tgid, pid_t tid, int sig) {
     return -1;
 }
 
-// GOT hook: 淇敼鎸囧畾搴撶殑 GOT 琛?
-// hook 绛栫暐锛氬鐩爣搴擄紙澹冲簱锛夊拰 libc.so 閮借繘琛?hook
-// - 澹冲簱 hook锛氭嫤鎴３鑷韩 PLT 璋冪敤
-// - libc hook锛氭嫤鎴３閫氳繃 libc PLT 鐨勮皟鐢紙瑕嗙洊 constructor 鏃跺簭闂锛?
+// GOT hook: 修改指定库的 GOT 表
+// hook 策略：对目标库（壳库）和 libc.so 都进行 hook
+// - 壳库 hook：拦截壳自身 PLT 调用
+// - libc hook：拦截壳通过 libc PLT 的调用（覆盖 constructor 时序问题）
 static void patch_loaded_jiagu_vip_self_kill_callsites();
 
 static int got_hook_library_callback(struct dl_phdr_info* info, size_t size, void* data) {
@@ -2235,7 +2119,7 @@ static int got_hook_library_callback(struct dl_phdr_info* info, size_t size, voi
 
     if (lib_name == nullptr) return 0;
 
-    // 鍖归厤鐩爣搴撴垨 libc.so
+    // 匹配目标库或 libc.so
     bool is_target = (strstr(lib_name, target_lib) != nullptr);
     if (!is_target) return 0;
 
@@ -2261,14 +2145,14 @@ static int got_hook_library_callback(struct dl_phdr_info* info, size_t size, voi
 
         if (symtab == nullptr || strtab == nullptr) {
             LOGW("got_hook: missing symtab=%p strtab=%p for %s", symtab, strtab, lib_name);
-            // 閬嶅巻 dynamic section 鐪嬫湁鍝簺鏉＄洰
+            // 遍历 dynamic section 看有哪些条目
             for (ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; d++) {
                 LOGD("got_hook:   d_tag=0x%lx d_val=0x%lx", (unsigned long)d->d_tag, (unsigned long)d->d_un.d_val);
             }
             return 0;
         }
 
-        // 鍒ゆ柇鏄?REL 杩樻槸 RELA锛圓RM64 閫氬父鐢?RELA锛?4 瀛楄妭/鏉＄洰锛?
+        // 判断是 REL 还是 RELA（ARM64 通常用 RELA，24 字节/条目）
         bool use_rela = false;
         for (ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; d++) {
             if (d->d_tag == DT_PLTREL && d->d_un.d_val == DT_RELA) {
@@ -2357,16 +2241,16 @@ static int got_hook_library_callback(struct dl_phdr_info* info, size_t size, voi
             }
             break;
         }
-        // 涓?return 1 鈥?缁х画閬嶅巻浠?hook 鍏朵粬搴擄紙濡?libc.so锛?
+        // 不 return 1 — 继续遍历以 hook 其他库（如 libc.so）
     }
     return 0;
 }
 
 /**
- * 瀵规寚瀹氬簱杩涜 GOT hook锛坥pen/openat/fopen锛?
- * 鐢ㄤ簬杩囨护 /proc/self/maps 璇诲彇锛岀粫杩囧３鐨勫弽璋冭瘯妫€娴?
+ * 对指定库进行 GOT hook（open/openat/fopen）
+ * 用于过滤 /proc/self/maps 读取，绕过壳的反调试检测
  *
- * @param libName 搴撳悕锛堝 "libjiagu_vip.so"锛?
+ * @param libName 库名（如 "libjiagu_vip.so"）
  */
 JNIEXPORT void JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeGotHookLibrary(
@@ -2383,14 +2267,14 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeGotHookLibrary(
     env->ReleaseStringUTFChars(libName, name);
 }
 
-// 浠庡畬鏁磋矾寰勬彁鍙栧簱鍚嶅苟璋冪敤 GOT hook
+// 从完整路径提取库名并调用 GOT hook
 static void got_hook_library_callback_wrapper(const char* path) {
     if (path == nullptr) return;
     const char* name = strrchr(path, '/');
     if (name != nullptr) name++; else name = path;
     LOGI("got_hook_wrapper: hooking GOT for %s (from %s)", name, path);
 
-    // 鏋氫妇鎵€鏈夊凡鍔犺浇鐨勫簱锛屾鏌ユ槸鍚﹁兘鎵惧埌鐩爣
+    // 枚举所有已加载的库，检查是否能找到目标
     int found = 0;
     dl_iterate_phdr([](struct dl_phdr_info* info, size_t size, void* data) -> int {
         int* count = (int*)data;
@@ -2406,8 +2290,8 @@ static void got_hook_library_callback_wrapper(const char* path) {
 }
 
 /**
- * 棰勮В鏋?ELF 鏂囦欢锛岃褰?GOT 鏉＄洰鍋忕Щ閲忋€?
- * dlopen 杩斿洖鍚庣珛鍗崇敤杩欎簺鍋忕Щ閲?hook GOT锛堟姠鍦?constructor 璇?maps 涔嬪墠锛夈€?
+ * 预解析 ELF 文件，记录 GOT 条目偏移量。
+ * dlopen 返回后立即用这些偏移量 hook GOT（抢在 constructor 读 maps 之前）。
  */
 struct GotEntryInfo {
     uintptr_t open_offset;
@@ -2475,8 +2359,6 @@ static int find_loaded_library_callback(struct dl_phdr_info* info, size_t size, 
     lookup->path = info->dlpi_name;
     return 1;
 }
-
-static const char* multiapp_get_method_shorty(JNIEnv* env, jmethodID mid);
 
 static bool refresh_libart_info() {
     if (g_libart_base != 0 && !g_libart_path.empty()) return true;
@@ -2581,11 +2463,6 @@ static void* resolve_symbol_from_elf_sections(
 
 static void* resolve_libart_symbol(std::string_view symbol_name, bool prefix_match) {
     if (symbol_name.empty()) return nullptr;
-    if (!prefix_match && (symbol_name == "_ZN3artL15GetMethodShortyEP7_JNIEnvP10_jmethodID" ||
-        symbol_name == "_ZN3art15GetMethodShortyEP7_JNIEnvP10_jmethodID")) {
-        LOGW("libart resolver: using MultiApp GetMethodShorty fallback for %.*s", (int)symbol_name.size(), symbol_name.data());
-        return reinterpret_cast<void*>(multiapp_get_method_shorty);
-    }
 
     if (!prefix_match && g_libart_handle != nullptr) {
         std::string name(symbol_name);
@@ -2622,7 +2499,7 @@ static GotEntryInfo pre_parse_elf_got(const char* so_path) {
     auto* ehdr = (ElfW(Ehdr)*)mapped;
     if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0) { munmap(mapped, st.st_size); return info; }
 
-    // 鎵?PT_DYNAMIC
+    // 找 PT_DYNAMIC
     auto* phdrs = (ElfW(Phdr)*)((uintptr_t)mapped + ehdr->e_phoff);
     ElfW(Dyn)* dyn_table = nullptr;
     size_t dyn_count = 0;
@@ -2654,6 +2531,14 @@ static GotEntryInfo pre_parse_elf_got(const char* so_path) {
         uintptr_t jmprel_file_off = elf_vaddr_to_file_offset(phdrs, ehdr->e_phnum, jmprel_off);
         if (strtab_file_off == 0 || symtab_file_off == 0 || jmprel_file_off == 0) {
             LOGW("pre_parse_elf_got: vaddr conversion failed for %s", so_path);
+            munmap(mapped, st.st_size);
+            return info;
+        }
+
+        if (strtab_file_off >= (uintptr_t)st.st_size ||
+            symtab_file_off >= (uintptr_t)st.st_size ||
+            jmprel_file_off >= (uintptr_t)st.st_size) {
+            LOGE("ELF offset out of bounds, skipping GOT parse");
             munmap(mapped, st.st_size);
             return info;
         }
@@ -2958,7 +2843,7 @@ static void patch_loaded_jiagu_vip_self_kill_callsites() {
          request.checked, request.patched);
 }
 
-// 绔嬪嵆 hook GOT锛堢敤棰勮В鏋愮殑鍋忕Щ閲忥級
+// 立即 hook GOT（用预解析的偏移量）
 static void got_hook_immediate(const char* path, const GotEntryInfo& info) {
     uintptr_t base_addr = find_loaded_library_base(path);
     if (base_addr == 0) {
@@ -3003,16 +2888,16 @@ static void got_hook_immediate(const char* path, const GotEntryInfo& info) {
 }
 
 /**
- * LoaderFactory 涓撶敤: 閫氳繃 dlopen 鐩存帴鍔犺浇鍔犲浐澹?native 搴擄紝骞舵墜鍔ㄨ皟鐢?JNI_OnLoad
+ * LoaderFactory 专用: 通过 dlopen 直接加载加固壳 native 库，并手动调用 JNI_OnLoad
  *
- * 鍏抽敭鏃跺簭锛?
- * 1. 棰勮В鏋?ELF锛堣褰?GOT 鍋忕Щ閲忥級
- * 2. dlopen锛坈onstructor 鎵ц锛屽彲鑳借 /proc/self/maps锛?
- * 3. 绔嬪嵆 hook GOT锛堢敤棰勮В鏋愬亸绉婚噺锛屽井绉掔骇锛?
- * 4. 鎵嬪姩璋冪敤 JNI_OnLoad
+ * 关键时序：
+ * 1. 预解析 ELF（记录 GOT 偏移量）
+ * 2. dlopen（constructor 执行，可能读 /proc/self/maps）
+ * 3. 立即 hook GOT（用预解析偏移量，微秒级）
+ * 4. 手动调用 JNI_OnLoad
  *
- * @param libPaths 瑕佸姞杞界殑 .so 鏂囦欢缁濆璺緞鏁扮粍
- * @return 鎴愬姛鍔犺浇骞惰皟鐢?JNI_OnLoad 鐨勬暟閲?
+ * @param libPaths 要加载的 .so 文件绝对路径数组
+ * @return 成功加载并调用 JNI_OnLoad 的数量
  */
 JNIEXPORT jint JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
@@ -3037,13 +2922,13 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
         const char* path = env->GetStringUTFChars(jPath, nullptr);
         if (path == nullptr) { env->DeleteLocalRef(jPath); continue; }
 
-        // Step 0: 棰勮В鏋?ELF锛岃褰?GOT 鏉＄洰鍋忕Щ閲?
+        // Step 0: 预解析 ELF，记录 GOT 条目偏移量
         GotEntryInfo got_info = pre_parse_elf_got(path);
         LOGI("nativePreloadLibraries: pre-parsed %s (open=%d openat=%d fopen=%d readlink=%d exit=%d _exit=%d abort=%d kill=%d tgkill=%d)",
              path, got_info.has_open, got_info.has_openat, got_info.has_fopen, got_info.has_readlink,
              got_info.has_exit, got_info.has__exit, got_info.has_abort, got_info.has_kill, got_info.has_tgkill);
 
-        // Step 1: dlopen 鍔犺浇 .so锛坈onstructor 鍙兘鍦ㄦ鎵ц锛?
+        // Step 1: dlopen 加载 .so（constructor 可能在此执行）
         LOGI("nativePreloadLibraries: dlopen %s", path);
         void* handle = dlopen(path, RTLD_NOW);
         if (handle == nullptr) {
@@ -3055,11 +2940,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
         }
         LOGI("nativePreloadLibraries: dlopen OK %s", path);
 
-        // Step 1.5: 绔嬪嵆 hook GOT锛堢敤棰勮В鏋愬亸绉婚噺锛屽井绉掔骇瀹屾垚锛?
-        // 姝ゆ椂 constructor 鍙兘杩樺湪鎵ц锛屼絾 GOT hook 浼氭嫤鎴悗缁殑 open/fopen 璋冪敤
+        // Step 1.5: 立即 hook GOT（用预解析偏移量，微秒级完成）
+        // 此时 constructor 可能还在执行，但 GOT hook 会拦截后续的 open/fopen 调用
         got_hook_immediate(path, got_info);
 
-        // Step 2: dlsym 鎵惧埌 JNI_OnLoad
+        // Step 2: dlsym 找到 JNI_OnLoad
         auto jniOnLoad = (jint (*)(JavaVM*, void*))dlsym(handle, "JNI_OnLoad");
         if (jniOnLoad == nullptr) {
             LOGI("nativePreloadLibraries: no JNI_OnLoad in %s (pure native)", path);
@@ -3069,16 +2954,16 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
             continue;
         }
 
-        // Step 3: 鎵嬪姩璋冪敤 JNI_OnLoad
+        // Step 3: 手动调用 JNI_OnLoad
         LOGI("nativePreloadLibraries: calling JNI_OnLoad for %s", path);
         jint onLoadResult = jniOnLoad(vm, nullptr);
         if (onLoadResult < 0) {
-            // 澹崇殑鍙嶆娴嬪鑷?JNI_OnLoad 杩斿洖 -1
-            // 浣嗗３鍙兘宸茬粡閮ㄥ垎鍒濆鍖栵紙瑙ｅ瘑浜嗛儴鍒?DEX銆佹敞鍐屼簡閮ㄥ垎鏂规硶锛?
-            // 寮哄埗缁х画锛屼笉瑙嗕负澶辫触
+            // 壳的反检测导致 JNI_OnLoad 返回 -1
+            // 但壳可能已经部分初始化（解密了部分 DEX、注册了部分方法）
+            // 强制继续，不视为失败
             LOGW("nativePreloadLibraries: JNI_OnLoad returned %d for %s (forcing continue anyway)",
                  onLoadResult, path);
-            loaded++; // 寮哄埗璁′负鎴愬姛
+            loaded++; // 强制计为成功
         } else {
             LOGI("nativePreloadLibraries: JNI_OnLoad returned %d (JNI_VERSION_%d) for %s",
                  onLoadResult, onLoadResult, path);
@@ -3094,11 +2979,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativePreloadLibraries(
 }
 
 /**
- * 鍙仛 dlopen + GOT hook锛屼笉璋?JNI_OnLoad銆?
- * 鐢ㄤ簬娣峰悎鏂规锛氬厛 dlopen 鍔犺浇骞?hook GOT锛屽啀閫氳繃 Runtime.nativeLoad 璁?ART 鍋?ClassLoader 缁戝畾 + JNI_OnLoad銆?
+ * 只做 dlopen + GOT hook，不调 JNI_OnLoad。
+ * 用于混合方案：先 dlopen 加载并 hook GOT，再通过 Runtime.nativeLoad 让 ART 做 ClassLoader 绑定 + JNI_OnLoad。
  *
- * @param libPath .so 鏂囦欢缁濆璺緞
- * @return dlopen handle 鐨勪綆 32 浣嶏紙0 = 澶辫触锛?
+ * @param libPath .so 文件绝对路径
+ * @return dlopen handle 的低 32 位（0 = 失败）
  */
 JNIEXPORT jint JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeDlopenOnly(
@@ -3110,13 +2995,13 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDlopenOnly(
     const char* path = env->GetStringUTFChars(libPath, nullptr);
     if (path == nullptr) return 0;
 
-    // 棰勮В鏋?ELF GOT
+    // 预解析 ELF GOT
     GotEntryInfo got_info = pre_parse_elf_got(path);
     LOGI("nativeDlopenOnly: pre-parsed %s (open=%d openat=%d fopen=%d readlink=%d exit=%d _exit=%d abort=%d kill=%d tgkill=%d)",
          path, got_info.has_open, got_info.has_openat, got_info.has_fopen, got_info.has_readlink,
          got_info.has_exit, got_info.has__exit, got_info.has_abort, got_info.has_kill, got_info.has_tgkill);
 
-    // dlopen 鍔犺浇锛堜笉璋?JNI_OnLoad锛?
+    // dlopen 加载（不调 JNI_OnLoad）
     void* handle = dlopen(path, RTLD_NOW);
     if (handle == nullptr) {
         const char* err = dlerror();
@@ -3126,25 +3011,25 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDlopenOnly(
     }
     LOGI("nativeDlopenOnly: dlopen OK %s", path);
 
-    // 绔嬪嵆瀹夎 GOT hook
+    // 立即安装 GOT hook
     got_hook_immediate(path, got_info);
 
     env->ReleaseStringUTFChars(libPath, path);
 
-    // 杩斿洖 handle 鐨勪綆 32 浣嶄綔涓烘垚鍔熸爣蹇?
+    // 返回 handle 的低 32 位作为成功标志
     return (jint)((uintptr_t)handle & 0xFFFFFFFF);
 }
 
 /**
- * 閫氳繃 JNI 璋冪敤 Runtime.nativeLoad(path, classLoader, callerClass)
+ * 通过 JNI 调用 Runtime.nativeLoad(path, classLoader, callerClass)
  *
- * JNI 璋冪敤缁曡繃 Java 灞?hidden API 妫€鏌ャ€?
- * 浼犲叆 guest ClassLoader 纭繚搴撳姞杞藉埌姝ｇ‘鐨勫懡鍚嶇┖闂淬€?
+ * JNI 调用绕过 Java 层 hidden API 检查。
+ * 传入 guest ClassLoader 确保库加载到正确的命名空间。
  *
- * @param libPath .so 鏂囦欢缁濆璺緞
+ * @param libPath .so 文件绝对路径
  * @param classLoader guest ClassLoader (PathClassLoader)
- * @param callerClass guest 涓殑璋冪敤鑰呯被 (濡?com.stub.StubApp)
- * @return JNI_OnLoad 杩斿洖鍊?(0=鎴愬姛, <0=澶辫触)
+ * @param callerClass guest 中的调用者类 (如 com.stub.StubApp)
+ * @return JNI_OnLoad 返回值 (0=成功, <0=失败)
  */
 JNIEXPORT jint JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
@@ -3153,7 +3038,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
     (void)clazz;
     if (libPath == nullptr) return -1;
 
-    // 鎵惧埌 Runtime 绫诲拰 nativeLoad 鏂规硶
+    // 找到 Runtime 类和 nativeLoad 方法
     jclass runtimeClass = env->FindClass("java/lang/Runtime");
     if (runtimeClass == nullptr) {
         LOGE("nativeLoadLibraryForGuest: Runtime class not found");
@@ -3161,7 +3046,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
         return -2;
     }
 
-    // 鑾峰彇 Runtime.getRuntime() 瀹炰緥
+    // 获取 Runtime.getRuntime() 实例
     jmethodID getRuntime = env->GetStaticMethodID(runtimeClass, "getRuntime", "()Ljava/lang/Runtime;");
     if (getRuntime == nullptr) {
         LOGE("nativeLoadLibraryForGuest: getRuntime not found");
@@ -3176,7 +3061,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
         return -4;
     }
 
-    // 鑾峰彇 nativeLoad(String, ClassLoader, Class) 鏂规硶
+    // 获取 nativeLoad(String, ClassLoader, Class) 方法
     bool nativeLoadHasCaller = true;
     jmethodID nativeLoad = env->GetStaticMethodID(
         runtimeClass, "nativeLoad",
@@ -3197,7 +3082,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
         return -5;
     }
 
-    // 璋冪敤 runtime.nativeLoad(libPath, classLoader, callerClass)
+    // 调用 runtime.nativeLoad(libPath, classLoader, callerClass)
     const char* path = env->GetStringUTFChars(libPath, nullptr);
     LOGI("nativeLoadLibraryForGuest: calling nativeLoad(%s)", path ? path : "null");
     env->ReleaseStringUTFChars(libPath, path);
@@ -3209,7 +3094,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
     env->DeleteLocalRef(runtime);
 
     if (error == nullptr) {
-        // null 琛ㄧず鎴愬姛
+        // null 表示成功
         LOGI("nativeLoadLibraryForGuest: SUCCESS");
         return 0;
     }
@@ -3222,11 +3107,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeLoadLibraryForGuest(
 }
 
 /**
- * hook_FindClass: 鎷︽埅 JNI_OnLoad 涓殑鎵€鏈?FindClass 璋冪敤
+ * hook_FindClass: 拦截 JNI_OnLoad 中的所有 FindClass 调用
  *
- * 绛栫暐锛氬厛璇?guest ClassLoader锛屾壘涓嶅埌鍐嶈蛋鍘熷璺緞銆?
- * 杩欐牱澹崇殑 JNI_OnLoad 鏃犺鏌ユ壘浠€涔堢被锛圫tubApp銆佸唴閮ㄥ伐鍏风被绛夛級閮借兘閫氳繃銆?
- * 绯荤粺绫伙紙java.lang.* 绛夛級鍦?guest ClassLoader 涓壘涓嶅埌锛岃嚜鍔?fallback 鍒?boot銆?
+ * 策略：先试 guest ClassLoader，找不到再走原始路径。
+ * 这样壳的 JNI_OnLoad 无论查找什么类（StubApp、内部工具类等）都能通过。
+ * 系统类（java.lang.* 等）在 guest ClassLoader 中找不到，自动 fallback 到 boot。
  */
 static jclass hooked_FindClass(JNIEnv* env, const char* name) {
     if (name == nullptr) {
@@ -3252,13 +3137,13 @@ static jclass hooked_FindClass(JNIEnv* env, const char* name) {
     }
 
     if (g_guest_classloader != nullptr && g_classloader_loadclass != nullptr) {
-        // 杞崲 "/" -> "." 缁?ClassLoader.loadClass
+        // 转换 "/" -> "." 给 ClassLoader.loadClass
         std::string dotName(name);
         for (auto& c : dotName) { if (c == '/') c = '.'; }
 
         jstring jClassName = env->NewStringUTF(dotName.c_str());
         if (jClassName != nullptr) {
-            // 鍏堣瘯 guest ClassLoader锛堣鐩栧３绫?+ app 绫伙級
+            // 先试 guest ClassLoader（覆盖壳类 + app 类）
             jclass clazz = (jclass)env->CallObjectMethod(
                 g_guest_classloader, g_classloader_loadclass, jClassName);
             env->DeleteLocalRef(jClassName);
@@ -3267,13 +3152,13 @@ static jclass hooked_FindClass(JNIEnv* env, const char* name) {
                 LOGI("hooked_FindClass: guest hit \"%s\"", name);
                 return clazz;
             }
-            // loadClass 鎶涗簡 ClassNotFoundException锛屾竻鎺夊紓甯歌蛋 fallback
+            // loadClass 抛了 ClassNotFoundException，清掉异常走 fallback
             if (env->ExceptionCheck()) env->ExceptionClear();
             LOGD("hooked_FindClass: guest miss \"%s\", trying original", name);
         }
     }
 
-    // guest 娌℃壘鍒帮紙绯荤粺绫汇€佸唴閮ㄧ被绛夛級锛岃蛋鍘熷 FindClass
+    // guest 没找到（系统类、内部类等），走原始 FindClass
     if (g_orig_findclass != nullptr) {
         using FindClassFn = jclass(*)(JNIEnv*, const char*);
         jclass result = ((FindClassFn)g_orig_findclass)(env, name);
@@ -3287,10 +3172,10 @@ static jclass hooked_FindClass(JNIEnv* env, const char* name) {
 }
 
 /**
- * 璁剧疆 guest ClassLoader 骞跺畨瑁?FindClass hook
+ * 设置 guest ClassLoader 并安装 FindClass hook
  *
- * 蹇呴』鍦?System.loadLibrary("jiagu_vip") 涔嬪墠璋冪敤銆?
- * hook 浠呭湪 JNI_OnLoad 鎵ц鏈熼棿鏈夋晥锛堝崟绾跨▼锛夈€?
+ * 必须在 System.loadLibrary("jiagu_vip") 之前调用。
+ * hook 仅在 JNI_OnLoad 执行期间有效（单线程）。
  */
 JNIEXPORT jboolean JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupFindClassHook(
@@ -3299,13 +3184,13 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupFindClassHook(
     (void)clazz;
     if (classLoader == nullptr || targetClassNames == nullptr) return JNI_FALSE;
 
-    // 淇濆瓨 guest ClassLoader 鍏ㄥ眬寮曠敤
+    // 保存 guest ClassLoader 全局引用
     if (g_guest_classloader != nullptr) {
         env->DeleteGlobalRef(g_guest_classloader);
     }
     g_guest_classloader = env->NewGlobalRef(classLoader);
 
-    // 淇濆瓨鍊欓€夌被鍚嶅垪琛紙杞崲涓?slash 鏍煎紡: "com.stub.StubApp" -> "com/stub/StubApp"锛?
+    // 保存候选类名列表（转换为 slash 格式: "com.stub.StubApp" -> "com/stub/StubApp"）
     g_findclass_targets.clear();
     jsize nameCount = env->GetArrayLength(targetClassNames);
     for (jsize i = 0; i < nameCount; i++) {
@@ -3330,7 +3215,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupFindClassHook(
         return JNI_FALSE;
     }
 
-    // 鑾峰彇 ClassLoader.loadClass 鏂规硶
+    // 获取 ClassLoader.loadClass 方法
     jclass clClass = env->FindClass("java/lang/ClassLoader");
     if (clClass == nullptr) {
         LOGE("nativeSetupFindClassHook: ClassLoader class not found");
@@ -3352,8 +3237,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupFindClassHook(
 }
 
 /**
- * 鍦?JNI 鍑芥暟琛ㄤ腑鏇挎崲 FindClass
- * 浠呭湪 libjiagu_vip.so 鐨?JNI_OnLoad 鎵ц鍓嶈皟鐢紝涔嬪悗鎭㈠
+ * 在 JNI 函数表中替换 FindClass
+ * 仅在 libjiagu_vip.so 的 JNI_OnLoad 执行前调用，之后恢复
  */
 JNIEXPORT void JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallFindClassHook(
@@ -3365,24 +3250,24 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallFindClassHook(
         return;
     }
 
-    // 鑾峰彇 JNI 鍑芥暟琛ㄦ寚閽?
+    // 获取 JNI 函数表指针
     void** jniFunctions = *reinterpret_cast<void***>(env);
 
-    // FindClass 鍦?JNI 鍑芥暟琛ㄤ腑鐨勪綅缃?
+    // FindClass 在 JNI 函数表中的位置
     // JNI 1.6+: reserved0(0), reserved1(1), reserved2(2), reserved3(3),
     //           GetVersion(4), DefineClass(5), FindClass(6)
     constexpr int FIND_CLASS_INDEX = 6;
 
-    // 淇濆瓨鍘熷鎸囬拡
+    // 保存原始指针
     g_orig_findclass = jniFunctions[FIND_CLASS_INDEX];
 
-    // 鏇挎崲 JNI 鍑芥暟琛ㄤ腑鐨?FindClass
-    // 闇€瑕佸厛 mprotect 淇敼涓哄彲鍐?
+    // 替换 JNI 函数表中的 FindClass
+    // 需要先 mprotect 修改为可写
     uintptr_t page_size = sysconf(_SC_PAGESIZE);
     uintptr_t page_start = (uintptr_t)&jniFunctions[FIND_CLASS_INDEX] & ~(page_size - 1);
     if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) == 0) {
         jniFunctions[FIND_CLASS_INDEX] = (void*)hooked_FindClass;
-        // 鎭㈠椤甸潰淇濇姢
+        // 恢复页面保护
         mprotect((void*)page_start, page_size, PROT_READ);
         LOGI("nativeInstallFindClassHook: installed (original=%p)", g_orig_findclass);
     } else {
@@ -3391,18 +3276,17 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallFindClassHook(
 }
 
 /**
- * 鎵嬪姩娉ㄥ唽 StubApp 鐨?native 鏂规硶锛堝厹搴曟柟妗堬級
+ * 手动注册 StubApp 的 native 方法（兜底方案）
  *
- * 褰?FindClass hook 涓嶇敓鏁堟椂锛岀洿鎺ョ敤 RegisterNatives 娉ㄥ唽 interface20() 绛夋柟娉曘€?
- * 杩斿洖涓€涓粯璁ゅ€艰澹崇殑鍒濆鍖栨祦绋嬭兘缁х画銆?
+ * 当 FindClass hook 不生效时，直接用 RegisterNatives 注册 interface20() 等方法。
+ * 返回一个默认值让壳的初始化流程能继续。
  */
 
-// 鍓嶅悜澹版槑锛歒WLoginManager 鍜?Fock 鐨?stub 鍑芥暟锛坰tub_interface_app 涓娇鐢級
+// 前向声明：YWLoginManager 和 Fock 的 stub 函数（stub_interface_app 中使用）
 static jobject JNICALL stub_ywlogin_getInstance(JNIEnv* env, jclass clazz);
 static void JNICALL stub_ywlogin_registerParameter(JNIEnv* env, jclass clazz, jobject getter);
 static void JNICALL stub_ywlogin_resetParameter(JNIEnv* env, jobject thiz, jstring key, jstring value);
 static jstring JNICALL stub_easyencrypt_md5_key(JNIEnv* env, jclass clazz);
-static jbyteArray JNICALL stub_easyencrypt_bytes_identity(JNIEnv* env, jclass clazz, jbyteArray data);
 static jobject JNICALL stub_online_getDownloadChap(JNIEnv* env, jobject thiz);
 static jobject JNICALL stub_online_getDownloadChapters(JNIEnv* env, jobject thiz);
 static void JNICALL stub_online_setToDownloadChapters(JNIEnv* env, jobject thiz, jobject chapters);
@@ -3429,9 +3313,9 @@ static void JNICALL stub_fock_save_encrypt_pool(JNIEnv* env, jclass clazz, jstri
 static void JNICALL stub_fock_update_encrypt_bean(JNIEnv* env, jclass clazz, jstring key, jstring value, jstring sign);
 static jstring JNICALL stub_fock_sign_string(JNIEnv* env, jclass clazz, jstring value);
 
-// interface5(Application) 鐨?stub 瀹炵幇
-// 澹冲湪 Application 鍒涘缓鏃惰皟鐢ㄦ鏂规硶锛屼箣鍚庢墠浼氳皟鐢?initLoginSDK()
-// 鍦ㄨ繖閲岄噸鏂版敞鍐屼笟鍔?stub锛岀‘淇?YWLoginManager.getInstance 绛夋柟娉曟湁瀹炵幇
+// interface5(Application) 的 stub 实现
+// 壳在 Application 创建时调用此方法，之后才会调用 initLoginSDK()
+// 在这里重新注册业务 stub，确保 YWLoginManager.getInstance 等方法有实现
 static bool clear_logged_exception(JNIEnv* env, const char* label) {
     if (!env->ExceptionCheck()) return false;
     env->ExceptionDescribe();
@@ -3492,24 +3376,18 @@ static void register_qrencrypt_stubs(JNIEnv* env) {
     jclass easyClass = (jclass)env->CallObjectMethod(g_guest_classloader, g_classloader_loadclass, easyName);
     env->DeleteLocalRef(easyName);
     if (easyClass != nullptr) {
-        JNINativeMethod methods[] = {
-            {const_cast<char*>("getMd5Key"),
-             const_cast<char*>("()Ljava/lang/String;"),
-             (void*)stub_easyencrypt_md5_key},
-            {const_cast<char*>("decrypt"),
-             const_cast<char*>("([B)[B"),
-             (void*)stub_easyencrypt_bytes_identity},
-            {const_cast<char*>("encrypt"),
-             const_cast<char*>("([B)[B"),
-             (void*)stub_easyencrypt_bytes_identity},
+        JNINativeMethod method = {
+            const_cast<char*>("getMd5Key"),
+            const_cast<char*>("()Ljava/lang/String;"),
+            (void*)stub_easyencrypt_md5_key
         };
-        if (env->RegisterNatives(easyClass, methods, sizeof(methods) / sizeof(methods[0])) == JNI_OK) {
-            registered += (int)(sizeof(methods) / sizeof(methods[0]));
-            LOGI("register_qrencrypt_stubs: EasyEncrypt methods OK");
+        if (env->RegisterNatives(easyClass, &method, 1) == JNI_OK) {
+            registered++;
+            LOGI("register_qrencrypt_stubs: EasyEncrypt.getMd5Key OK");
         } else {
             if (env->ExceptionCheck()) env->ExceptionClear();
             failed++;
-            LOGW("register_qrencrypt_stubs: EasyEncrypt methods failed");
+            LOGW("register_qrencrypt_stubs: EasyEncrypt.getMd5Key failed");
         }
         env->DeleteLocalRef(easyClass);
     } else {
@@ -3582,7 +3460,7 @@ static void JNICALL stub_interface11(JNIEnv* env, jclass clazz, jint value) {
          g_online_chapter_register_count.load(std::memory_order_relaxed));
 }
 
-// interface20 鐨?stub 瀹炵幇锛氳繑鍥?true
+// interface20 的 stub 实现：返回 true
 JNIEXPORT jboolean JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterQrencryptStubs(
     JNIEnv* env, jclass clazz, jobject classLoader)
@@ -3626,15 +3504,15 @@ static jboolean JNICALL stub_interface_bool(JNIEnv* env, jclass clazz) {
     return JNI_TRUE;
 }
 
-// interface31(String) 鐨?stub 瀹炵幇锛氳繑鍥?true
+// interface31(String) 的 stub 实现：返回 true
 static jboolean JNICALL stub_interface_str(JNIEnv* env, jclass clazz, jstring s) {
     LOGI("stub_interface_str called (returning true)");
     return JNI_TRUE;
 }
 
-// YWLoginManager 鐨?stub native 鏂规硶瀹炵幇
+// YWLoginManager 的 stub native 方法实现
 
-// getInstance() 鈥?鍒涘缓瀹炰緥锛堜笉璋冪敤鏋勯€犲嚱鏁帮紝纭繚涓嶈繑鍥?null锛?
+// getInstance() — 创建实例（不调用构造函数，确保不返回 null）
 static jobject JNICALL stub_ywlogin_getInstance(JNIEnv* env, jclass clazz) {
     if (g_guest_classloader == nullptr || g_classloader_loadclass == nullptr) {
         LOGW("stub_ywlogin_getInstance: no guest ClassLoader");
@@ -3647,7 +3525,7 @@ static jobject JNICALL stub_ywlogin_getInstance(JNIEnv* env, jclass clazz) {
         if (env->ExceptionCheck()) env->ExceptionClear();
         return nullptr;
     }
-    // AllocObject 鍒嗛厤瀹炰緥浣嗕笉璋冪敤鏋勯€犲嚱鏁?鈥?纭繚涓嶈繑鍥?null
+    // AllocObject 分配实例但不调用构造函数 — 确保不返回 null
     jobject instance = env->AllocObject(ywClass);
     env->DeleteLocalRef(ywClass);
     if (instance) {
@@ -3659,7 +3537,7 @@ static jobject JNICALL stub_ywlogin_getInstance(JNIEnv* env, jclass clazz) {
     return instance;
 }
 
-// registerParameter(IParameterGetter)V 鈥?绌哄疄鐜?
+// registerParameter(IParameterGetter)V — 空实现
 static void JNICALL stub_ywlogin_registerParameter(JNIEnv* env, jclass clazz, jobject getter) {
     LOGI("stub_ywlogin_registerParameter: stub (no-op)");
 }
@@ -3687,9 +3565,9 @@ static void JNICALL stub_ywlogin_fetchSettings(JNIEnv* env, jobject thiz, jobjec
     LOGI("stub_ywlogin_fetchSettings: stub (no-op)");
 }
 
-// 鍏朵粬鍙兘鐨?native 鏂规硶 stub
+// 其他可能的 native 方法 stub
 static void JNICALL stub_ywlogin_void(JNIEnv* env, jclass clazz) {
-    // 閫氱敤 void stub
+    // 通用 void stub
 }
 static jobject JNICALL stub_ywlogin_null(JNIEnv* env, jclass clazz) {
     return nullptr;
@@ -3707,31 +3585,6 @@ static jstring JNICALL stub_easyencrypt_md5_key(JNIEnv* env, jclass clazz) {
     // This avoids the obsolete native registration name mismatch without
     // returning an empty key that breaks caller-side signatures.
     return env->NewStringUTF("51076a5fd0b1fd440c06277855f27311");
-}
-
-static jbyteArray JNICALL stub_easyencrypt_bytes_identity(JNIEnv* env, jclass clazz, jbyteArray data) {
-    (void)clazz;
-    if (data == nullptr) {
-        return nullptr;
-    }
-    jsize len = env->GetArrayLength(data);
-    jbyteArray out = env->NewByteArray(len);
-    if (out == nullptr) {
-        return nullptr;
-    }
-    if (len > 0) {
-        std::vector<jbyte> bytes((size_t)len);
-        env->GetByteArrayRegion(data, 0, len, bytes.data());
-        if (env->ExceptionCheck()) {
-            return nullptr;
-        }
-        env->SetByteArrayRegion(out, 0, len, bytes.data());
-        if (env->ExceptionCheck()) {
-            return nullptr;
-        }
-    }
-    LOGI("stub_easyencrypt_bytes_identity: len=%d", (int)len);
-    return out;
 }
 
 static jobject get_object_field(JNIEnv* env, jobject thiz, const char* name, const char* sig) {
@@ -5049,13 +4902,17 @@ static jobject read_online_search_via_reader_protocol(
         LOGW("stub_online_run: protocol fallback unavailable: no hook ClassLoader");
         return nullptr;
     }
+    if (!ensure_classloader_loadclass(env)) {
+        LOGW("stub_online_run: protocol fallback unavailable: no ClassLoader.loadClass");
+        return nullptr;
+    }
 
-    jclass helperClass = load_class_with_loader(
-            env,
-            g_hook_classloader,
-            "com.multiapp.core.hook.QqReaderOnlineProtocolFallback",
-            "stub_online_run load protocol helper");
+    jstring helperName = env->NewStringUTF("com.multiapp.core.hook.QqReaderOnlineProtocolFallback");
+    jclass helperClass = helperName == nullptr ? nullptr :
+            (jclass)env->CallObjectMethod(g_hook_classloader, g_classloader_loadclass, helperName);
+    if (helperName != nullptr) env->DeleteLocalRef(helperName);
     if (helperClass == nullptr) {
+        clear_logged_exception(env, "stub_online_run load protocol helper");
         LOGW("stub_online_run: protocol fallback helper class not found");
         return nullptr;
     }
@@ -5093,137 +4950,7 @@ static jobject read_online_search_via_reader_protocol(
     return result;
 }
 
-static void log_mini_content_shape(JNIEnv* env, const std::string& bid, jint cid) {
-    if (bid.empty() || cid <= 0) {
-        LOGW("stub_online_run: mini content diagnostic skipped bid=%s cid=%d",
-             bid.c_str(),
-             cid);
-        return;
-    }
-    if (g_hook_classloader == nullptr) {
-        LOGW("stub_online_run: mini content diagnostic unavailable: no hook ClassLoader");
-        return;
-    }
-
-    jclass helperClass = load_class_with_loader(
-            env,
-            g_hook_classloader,
-            "com.multiapp.core.hook.QqReaderOnlineProtocolFallback",
-            "stub_online_run load mini content helper");
-    if (helperClass == nullptr) {
-        LOGW("stub_online_run: mini content helper class not found");
-        return;
-    }
-
-    jmethodID method = env->GetStaticMethodID(
-            helperClass,
-            "logMiniContentShape",
-            "(Ljava/lang/String;I)V");
-    if (method == nullptr) {
-        clear_logged_exception(env, "stub_online_run mini content helper method");
-        env->DeleteLocalRef(helperClass);
-        return;
-    }
-
-    jstring bidString = env->NewStringUTF(bid.c_str());
-    if (bidString != nullptr) {
-        env->CallStaticVoidMethod(helperClass, method, bidString, cid);
-    }
-    clear_logged_exception(env, "stub_online_run mini content helper call");
-    if (bidString != nullptr) env->DeleteLocalRef(bidString);
-    env->DeleteLocalRef(helperClass);
-}
-
-static bool materialize_mini_content_eqct(JNIEnv* env, jobject tag, const std::string& bid, jint cid, const std::string& expectedEqct) {
-    if (bid.empty() || cid <= 0 || expectedEqct.empty()) {
-        LOGW("stub_online_run: mini materialize skipped bid=%s cid=%d expectedEqct=%s",
-             bid.c_str(), cid, expectedEqct.c_str());
-        return false;
-    }
-    if (g_hook_classloader == nullptr) {
-        LOGW("stub_online_run: mini materialize unavailable: no hook ClassLoader");
-        return false;
-    }
-
-    jclass helperClass = load_class_with_loader(
-            env,
-            g_hook_classloader,
-            "com.multiapp.core.hook.QqReaderOnlineProtocolFallback",
-            "stub_online_run load mini materialize helper");
-    if (helperClass == nullptr) {
-        LOGW("stub_online_run: mini materialize helper class not found");
-        return false;
-    }
-
-    jmethodID method = env->GetStaticMethodID(
-            helperClass,
-            "materializeMiniContentEqct",
-            "(Ljava/lang/Object;Ljava/lang/String;ILjava/lang/String;)Z");
-    if (method == nullptr) {
-        clear_logged_exception(env, "stub_online_run mini materialize helper method");
-        env->DeleteLocalRef(helperClass);
-        return false;
-    }
-
-    jstring bidString = env->NewStringUTF(bid.c_str());
-    jstring expectedString = env->NewStringUTF(expectedEqct.c_str());
-    bool result = false;
-    if (bidString != nullptr && expectedString != nullptr) {
-        result = env->CallStaticBooleanMethod(helperClass, method, tag, bidString, cid, expectedString) == JNI_TRUE;
-    }
-    bool ok = !clear_logged_exception(env, "stub_online_run mini materialize helper call");
-    if (bidString != nullptr) env->DeleteLocalRef(bidString);
-    if (expectedString != nullptr) env->DeleteLocalRef(expectedString);
-    env->DeleteLocalRef(helperClass);
-    LOGW("stub_online_run: mini materialize helper returned result=%d ok=%d expectedEqct=%s size=%lld",
-         result ? 1 : 0,
-         ok ? 1 : 0,
-         expectedEqct.c_str(),
-         file_size_or_negative(expectedEqct));
-    return ok && result;
-}
-
-
-static void log_online_dir_shape(JNIEnv* env, const std::string& baseDir, const std::string& expectedEqct, jint cid) {
-    if (baseDir.empty()) {
-        LOGW("stub_online_run: java dir shape skipped: empty baseDir cid=%d", cid);
-        return;
-    }
-    if (g_hook_classloader == nullptr) {
-        LOGW("stub_online_run: java dir shape unavailable: no hook ClassLoader");
-        return;
-    }
-
-    jclass helperClass = load_class_with_loader(
-            env,
-            g_hook_classloader,
-            "com.multiapp.core.hook.QqReaderOnlineProtocolFallback",
-            "stub_online_run load java dir helper");
-    if (helperClass == nullptr) {
-        LOGW("stub_online_run: java dir helper class not found");
-        return;
-    }
-
-    jmethodID method = env->GetStaticMethodID(
-            helperClass,
-            "logOnlineDirShape",
-            "(Ljava/lang/String;Ljava/lang/String;I)V");
-    if (method == nullptr) {
-        clear_logged_exception(env, "stub_online_run java dir helper method");
-        env->DeleteLocalRef(helperClass);
-        return;
-    }
-
-    jstring baseString = env->NewStringUTF(baseDir.c_str());
-    jstring expectedString = env->NewStringUTF(expectedEqct.c_str());
-    if (baseString != nullptr && expectedString != nullptr) {
-        env->CallStaticVoidMethod(helperClass, method, baseString, expectedString, cid);
-    }
-    clear_logged_exception(env, "stub_online_run java dir helper call");
-    if (baseString != nullptr) env->DeleteLocalRef(baseString);
-    if (expectedString != nullptr) env->DeleteLocalRef(expectedString);
-    env->DeleteLocalRef(helperClass);
-}static std::string replace_query_param_value(
+static std::string replace_query_param_value(
         const std::string& url,
         const std::string& key,
         const std::string& value) {
@@ -5249,60 +4976,18 @@ static std::string build_online_chapter_url_for_current_cid(
     return replace_query_param_value(tagUrl, "scids", std::to_string(effectiveCid));
 }
 
-static jstring get_qqreader_trusted_id(JNIEnv* env) {
-    jclass providerClass = env->FindClass("com/qq/reader/common/conn/search/qdad");
-    if (providerClass == nullptr) {
-        clear_logged_exception(env, "stub_online_run FindClass conn token provider");
-        return nullptr;
-    }
-
-    jmethodID instanceMethod = env->GetStaticMethodID(
-            providerClass,
-            "search",
-            "()Lcom/qq/reader/common/conn/search/qdad;");
-    if (instanceMethod == nullptr) {
-        clear_logged_exception(env, "stub_online_run conn token provider search()");
-        env->DeleteLocalRef(providerClass);
-        return nullptr;
-    }
-
-    jobject provider = env->CallStaticObjectMethod(providerClass, instanceMethod);
-    if (clear_logged_exception(env, "stub_online_run call conn token provider search()") || provider == nullptr) {
-        env->DeleteLocalRef(providerClass);
-        if (provider != nullptr) env->DeleteLocalRef(provider);
-        return nullptr;
-    }
-
-    jmethodID trustedIdMethod = env->GetMethodID(providerClass, "judian", "()Ljava/lang/String;");
-    if (trustedIdMethod == nullptr) {
-        clear_logged_exception(env, "stub_online_run conn token provider judian()");
-        env->DeleteLocalRef(providerClass);
-        env->DeleteLocalRef(provider);
-        return nullptr;
-    }
-
-    auto trustedId = (jstring)env->CallObjectMethod(provider, trustedIdMethod);
-    if (clear_logged_exception(env, "stub_online_run call conn token provider judian()")) {
-        if (trustedId != nullptr) env->DeleteLocalRef(trustedId);
-        trustedId = nullptr;
-    }
-    env->DeleteLocalRef(providerClass);
-    env->DeleteLocalRef(provider);
-    return trustedId;
-}
-
 static bool online_run_fallback_enabled() {
     char value[PROP_VALUE_MAX] = {0};
     int len = __system_property_get("debug.multiapp.online.run_fallback", value);
-    if (len <= 0) return true;
-    return !(strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0);
+    if (len <= 0) return false;
+    return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0;
 }
 
 static bool online_materialize_eqct_enabled() {
     char value[PROP_VALUE_MAX] = {0};
     int len = __system_property_get("debug.multiapp.online.materialize_eqct", value);
-    if (len <= 0) return true;
-    return !(strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0 || strcasecmp(value, "off") == 0);
+    if (len <= 0) return false;
+    return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0;
 }
 
 static void JNICALL stub_online_run(JNIEnv* env, jobject thiz) {
@@ -5370,20 +5055,11 @@ static void JNICALL stub_online_run(JNIEnv* env, jobject thiz) {
         jstring tagBookMetaPathValue = call_string_method(env, tag, "c", "()Ljava/lang/String;");
         jstring tagCurrentPathValue = call_string_method(env, tag, "d", "()Ljava/lang/String;");
         jstring tagUrlValue = nullptr;
-        jstring trustedIdArg = get_qqreader_trusted_id(env);
-        bool trustedIdFallback = false;
-        if (trustedIdArg == nullptr) {
-            trustedIdArg = env->NewStringUTF("");
-            trustedIdFallback = true;
+        jstring emptyArg = env->NewStringUTF("");
+        if (emptyArg != nullptr) {
+            tagUrlValue = call_string_method(env, tag, "f", "(Ljava/lang/String;)Ljava/lang/String;", emptyArg);
+            env->DeleteLocalRef(emptyArg);
         }
-        std::string trustedIdValue = jstring_to_string(env, trustedIdArg);
-        if (trustedIdArg != nullptr) {
-            tagUrlValue = call_string_method(env, tag, "f", "(Ljava/lang/String;)Ljava/lang/String;", trustedIdArg);
-            env->DeleteLocalRef(trustedIdArg);
-        }
-        LOGW("stub_online_run: OnlineTag.f trustedId applied len=%zu fallbackEmpty=%d",
-             trustedIdValue.size(),
-             trustedIdFallback ? 1 : 0);
         jstring tagSearchPathValue = nullptr;
         if (tagCid >= 0) {
             tagSearchPathValue = call_string_method(env, tag, "search", "(I)Ljava/lang/String;", tagCid);
@@ -5511,35 +5187,6 @@ static void JNICALL stub_online_run(JNIEnv* env, jobject thiz) {
              expectedEqctPath.c_str(),
              file_size_or_negative(expectedEqctPath));
     } else if (callbackResult != nullptr && callbackCode == 0) {
-        if (allowMaterialize && !materialized && !hasUsableChapterFile) {
-            std::lock_guard<std::mutex> onlineLock(g_online_materialize_mutex);
-            materialized = materialize_mini_content_eqct(
-                    env,
-                    tag,
-                    !tagBookId.empty() ? tagBookId : bidStr,
-                    effectiveCid,
-                    expectedEqctPath);
-            hasUsableChapterFile = materialized && file_size_or_negative(expectedEqctPath) > 0;
-            if (hasUsableChapterFile && notify_online_download_success(env, thiz, callbackResult)) {
-                LOGW("stub_online_run: completed via mini materialized eqct resultCode=%d expectedEqct=%s size=%lld",
-                     callbackCode,
-                     expectedEqctPath.c_str(),
-                     file_size_or_negative(expectedEqctPath));
-                if (fetchedResult != nullptr) env->DeleteLocalRef(fetchedResult);
-                if (bid != nullptr) env->DeleteLocalRef(bid);
-                if (bookName != nullptr) env->DeleteLocalRef(bookName);
-                if (scene != nullptr) env->DeleteLocalRef(scene);
-                if (bookTaskId != nullptr) env->DeleteLocalRef(bookTaskId);
-                if (taskDownloadListener != nullptr) env->DeleteLocalRef(taskDownloadListener);
-                if (downloadListener != nullptr) env->DeleteLocalRef(downloadListener);
-                if (result != nullptr) env->DeleteLocalRef(result);
-                if (preloadResult != nullptr) env->DeleteLocalRef(preloadResult);
-                if (tag != nullptr) env->DeleteLocalRef(tag);
-                if (listener != nullptr) env->DeleteLocalRef(listener);
-                if (chapters != nullptr) env->DeleteLocalRef(chapters);
-                return;
-            }
-        }
         LOGW("stub_online_run: ReadOnlineResult success but no usable chapter file allow=%d materialized=%d hasUsable=%d expectedEqct=%s expectedEqctSize=%lld fallbackAll=%s; dispatching failed",
              allowMaterialize ? 1 : 0,
              materialized ? 1 : 0,
@@ -5547,8 +5194,6 @@ static void JNICALL stub_online_run(JNIEnv* env, jobject thiz) {
              expectedEqctPath.c_str(),
              file_size_or_negative(expectedEqctPath),
              fallbackAllPath.c_str());
-        log_mini_content_shape(env, !tagBookId.empty() ? tagBookId : bidStr, effectiveCid);
-        log_online_dir_shape(env, tagBaseDir, expectedEqctPath, effectiveCid);
         notify_online_download_failed(env, thiz, callbackResult);
     } else if (callbackResult != nullptr && (callbackCode == -8 || callbackCode == -9)) {
         LOGW("stub_online_run: ReadOnlineResult requires vip/pay resultCode=%d; dispatching needVipOrPay",
@@ -5893,11 +5538,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterStubMethods(
     (void)clazz;
     if (classLoader == nullptr || className == nullptr) return JNI_FALSE;
 
-    // 鑾峰彇绫诲悕
+    // 获取类名
     const char* name = env->GetStringUTFChars(className, nullptr);
     if (name == nullptr) return JNI_FALSE;
 
-    // 閫氳繃 guest ClassLoader 鍔犺浇绫?
+    // 通过 guest ClassLoader 加载类
     jclass clClass = env->FindClass("java/lang/ClassLoader");
     jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
     jstring jName = env->NewStringUTF(name);
@@ -5913,7 +5558,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterStubMethods(
         return JNI_FALSE;
     }
 
-    // 360 鍔犲浐澹?StubApp 鐨勫畬鏁?native 鏂规硶绛惧悕锛堜粠 logcat 閿欒淇℃伅鎻愬彇锛?
+    // 360 加固壳 StubApp 的完整 native 方法签名（从 logcat 错误信息提取）
     JNINativeMethod methods[] = {
         // interface5(Application)V
         {const_cast<char*>("interface5"),  const_cast<char*>("(Landroid/app/Application;)V"), (void*)stub_interface5},
@@ -5962,8 +5607,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterStubMethods(
 }
 
 /**
- * 娉ㄥ唽 YWLoginManager.getInstance() 鐨?stub 瀹炵幇
- * 璁╁簲鐢ㄤ笉宕╂簝锛岀櫥褰曞姛鑳戒笉鍙敤锛屼絾鍏朵粬鍔熻兘鍙兘姝ｅ父
+ * 注册 YWLoginManager.getInstance() 的 stub 实现
+ * 让应用不崩溃，登录功能不可用，但其他功能可能正常
  */
 JNIEXPORT jboolean JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterStubInterface20Only(
@@ -6114,7 +5759,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
     jclass clClass = env->FindClass("java/lang/ClassLoader");
     jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
 
-    // 宸茬煡闇€瑕?stub 鐨?native 鏂规硶
+    // 已知需要 stub 的 native 方法
     struct StubEntry {
         const char* className;
         const char* methodName;
@@ -6138,14 +5783,10 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
          "(Lcom/yuewen/ywlogin/callbacks/DefaultYWCallback;)V", (void*)stub_ywlogin_fetchSettings},
         {"com.qq.reader.common.utils.crypto.EasyEncrypt", "getMd5Key",
          "()Ljava/lang/String;", (void*)stub_easyencrypt_md5_key},
-        {"com.qq.reader.common.utils.crypto.EasyEncrypt", "decrypt",
-         "([B)[B", (void*)stub_easyencrypt_bytes_identity},
-        {"com.qq.reader.common.utils.crypto.EasyEncrypt", "encrypt",
-         "([B)[B", (void*)stub_easyencrypt_bytes_identity},
         // Keep Fock payload signing/encryption untouched. Faking those avoids
         // crashes but causes bookcity responses to fail.
-        // libfock.so JNI_OnLoad 杩斿洖 -1 鈫?鍑芥暟鎸囬拡琛ㄤ负绌?鈫?璋冪敤鍗?SIGSEGV
-        // 娉ㄥ唽澶氱绛惧悕锛堝弽灏勬棤娉曠‘瀹氱‘鍒囩鍚嶏級锛屽叏閮ㄨ繑鍥炵┖瀛楃涓?
+        // libfock.so JNI_OnLoad 返回 -1 → 函数指针表为空 → 调用即 SIGSEGV
+        // 注册多种签名（反射无法确定确切签名），全部返回空字符串
     };
 
     int registered = 0;
@@ -6158,7 +5799,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
 
         if (targetClass == nullptr) {
             if (env->ExceptionCheck()) env->ExceptionClear();
-            continue; // 绫讳笉瀛樺湪锛岃烦杩?
+            continue; // 类不存在，跳过
         }
 
         JNINativeMethod method = {
@@ -6187,17 +5828,20 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
 
 JNIEXPORT jboolean JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownloadFallbackStubs(
-    JNIEnv* env, jobject thiz, jobject classLoader)
+    JNIEnv* env, jclass clazz, jobject classLoader)
 {
     if (classLoader == nullptr) return JNI_FALSE;
-    remember_hook_classloader_from_object(env, thiz);
+    remember_hook_classloader(env, clazz);
 
-    jclass targetClass = load_class_with_loader(
-            env,
-            classLoader,
-            "com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask",
-            "nativeRegisterOnlineChapterDownloadFallbackStubs");
+    if (!ensure_classloader_loadclass(env)) {
+        return JNI_FALSE;
+    }
+
+    jstring name = env->NewStringUTF("com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask");
+    jclass targetClass = (jclass)env->CallObjectMethod(classLoader, g_classloader_loadclass, name);
+    env->DeleteLocalRef(name);
     if (targetClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
         LOGW("nativeRegisterOnlineChapterDownloadFallbackStubs: class not found");
         return JNI_FALSE;
     }
@@ -6269,8 +5913,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownload
 static std::string javaTypeToJni(const char* typeName);
 
 /**
- * 鎵弿 guest ClassLoader 涓墍鏈夌被鐨?native 鏂规硶锛屾壒閲忔敞鍐?stub 瀹炵幇
- * 杩欐槸瑙ｅ喅"澹充笉娉ㄥ唽涓氬姟 native 鏂规硶"闂鐨勯€氱敤鏂规
+ * 扫描 guest ClassLoader 中所有类的 native 方法，批量注册 stub 实现
+ * 这是解决"壳不注册业务 native 方法"问题的通用方案
  */
 JNIEXPORT jint JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMethods(
@@ -6279,12 +5923,12 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
     (void)clazz;
     if (classLoader == nullptr) return 0;
 
-    // 鑾峰彇 ClassLoader.loadClass
+    // 获取 ClassLoader.loadClass
     jclass clClass = env->FindClass("java/lang/ClassLoader");
     jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
     env->DeleteLocalRef(clClass);
 
-    // 鑾峰彇 Class.getDeclaredMethods
+    // 获取 Class.getDeclaredMethods
     jclass classClass = env->FindClass("java/lang/Class");
     jmethodID getDeclaredMethods = env->GetMethodID(classClass, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;");
     jclass methodClass = env->FindClass("java/lang/reflect/Method");
@@ -6297,14 +5941,14 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
     jclass typeClass = env->FindClass("java/lang/reflect/Type");
     jmethodID getTypeName = env->GetMethodID(typeClass, "getTypeName", "()Ljava/lang/String;");
 
-    // 宸茬煡鐨?native 绫诲垪琛紙浠?DEX 鎵弿缁撴灉鑾峰彇锛?
-    // 杩欎簺绫诲寘鍚?native 鏂规硶锛岄渶瑕佹敞鍐?stub
+    // 已知的 native 类列表（从 DEX 扫描结果获取）
+    // 这些类包含 native 方法，需要注册 stub
     const char* knownNativeClasses[] = {
         "__multiapp.noop.NativeClass",
         // Keep QQ Reader URL/signing/encryption native classes untouched.
         // Blanket null/false stubs break network-backed content.
-        // EasyEncrypt 宸茬敱 registerBusinessStubs 澶勭悊锛堣繑鍥炵┖瀛楃涓诧級锛屼笉鏀惧湪杩欓噷
-        // 閬垮厤 registerAllMissingNativeMethods 鐢?null 瑕嗙洊绌哄瓧绗︿覆
+        // EasyEncrypt 已由 registerBusinessStubs 处理（返回空字符串），不放在这里
+        // 避免 registerAllMissingNativeMethods 用 null 覆盖空字符串
     };
     int classCount = sizeof(knownNativeClasses) / sizeof(knownNativeClasses[0]);
 
@@ -6320,7 +5964,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
             continue;
         }
 
-        // 鑾峰彇鎵€鏈夊０鏄庣殑鏂规硶
+        // 获取所有声明的方法
         jobjectArray methods = (jobjectArray)env->CallObjectMethod(targetClass, getDeclaredMethods);
         if (methods == nullptr) {
             env->DeleteLocalRef(targetClass);
@@ -6334,27 +5978,27 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
             jobject method = env->GetObjectArrayElement(methods, mi);
             if (method == nullptr) continue;
 
-            // 妫€鏌ユ槸鍚︽槸 native 鏂规硶 (Modifier.NATIVE = 0x100)
+            // 检查是否是 native 方法 (Modifier.NATIVE = 0x100)
             jint modifiers = env->CallIntMethod(method, getModifiers);
             if ((modifiers & 0x100) == 0) {
                 env->DeleteLocalRef(method);
                 continue;
             }
 
-            // 鑾峰彇鏂规硶鍚?
+            // 获取方法名
             auto methodNameObj = (jstring)env->CallObjectMethod(method, getName);
             const char* methodName = env->GetStringUTFChars(methodNameObj, nullptr);
 
-            // 鑾峰彇杩斿洖绫诲瀷
+            // 获取返回类型
             jobject returnType = env->CallObjectMethod(method, getReturnType);
             auto returnTypeNameObj = (jstring)env->CallObjectMethod(returnType, getTypeName);
             const char* returnTypeName = env->GetStringUTFChars(returnTypeNameObj, nullptr);
 
-            // 鑾峰彇鍙傛暟绫诲瀷
+            // 获取参数类型
             jobjectArray paramTypes = (jobjectArray)env->CallObjectMethod(method, getParameterTypes);
             jsize paramCount = paramTypes ? env->GetArrayLength(paramTypes) : 0;
 
-            // 鏋勫缓 JNI 绛惧悕
+            // 构建 JNI 签名
             std::string signature = "(";
             for (jsize pi = 0; pi < paramCount; pi++) {
                 jobject paramType = env->GetObjectArrayElement(paramTypes, pi);
@@ -6368,7 +6012,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
             signature += ")";
             signature += javaTypeToJni(returnTypeName);
 
-            // 閫夋嫨 stub 鍑芥暟
+            // 选择 stub 函数
             void* stubFn = nullptr;
             std::string retStr(returnTypeName);
             if (retStr == "void") {
@@ -6379,7 +6023,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
                 stubFn = (void*)stub_ywlogin_null;
             }
 
-            // 瀛樺偍鏂规硶鍚嶏紙闇€瑕佹寔涔呭寲锛?
+            // 存储方法名（需要持久化）
             char* nameCopy = strdup(methodName);
             char* sigCopy = strdup(signature.c_str());
 
@@ -6397,7 +6041,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
 
         env->DeleteLocalRef(methods);
 
-        // 鎵归噺娉ㄥ唽
+        // 批量注册
         if (!nativeMethods.empty()) {
             jint result = env->RegisterNatives(targetClass, nativeMethods.data(), (jint)nativeMethods.size());
             if (result == JNI_OK) {
@@ -6408,7 +6052,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
                 LOGW("nativeRegisterAll: %s RegisterNatives failed", knownNativeClasses[ci]);
             }
 
-            // 閲婃斁 strdup 鐨勫唴瀛?
+            // 释放 strdup 的内存
             for (auto& m : nativeMethods) {
                 std::free((void*)m.name);
                 std::free((void*)m.signature);
@@ -6427,7 +6071,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
     return totalRegistered;
 }
 
-// Java 绫诲瀷鍚嶈浆 JNI 绛惧悕
+// Java 类型名转 JNI 签名
 static std::string javaTypeToJni(const char* typeName) {
     if (strcmp(typeName, "void") == 0) return "V";
     if (strcmp(typeName, "boolean") == 0) return "Z";
@@ -6438,7 +6082,7 @@ static std::string javaTypeToJni(const char* typeName) {
     if (strcmp(typeName, "long") == 0) return "J";
     if (strcmp(typeName, "float") == 0) return "F";
     if (strcmp(typeName, "double") == 0) return "D";
-    // 瀵硅薄绫诲瀷: java.lang.String -> Ljava/lang/String;
+    // 对象类型: java.lang.String -> Ljava/lang/String;
     std::string result = "L";
     for (const char* p = typeName; *p; p++) {
         result += (*p == '.') ? '/' : *p;
@@ -6448,30 +6092,30 @@ static std::string javaTypeToJni(const char* typeName) {
 }
 
 /**
- * 浠?DexFile C++ 瀵硅薄鎸囬拡涓彁鍙?begin_ 鍜?size_銆?
- * 閫氳繃鎵弿瀵硅薄鍐呭瓨瀵绘壘 DEX magic 鏉ュ畾浣嶏紝涓嶄緷璧栧浐瀹氬亸绉汇€?
+ * 从 DexFile C++ 对象指针中提取 begin_ 和 size_。
+ * 通过扫描对象内存寻找 DEX magic 来定位，不依赖固定偏移。
  */
 static int dump_dex_from_dexfile_ptr(const void* dexfile_ptr, const char* dumpDir, int index) {
     if (dexfile_ptr == nullptr) return -1;
 
-    // DexFile 瀵硅薄閫氬父鍦ㄥ墠 64 瀛楄妭鍐呭寘鍚?begin_ 鎸囬拡鍜?size_
-    // 鎴戜滑鎵弿鍓?128 瀛楄妭瀵绘壘涓€涓寚閽堬紝鎸囧悜鐨勫唴瀛樹互 "dex\n" 寮€澶?
+    // DexFile 对象通常在前 64 字节内包含 begin_ 指针和 size_
+    // 我们扫描前 128 字节寻找一个指针，指向的内存以 "dex\n" 开头
     const uintptr_t* fields = (const uintptr_t*)dexfile_ptr;
 
-    for (int i = 1; i < 16; i++) { // 浠?1 寮€濮嬭烦杩?vtable
+    for (int i = 1; i < 16; i++) { // 从 1 开始跳过 vtable
         uintptr_t candidate = fields[i];
-        // 妫€鏌ユ槸鍚︽槸鍚堢悊鐨勬寚閽堬紙闈為浂銆佸悎鐞嗚寖鍥达級
+        // 检查是否是合理的指针（非零、合理范围）
         if (candidate == 0 || candidate < 0x10000) continue;
-        // C2 淇锛氱Щ闄?4KB 瀵归綈妫€鏌ワ紝InMemoryDexClassLoader 鐨?DEX 鏄?16 瀛楄妭瀵归綈
+        // C2 修复：移除 4KB 对齐检查，InMemoryDexClassLoader 的 DEX 是 16 字节对齐
 
         const uint8_t* possible_begin = (const uint8_t*)candidate;
-        // 妫€鏌?DEX magic
+        // 检查 DEX magic
         if (memcmp(possible_begin, "dex\n", 4) != 0) continue;
 
         uint32_t file_size = *(const uint32_t*)(possible_begin + 0x20);
         if (file_size < 0x70 || file_size > 50 * 1024 * 1024) continue;
 
-        // 涓嬩竴涓瓧娈靛彲鑳芥槸 size_
+        // 下一个字段可能是 size_
         uintptr_t possible_size = fields[i + 1];
         if (possible_size >= file_size) {
             char path[512];
@@ -6492,12 +6136,12 @@ static int dump_dex_from_dexfile_ptr(const void* dexfile_ptr, const char* dumpDi
 }
 
 /**
- * JNI: 浠?guest ClassLoader 鐨?DexPathList.dexElements 涓彁鍙栨墍鏈?DexFile锛?
- * 閫氳繃 mCookie 璇诲彇 DEX 瀛楄妭骞跺啓鍏ユ枃浠躲€?
+ * JNI: 从 guest ClassLoader 的 DexPathList.dexElements 中提取所有 DexFile，
+ * 通过 mCookie 读取 DEX 字节并写入文件。
  *
  * @param classLoader guest ClassLoader (PathClassLoader)
- * @param dumpDir     杈撳嚭鐩綍璺緞
- * @return 鎴愬姛 dump 鐨?DEX 鏁伴噺
+ * @param dumpDir     输出目录路径
+ * @return 成功 dump 的 DEX 数量
  */
 JNIEXPORT jint JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
@@ -6562,7 +6206,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
     jsize elemCount = env->GetArrayLength(dexElements);
     LOGI("dumpDex: found %d dexElements", elemCount);
 
-    // 3. 閬嶅巻姣忎釜 Element -> dexFile -> mCookie
+    // 3. 遍历每个 Element -> dexFile -> mCookie
     jclass elementClass = nullptr;
     jfieldID dexFileField = nullptr;
     jclass dexFileClass = nullptr;
@@ -6590,7 +6234,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
         if (dexFileClass == nullptr) {
             dexFileClass = env->GetObjectClass(dexFile);
 
-            // 璋冭瘯锛氭灇涓?DexFile 鐨勬墍鏈夊瓧娈?
+            // 调试：枚举 DexFile 的所有字段
             jclass classClass = env->FindClass("java/lang/Class");
             jmethodID getDeclaredFields = env->GetMethodID(classClass, "getDeclaredFields", "()[Ljava/lang/reflect/Field;");
             jobjectArray fields = (jobjectArray)env->CallObjectMethod(dexFileClass, getDeclaredFields);
@@ -6623,12 +6267,12 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
             }
             env->DeleteLocalRef(classClass);
 
-            // Android 16: DexFile 瀛楁鏄?Object 绫诲瀷
-            // 鍏堝皾璇?long 瀛楁锛屽啀灏濊瘯 Object 瀛楁
+            // Android 16: DexFile 字段是 Object 类型
+            // 先尝试 long 字段，再尝试 Object 字段
             bool foundCookie = false;
             const char* cookieNames[] = {"mCookie", "mInternalCookie", "cookie", "mNativePtr"};
             for (int ci = 0; ci < 4 && !foundCookie; ci++) {
-                // 灏濊瘯 long
+                // 尝试 long
                 jfieldID longField = env->GetFieldID(dexFileClass, cookieNames[ci], "J");
                 if (longField != nullptr) {
                     if (env->ExceptionCheck()) env->ExceptionClear();
@@ -6642,14 +6286,14 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
                 if (env->ExceptionCheck()) env->ExceptionClear();
 
                 if (!foundCookie) {
-                    // 灏濊瘯 Object
+                    // 尝试 Object
                     jfieldID objField = env->GetFieldID(dexFileClass, cookieNames[ci], "Ljava/lang/Object;");
                     if (objField != nullptr) {
                         if (env->ExceptionCheck()) env->ExceptionClear();
                         jobject objVal = env->GetObjectField(dexFile, objField);
                         if (objVal != nullptr) {
                             jclass objClass = env->GetObjectClass(objVal);
-                            // 鎵撳嵃 Object 鐨勫疄闄呯被鍨?
+                            // 打印 Object 的实际类型
                             jclass classClass = env->FindClass("java/lang/Class");
                             jmethodID getName = env->GetMethodID(classClass, "getName", "()Ljava/lang/String;");
                             auto className = (jstring)env->CallObjectMethod(objClass, getName);
@@ -6664,11 +6308,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
                                 jlong val = env->CallLongMethod(objVal, longValue);
                                 LOGI("dumpDex: %s (Long obj) = %p", cookieNames[ci], (void*)val);
                                 if (val != 0) {
-                                    // 鎵嬪姩鎻愬彇 cookie 鍊硷紝涓嶄緷璧?cookieField
-                                    // 鐩存帴璺冲埌 cookie 澶勭悊閫昏緫
+                                    // 手动提取 cookie 值，不依赖 cookieField
+                                    // 直接跳到 cookie 处理逻辑
                                     env->DeleteLocalRef(objVal);
                                     env->DeleteLocalRef(objClass);
-                                    // 鐢ㄨ繖涓€间綔涓?cookie
+                                    // 用这个值作为 cookie
                                     auto** vec_storage = reinterpret_cast<void**>(val);
                                     if (vec_storage != nullptr) {
                                         void** dex_ptrs = reinterpret_cast<void**>(vec_storage[0]);
@@ -6682,8 +6326,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
                                         }
                                     }
                                     foundCookie = true;
-                                    cookieField = objField; // C1 淇锛氫繚瀛?field ID 渚涘悗缁厓绱犲鐢?
-                                    continue; // 璺宠繃鍚庣画 GetLongField
+                                    cookieField = objField; // C1 修复：保存 field ID 供后续元素复用
+                                    continue; // 跳过后续 GetLongField
                                 }
                             }
                             if (env->ExceptionCheck()) env->ExceptionClear();
@@ -6697,7 +6341,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
         }
 
         if (cookieField == nullptr) {
-            // 澶囩敤鏂规锛氱敤 mFileName 鐩存帴璇诲彇 DEX 鏂囦欢
+            // 备用方案：用 mFileName 直接读取 DEX 文件
             jfieldID fileNameField = env->GetFieldID(dexFileClass, "mFileName", "Ljava/lang/String;");
             if (fileNameField != nullptr) {
                 if (env->ExceptionCheck()) env->ExceptionClear();
@@ -6706,23 +6350,23 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
                     const char* fileNameStr = env->GetStringUTFChars(fileName, nullptr);
                     if (fileNameStr != nullptr && fileNameStr[0] != '\0') {
                         LOGI("dumpDex: trying mFileName fallback: %s", fileNameStr);
-                        // 妫€鏌ユ枃浠舵槸鍚﹀瓨鍦ㄤ笖鍙
+                        // 检查文件是否存在且可读
                         FILE* f = fopen(fileNameStr, "rb");
                         if (f != nullptr) {
-                            // 鑾峰彇鏂囦欢澶у皬
+                            // 获取文件大小
                             fseek(f, 0, SEEK_END);
                             long fileSize = ftell(f);
                             fseek(f, 0, SEEK_SET);
 
                             if (fileSize > 0x70 && fileSize < 50 * 1024 * 1024) {
-                                // 璇诲彇鏂囦欢鍐呭 (H6: 浣跨敤 unique_ptr 鑷姩閲婃斁)
+                                // 读取文件内容 (H6: 使用 unique_ptr 自动释放)
                                 std::unique_ptr<uint8_t[]> buf(new(std::nothrow) uint8_t[fileSize]);
                                 if (buf) {
                                     size_t read = fread(buf.get(), 1, fileSize, f);
                                     if (read == (size_t)fileSize) {
-                                        // 妫€鏌?DEX magic
+                                        // 检查 DEX magic
                                         if (memcmp(buf.get(), "dex\n", 4) == 0) {
-                                            char path[1024]; // H5: 鎵╁ぇ buffer
+                                            char path[1024]; // H5: 扩大 buffer
                                             snprintf(path, sizeof(path), "%s/dump_%d.dex", dir, dumped);
                                             FILE* out = fopen(path, "wb");
                                             if (out != nullptr) {
@@ -6735,7 +6379,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
                                             LOGW("dumpDex: mFileName file is not a DEX (magic mismatch)");
                                         }
                                     }
-                                    // H6: buf 鑷姩閲婃斁锛屾棤闇€鎵嬪姩 free
+                                    // H6: buf 自动释放，无需手动 free
                                 }
                             }
                             fclose(f);
@@ -6752,11 +6396,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
             continue;
         }
 
-        // Android 16: mCookie 鏄?Object 绫诲瀷锛堜笉鏄?long锛?
-        // 灏濊瘯 GetLongField锛屽鏋滃け璐ュ垯 GetObjectField 鍐嶅彇鍏?nativePtr
+        // Android 16: mCookie 是 Object 类型（不是 long）
+        // 尝试 GetLongField，如果失败则 GetObjectField 再取其 nativePtr
         jlong cookie = 0;
         {
-            // 鍏堟鏌ュ瓧娈电被鍨?
+            // 先检查字段类型
             jclass classClass = env->FindClass("java/lang/Class");
             jmethodID getDeclaredField = env->GetMethodID(classClass, "getDeclaredField",
                 "(Ljava/lang/String;)Ljava/lang/reflect/Field;");
@@ -6773,22 +6417,22 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
                 jclass longClass = env->FindClass("java/lang/Long");
 
                 if (env->IsAssignableFrom(type, longClass)) {
-                    // long 绫诲瀷 鈥?鐩存帴 GetLongField
+                    // long 类型 — 直接 GetLongField
                     cookie = env->GetLongField(dexFile, cookieField);
                     LOGI("dumpDex: mCookie (long) = %p", (void*)cookie);
                 } else {
-                    // Object 绫诲瀷 鈥?GetObjectField锛岀劧鍚庢壘閲岄潰鐨?value 鎴?nativePtr
+                    // Object 类型 — GetObjectField，然后找里面的 value 或 nativePtr
                     jobject cookieObj = env->GetObjectField(dexFile, cookieField);
                     if (cookieObj != nullptr) {
-                        // 鍙兘鏄?Long 瀵硅薄
+                        // 可能是 Long 对象
                         jclass longObjClass = env->GetObjectClass(cookieObj);
                         jmethodID longValue = env->GetMethodID(longObjClass, "longValue", "()J");
                         if (longValue != nullptr) {
                             cookie = env->CallLongMethod(cookieObj, longValue);
                             LOGI("dumpDex: mCookie (Long object) = %p", (void*)cookie);
                         } else {
-                            // 鍙兘鐩存帴鏄?native pointer 灏佽鍦ㄥ璞′腑
-                            // 灏濊瘯璇诲彇瀵硅薄鐨勭涓€涓潪寮曠敤瀛楁
+                            // 可能直接是 native pointer 封装在对象中
+                            // 尝试读取对象的第一个非引用字段
                             LOGW("dumpDex: mCookie is Object but not Long, class=%s",
                                  describe_java_class(env, longObjClass).c_str());
                         }
@@ -6806,8 +6450,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
         env->DeleteLocalRef(dexFile);
         if (cookie == 0) continue;
 
-        // mCookie 鍦?Android 8+ 鏄?vector<DexFile*>* 鐨?native 鎸囬拡
-        // vector 鍐呴儴甯冨眬: { data_ptr (void*), size (size_t), capacity (size_t) }
+        // mCookie 在 Android 8+ 是 vector<DexFile*>* 的 native 指针
+        // vector 内部布局: { data_ptr (void*), size (size_t), capacity (size_t) }
         auto** vec_storage = reinterpret_cast<void**>(cookie);
         if (vec_storage == nullptr) continue;
 
@@ -6821,7 +6465,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
                 }
             }
         } else {
-            // 鍥為€€锛歝ookie 鐩存帴灏辨槸 DexFile*
+            // 回退：cookie 直接就是 DexFile*
             if (dump_dex_from_dexfile_ptr(reinterpret_cast<void*>(cookie), dir, dumped) == 0) {
                 dumped++;
             }
@@ -6838,10 +6482,10 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpDexFromClassLoader(
 }
 
 /**
- * dl_iterate_phdr 鍥炶皟锛歞ump 宸插姞杞界殑 native library
+ * dl_iterate_phdr 回调：dump 已加载的 native library
  */
 struct SoDumpRequest {
-    const char* targetBasename;  // 瑕佸尮閰嶇殑搴撳悕锛坣ull = dump 鎵€鏈?app .so锛?
+    const char* targetBasename;  // 要匹配的库名（null = dump 所有 app .so）
     const char* dumpDir;
     int count;
 };
@@ -6865,7 +6509,7 @@ static int dump_so_callback(struct dl_phdr_info* info, size_t size, void* data) 
 
     if (info->dlpi_phdr == nullptr || info->dlpi_phnum == 0) return 0;
 
-    // 璁＄畻鎬诲姞杞藉ぇ灏?
+    // 计算总加载大小
     size_t max_end = 0;
     for (int i = 0; i < info->dlpi_phnum; i++) {
         if (info->dlpi_phdr[i].p_type == PT_LOAD) {
@@ -6875,7 +6519,7 @@ static int dump_so_callback(struct dl_phdr_info* info, size_t size, void* data) 
     }
     if (max_end < sizeof(ElfW(Ehdr))) return 0;
 
-    // 楠岃瘉 ELF magic
+    // 验证 ELF magic
     auto* ehdr = reinterpret_cast<ElfW(Ehdr)*>(info->dlpi_addr);
     if (ehdr->e_ident[EI_MAG0] != ELFMAG0 || ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
         ehdr->e_ident[EI_MAG2] != ELFMAG2 || ehdr->e_ident[EI_MAG3] != ELFMAG3) {
@@ -6883,7 +6527,7 @@ static int dump_so_callback(struct dl_phdr_info* info, size_t size, void* data) 
         return 0;
     }
 
-    char outPath[1024]; // H5: 浠?512 鎵╁ぇ鍒?1024锛岄伩鍏嶉暱璺緞鎴柇
+    char outPath[1024]; // H5: 从 512 扩大到 1024，避免长路径截断
     int pathLen = snprintf(outPath, sizeof(outPath), "%s/%s", req->dumpDir, basename);
     if (pathLen < 0 || pathLen >= (int)sizeof(outPath)) {
         LOGE("dump_so: path truncated (%d bytes): %s/%s", pathLen, req->dumpDir, basename);
@@ -6904,7 +6548,7 @@ static int dump_so_callback(struct dl_phdr_info* info, size_t size, void* data) 
     fseek(out, ehdr->e_phoff, SEEK_SET);
     fwrite(phdrs, 1, ehdr->e_phnum * sizeof(ElfW(Phdr)), out);
 
-    // PT_LOAD segments 鈥?璺宠繃 filesz==0 鐨勭函 BSS 娈?
+    // PT_LOAD segments — 跳过 filesz==0 的纯 BSS 段
     for (int i = 0; i < info->dlpi_phnum; i++) {
         if (phdrs[i].p_type != PT_LOAD) continue;
         if (phdrs[i].p_filesz == 0) continue;
@@ -6920,15 +6564,15 @@ static int dump_so_callback(struct dl_phdr_info* info, size_t size, void* data) 
     fclose(out);
     req->count++;
     LOGI("dump_so: %s (base=%p, size=%zu)", outPath, (void*)info->dlpi_addr, max_end);
-    return 0; // 缁х画閬嶅巻
+    return 0; // 继续遍历
 }
 
 /**
- * JNI: dump 宸插姞杞界殑 native libraries
+ * JNI: dump 已加载的 native libraries
  *
- * @param dumpDir  杈撳嚭鐩綍璺緞
- * @param targetLib 瑕?dump 鐨勭壒瀹氬簱鍚嶏紙null = dump 鎵€鏈?app .so锛?
- * @return 鎴愬姛 dump 鐨?.so 鏁伴噺
+ * @param dumpDir  输出目录路径
+ * @param targetLib 要 dump 的特定库名（null = dump 所有 app .so）
+ * @return 成功 dump 的 .so 数量
  */
 JNIEXPORT jint JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpLoadedLibraries(
@@ -6958,24 +6602,24 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpLoadedLibraries(
 }
 
 // ==================== LSPlant Integration ====================
-// LSPlant 鈥?ART method hooking framework
-// 閫氳繃 dlopen/dlsym 鍔ㄦ€佸姞杞?liblsplant.so锛岄伩鍏嶆瀯寤烘椂閾炬帴瀵艰嚧鐨勫穿婧?
+// LSPlant — ART method hooking framework
+// 通过 dlopen/dlsym 动态加载 liblsplant.so，避免构建时链接导致的崩溃
 
-// LSPlant mangled 绗﹀彿鍚嶏紙浠?liblsplant.so 鐢?llvm-nm -D 鑾峰彇锛?
+// LSPlant mangled 符号名（从 liblsplant.so 用 llvm-nm -D 获取）
 static constexpr const char* LSPLANT_INIT_SYM = "_ZN7lsplant2v24InitEP7_JNIEnvRKNS0_8InitInfoE";
 static constexpr const char* LSPLANT_HOOK_SYM = "_ZN7lsplant2v24HookEP7_JNIEnvP8_jobjectS4_S4_";
 static constexpr const char* LSPLANT_UNHOOK_SYM = "_ZN7lsplant2v26UnHookEP7_JNIEnvP8_jobject";
 static constexpr const char* LSPLANT_IS_HOOKED_SYM = "_ZN7lsplant2v28IsHookedEP7_JNIEnvP8_jobject";
 static constexpr const char* LSPLANT_DEOPTIMIZE_SYM = "_ZN7lsplant2v210DeoptimizeEP7_JNIEnvP8_jobject";
 
-// LSPlant 鍑芥暟鎸囬拡绫诲瀷锛堝尮閰?C++ ABI锛?
+// LSPlant 函数指针类型（匹配 C++ ABI）
 typedef bool (*LsplantInitFn)(JNIEnv*, const void*);
 typedef jobject (*LsplantHookFn)(JNIEnv*, jobject, jobject, jobject);
 typedef bool (*LsplantUnhookFn)(JNIEnv*, jobject);
 typedef bool (*LsplantIsHookedFn)(JNIEnv*, jobject);
 typedef bool (*LsplantDeoptimizeFn)(JNIEnv*, jobject);
 
-// 鍏ㄥ眬鐘舵€?
+// 全局状态
 static void* g_lsplant_handle = nullptr;
 static LsplantInitFn g_lsplant_init = nullptr;
 static LsplantHookFn g_lsplant_hook = nullptr;
@@ -6984,161 +6628,54 @@ static LsplantIsHookedFn g_lsplant_is_hooked = nullptr;
 static LsplantDeoptimizeFn g_lsplant_deoptimize = nullptr;
 static bool g_lsplant_initialized = false;
 
-// ShadowHook stub map for unhook.
+// ShadowHook stub 跟踪（用于 unhook）
 static std::unordered_map<void*, void*> g_lsplant_hook_stubs;
 static std::shared_mutex g_lsplant_stub_mutex;
-static std::mutex g_method_shorty_mutex;
-static std::unordered_map<jmethodID, std::string> g_method_shorty_cache;
-
-static char class_to_shorty_char(JNIEnv* env, jobject clazz_obj, bool is_return_type) {
-    if (clazz_obj == nullptr) return is_return_type ? 'V' : 'L';
-    jclass classClass = env->FindClass("java/lang/Class");
-    if (classClass == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        return 'L';
-    }
-    jmethodID isPrimitive = env->GetMethodID(classClass, "isPrimitive", "()Z");
-    jmethodID isArray = env->GetMethodID(classClass, "isArray", "()Z");
-    jmethodID getName = env->GetMethodID(classClass, "getName", "()Ljava/lang/String;");
-    if (isPrimitive == nullptr || isArray == nullptr || getName == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        env->DeleteLocalRef(classClass);
-        return 'L';
-    }
-    jboolean arrayType = env->CallBooleanMethod(clazz_obj, isArray);
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    if (arrayType) {
-        env->DeleteLocalRef(classClass);
-        return 'L';
-    }
-    jboolean primitive = env->CallBooleanMethod(clazz_obj, isPrimitive);
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    if (!primitive) {
-        env->DeleteLocalRef(classClass);
-        return 'L';
-    }
-    jstring nameObj = static_cast<jstring>(env->CallObjectMethod(clazz_obj, getName));
-    if (env->ExceptionCheck() || nameObj == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        env->DeleteLocalRef(classClass);
-        return is_return_type ? 'V' : 'L';
-    }
-    const char* name = env->GetStringUTFChars(nameObj, nullptr);
-    char result = 'L';
-    if (name != nullptr) {
-        if (strcmp(name, "void") == 0) result = 'V';
-        else if (strcmp(name, "boolean") == 0) result = 'Z';
-        else if (strcmp(name, "byte") == 0) result = 'B';
-        else if (strcmp(name, "char") == 0) result = 'C';
-        else if (strcmp(name, "short") == 0) result = 'S';
-        else if (strcmp(name, "int") == 0) result = 'I';
-        else if (strcmp(name, "long") == 0) result = 'J';
-        else if (strcmp(name, "float") == 0) result = 'F';
-        else if (strcmp(name, "double") == 0) result = 'D';
-        env->ReleaseStringUTFChars(nameObj, name);
-    }
-    env->DeleteLocalRef(nameObj);
-    env->DeleteLocalRef(classClass);
-    return result;
-}
-
-static std::string build_shorty_for_reflected_executable(JNIEnv* env, jobject method_obj) {
-    if (method_obj == nullptr) return "V";
-    std::string shorty;
-    jclass methodClass = env->FindClass("java/lang/reflect/Method");
-    bool isMethod = methodClass != nullptr && env->IsInstanceOf(method_obj, methodClass);
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    if (isMethod) {
-        jmethodID getReturnType = env->GetMethodID(methodClass, "getReturnType", "()Ljava/lang/Class;");
-        jobject returnType = getReturnType != nullptr ? env->CallObjectMethod(method_obj, getReturnType) : nullptr;
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        shorty.push_back(class_to_shorty_char(env, returnType, true));
-        if (returnType != nullptr) env->DeleteLocalRef(returnType);
-    } else {
-        shorty.push_back('V');
-    }
-    if (methodClass != nullptr) env->DeleteLocalRef(methodClass);
-    jclass executableClass = env->FindClass("java/lang/reflect/Executable");
-    jmethodID getParameterTypes = executableClass != nullptr ? env->GetMethodID(executableClass, "getParameterTypes", "()[Ljava/lang/Class;") : nullptr;
-    jobjectArray params = getParameterTypes != nullptr ? static_cast<jobjectArray>(env->CallObjectMethod(method_obj, getParameterTypes)) : nullptr;
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    if (params != nullptr) {
-        jsize count = env->GetArrayLength(params);
-        for (jsize i = 0; i < count; ++i) {
-            jobject param = env->GetObjectArrayElement(params, i);
-            shorty.push_back(class_to_shorty_char(env, param, false));
-            if (param != nullptr) env->DeleteLocalRef(param);
-        }
-        env->DeleteLocalRef(params);
-    }
-    if (executableClass != nullptr) env->DeleteLocalRef(executableClass);
-    return shorty.empty() ? std::string("V") : shorty;
-}
-
-static void cache_reflected_method_shorty(JNIEnv* env, jobject method_obj, const char* label) {
-    if (method_obj == nullptr) return;
-    jmethodID mid = env->FromReflectedMethod(method_obj);
-    if (mid == nullptr) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        LOGW("GetMethodShorty fallback: FromReflectedMethod failed for %s", label ? label : "method");
-        return;
-    }
-    std::string shorty = build_shorty_for_reflected_executable(env, method_obj);
-    {
-        std::lock_guard<std::mutex> lock(g_method_shorty_mutex);
-        g_method_shorty_cache[mid] = shorty;
-    }
-    LOGI("GetMethodShorty fallback: cached %s mid=%p shorty=%s", label ? label : "method", mid, shorty.c_str());
-}
-
-static const char* multiapp_get_method_shorty(JNIEnv* env, jmethodID mid) {
-    (void)env;
-    std::lock_guard<std::mutex> lock(g_method_shorty_mutex);
-    auto it = g_method_shorty_cache.find(mid);
-    if (it != g_method_shorty_cache.end()) {
-        return it->second.c_str();
-    }
-    LOGW("GetMethodShorty fallback: cache miss mid=%p", mid);
-    return "V";
-}
 
 /**
- * 鍒濆鍖?LSPlant锛歞lopen + dlsym + InitInfo 閰嶇疆
+ * 初始化 LSPlant：dlopen + dlsym + InitInfo 配置
  */
-static bool init_lsplant_internal(JNIEnv* env, const char* lib_dir)
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeInitLsplant(
+    JNIEnv* env, jclass clazz, jstring libDir)
 {
+    (void)clazz;
     if (g_lsplant_initialized) {
         LOGI("nativeInitLsplant: already initialized");
-        return true;
+        return JNI_TRUE;
     }
 
     LOGI("nativeInitLsplant: starting LSPlant initialization...");
 
-    if (!init_shadowhook_for_runtime("nativeInitLsplant")) {
-        LOGE("nativeInitLsplant: shadowhook backend unavailable");
-        return false;
-    }
-
+    // Enable bypass so hooked_dlopen allows lsplant loading
     g_lsplant_dlopen_bypass = true;
 
-    if (lib_dir != nullptr && lib_dir[0] != '\0') {
-        char fullPath[512];
-        snprintf(fullPath, sizeof(fullPath), "%s/liblsplant.so", lib_dir);
-        LOGI("nativeInitLsplant: trying dlopen with full path: %s", fullPath);
-        g_lsplant_handle = dlopen(fullPath, RTLD_NOW);
-        if (g_lsplant_handle == nullptr) {
-            const char* err = dlerror();
-            LOGW("nativeInitLsplant: dlopen full path failed: %s", err ? err : "unknown");
-        } else {
-            LOGI("nativeInitLsplant: dlopen full path OK: %p", g_lsplant_handle);
+    // Step 1: dlopen liblsplant.so
+    // 如果传入了 libDir，用完整路径加载（绕过 ClassLoader 命名空间限制）
+    if (libDir != nullptr) {
+        const char* dir = env->GetStringUTFChars(libDir, nullptr);
+        if (dir != nullptr && dir[0] != '\0') {
+            char fullPath[512];
+            snprintf(fullPath, sizeof(fullPath), "%s/liblsplant.so", dir);
+            LOGI("nativeInitLsplant: trying dlopen with full path: %s", fullPath);
+            g_lsplant_handle = dlopen(fullPath, RTLD_NOW);
+            if (g_lsplant_handle == nullptr) {
+                const char* err = dlerror();
+                LOGW("nativeInitLsplant: dlopen full path failed: %s", err ? err : "unknown");
+            } else {
+                LOGI("nativeInitLsplant: dlopen full path OK: %p", g_lsplant_handle);
+            }
+            env->ReleaseStringUTFChars(libDir, dir);
         }
     }
 
+    // 如果完整路径失败，尝试默认方式
     if (g_lsplant_handle == nullptr) {
         g_lsplant_handle = dlopen("liblsplant.so", RTLD_NOW);
         if (g_lsplant_handle == nullptr) {
             const char* err = dlerror();
             LOGE("nativeInitLsplant: dlopen liblsplant.so failed: %s", err ? err : "unknown");
+            // 尝试加载 libc++_shared.so 后重试
             void* libcxx = dlopen("libc++_shared.so", RTLD_NOW);
             if (libcxx) {
                 LOGI("nativeInitLsplant: loaded libc++_shared.so, retrying dlopen...");
@@ -7148,6 +6685,8 @@ static bool init_lsplant_internal(JNIEnv* env, const char* lib_dir)
                 err = dlerror();
                 LOGE("nativeInitLsplant: dlopen retry failed: %s", err ? err : "unknown");
 
+                // 最后手段：从 /proc/self/maps 找 libmultiapp-native.so 的路径，
+                // liblsplant.so 在同一目录
                 FILE* maps = fopen("/proc/self/maps", "r");
                 if (maps) {
                     char line[1024];
@@ -7155,8 +6694,10 @@ static bool init_lsplant_internal(JNIEnv* env, const char* lib_dir)
                         if (strstr(line, "libmultiapp-native.so")) {
                             char* abs_path = strchr(line, '/');
                             if (abs_path) {
+                                // 去掉换行符
                                 char* nl = strchr(abs_path, '\n');
                                 if (nl) *nl = '\0';
+                                // 替换文件名: libmultiapp-native.so -> liblsplant.so
                                 char* name_pos = strrchr(abs_path, '/');
                                 if (name_pos) {
                                     strcpy(name_pos + 1, "liblsplant.so");
@@ -7179,15 +6720,17 @@ static bool init_lsplant_internal(JNIEnv* env, const char* lib_dir)
                 if (g_lsplant_handle == nullptr) {
                     LOGE("nativeInitLsplant: all dlopen attempts failed");
                     g_lsplant_dlopen_bypass = false;
-                    return false;
+                    return JNI_FALSE;
                 }
             }
         }
     }
     LOGI("nativeInitLsplant: liblsplant.so loaded at %p", g_lsplant_handle);
 
+    // Disable bypass — no longer needed after dlopen
     g_lsplant_dlopen_bypass = false;
 
+    // Step 2: dlsym 解析函数指针
     g_lsplant_init = (LsplantInitFn)dlsym(g_lsplant_handle, LSPLANT_INIT_SYM);
     g_lsplant_hook = (LsplantHookFn)dlsym(g_lsplant_handle, LSPLANT_HOOK_SYM);
     g_lsplant_unhook = (LsplantUnhookFn)dlsym(g_lsplant_handle, LSPLANT_UNHOOK_SYM);
@@ -7195,13 +6738,15 @@ static bool init_lsplant_internal(JNIEnv* env, const char* lib_dir)
     g_lsplant_deoptimize = (LsplantDeoptimizeFn)dlsym(g_lsplant_handle, LSPLANT_DEOPTIMIZE_SYM);
 
     if (g_lsplant_init == nullptr || g_lsplant_hook == nullptr) {
-        LOGE("nativeInitLsplant: dlsym failed init=%p hook=%p", g_lsplant_init, g_lsplant_hook);
+        LOGE("nativeInitLsplant: dlsym failed — init=%p hook=%p", g_lsplant_init, g_lsplant_hook);
         dlclose(g_lsplant_handle);
         g_lsplant_handle = nullptr;
-        return false;
+        return JNI_FALSE;
     }
-    LOGI("nativeInitLsplant: symbols resolved init=%p hook=%p unhook=%p", g_lsplant_init, g_lsplant_hook, g_lsplant_unhook);
+    LOGI("nativeInitLsplant: symbols resolved — init=%p hook=%p unhook=%p",
+         g_lsplant_init, g_lsplant_hook, g_lsplant_unhook);
 
+    // Step 3: 打开 libart.so（用于 ART 符号解析）
     if (g_libart_handle == nullptr) {
         g_libart_handle = dlopen("libart.so", RTLD_NOW | RTLD_NOLOAD);
         if (g_libart_handle == nullptr) {
@@ -7210,7 +6755,10 @@ static bool init_lsplant_internal(JNIEnv* env, const char* lib_dir)
         LOGI("nativeInitLsplant: libart.so handle=%p", g_libart_handle);
     }
 
+    // Step 4: 构造 InitInfo
     lsplant::InitInfo init_info{};
+
+    // inline_hooker: 用 ShadowHook 的地址 hook
     init_info.inline_hooker = [](void* target, void* replace) -> void* {
         void* backup = nullptr;
         void* stub = shadowhook_hook_sym_addr(target, replace, &backup);
@@ -7219,12 +6767,14 @@ static bool init_lsplant_internal(JNIEnv* env, const char* lib_dir)
             g_lsplant_hook_stubs[backup] = stub;
             LOGD("lsplant inline_hooker: hooked %p -> %p (backup=%p)", target, replace, backup);
             return backup;
+        } else {
+            int err = shadowhook_get_errno();
+            LOGW("lsplant inline_hooker: failed to hook %p, errno=%d", target, err);
+            return nullptr;
         }
-        int err = shadowhook_get_errno();
-        LOGW("lsplant inline_hooker: failed to hook %p, errno=%d", target, err);
-        return nullptr;
     };
 
+    // inline_unhooker: 通过 stub 映射 unhook
     init_info.inline_unhooker = [](void* backup) -> bool {
         std::unique_lock<std::shared_mutex> lock(g_lsplant_stub_mutex);
         auto it = g_lsplant_hook_stubs.find(backup);
@@ -7244,43 +6794,31 @@ static bool init_lsplant_internal(JNIEnv* env, const char* lib_dir)
     };
 
     refresh_libart_info();
+
+    // art_symbol_resolver: dlsym first, then libart ELF .symtab/.dynsym fallback.
     init_info.art_symbol_resolver = [](std::string_view symbol_name) -> void* {
         return resolve_libart_symbol(symbol_name, false);
     };
+
     init_info.art_symbol_prefix_resolver = [](std::string_view symbol_prefix) -> void* {
         return resolve_libart_symbol(symbol_prefix, true);
     };
-    init_info.generated_class_name = "MultiAppHooker_";
-    init_info.generated_source_name = "MultiApp";
 
+    // Step 5: 调用 lsplant::Init
     bool result = g_lsplant_init(env, &init_info);
     g_lsplant_initialized = result;
+
     if (result) {
         LOGI("nativeInitLsplant: LSPlant initialized successfully!");
     } else {
         LOGE("nativeInitLsplant: lsplant::Init returned false");
     }
-    return result;
-}
 
-JNIEXPORT jboolean JNICALL
-Java_com_multiapp_core_hook_NativeHookBridge_nativeInitLsplant(
-    JNIEnv* env, jclass clazz, jstring libDir)
-{
-    (void)clazz;
-    const char* dir = nullptr;
-    if (libDir != nullptr) {
-        dir = env->GetStringUTFChars(libDir, nullptr);
-    }
-    bool ok = init_lsplant_internal(env, dir);
-    if (dir != nullptr) {
-        env->ReleaseStringUTFChars(libDir, dir);
-    }
-    return ok ? JNI_TRUE : JNI_FALSE;
+    return result ? JNI_TRUE : JNI_FALSE;
 }
 
 /**
- * 妫€鏌?LSPlant 鏄惁宸插垵濮嬪寲
+ * 检查 LSPlant 是否已初始化
  */
 JNIEXPORT jboolean JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeIsLsplantInitialized(
@@ -7291,77 +6829,67 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeIsLsplantInitialized(
 }
 
 /**
- * 鐢?LSPlant hook Java 鏂规硶
+ * 用 LSPlant hook Java 方法
  *
- * @param targetMethod 瑕?hook 鐨勬柟娉?(java.lang.reflect.Executable)
- * @param hookerObject 鍖呭惈 callback 鏂规硶鐨勫璞?
- *                     callback 绛惧悕: public Object callback(Object[] args)
- * @return true 琛ㄧず hook 鎴愬姛
+ * @param targetMethod 要 hook 的方法 (java.lang.reflect.Executable)
+ * @param hookerObject 包含 callback 方法的对象
+ *                     callback 签名: public Object callback(Object[] args)
+ * @return true 表示 hook 成功
  */
-static jobject nativeHookMethodWithBackupImpl(
-    JNIEnv* env, jobject targetMethod, jobject hookerObject)
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeHookMethod(
+    JNIEnv* env, jclass clazz, jobject targetMethod, jobject hookerObject)
 {
+    (void)clazz;
     if (!g_lsplant_initialized || g_lsplant_hook == nullptr) {
-        LOGE("nativeHookMethodWithBackup: LSPlant not initialized");
-        return nullptr;
+        LOGE("nativeHookMethod: LSPlant not initialized");
+        return JNI_FALSE;
     }
 
     if (targetMethod == nullptr || hookerObject == nullptr) {
-        LOGE("nativeHookMethodWithBackup: targetMethod or hookerObject is null");
-        return nullptr;
+        LOGE("nativeHookMethod: targetMethod or hookerObject is null");
+        return JNI_FALSE;
     }
 
+    // 获取 hooker 对象的 callback 方法
     jclass hookerClass = env->GetObjectClass(hookerObject);
     if (hookerClass == nullptr) {
-        LOGE("nativeHookMethodWithBackup: cannot get hooker class");
-        return nullptr;
+        LOGE("nativeHookMethod: cannot get hooker class");
+        return JNI_FALSE;
     }
 
     jmethodID callbackMethodId = env->GetMethodID(
         hookerClass, "callback", "([Ljava/lang/Object;)Ljava/lang/Object;");
     if (callbackMethodId == nullptr) {
-        LOGE("nativeHookMethodWithBackup: callback method not found in hooker class");
+        LOGE("nativeHookMethod: callback method not found in hooker class");
         if (env->ExceptionCheck()) env->ExceptionClear();
         env->DeleteLocalRef(hookerClass);
-        return nullptr;
+        return JNI_FALSE;
     }
 
+    // 将 jmethodID 转换为 jobject (Method 引用)
     jobject callbackMethodObj = env->ToReflectedMethod(
         hookerClass, callbackMethodId, JNI_FALSE);
     if (callbackMethodObj == nullptr) {
-        LOGE("nativeHookMethodWithBackup: cannot convert callback methodID to Method object");
+        LOGE("nativeHookMethod: cannot convert callback methodID to Method object");
         env->DeleteLocalRef(hookerClass);
-        return nullptr;
+        return JNI_FALSE;
     }
 
-    cache_reflected_method_shorty(env, targetMethod, "target");
-    cache_reflected_method_shorty(env, callbackMethodObj, "callback");
-
+    // 调用 lsplant::Hook(env, targetMethod, hookerObject, callbackMethod)
     jobject backup = g_lsplant_hook(env, targetMethod, hookerObject, callbackMethodObj);
 
     env->DeleteLocalRef(hookerClass);
     env->DeleteLocalRef(callbackMethodObj);
 
     if (backup != nullptr) {
-        LOGI("nativeHookMethodWithBackup: hook succeeded backup=%p", backup);
-    } else {
-        LOGE("nativeHookMethodWithBackup: lsplant::Hook returned null (hook failed)");
-    }
-    return backup;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_multiapp_core_hook_NativeHookBridge_nativeHookMethod(
-    JNIEnv* env, jclass clazz, jobject targetMethod, jobject hookerObject)
-{
-    (void)clazz;
-    jobject backup = nativeHookMethodWithBackupImpl(env, targetMethod, hookerObject);
-    if (backup != nullptr) {
         env->DeleteLocalRef(backup);
         LOGI("nativeHookMethod: hook succeeded");
         return JNI_TRUE;
+    } else {
+        LOGE("nativeHookMethod: lsplant::Hook returned null (hook failed)");
+        return JNI_FALSE;
     }
-    return JNI_FALSE;
 }
 
 JNIEXPORT jobject JNICALL
@@ -7369,26 +6897,69 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeHookMethodWithBackup(
     JNIEnv* env, jclass clazz, jobject targetMethod, jobject hookerObject)
 {
     (void)clazz;
-    return nativeHookMethodWithBackupImpl(env, targetMethod, hookerObject);
-}
-
-JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved)
-{
-    (void)reserved;
-    JNIEnv* env = nullptr;
-    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || env == nullptr) {
-        LOGE("JNI_OnLoad: GetEnv failed");
-        return JNI_ERR;
+    if (!g_lsplant_initialized || g_lsplant_hook == nullptr) {
+        LOGE("nativeHookMethodWithBackup: LSPlant not initialized");
+        return nullptr;
     }
+    if (targetMethod == nullptr || hookerObject == nullptr) {
+        LOGE("nativeHookMethodWithBackup: null args");
+        return nullptr;
+    }
+    jclass hookerClass = env->GetObjectClass(hookerObject);
+    if (hookerClass == nullptr) return nullptr;
 
-    LOGI("JNI_OnLoad: early LSPlant init begin");
-    bool ok = init_lsplant_internal(env, nullptr);
-    LOGI("JNI_OnLoad: early LSPlant init result=%d", ok ? 1 : 0);
-    return JNI_VERSION_1_6;
+    jmethodID callbackMethodId = env->GetMethodID(
+        hookerClass, "callback", "([Ljava/lang/Object;)Ljava/lang/Object;");
+    if (callbackMethodId == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(hookerClass);
+        return nullptr;
+    }
+    jobject callbackMethodObj = env->ToReflectedMethod(
+        hookerClass, callbackMethodId, JNI_FALSE);
+    if (callbackMethodObj == nullptr) {
+        env->DeleteLocalRef(hookerClass);
+        return nullptr;
+    }
+    jobject backup = g_lsplant_hook(env, targetMethod, hookerObject, callbackMethodObj);
+    env->DeleteLocalRef(hookerClass);
+    env->DeleteLocalRef(callbackMethodObj);
+
+    if (backup != nullptr) {
+        jobject globalBackup = env->NewGlobalRef(backup);
+        env->DeleteLocalRef(backup);
+        LOGI("nativeHookMethodWithBackup: success, backup=%p", globalBackup);
+        return globalBackup;
+    }
+    LOGE("nativeHookMethodWithBackup: lsplant::Hook returned null");
+    return nullptr;
 }
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeUnhookMethod(
+    JNIEnv* env, jclass clazz, jobject targetMethod)
+{
+    (void)clazz;
+    if (!g_lsplant_initialized || g_lsplant_unhook == nullptr) return JNI_FALSE;
+    return g_lsplant_unhook(env, targetMethod) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeIsMethodHooked(
+    JNIEnv* env, jclass clazz, jobject method)
+{
+    (void)clazz;
+    if (!g_lsplant_initialized || g_lsplant_is_hooked == nullptr) return JNI_FALSE;
+    return g_lsplant_is_hooked(env, method) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeDeoptimizeMethod(
+    JNIEnv* env, jclass clazz, jobject method)
+{
+    (void)clazz;
+    if (!g_lsplant_initialized || g_lsplant_deoptimize == nullptr) return JNI_FALSE;
+    return g_lsplant_deoptimize(env, method) ? JNI_TRUE : JNI_FALSE;
+}
+
 } // extern "C"
-
-
-
-
-

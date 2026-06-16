@@ -29,11 +29,20 @@ class SimpleHooker(
     }
 
     fun callOriginal(args: Array<Any?>): Any? {
-        val backupMethod = backup as? Method
-            ?: throw IllegalStateException("Only Method backup is supported for ${method.name}")
+        val backupMethod = backup
+            ?: throw IllegalStateException("Backup not set for ${method.name}")
         val receiver = if (isStatic) null else args.firstOrNull()
         val methodArgs = if (isStatic) args else args.drop(1).toTypedArray()
-        return backupMethod.invoke(receiver, *methodArgs)
+
+        return if (backupMethod is java.lang.reflect.Method) {
+            backupMethod.invoke(receiver, *methodArgs)
+        } else if (backupMethod is java.lang.reflect.Constructor<*>) {
+            backupMethod.newInstance(*methodArgs)
+        } else {
+            throw IllegalStateException(
+                "Unsupported backup type: ${backupMethod?.javaClass?.name}"
+            )
+        }
     }
 
     /**

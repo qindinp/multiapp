@@ -94,11 +94,15 @@ class StubBuilder(
             } catch (e: Throwable) {
                 Log.e("StubBuilder", "rewriteManifest failed, falling back to generator", e)
                 // 回退到从零生成（兼容不支持增量修改的情况）
+                // MIUI 上 provider meta-data 编码会导致安装失败，检测到 MIUI 时跳过
+                val isMiui = isMiuiDevice()
+                if (isMiui) Log.w("StubBuilder", "MIUI detected, skipping provider meta-data encoding")
                 generator.generateBytes(
                     stubPackageName = config.stubPackageName,
                     manifest = manifest,
                     launcherActivity = launcherActivity,
-                    config = config
+                    config = config,
+                    encodeProviderMetaData = !isMiui
                 )
             }
             Log.w("StubBuilder", "manifest binary XML: ${manifestBytes.size} bytes")
@@ -1358,6 +1362,17 @@ class StubBuilder(
             size = data.size.toLong()
             compressedSize = data.size.toLong()
             crc = crcCalculator.value
+        }
+    }
+
+    private fun isMiuiDevice(): Boolean {
+        return try {
+            val cls = Class.forName("android.os.SystemProperties")
+            val method = cls.getMethod("get", String::class.java)
+            val prop = method.invoke(null, "ro.miui.ui.version.name") as String
+            prop.isNotEmpty()
+        } catch (_: Exception) {
+            android.os.Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true)
         }
     }
 }

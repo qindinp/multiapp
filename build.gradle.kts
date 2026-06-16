@@ -28,6 +28,58 @@ subprojects {
     }
 }
 
+// JaCoCo code coverage
+subprojects {
+    afterEvaluate {
+        if (plugins.hasPlugin("com.android.application") || plugins.hasPlugin("com.android.library")) {
+            apply(plugin = "jacoco")
+
+            extensions.configure<JacocoPluginExtension> {
+                toolVersion = "0.8.12"
+            }
+
+            tasks.register<JacocoReport>("jacocoTestReport") {
+                dependsOn("testDebugUnitTest")
+
+                group = "verification"
+                description = "Generate JaCoCo coverage report for debug variant"
+
+                val execFiles = fileTree(buildDir) {
+                    include("**/testDebugUnitTest.exec")
+                }
+
+                val classFiles = fileTree(buildDir) {
+                    include(
+                        "tmp/kotlin-classes/debug/**/*.class",
+                        "intermediates/javac/debug/**/*.class"
+                    )
+                    exclude(
+                        "**/R.class",
+                        "**/R\$*.class",
+                        "**/BuildConfig.class",
+                        "**/Manifest*.*",
+                        "**/*_MembersInjector.class",
+                        "**/Dagger*Component*.*",
+                        "**/*Module_*Factory.class",
+                        "**/*_Factory.class",
+                        "**/Hilt_*.*",
+                        "**/*GeneratedInjector.*"
+                    )
+                }
+
+                sourceDirectories.setFrom(files("$projectDir/src/main/java", "$projectDir/src/main/kotlin"))
+                classDirectories.setFrom(classFiles)
+                executionData.setFrom(execFiles)
+
+                reports {
+                    xml.required.set(true)
+                    html.required.set(true)
+                }
+            }
+        }
+    }
+}
+
 // Configure Detekt for all subprojects
 subprojects {
     apply(plugin = "io.gitlab.arturbosch.detekt")

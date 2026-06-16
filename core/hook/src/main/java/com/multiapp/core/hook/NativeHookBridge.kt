@@ -555,6 +555,34 @@ class NativeHookBridge {
         }
     }
 
+    fun unhookMethod(targetMethod: java.lang.reflect.Executable): Boolean {
+        if (!nativeHooksAvailable) return false
+        return try {
+            nativeUnhookMethod(targetMethod)
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "unhookMethod failed: ${e.message}", e)
+            false
+        }
+    }
+
+    fun isMethodHooked(method: java.lang.reflect.Executable): Boolean {
+        if (!nativeHooksAvailable) return false
+        return try {
+            nativeIsMethodHooked(method)
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
+    fun deoptimizeMethod(method: java.lang.reflect.Executable): Boolean {
+        if (!nativeHooksAvailable) return false
+        return try {
+            nativeDeoptimizeMethod(method)
+        } catch (e: Throwable) {
+            false
+        }
+    }
+
     fun setupAppRedirections(guestPackageName: String, instanceId: String, sandboxDataDir: String) {
         addPathRedirection("/data/data/$guestPackageName/", "$sandboxDataDir/")
         addPathRedirection("/data/user/0/$guestPackageName/", "$sandboxDataDir/")
@@ -719,6 +747,9 @@ class NativeHookBridge {
     private external fun nativeIsLsplantInitialized(): Boolean
     private external fun nativeHookMethod(targetMethod: java.lang.reflect.Executable, hookerObject: Any): Boolean
     private external fun nativeHookMethodWithBackup(targetMethod: java.lang.reflect.Executable, hookerObject: Any): java.lang.reflect.Executable?
+    private external fun nativeUnhookMethod(targetMethod: java.lang.reflect.Executable): Boolean
+    private external fun nativeIsMethodHooked(method: java.lang.reflect.Executable): Boolean
+    private external fun nativeDeoptimizeMethod(method: java.lang.reflect.Executable): Boolean
 
     // P0: DEX + SO dump
     private external fun nativeDumpDexFromClassLoader(classLoader: ClassLoader, dumpDir: String): Int

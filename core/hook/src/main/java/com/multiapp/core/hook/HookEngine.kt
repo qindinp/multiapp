@@ -147,7 +147,8 @@ class HookEngine private constructor() {
             installedHooks.add(HookInfo(
                 type = HookType.LSPLANT_METHOD,
                 target = "${method.declaringClass.name}.${method.name}",
-                originalValue = null
+                originalValue = null,
+                executable = method
             ))
             Timber.tag(TAG).d("LSPlant hooked: ${method.declaringClass.name}.${method.name}")
             android.util.Log.i(TAG, "hookMethod: successfully hooked ${method.declaringClass.name}.${method.name}")
@@ -217,7 +218,8 @@ class HookEngine private constructor() {
             installedHooks.add(HookInfo(
                 type = HookType.LSPLANT_METHOD,
                 target = "${method.declaringClass.name}.${method.name}",
-                originalValue = null
+                originalValue = null,
+                executable = method
             ))
             android.util.Log.i(TAG, "hookMethodPassThrough: successfully hooked ${method.declaringClass.name}.${method.name}")
             return true
@@ -258,7 +260,8 @@ class HookEngine private constructor() {
             installedHooks.add(HookInfo(
                 type = HookType.LSPLANT_METHOD,
                 target = "${method.declaringClass.name}.${method.name}",
-                originalValue = null
+                originalValue = null,
+                executable = method
             ))
             android.util.Log.i(TAG, "hookMethodAround: successfully hooked ${method.declaringClass.name}.${method.name}")
             return true
@@ -333,9 +336,7 @@ class HookEngine private constructor() {
     }
 
     fun unhookAll() {
-        // Note: LSPlant hooks cannot be easily unhoked in our simplified implementation
-        // The hooks will remain until the process is killed
-        Timber.tag(TAG).d("Clearing ${lsplantHooks.size} LSPlant hooks (hooks remain active until process exit)")
+        Timber.tag(TAG).d("Clearing ${lsplantHooks.size} LSPlant hooks")
         lsplantHooks.clear()
 
         for (hook in installedHooks.reversed()) {
@@ -357,7 +358,14 @@ class HookEngine private constructor() {
                         field.isAccessible = true
                         field.set(instance, hook.originalValue)
                     }
-                    HookType.LSPLANT_METHOD -> { }
+                    HookType.LSPLANT_METHOD -> {
+                        try {
+                            val bridge = NativeHookBridge.getInstance()
+                            bridge.unhookMethod(hook.executable ?: continue)
+                        } catch (e: Throwable) {
+                            Timber.tag(TAG).e(e, "Failed to unhook LSPlant method: ${hook.target}")
+                        }
+                    }
                     else -> { }
                 }
             } catch (e: Exception) {
@@ -376,7 +384,8 @@ class HookEngine private constructor() {
         val type: HookType,
         val target: String,
         val originalValue: Any? = null,
-        val instance: Any? = null
+        val instance: Any? = null,
+        val executable: Executable? = null
     )
 
     private enum class HookType {

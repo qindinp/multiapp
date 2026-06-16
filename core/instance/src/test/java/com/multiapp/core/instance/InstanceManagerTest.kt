@@ -2,6 +2,7 @@ package com.multiapp.core.instance
 
 import android.content.Context
 import com.google.gson.Gson
+import com.multiapp.core.hook.IdentitySpoofingEngine
 import com.multiapp.core.identity.DeviceIdentityPool
 import com.multiapp.core.model.IdentityConfig
 import com.multiapp.core.installer.StubInstaller
@@ -29,6 +30,7 @@ class InstanceManagerTest {
     private lateinit var stubBuilder: StubBuilder
     private lateinit var stubInstaller: StubInstaller
     private lateinit var context: Context
+    private lateinit var identitySpoofingEngine: IdentitySpoofingEngine
     private lateinit var instanceDao: InstanceDao
     private lateinit var parser: ManifestParser
     private lateinit var extractor: ComponentExtractor
@@ -45,6 +47,7 @@ class InstanceManagerTest {
         stubBuilder = mockk(relaxed = true)
         stubInstaller = mockk(relaxed = true)
         context = mockk(relaxed = true)
+        identitySpoofingEngine = mockk(relaxed = true)
         instanceDao = mockk(relaxed = true)
         parser = mockk(relaxed = true)
         extractor = mockk(relaxed = true)
@@ -58,6 +61,7 @@ class InstanceManagerTest {
             stubBuilder = stubBuilder,
             stubInstaller = stubInstaller,
             context = context,
+            identitySpoofingEngine = identitySpoofingEngine,
             parser = parser,
             extractor = extractor
         )
@@ -68,7 +72,7 @@ class InstanceManagerTest {
         unmockkAll()
     }
 
-    // ── 辅助工厂方法 ──────────────────────────────────────────────
+    // -- helper factory methods ------------------------------------------------
 
     private fun createTestIdentityConfig(
         instanceId: String = "stub_test-id",
@@ -105,9 +109,7 @@ class InstanceManagerTest {
         instanceId = "existing-instance"
     )
 
-    /**
-     * 创建一个真实的空 APK 文件（避免 mockkConstructor(File::class) 导致 StackOverflow）
-     */
+    /** Create an empty real APK file so that File.exists() returns true. */
     private fun ensureApkExists(apkPath: String) {
         val file = File(apkPath)
         file.parentFile?.mkdirs()
@@ -143,7 +145,6 @@ class InstanceManagerTest {
         } returns identity
 
         if (apkExists) {
-            // 使用真实临时文件
             ensureApkExists(app.apkPath)
 
             val parsedManifest = ManifestParser.ParsedManifest(
@@ -179,14 +180,16 @@ class InstanceManagerTest {
         return identity
     }
 
-    // ── 1. 创建实例 - 实例 ID 唯一性 ────────────────────────────
+    // =========================================================================
+    // 1. createInstance - instance ID uniqueness
+    // =========================================================================
 
     @Nested
-    @DisplayName("createInstance - 实例 ID 唯一性")
+    @DisplayName("createInstance - instance ID uniqueness")
     inner class CreateInstanceIdUniqueness {
 
         @Test
-        fun `生成的 instanceId 以 stub_ 前缀开头`() = runTest {
+        fun `generated instanceId starts with stub_ prefix`() = runTest {
             val app = createTestVirtualApp()
             mockCreateInstanceFlow(app)
 
@@ -194,16 +197,20 @@ class InstanceManagerTest {
 
             assertTrue(
                 instanceId.startsWith("stub_"),
-                "instanceId 应以 stub_ 开头，实际为: $instanceId"
+                "instanceId should start with stub_, got: $instanceId"
             )
         }
 
         @Test
-        fun `多次调用生成不同的 instanceId`() = runTest {
-            val app1 = createTestVirtualApp(packageName = "com.example.app1",
-                apkPath = File(tempDir, "test1.apk").absolutePath)
-            val app2 = createTestVirtualApp(packageName = "com.example.app2",
-                apkPath = File(tempDir, "test2.apk").absolutePath)
+        fun `multiple calls generate different instanceIds`() = runTest {
+            val app1 = createTestVirtualApp(
+                packageName = "com.example.app1",
+                apkPath = File(tempDir, "test1.apk").absolutePath
+            )
+            val app2 = createTestVirtualApp(
+                packageName = "com.example.app2",
+                apkPath = File(tempDir, "test2.apk").absolutePath
+            )
 
             mockCreateInstanceFlow(app1)
             mockCreateInstanceFlow(app2)
@@ -211,34 +218,36 @@ class InstanceManagerTest {
             val id1 = instanceManager.createInstance(app1)
             val id2 = instanceManager.createInstance(app2)
 
-            assertNotEquals(id1, id2, "两次创建应生成不同的 instanceId")
+            assertNotEquals(id1, id2, "Two creates should produce different instanceIds")
         }
 
         @Test
-        fun `instanceId 符合 UUID 格式`() = runTest {
+        fun `instanceId conforms to UUID format`() = runTest {
             val app = createTestVirtualApp()
             mockCreateInstanceFlow(app)
 
             val instanceId = instanceManager.createInstance(app)
             val uuidPart = instanceId.removePrefix("stub_")
 
-            // UUID 格式: 32 hex chars (无连字符，代码中 replace("-",""))
+            // UUID format: 32 hex chars (dashes stripped by code)
             val uuidRegex = Regex("[0-9a-f]{32}")
             assertTrue(
                 uuidRegex.matches(uuidPart),
-                "UUID 部分不符合格式: $uuidPart"
+                "UUID part does not match expected format: $uuidPart"
             )
         }
     }
 
-    // ── 2. 创建实例 - 配置正确生成 ──────────────────────────────
+    // =========================================================================
+    // 2. createInstance - configuration correctness
+    // =========================================================================
 
     @Nested
-    @DisplayName("createInstance - 配置正确生成")
+    @DisplayName("createInstance - configuration correctness")
     inner class CreateInstanceConfig {
 
         @Test
-        fun `调用 DeviceIdentityPool 时传入正确的 instanceId 和 packageName`() = runTest {
+        fun `calls DeviceIdentityPool with correct instanceId and packageName`() = runTest {
             val app = createTestVirtualApp(packageName = "com.example.testapp")
             mockCreateInstanceFlow(app)
 
@@ -253,7 +262,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `使用正确的 IdentityConfig 调用 StubBuilder`() = runTest {
+        fun `passes correct IdentityConfig to StubBuilder`() = runTest {
             val app = createTestVirtualApp(packageName = "com.example.app")
             val identity = mockCreateInstanceFlow(app)
 
@@ -273,7 +282,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `DeviceIdentityConfig 字段正确映射自 IdentityConfig`() = runTest {
+        fun `DeviceIdentityConfig fields map correctly from IdentityConfig`() = runTest {
             val app = createTestVirtualApp()
             val identity = createTestIdentityConfig()
 
@@ -281,7 +290,6 @@ class InstanceManagerTest {
                 DeviceIdentityPool.generateIdentity(any(), any())
             } returns identity
 
-            // 使用真实临时文件
             ensureApkExists(app.apkPath)
 
             every { parser.parse(any<File>()) } returns ManifestParser.ParsedManifest(
@@ -339,7 +347,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `实例保存到数据库包含正确的 IdentityJson`() = runTest {
+        fun `entity saved to database contains correct IdentityJson`() = runTest {
             val app = createTestVirtualApp()
             val identity = mockCreateInstanceFlow(app)
 
@@ -355,16 +363,34 @@ class InstanceManagerTest {
                 )
             }
         }
+
+        @Test
+        fun `syncs identity to IdentitySpoofingEngine during creation`() = runTest {
+            val app = createTestVirtualApp()
+            mockCreateInstanceFlow(app)
+
+            instanceManager.createInstance(app)
+
+            verify {
+                identitySpoofingEngine.applyDeviceProfile(
+                    any(),
+                    match { it.startsWith("stub_") },
+                    any()
+                )
+            }
+        }
     }
 
-    // ── 3. 获取实例列表 ──────────────────────────────────────────
+    // =========================================================================
+    // 3. loadInstances - instance listing
+    // =========================================================================
 
     @Nested
-    @DisplayName("loadInstances - 获取实例列表")
+    @DisplayName("loadInstances - instance listing")
     inner class LoadInstances {
 
         @Test
-        fun `从数据库加载实例并更新 StateFlow`() = runTest {
+        fun `loads instances from database and updates StateFlow`() = runTest {
             val entity1 = createTestEntity(instanceId = "stub_id1", packageName = "com.app1")
             val entity2 = createTestEntity(instanceId = "stub_id2", packageName = "com.app2")
 
@@ -379,7 +405,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `加载的实例包含正确的 status 枚举值`() = runTest {
+        fun `loaded instances have correct status enum value`() = runTest {
             val entity = createTestEntity(status = InstanceStatus.READY.name)
             every { instanceDao.observeAll() } returns flowOf(listOf(entity))
 
@@ -389,7 +415,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `加载的实例包含正确的 identity 信息`() = runTest {
+        fun `loaded instances have correct identity information`() = runTest {
             val identity = createTestIdentityConfig()
             val entity = createTestEntity().copy(identityJson = gson.toJson(identity))
             every { instanceDao.observeAll() } returns flowOf(listOf(entity))
@@ -403,7 +429,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `加载的实例按 createdAt 排序`() = runTest {
+        fun `loaded instances preserve insertion order`() = runTest {
             val now = System.currentTimeMillis()
             val entity1 = createTestEntity(instanceId = "stub_old").copy(createdAt = now - 10000)
             val entity2 = createTestEntity(instanceId = "stub_new").copy(createdAt = now)
@@ -418,50 +444,16 @@ class InstanceManagerTest {
         }
     }
 
-    // ── 4. 获取单个实例 ──────────────────────────────────────────
+    // =========================================================================
+    // 4. deleteInstance - instance deletion
+    // =========================================================================
 
     @Nested
-    @DisplayName("loadInstances - 获取单个实例")
-    inner class GetSingleInstance {
-
-        @Test
-        fun `加载单个实例到 StateFlow`() = runTest {
-            val entity = createTestEntity(instanceId = "stub_single")
-            every { instanceDao.observeAll() } returns flowOf(listOf(entity))
-
-            instanceManager.loadInstances()
-
-            assertEquals(1, instanceManager.instances.value.size)
-            assertEquals("stub_single", instanceManager.instances.value.first().instanceId)
-        }
-
-        @Test
-        fun `createInstance 后 StateFlow 包含新实例`() = runTest {
-            // 先初始化空列表
-            every { instanceDao.observeAll() } returns flowOf(emptyList())
-            instanceManager.loadInstances()
-            assertTrue(instanceManager.instances.value.isEmpty())
-
-            // 创建实例
-            val app = createTestVirtualApp()
-            mockCreateInstanceFlow(app)
-            val newId = instanceManager.createInstance(app)
-
-            val instances = instanceManager.instances.value
-            assertEquals(1, instances.size)
-            assertEquals(newId, instances.first().instanceId)
-            assertEquals(app.packageName, instances.first().originalPackageName)
-        }
-    }
-
-    // ── 5. 删除实例 ─────────────────────────────────────────────
-
-    @Nested
-    @DisplayName("deleteInstance - 删除实例")
+    @DisplayName("deleteInstance - instance deletion")
     inner class DeleteInstance {
 
         @Test
-        fun `成功删除存在的实例`() = runTest {
+        fun `successfully deletes an existing instance`() = runTest {
             val instanceId = "stub_to-delete"
             val entity = createTestEntity(instanceId = instanceId)
 
@@ -474,29 +466,28 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `删除后从 StateFlow 中移除实例`() = runTest {
+        fun `removes deleted instance from StateFlow`() = runTest {
             val instanceId = "stub_to-delete"
             val entity = createTestEntity(instanceId = instanceId)
 
             coEvery { instanceDao.getById(instanceId) } returns entity
             coEvery { instanceDao.deleteById(instanceId) } just Runs
 
-            // 先加载实例到 StateFlow
+            // Load instance into StateFlow first
             every { instanceDao.observeAll() } returns flowOf(listOf(entity))
             instanceManager.loadInstances()
             assertEquals(1, instanceManager.instances.value.size)
 
-            // 删除实例
             instanceManager.deleteInstance(instanceId)
 
             assertTrue(
                 instanceManager.instances.value.none { it.instanceId == instanceId },
-                "删除后 StateFlow 中不应包含该实例"
+                "Deleted instance should not be in StateFlow"
             )
         }
 
         @Test
-        fun `删除一个实例不影响其他实例`() = runTest {
+        fun `deleting one instance does not affect others`() = runTest {
             val idToDelete = "stub_delete-me"
             val idToKeep = "stub_keep-me"
             val entityToDelete = createTestEntity(instanceId = idToDelete)
@@ -505,12 +496,11 @@ class InstanceManagerTest {
             coEvery { instanceDao.getById(idToDelete) } returns entityToDelete
             coEvery { instanceDao.deleteById(idToDelete) } just Runs
 
-            // 加载两个实例
+            // Load both
             every { instanceDao.observeAll() } returns flowOf(listOf(entityToDelete, entityToKeep))
             instanceManager.loadInstances()
             assertEquals(2, instanceManager.instances.value.size)
 
-            // 删除一个
             instanceManager.deleteInstance(idToDelete)
 
             assertEquals(1, instanceManager.instances.value.size)
@@ -518,15 +508,15 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `删除实例时启动卸载 Intent`() = runTest {
+        fun `delete triggers uninstall Intent for stub package`() = runTest {
             val instanceId = "stub_uninstall-test"
             val entity = createTestEntity(instanceId = instanceId)
             coEvery { instanceDao.getById(instanceId) } returns entity
             coEvery { instanceDao.deleteById(instanceId) } just Runs
 
-            // Intent() 构造函数在 JVM 测试环境中抛出 "Stub!"，
-            // 异常被 try-catch 捕获后 startActivity 不会被调用。
-            // 验证 deleteInstance 不因 Intent 异常而中断，且数据库清理正常执行。
+            // Intent() constructor throws "Stub!" in JVM tests;
+            // the catch block in deleteInstance prevents the crash.
+            // We verify that the database is still cleaned up.
             instanceManager.deleteInstance(instanceId)
 
             coVerify { instanceDao.deleteById(instanceId) }
@@ -536,14 +526,109 @@ class InstanceManagerTest {
         }
     }
 
-    // ── 6. 实例状态管理 ──────────────────────────────────────────
+    // =========================================================================
+    // 5. undoDelete - instance restoration
+    // =========================================================================
 
     @Nested
-    @DisplayName("实例状态管理")
+    @DisplayName("undoDelete - instance restoration")
+    inner class UndoDelete {
+
+        @Test
+        fun `restores instance record to database`() = runTest {
+            val identity = createTestIdentityConfig(instanceId = "stub_restored")
+            val identityJson = gson.toJson(identity)
+
+            instanceManager.undoDelete("stub_restored", identityJson)
+
+            coVerify {
+                instanceDao.insert(
+                    match<InstanceEntity> { entity ->
+                        entity.instanceId == "stub_restored" &&
+                            entity.originalPackageName == identity.originalPackageName &&
+                            entity.stubPackageName == identity.stubPackageName &&
+                            entity.status == InstanceStatus.READY.name
+                    }
+                )
+            }
+        }
+
+        @Test
+        fun `adds restored instance to StateFlow`() = runTest {
+            val identity = createTestIdentityConfig(instanceId = "stub_restored")
+            val identityJson = gson.toJson(identity)
+
+            every { instanceDao.observeAll() } returns flowOf(emptyList())
+            instanceManager.loadInstances()
+            assertTrue(instanceManager.instances.value.isEmpty())
+
+            instanceManager.undoDelete("stub_restored", identityJson)
+
+            assertEquals(1, instanceManager.instances.value.size)
+            val restored = instanceManager.instances.value.first()
+            assertEquals("stub_restored", restored.instanceId)
+            assertEquals(identity.originalPackageName, restored.originalPackageName)
+            assertEquals(identity.stubPackageName, restored.stubPackageName)
+            assertEquals(InstanceStatus.READY, restored.status)
+        }
+
+        @Test
+        fun `restores correct identity information`() = runTest {
+            val identity = createTestIdentityConfig(instanceId = "stub_id-check")
+            val identityJson = gson.toJson(identity)
+
+            instanceManager.undoDelete("stub_id-check", identityJson)
+
+            val restored = instanceManager.instances.value.first()
+            assertEquals(identity.imei, restored.identity.imei)
+            assertEquals(identity.androidId, restored.identity.androidId)
+            assertEquals(identity.buildModel, restored.identity.buildModel)
+        }
+
+        @Test
+        fun `silently skips restore when identityJson is invalid`() = runTest {
+            every { instanceDao.observeAll() } returns flowOf(emptyList())
+            instanceManager.loadInstances()
+
+            instanceManager.undoDelete("stub_bad", "this is not JSON {{{")
+
+            coVerify(exactly = 0) { instanceDao.insert(any()) }
+            assertTrue(instanceManager.instances.value.isEmpty())
+        }
+
+        @Test
+        fun `can restore after delete removes from StateFlow`() = runTest {
+            val instanceId = "stub_cycle"
+            val entity = createTestEntity(instanceId = instanceId)
+            val identityJson = entity.identityJson
+
+            // Load and delete
+            coEvery { instanceDao.getById(instanceId) } returns entity
+            coEvery { instanceDao.deleteById(instanceId) } just Runs
+            every { instanceDao.observeAll() } returns flowOf(listOf(entity))
+            instanceManager.loadInstances()
+            assertEquals(1, instanceManager.instances.value.size)
+
+            instanceManager.deleteInstance(instanceId)
+            assertTrue(instanceManager.instances.value.isEmpty())
+
+            // Undo delete
+            instanceManager.undoDelete(instanceId, identityJson)
+            assertEquals(1, instanceManager.instances.value.size)
+            assertEquals(instanceId, instanceManager.instances.value.first().instanceId)
+        }
+    }
+
+    // =========================================================================
+    // 6. Instance status management
+    // =========================================================================
+
+    @Nested
+    @DisplayName("instance status management")
     inner class InstanceStatusManagement {
 
         @Test
-        fun `新建实例状态为 READY`() = runTest {
+        fun `newly created instance has READY status`() = runTest {
             val app = createTestVirtualApp()
             mockCreateInstanceFlow(app)
 
@@ -554,7 +639,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `数据库中保存的状态为 READY 字符串`() = runTest {
+        fun `entity saved to database has READY string status`() = runTest {
             val app = createTestVirtualApp()
             mockCreateInstanceFlow(app)
 
@@ -568,7 +653,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `加载实例时解析 CREATING 状态`() = runTest {
+        fun `loadInstances parses CREATING status`() = runTest {
             val entity = createTestEntity(status = InstanceStatus.CREATING.name)
             every { instanceDao.observeAll() } returns flowOf(listOf(entity))
 
@@ -578,7 +663,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `加载实例时解析 RUNNING 状态`() = runTest {
+        fun `loadInstances parses RUNNING status`() = runTest {
             val entity = createTestEntity(status = InstanceStatus.RUNNING.name)
             every { instanceDao.observeAll() } returns flowOf(listOf(entity))
 
@@ -588,7 +673,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `加载实例时解析 ERROR 状态`() = runTest {
+        fun `loadInstances parses ERROR status`() = runTest {
             val entity = createTestEntity(status = InstanceStatus.ERROR.name)
             every { instanceDao.observeAll() } returns flowOf(listOf(entity))
 
@@ -598,7 +683,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `加载实例时未知 status 回退为 ERROR`() = runTest {
+        fun `loadInstances falls back to ERROR for unknown status`() = runTest {
             val entity = createTestEntity(status = "UNKNOWN_STATUS")
             every { instanceDao.observeAll() } returns flowOf(listOf(entity))
 
@@ -607,15 +692,321 @@ class InstanceManagerTest {
             assertEquals(
                 InstanceStatus.ERROR,
                 instanceManager.instances.value.first().status,
-                "未知状态应回退为 ERROR"
+                "Unknown status should fall back to ERROR"
             )
         }
     }
 
-    // ── 7. DeviceIdentityPool 身份生成唯一性 ─────────────────────
+    // =========================================================================
+    // 7. Edge cases
+    // =========================================================================
 
     @Nested
-    @DisplayName("DeviceIdentityPool - 身份生成唯一性")
+    @DisplayName("edge cases")
+    inner class EdgeCases {
+
+        @Test
+        fun `initial StateFlow is an empty list`() = runTest {
+            assertTrue(
+                instanceManager.instances.value.isEmpty(),
+                "Initial StateFlow should be empty"
+            )
+        }
+
+        @Test
+        fun `loadInstances handles empty database`() = runTest {
+            every { instanceDao.observeAll() } returns flowOf(emptyList())
+
+            instanceManager.loadInstances()
+
+            assertTrue(
+                instanceManager.instances.value.isEmpty(),
+                "Empty database should load as empty list"
+            )
+        }
+
+        @Test
+        fun `loadInstances skips records with unparseable identityJson`() = runTest {
+            val validEntity = createTestEntity(instanceId = "stub_valid")
+            val invalidEntity = createTestEntity(instanceId = "stub_invalid")
+                .copy(identityJson = "not valid JSON {{{")
+
+            every { instanceDao.observeAll() } returns flowOf(
+                listOf(validEntity, invalidEntity)
+            )
+
+            instanceManager.loadInstances()
+
+            assertEquals(
+                1,
+                instanceManager.instances.value.size,
+                "Invalid records should be skipped"
+            )
+            assertEquals(
+                "stub_valid",
+                instanceManager.instances.value.first().instanceId
+            )
+        }
+
+        @Test
+        fun `loadInstances handles empty identityJson`() = runTest {
+            val entity = createTestEntity().copy(identityJson = "")
+            every { instanceDao.observeAll() } returns flowOf(listOf(entity))
+
+            instanceManager.loadInstances()
+
+            assertTrue(
+                instanceManager.instances.value.isEmpty(),
+                "Empty JSON should cause record to be skipped"
+            )
+        }
+
+        @Test
+        fun `loadInstances handles null literal identityJson`() = runTest {
+            val entity = createTestEntity().copy(identityJson = "null")
+            every { instanceDao.observeAll() } returns flowOf(listOf(entity))
+
+            // null JSON is parsed as null by Gson, mapNotNull filters it out
+            instanceManager.loadInstances()
+        }
+
+        @Test
+        fun `loadInstances handles large batch of records`() = runTest {
+            val entities = (1..1000).map { i ->
+                createTestEntity(
+                    instanceId = "stub_bulk-$i",
+                    packageName = "com.bulk.app$i"
+                )
+            }
+            every { instanceDao.observeAll() } returns flowOf(entities)
+
+            instanceManager.loadInstances()
+
+            assertEquals(1000, instanceManager.instances.value.size)
+        }
+
+        @Test
+        fun `deleteInstance tolerates uninstall Intent failure`() = runTest {
+            val instanceId = "stub_uninstall-fail"
+            val entity = createTestEntity(instanceId = instanceId)
+
+            coEvery { instanceDao.getById(instanceId) } returns entity
+            every { context.startActivity(any()) } throws SecurityException("Permission denied")
+            coEvery { instanceDao.deleteById(instanceId) } just Runs
+
+            // Uninstall failure should not block deletion
+            instanceManager.deleteInstance(instanceId)
+
+            coVerify { instanceDao.deleteById(instanceId) }
+            assertTrue(
+                instanceManager.instances.value.none { it.instanceId == instanceId }
+            )
+        }
+
+        @Test
+        fun `creating two instances with same packageName produces different IDs`() = runTest {
+            val pkg = "com.same.package"
+            val app1 = createTestVirtualApp(
+                packageName = pkg,
+                apkPath = File(tempDir, "same1.apk").absolutePath
+            )
+            val app2 = createTestVirtualApp(
+                packageName = pkg,
+                apkPath = File(tempDir, "same2.apk").absolutePath
+            )
+
+            mockCreateInstanceFlow(app1)
+            mockCreateInstanceFlow(app2)
+
+            val id1 = instanceManager.createInstance(app1)
+            val id2 = instanceManager.createInstance(app2)
+
+            assertNotEquals(id1, id2, "Same packageName should still produce unique IDs")
+        }
+
+        @Test
+        fun `createInstance with empty packageName still works`() = runTest {
+            val app = createTestVirtualApp(packageName = "")
+            mockCreateInstanceFlow(app)
+
+            val instanceId = instanceManager.createInstance(app)
+
+            assertTrue(instanceId.startsWith("stub_"))
+            assertEquals("", instanceManager.instances.value.first().originalPackageName)
+        }
+
+        @Test
+        fun `createInstance with very long packageName`() = runTest {
+            val longPkg = "com.${"a".repeat(200)}.app"
+            val app = createTestVirtualApp(packageName = longPkg)
+            mockCreateInstanceFlow(app)
+
+            val instanceId = instanceManager.createInstance(app)
+
+            assertTrue(instanceId.startsWith("stub_"))
+            assertEquals(longPkg, instanceManager.instances.value.first().originalPackageName)
+        }
+
+        @Test
+        fun `createInstance with special characters in packageName`() = runTest {
+            val specialPkg = "com.example.my-app_v2"
+            val app = createTestVirtualApp(packageName = specialPkg)
+            mockCreateInstanceFlow(app)
+
+            val instanceId = instanceManager.createInstance(app)
+
+            assertTrue(instanceId.startsWith("stub_"))
+            assertEquals(specialPkg, instanceManager.instances.value.first().originalPackageName)
+        }
+    }
+
+    // =========================================================================
+    // 8. Error handling
+    // =========================================================================
+
+    @Nested
+    @DisplayName("error handling")
+    inner class ErrorHandling {
+
+        @Test
+        fun `createInstance throws when APK file does not exist`() = runTest {
+            val nonExistentPath = File(tempDir, "nonexistent_${System.nanoTime()}.apk").absolutePath
+            val app = createTestVirtualApp(apkPath = nonExistentPath)
+
+            every {
+                DeviceIdentityPool.generateIdentity(any(), any())
+            } returns createTestIdentityConfig()
+
+            assertThrows<IllegalArgumentException> {
+                instanceManager.createInstance(app)
+            }
+        }
+
+        @Test
+        fun `createInstance throws when no launcher Activity found`() = runTest {
+            val app = createTestVirtualApp()
+
+            every {
+                DeviceIdentityPool.generateIdentity(any(), any())
+            } returns createTestIdentityConfig()
+
+            ensureApkExists(app.apkPath)
+
+            every { parser.parse(any<File>()) } returns ManifestParser.ParsedManifest(
+                packageName = app.packageName,
+                applicationClass = null,
+                activities = emptyList(),
+                services = emptyList(),
+                receivers = emptyList(),
+                providers = emptyList(),
+                permissions = emptyList()
+            )
+
+            every {
+                extractor.extractLauncherActivity(any())
+            } returns null
+
+            assertThrows<IllegalStateException> {
+                instanceManager.createInstance(app)
+            }
+        }
+
+        @Test
+        fun `createInstance throws when Stub install fails`() = runTest {
+            val app = createTestVirtualApp()
+
+            mockCreateInstanceFlow(app)
+            every {
+                stubInstaller.install(any())
+            } returns StubInstaller.InstallResult.Error("Install failed: insufficient storage")
+
+            assertThrows<RuntimeException> {
+                instanceManager.createInstance(app)
+            }
+        }
+
+        @Test
+        fun `createInstance does not write to database when install fails`() = runTest {
+            val app = createTestVirtualApp()
+
+            mockCreateInstanceFlow(app)
+            every {
+                stubInstaller.install(any())
+            } returns StubInstaller.InstallResult.Error("Install failed")
+
+            assertThrows<RuntimeException> {
+                instanceManager.createInstance(app)
+            }
+
+            coVerify(exactly = 0) { instanceDao.insert(any()) }
+        }
+
+        @Test
+        fun `createInstance does not update StateFlow when install fails`() = runTest {
+            val app = createTestVirtualApp()
+
+            mockCreateInstanceFlow(app)
+            every {
+                stubInstaller.install(any())
+            } returns StubInstaller.InstallResult.Error("Install failed")
+
+            every { instanceDao.observeAll() } returns flowOf(emptyList())
+            instanceManager.loadInstances()
+            val countBefore = instanceManager.instances.value.size
+
+            assertThrows<RuntimeException> {
+                instanceManager.createInstance(app)
+            }
+
+            assertEquals(
+                countBefore,
+                instanceManager.instances.value.size,
+                "StateFlow should not change on install failure"
+            )
+        }
+
+        @Test
+        fun `deleteInstance throws when instance not found`() = runTest {
+            coEvery { instanceDao.getById("nonexistent-id") } returns null
+
+            assertThrows<IllegalArgumentException> {
+                instanceManager.deleteInstance("nonexistent-id")
+            }
+        }
+
+        @Test
+        fun `deleteInstance does not delete from database when instance not found`() = runTest {
+            coEvery { instanceDao.getById("nonexistent-id") } returns null
+
+            try {
+                instanceManager.deleteInstance("nonexistent-id")
+            } catch (_: IllegalArgumentException) {
+                // expected
+            }
+
+            coVerify(exactly = 0) { instanceDao.deleteById(any()) }
+        }
+
+        @Test
+        fun `deleteInstance does not start uninstall Intent when instance not found`() = runTest {
+            coEvery { instanceDao.getById("nonexistent-id") } returns null
+
+            try {
+                instanceManager.deleteInstance("nonexistent-id")
+            } catch (_: IllegalArgumentException) {
+                // expected
+            }
+
+            verify(exactly = 0) { context.startActivity(any()) }
+        }
+    }
+
+    // =========================================================================
+    // 9. DeviceIdentityPool - identity uniqueness
+    // =========================================================================
+
+    @Nested
+    @DisplayName("DeviceIdentityPool - identity uniqueness")
     inner class IdentityUniqueness {
 
         @AfterEach
@@ -624,87 +1015,71 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `连续生成两个身份具有不同的 IMEI`() {
+        fun `two consecutive identities have different IMEIs`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity1 = DeviceIdentityPool.generateIdentity("inst-1", "com.app")
             val identity2 = DeviceIdentityPool.generateIdentity("inst-2", "com.app")
 
-            assertNotEquals(
-                identity1.imei,
-                identity2.imei,
-                "两次生成的 IMEI 应不同"
-            )
+            assertNotEquals(identity1.imei, identity2.imei)
         }
 
         @Test
-        fun `连续生成两个身份具有不同的 AndroidId`() {
+        fun `two consecutive identities have different AndroidIds`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity1 = DeviceIdentityPool.generateIdentity("inst-1", "com.app")
             val identity2 = DeviceIdentityPool.generateIdentity("inst-2", "com.app")
 
-            assertNotEquals(
-                identity1.androidId,
-                identity2.androidId,
-                "两次生成的 AndroidId 应不同"
-            )
+            assertNotEquals(identity1.androidId, identity2.androidId)
         }
 
         @Test
-        fun `连续生成两个身份具有不同的 MAC 地址`() {
+        fun `two consecutive identities have different MAC addresses`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity1 = DeviceIdentityPool.generateIdentity("inst-1", "com.app")
             val identity2 = DeviceIdentityPool.generateIdentity("inst-2", "com.app")
 
-            assertNotEquals(
-                identity1.macAddress,
-                identity2.macAddress,
-                "两次生成的 MAC 地址应不同"
-            )
+            assertNotEquals(identity1.macAddress, identity2.macAddress)
         }
 
         @Test
-        fun `连续生成两个身份具有不同的 Serial`() {
+        fun `two consecutive identities have different Serials`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity1 = DeviceIdentityPool.generateIdentity("inst-1", "com.app")
             val identity2 = DeviceIdentityPool.generateIdentity("inst-2", "com.app")
 
-            assertNotEquals(
-                identity1.serial,
-                identity2.serial,
-                "两次生成的 Serial 应不同"
-            )
+            assertNotEquals(identity1.serial, identity2.serial)
         }
 
         @Test
-        fun `生成的 IMEI 长度为 15 位且格式正确`() {
+        fun `IMEI is 15 digits and starts with 86`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity = DeviceIdentityPool.generateIdentity("inst-1", "com.app")
 
-            assertEquals(15, identity.imei.length, "IMEI 应为 15 位")
-            assertTrue(identity.imei.startsWith("86"), "IMEI 应以 86 开头")
-            assertTrue(identity.imei.all { it.isDigit() }, "IMEI 应全为数字")
+            assertEquals(15, identity.imei.length)
+            assertTrue(identity.imei.startsWith("86"))
+            assertTrue(identity.imei.all { it.isDigit() })
         }
 
         @Test
-        fun `生成的 AndroidId 长度为 16 位十六进制字符`() {
+        fun `AndroidId is 16 hex characters`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity = DeviceIdentityPool.generateIdentity("inst-1", "com.app")
 
-            assertEquals(16, identity.androidId.length, "AndroidId 应为 16 位")
+            assertEquals(16, identity.androidId.length)
             assertTrue(
                 identity.androidId.all { it in "0123456789abcdef" },
-                "AndroidId 应为小写十六进制: ${identity.androidId}"
+                "AndroidId should be lowercase hex: ${identity.androidId}"
             )
         }
 
         @Test
-        fun `生成的 MAC 地址符合 AA_BB_CC_DD_EE_FF 格式`() {
+        fun `MAC address matches XX_XX_XX_XX_XX_XX format`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity = DeviceIdentityPool.generateIdentity("inst-1", "com.app")
@@ -712,28 +1087,22 @@ class InstanceManagerTest {
             val macRegex = Regex("^([0-9A-F]{2}:){5}[0-9A-F]{2}$")
             assertTrue(
                 macRegex.matches(identity.macAddress),
-                "MAC 地址格式不正确: ${identity.macAddress}"
+                "MAC format incorrect: ${identity.macAddress}"
             )
         }
 
         @Test
-        fun `生成的 stubPackageName 包含原始包名和 clone 标记`() {
+        fun `stubPackageName contains original package and clone marker`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity = DeviceIdentityPool.generateIdentity("inst-abc", "com.whatsapp")
 
-            assertTrue(
-                identity.stubPackageName.contains("com.whatsapp"),
-                "stubPackageName 应包含原始包名"
-            )
-            assertTrue(
-                identity.stubPackageName.contains("clone"),
-                "stubPackageName 应包含 clone 标记"
-            )
+            assertTrue(identity.stubPackageName.contains("com.whatsapp"))
+            assertTrue(identity.stubPackageName.contains("clone"))
         }
 
         @Test
-        fun `生成的 authorityMap 包含 provider 和 fileprovider 映射`() {
+        fun `authorityMap contains provider and fileprovider mappings`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity = DeviceIdentityPool.generateIdentity("inst-1", "com.example")
@@ -746,42 +1115,44 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `sdkInt 在 33 到 35 范围内`() {
+        fun `sdkInt is in the range 33-35`() {
             unmockkObject(DeviceIdentityPool)
 
             repeat(20) {
                 val identity = DeviceIdentityPool.generateIdentity("inst-$it", "com.app")
                 assertTrue(
                     identity.sdkInt in 33..35,
-                    "sdkInt 应在 33-35 范围内，实际: ${identity.sdkInt}"
+                    "sdkInt should be 33-35, got: ${identity.sdkInt}"
                 )
             }
         }
 
         @Test
-        fun `生成的身份字段无空值`() {
+        fun `generated identity has no empty fields`() {
             unmockkObject(DeviceIdentityPool)
 
             val identity = DeviceIdentityPool.generateIdentity("inst-1", "com.app")
 
-            assertTrue(identity.imei.isNotEmpty(), "imei 不应为空")
-            assertTrue(identity.androidId.isNotEmpty(), "androidId 不应为空")
-            assertTrue(identity.macAddress.isNotEmpty(), "macAddress 不应为空")
-            assertTrue(identity.serial.isNotEmpty(), "serial 不应为空")
-            assertTrue(identity.buildModel.isNotEmpty(), "buildModel 不应为空")
-            assertTrue(identity.buildManufacturer.isNotEmpty(), "buildManufacturer 不应为空")
-            assertTrue(identity.buildFingerprint.isNotEmpty(), "buildFingerprint 不应为空")
-            assertTrue(identity.buildBrand.isNotEmpty(), "buildBrand 不应为空")
-            assertTrue(identity.buildDevice.isNotEmpty(), "buildDevice 不应为空")
-            assertTrue(identity.buildProduct.isNotEmpty(), "buildProduct 不应为空")
-            assertTrue(identity.versionRelease.isNotEmpty(), "versionRelease 不应为空")
+            assertTrue(identity.imei.isNotEmpty())
+            assertTrue(identity.androidId.isNotEmpty())
+            assertTrue(identity.macAddress.isNotEmpty())
+            assertTrue(identity.serial.isNotEmpty())
+            assertTrue(identity.buildModel.isNotEmpty())
+            assertTrue(identity.buildManufacturer.isNotEmpty())
+            assertTrue(identity.buildFingerprint.isNotEmpty())
+            assertTrue(identity.buildBrand.isNotEmpty())
+            assertTrue(identity.buildDevice.isNotEmpty())
+            assertTrue(identity.buildProduct.isNotEmpty())
+            assertTrue(identity.versionRelease.isNotEmpty())
         }
     }
 
-    // ── 8. 身份池的并发安全性 ────────────────────────────────────
+    // =========================================================================
+    // 10. DeviceIdentityPool - concurrency safety
+    // =========================================================================
 
     @Nested
-    @DisplayName("DeviceIdentityPool - 并发安全性")
+    @DisplayName("DeviceIdentityPool - concurrency safety")
     inner class IdentityConcurrency {
 
         @AfterEach
@@ -790,7 +1161,7 @@ class InstanceManagerTest {
         }
 
         @Test
-        fun `并发生成 100 个身份全部唯一`() {
+        fun `100 concurrent identities are all unique`() {
             unmockkObject(DeviceIdentityPool)
 
             val threadCount = 100
@@ -817,26 +1188,22 @@ class InstanceManagerTest {
             threads.forEach { it.start() }
             latch.await()
 
-            assertEquals(0, errorCount.get(), "并发生成不应抛出异常")
-            assertEquals(threadCount, identities.size, "应生成全部身份")
+            assertEquals(0, errorCount.get(), "Concurrent generation should not throw")
+            assertEquals(threadCount, identities.size)
 
             val uniqueImeis = identities.map { it.imei }.toSet()
             assertEquals(
                 threadCount,
                 uniqueImeis.size,
-                "所有 IMEI 应唯一，但发现重复: ${threadCount - uniqueImeis.size} 个重复"
+                "All IMEIs should be unique, found ${threadCount - uniqueImeis.size} duplicates"
             )
 
             val uniqueAndroidIds = identities.map { it.androidId }.toSet()
-            assertEquals(
-                threadCount,
-                uniqueAndroidIds.size,
-                "所有 AndroidId 应唯一"
-            )
+            assertEquals(threadCount, uniqueAndroidIds.size)
         }
 
         @Test
-        fun `并发生成身份的 MAC 地址全部唯一`() {
+        fun `50 concurrent MAC addresses are all unique`() {
             unmockkObject(DeviceIdentityPool)
 
             val threadCount = 50
@@ -858,11 +1225,11 @@ class InstanceManagerTest {
             latch.await()
 
             val uniqueMacs = identities.map { it.macAddress }.toSet()
-            assertEquals(threadCount, uniqueMacs.size, "所有 MAC 地址应唯一")
+            assertEquals(threadCount, uniqueMacs.size)
         }
 
         @Test
-        fun `并发创建实例生成唯一 instanceId`() = runTest {
+        fun `sequential creates produce unique instanceIds`() = runTest {
             val apps = (1..10).map { i ->
                 createTestVirtualApp(packageName = "com.concurrent.app$i")
             }
@@ -875,253 +1242,7 @@ class InstanceManagerTest {
                 instanceManager.createInstance(app)
             }.toSet()
 
-            assertEquals(10, ids.size, "并发创建应生成 10 个不同的 instanceId")
-        }
-    }
-
-    // ── 9. 边界条件 ──────────────────────────────────────────────
-
-    @Nested
-    @DisplayName("边界条件")
-    inner class EdgeCases {
-
-        @Test
-        fun `初始状态下 instances StateFlow 为空列表`() = runTest {
-            assertTrue(
-                instanceManager.instances.value.isEmpty(),
-                "初始状态应为空列表"
-            )
-        }
-
-        @Test
-        fun `loadInstances 处理空数据库列表`() = runTest {
-            every { instanceDao.observeAll() } returns flowOf(emptyList())
-
-            instanceManager.loadInstances()
-
-            assertTrue(
-                instanceManager.instances.value.isEmpty(),
-                "空数据库应加载为空列表"
-            )
-        }
-
-        @Test
-        fun `loadInstances 跳过 identityJson 解析失败的记录`() = runTest {
-            val validEntity = createTestEntity(instanceId = "stub_valid")
-            val invalidEntity = createTestEntity(instanceId = "stub_invalid")
-                .copy(identityJson = "这不是合法的 JSON {{{")
-
-            every { instanceDao.observeAll() } returns flowOf(
-                listOf(validEntity, invalidEntity)
-            )
-
-            instanceManager.loadInstances()
-
-            assertEquals(
-                1,
-                instanceManager.instances.value.size,
-                "解析失败的记录应被跳过"
-            )
-            assertEquals(
-                "stub_valid",
-                instanceManager.instances.value.first().instanceId
-            )
-        }
-
-        @Test
-        fun `loadInstances 处理 identityJson 为空字符串的记录`() = runTest {
-            val entity = createTestEntity().copy(identityJson = "")
-            every { instanceDao.observeAll() } returns flowOf(listOf(entity))
-
-            instanceManager.loadInstances()
-
-            assertTrue(
-                instanceManager.instances.value.isEmpty(),
-                "空 JSON 应导致记录被跳过"
-            )
-        }
-
-        @Test
-        fun `loadInstances 处理 identityJson 为 null 字面量的记录`() = runTest {
-            val entity = createTestEntity().copy(identityJson = "null")
-            every { instanceDao.observeAll() } returns flowOf(listOf(entity))
-
-            // null JSON 会被 Gson 解析为 null 对象，mapNotNull 会过滤掉
-            instanceManager.loadInstances()
-        }
-
-        @Test
-        fun `loadInstances 处理大量实例记录`() = runTest {
-            val entities = (1..1000).map { i ->
-                createTestEntity(
-                    instanceId = "stub_bulk-$i",
-                    packageName = "com.bulk.app$i"
-                )
-            }
-            every { instanceDao.observeAll() } returns flowOf(entities)
-
-            instanceManager.loadInstances()
-
-            assertEquals(1000, instanceManager.instances.value.size)
-        }
-
-        @Test
-        fun `deleteInstance 处理卸载 Intent 发送失败`() = runTest {
-            val instanceId = "stub_uninstall-fail"
-            val entity = createTestEntity(instanceId = instanceId)
-
-            coEvery { instanceDao.getById(instanceId) } returns entity
-            every { context.startActivity(any()) } throws SecurityException("Permission denied")
-            coEvery { instanceDao.deleteById(instanceId) } just Runs
-
-            // 卸载失败不应阻断删除流程
-            instanceManager.deleteInstance(instanceId)
-
-            coVerify { instanceDao.deleteById(instanceId) }
-            assertTrue(
-                instanceManager.instances.value.none { it.instanceId == instanceId }
-            )
-        }
-    }
-
-    // ── 10. 错误处理 ─────────────────────────────────────────────
-
-    @Nested
-    @DisplayName("错误处理")
-    inner class ErrorHandling {
-
-        @Test
-        fun `createInstance 在 APK 文件不存在时抛出 IllegalArgumentException`() = runTest {
-            // 使用 tempDir 下一个不存在的路径（不创建文件）
-            val nonExistentPath = File(tempDir, "nonexistent_${System.nanoTime()}.apk").absolutePath
-            val app = createTestVirtualApp(apkPath = nonExistentPath)
-
-            every {
-                DeviceIdentityPool.generateIdentity(any(), any())
-            } returns createTestIdentityConfig()
-
-            assertThrows<IllegalArgumentException> {
-                instanceManager.createInstance(app)
-            }
-        }
-
-        @Test
-        fun `createInstance 在无 launcher Activity 时抛出 IllegalStateException`() = runTest {
-            val app = createTestVirtualApp()
-
-            every {
-                DeviceIdentityPool.generateIdentity(any(), any())
-            } returns createTestIdentityConfig()
-
-            // 使用真实临时文件（APK 存在）
-            ensureApkExists(app.apkPath)
-
-            every { parser.parse(any<File>()) } returns ManifestParser.ParsedManifest(
-                packageName = app.packageName,
-                applicationClass = null,
-                activities = emptyList(),
-                services = emptyList(),
-                receivers = emptyList(),
-                providers = emptyList(),
-                permissions = emptyList()
-            )
-
-            every {
-                extractor.extractLauncherActivity(any())
-            } returns null
-
-            assertThrows<IllegalStateException> {
-                instanceManager.createInstance(app)
-            }
-        }
-
-        @Test
-        fun `createInstance 在 Stub 安装失败时抛出 RuntimeException`() = runTest {
-            val app = createTestVirtualApp()
-
-            mockCreateInstanceFlow(app)
-            every {
-                stubInstaller.install(any())
-            } returns StubInstaller.InstallResult.Error("Install failed: insufficient storage")
-
-            assertThrows<RuntimeException> {
-                instanceManager.createInstance(app)
-            }
-        }
-
-        @Test
-        fun `createInstance 安装失败时不写入数据库`() = runTest {
-            val app = createTestVirtualApp()
-
-            mockCreateInstanceFlow(app)
-            every {
-                stubInstaller.install(any())
-            } returns StubInstaller.InstallResult.Error("Install failed")
-
-            assertThrows<RuntimeException> {
-                instanceManager.createInstance(app)
-            }
-
-            coVerify(exactly = 0) { instanceDao.insert(any()) }
-        }
-
-        @Test
-        fun `createInstance 安装失败时不更新 StateFlow`() = runTest {
-            val app = createTestVirtualApp()
-
-            mockCreateInstanceFlow(app)
-            every {
-                stubInstaller.install(any())
-            } returns StubInstaller.InstallResult.Error("Install failed")
-
-            every { instanceDao.observeAll() } returns flowOf(emptyList())
-            instanceManager.loadInstances()
-            val countBefore = instanceManager.instances.value.size
-
-            assertThrows<RuntimeException> {
-                instanceManager.createInstance(app)
-            }
-
-            assertEquals(
-                countBefore,
-                instanceManager.instances.value.size,
-                "安装失败后 StateFlow 不应改变"
-            )
-        }
-
-        @Test
-        fun `deleteInstance 在实例不存在时抛出 IllegalArgumentException`() = runTest {
-            coEvery { instanceDao.getById("nonexistent-id") } returns null
-
-            assertThrows<IllegalArgumentException> {
-                instanceManager.deleteInstance("nonexistent-id")
-            }
-        }
-
-        @Test
-        fun `deleteInstance 不存在的实例不触发数据库删除`() = runTest {
-            coEvery { instanceDao.getById("nonexistent-id") } returns null
-
-            try {
-                instanceManager.deleteInstance("nonexistent-id")
-            } catch (_: IllegalArgumentException) {
-                // expected
-            }
-
-            coVerify(exactly = 0) { instanceDao.deleteById(any()) }
-        }
-
-        @Test
-        fun `deleteInstance 不存在的实例不启动卸载 Intent`() = runTest {
-            coEvery { instanceDao.getById("nonexistent-id") } returns null
-
-            try {
-                instanceManager.deleteInstance("nonexistent-id")
-            } catch (_: IllegalArgumentException) {
-                // expected
-            }
-
-            verify(exactly = 0) { context.startActivity(any()) }
+            assertEquals(10, ids.size, "Sequential creates should produce 10 unique IDs")
         }
     }
 }
