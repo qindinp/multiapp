@@ -2430,7 +2430,7 @@ class LoaderFactory : AppComponentFactory() {
         }
 
         val bridge = NativeHookBridge.getInstance()
-        preloadNativeForClass(
+        val ywLoginGetInstanceBound = preloadNativeForClass(
             bridge = bridge,
             classLoader = realGuestClassLoader,
             className = "com.yuewen.ywlogin.login.YWLoginManager",
@@ -2453,6 +2453,17 @@ class LoaderFactory : AppComponentFactory() {
                 "libQmt.so"
             )
         )
+        logD("  Stage2 YWLoginManager.getInstance preload result=$ywLoginGetInstanceBound")
+        val ywLoginReport = bridge.getYwLoginBindingReport()
+        logW("  Stage2 YWLogin native binding report: $ywLoginReport")
+        if (!ywLoginReport.contains("pwdLogin=bound") ||
+            !ywLoginReport.contains("sendPhoneCode=bound")
+        ) {
+            logW(
+                "  Stage2 YWLogin login actions are not bound; " +
+                    "pwdLogin/sendPhoneCode will fail unless debug.multiapp.ywlogin.action_fallback=1"
+            )
+        }
         val onlineRunBound = preloadNativeForClass(
             bridge = bridge,
             classLoader = realGuestClassLoader,

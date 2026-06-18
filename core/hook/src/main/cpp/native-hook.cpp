@@ -1723,6 +1723,25 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallRegisterNativesLogger(
     return installRegisterNativesLogger(env) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeGetYwLoginBindingReport(
+    JNIEnv* env, jobject thiz)
+{
+    (void)thiz;
+    char buffer[512];
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "pwdLogin=%s ptr=%p sendPhoneCode=%s ptr=%p qrCodeV2=%s ptr=%p",
+        g_orig_ywlogin_pwdLogin != nullptr ? "bound" : "missing",
+        (void*)g_orig_ywlogin_pwdLogin,
+        g_orig_ywlogin_sendPhoneCode != nullptr ? "bound" : "missing",
+        (void*)g_orig_ywlogin_sendPhoneCode,
+        g_orig_ywlogin_qrCodeV2 != nullptr ? "bound" : "missing",
+        (void*)g_orig_ywlogin_qrCodeV2);
+    return env->NewStringUTF(buffer);
+}
+
 // ==================== LoaderFactory Static JNI Methods ====================
 
 /**

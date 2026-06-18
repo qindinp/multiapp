@@ -135,6 +135,15 @@ class NativeHookBridge {
         }
     }
 
+    fun getYwLoginBindingReport(): String {
+        if (!nativeLibLoaded) return "native-lib-not-loaded"
+        return try {
+            nativeGetYwLoginBindingReport()
+        } catch (e: Throwable) {
+            "error=${e.javaClass.simpleName}: ${e.message}"
+        }
+    }
+
     /**
      * 閫氳繃 dlopen 鐩存帴鍔犺浇 native 搴擄紙缁曡繃 Java 灞?hidden API 闄愬埗锛?
      * 鐢ㄤ簬鍔犺浇鍔犲浐澹崇殑 libjiagu_vip.so 绛夊簱
@@ -744,6 +753,7 @@ class NativeHookBridge {
     private external fun nativeIsInitialized(): Boolean
     private external fun nativeInstallRuntimeLoadHook(fallbackCallerClasses: Array<String>): Boolean
     private external fun nativeInstallRegisterNativesLogger(): Boolean
+    private external fun nativeGetYwLoginBindingReport(): String
     private external fun nativePreloadLibraries(libPaths: Array<String>): Int
     private external fun nativeLoadLibraryForGuest(libPath: String, classLoader: ClassLoader, callerClass: Class<*>): Int
     private external fun nativeDlopenOnly(libPath: String): Int

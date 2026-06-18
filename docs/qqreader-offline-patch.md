@@ -3432,3 +3432,44 @@ exit-info：
 - 登录崩溃不是 LSPlant 初始化问题，v193 中 LSPlant 仍成功。
 - 手机号/密码登录和发送验证码都卡在 YWLogin SDK native 方法未注册。
 - `debug.multiapp.ywlogin.action_fallback=1` 只能防崩或造回调，不能产生真实登录态；真正修复要么恢复真实 YWLogin native 注册链路，要么实现 Java 登录网络链路并写回登录态。
+
+### 2026-06-18 v194 YWLogin 绑定诊断修正
+
+v193 日志里有一个容易误判的点：
+
+```text
+Stage2 native method bound after libywad-own.so:
+com.yuewen.ywlogin.login.YWLoginManager.getInstance
+```
+
+这只能证明 `YWLoginManager.getInstance()` 被绑定；它不能证明真正登录动作已经绑定。v193 手动登录已经反证：
+
+```text
+YWLoginManager.pwdLogin(...) -> UnsatisfiedLinkError
+YWLoginManager.sendPhoneCode(...) -> UnsatisfiedLinkError
+```
+
+本轮代码修正：
+
+- `NativeHookBridge.getYwLoginBindingReport()` 新增 native 绑定状态报告。
+- native 侧直接输出已捕获的原始函数指针：
+
+```text
+pwdLogin=bound|missing ptr=...
+sendPhoneCode=bound|missing ptr=...
+qrCodeV2=bound|missing ptr=...
+```
+
+- `LoaderFactory.preloadGuestRuntimeNativeLibraries()` 在 Stage2 预加载后记录：
+
+```text
+Stage2 YWLoginManager.getInstance preload result=...
+Stage2 YWLogin native binding report: ...
+Stage2 YWLogin login actions are not bound; pwdLogin/sendPhoneCode will fail unless debug.multiapp.ywlogin.action_fallback=1
+```
+
+预期判断：
+
+- 如果下一包日志显示 `pwdLogin=missing sendPhoneCode=missing`，说明继续加载 `libywad-own.so/libnativekey.so/libapp.so/libentryexpro.so/libQmt.so` 仍没有恢复真实登录 native，不能再把 Stage2 `.so` 加载成功当成登录链路修复。
+- 如果日志显示 `pwdLogin=bound sendPhoneCode=bound`，再进入真实手机号登录测试，继续看服务端返回、风控参数、验证码和登录态写入。
+- `debug.multiapp.ywlogin.action_fallback=1` 仍只作为防闪退诊断开关；它不能作为“正常登录可用”的完成标准。
