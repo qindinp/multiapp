@@ -1742,6 +1742,27 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeGetYwLoginBindingReport(
     return env->NewStringUTF(buffer);
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeGetStubAppBindingReport(
+    JNIEnv* env, jobject thiz)
+{
+    (void)thiz;
+    char buffer[768];
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "interface5=%s ptr=%p interface11=%s ptr=%p interface20=%s ptr=%p interface21=%s ptr=%p",
+        g_orig_stub_interface5 != nullptr ? "bound" : "missing",
+        (void*)g_orig_stub_interface5,
+        g_orig_stub_interface11 != nullptr ? "bound" : "missing",
+        (void*)g_orig_stub_interface11,
+        g_orig_stub_interface20 != nullptr ? "bound" : "missing",
+        (void*)g_orig_stub_interface20,
+        g_orig_stub_interface21 != nullptr ? "bound" : "missing",
+        (void*)g_orig_stub_interface21);
+    return env->NewStringUTF(buffer);
+}
+
 // ==================== LoaderFactory Static JNI Methods ====================
 
 /**

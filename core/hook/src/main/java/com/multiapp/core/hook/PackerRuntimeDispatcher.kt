@@ -121,7 +121,7 @@ class PackerRuntimeDispatcher {
 
         // Step 5: 安装 stub fallback
         try {
-            runtime.installStubFallback(context.guestClassLoader, loadResult)
+            runtime.installStubFallback(context, loadResult)
         } catch (e: Throwable) {
             Log.w(TAG, "installStubFallback() failed: ${e.message}")
         }

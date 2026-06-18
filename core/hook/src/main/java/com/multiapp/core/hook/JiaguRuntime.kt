@@ -297,12 +297,34 @@ class JiaguRuntime : PackerRuntime {
     //  installStubFallback: StubApp native 方法 stub fallback
     // ──────────────────────────────────────────────────────────
 
-    override fun installStubFallback(guestCl: ClassLoader, loadResult: PackerLoadResult) {
+    override fun installStubFallback(context: PackerRuntimeContext, loadResult: PackerLoadResult) {
+        val guestCl = context.guestClassLoader
         val bridge = NativeHookBridge.getInstance()
         val callerClass = resolveStubAppClass(guestCl) ?: return
         val targetClass = callerClass.name
 
         val stubFallbackMode = getSystemProperty("debug.multiapp.stubapp.fallback", "0")
+        val isQqReader = context.originalPackageName == "com.qq.reader" ||
+            context.cloneProfile == "QQ_READER_SPECIAL"
+
+        if (isQqReader && loadResult.jiaguLoaded && stubFallbackMode == "0") {
+            val report = bridge.getStubAppBindingReport()
+            val hasOriginalCore = report.contains("interface11=bound") &&
+                report.contains("interface20=bound")
+            Log.d(TAG, "installStubFallback: QQ Reader StubApp native binding report: $report")
+            if (hasOriginalCore) {
+                Log.d(TAG, "installStubFallback: QQ Reader preserves original StubApp core natives")
+                return
+            }
+            Log.w(TAG, "installStubFallback: QQ Reader original StubApp core natives missing; registering core fallback")
+            try {
+                bridge.registerStubCoreBootstrapMethods(guestCl, targetClass)
+            } catch (e: Throwable) {
+                Log.w(TAG, "installStubFallback: registerStubCoreBootstrapMethods failed: ${e.message}")
+            }
+            return
+        }
+
         if (loadResult.jiaguLoaded && stubFallbackMode.equals("core", ignoreCase = true)) {
             Log.d(TAG, "installStubFallback: registering StubApp core bootstrap methods")
             try {

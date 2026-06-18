@@ -52,7 +52,7 @@ interface PackerRuntime {
      * 验证壳的 RegisterNatives 是否成功完成。
      * 例如检查 StubApp.interface20 等关键 native 方法是否已注册。
      *
-     * @param guestCl guest ClassLoader
+     * @param context runtime context
      * @return true 如果关键 native 方法已注册
      */
     fun verifyRegisterNatives(guestCl: ClassLoader): Boolean
@@ -75,7 +75,7 @@ interface PackerRuntime {
      * @param guestCl guest ClassLoader
      * @param loadResult 加载结果
      */
-    fun installStubFallback(guestCl: ClassLoader, loadResult: PackerLoadResult) {
+    fun installStubFallback(context: PackerRuntimeContext, loadResult: PackerLoadResult) {
         // 默认空实现
     }
 }
@@ -88,6 +88,8 @@ data class PackerRuntimeContext(
     val originLibDir: String?,
     val originApkPath: String?,
     val originalApkPath: String?,
+    val originalPackageName: String?,
+    val cloneProfile: String?,
     val dataDir: String?,
     val stubApkPath: String,
     val bridge: NativeHookBridge,

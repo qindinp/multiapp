@@ -3554,3 +3554,53 @@ exit-info：
 - `libywad-own.so/libnativekey.so/libapp.so/libentryexpro.so/libQmt.so` 可以 `nativeLoad` 成功，但没有注册真实 `pwdLogin/sendPhoneCode`。
 - `NativeHookBridge.nativeRegisterBusinessStubs` 只注册了当前 MultiApp stub/fallback 方法，例如 `getInstance/registerParameter/resetParameter/setDefaultParameters/fetchSettings/qrCodeV2`；它没有恢复真实登录动作。
 - 下一步必须查真实 YWLogin native 注册入口或走 Java 登录链路；继续只加 `.so` 预加载没有证据能解决手机号登录。
+
+### 2026-06-18 v197-v199 StubApp core native 保留与无效实验
+
+v197 增加 `StubApp` 原始 native 绑定报告后，发现 `PackerRuntime.Jiagu` 阶段已经捕获到原始 core native：
+
+```text
+installStubFallback: QQ Reader StubApp native binding report: interface5=bound ... interface11=bound ... interface20=bound ...
+installStubFallback: QQ Reader preserves original StubApp core natives
+```
+
+但同一包在 `:pushcore` 子进程里，`LoaderFactory` 后续逻辑又覆盖注册了 MultiApp 的 core fallback：
+
+```text
+QQ Reader child process ...:pushcore registers StubApp core fallback
+```
+
+v198 修正为：子进程也先读取 `NativeHookBridge.getStubAppBindingReport()`，只有 `interface11/interface20` 缺失时才注册 fallback；如果原始 core native 已绑定，就保留原始实现。
+
+v198 证据：
+
+```text
+PackerRuntime.Jiagu: installStubFallback: QQ Reader StubApp native binding report: interface5=bound ... interface11=bound ... interface20=bound ...
+PackerRuntime.Jiagu: installStubFallback: QQ Reader preserves original StubApp core natives
+MultiApp.POC: QQ Reader child process ...:pushcore keeps original StubApp core natives
+```
+
+结论：
+
+- v198 解决的是 `LoaderFactory` 子进程覆盖原始 `StubApp.interface11/interface20` 的问题。
+- v198 不能解决登录，因为真实登录动作仍显示缺失：
+
+```text
+Stage2 YWLogin native binding report: pwdLogin=missing ptr=0x0 sendPhoneCode=missing ptr=0x0 qrCodeV2=missing ptr=0x0
+YWLoginManager.pwdLogin(...) -> UnsatisfiedLinkError
+```
+
+v199 曾尝试在 `installPostLoadHooks` 中提前强制初始化 `YWLoginManager`，结果证明方向错误：
+
+```text
+installPostLoadHooks: QQ Reader forced YWLoginManager init failed: UnsatisfiedLinkError: No implementation found for void com.stub.StubApp.interface11(int)
+Rejecting re-init on previously-failed class java.lang.Class<com.yuewen.ywlogin.login.YWLoginManager>
+```
+
+该实验会在 `installStubFallback` 之前触发 `YWLoginManager.<clinit>`，一旦当时 `StubApp.interface11` 还没有可用实现，就会把 `YWLoginManager` 标记为初始化失败类，后续无法恢复。因此不要再走“pre-stub 强制 `<clinit>`”路线。
+
+当前保留策略：
+
+- 保留 `getStubAppBindingReport()` 诊断。
+- QQ Reader 专项路径下，原始 `StubApp.interface11/interface20` 已绑定时保留原始 native，不再覆盖。
+- 登录问题继续聚焦真实 `YWLoginManager.pwdLogin/sendPhoneCode` 注册入口，或另行恢复 Java 登录链路；`debug.multiapp.ywlogin.action_fallback=1` 仍只能防闪退，不能作为登录成功标准。
