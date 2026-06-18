@@ -3355,3 +3355,80 @@ uiautomator package=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
 - v193 是目前应继续使用的 QQ 阅读专项包。
 - LSPlant 初始化、backup hook、pass-through 异常传播、阅读页启动均已在真机验证。
 - 登录仍未完成验证；下一步只围绕手机号登录按钮实际点击后的日志判断，不再回到 LSPlant 初始化问题。
+
+### 2026-06-18 v193 手动登录日志
+
+提交点：
+
+```text
+9de2d18 fix: stabilize QQ Reader clone startup
+```
+
+手动测试后抓取：
+
+```text
+device=192.168.2.119:37869
+log=.tmp\qqreader-v193-login-manual-$(Get-Date -Format yyyyMMdd-HHmmss)-logcat.txt
+crash=.tmp\qqreader-v193-login-manual-$(Get-Date -Format yyyyMMdd-HHmmss)-crash.txt
+exit=.tmp\qqreader-v193-login-manual-$(Get-Date -Format yyyyMMdd-HHmmss)-exit-info.txt
+```
+
+注意：本次抓取脚本里的 PowerShell tag 字符串使用了单引号，文件名保留了字面量 `$(Get-Date -Format yyyyMMdd-HHmmss)`，但文件内容有效。
+
+验证到的登录路径：
+
+```text
+QRLoginActivity -> LoginActivity
+```
+
+密码登录崩溃：
+
+```text
+06-18 09:08:16.564 AndroidRuntime: FATAL EXCEPTION: main
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.pwdLogin(
+  android.app.Activity,
+  java.lang.String,
+  java.lang.String,
+  com.yuewen.ywlogin.login.YWCallBack
+)
+  at com.yuewen.ywlogin.login.YWLoginManager.pwdLogin(Native Method)
+  at com.yuewen.ywlogin.YWLogin.pwdLogin
+  at com.yuewen.ywlogin.ui.model.LoginModel.pwdLogin
+  at com.yuewen.ywlogin.ui.presenter.LoginPresenter.loginByAccount
+  at com.yuewen.ywlogin.ui.activity.LoginActivity.loginByPassWord
+  at com.yuewen.ywlogin.ui.activity.LoginActivity.onClick
+```
+
+发送验证码崩溃：
+
+```text
+06-18 09:09:16.777 AndroidRuntime: FATAL EXCEPTION: main
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.sendPhoneCode(
+  android.content.Context,
+  java.lang.String,
+  int,
+  int,
+  com.yuewen.ywlogin.login.YWCallBack
+)
+  at com.yuewen.ywlogin.login.YWLoginManager.sendPhoneCode(Native Method)
+  at com.yuewen.ywlogin.YWLogin.sendPhoneCode
+  at com.qq.reader.qrlogin.qdab.search
+  at com.qq.reader.qrlogin.apiimpl.LoginServerImpl.search
+  at com.qq.reader.login.client.impl.QRLoginActivity.search
+  at com.qq.reader.login.client.impl.QRLoginActivity$18.onClick
+```
+
+exit-info：
+
+```text
+2026-06-18 09:08:20 pid=24098 reason=4 (APP CRASH(EXCEPTION))
+2026-06-18 09:09:16 pid=24491 reason=4 (APP CRASH(EXCEPTION))
+```
+
+当前结论：
+
+- 登录崩溃不是 LSPlant 初始化问题，v193 中 LSPlant 仍成功。
+- 手机号/密码登录和发送验证码都卡在 YWLogin SDK native 方法未注册。
+- `debug.multiapp.ywlogin.action_fallback=1` 只能防崩或造回调，不能产生真实登录态；真正修复要么恢复真实 YWLogin native 注册链路，要么实现 Java 登录网络链路并写回登录态。
