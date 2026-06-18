@@ -29,7 +29,7 @@
     [string]$OnlineFileDiag = "0",
 
     [ValidateSet("0", "1", "core")]
-    [string]$StubAppFallback = "core",
+    [string]$StubAppFallback = "0",
 
     [switch]$SkipInstall
 )

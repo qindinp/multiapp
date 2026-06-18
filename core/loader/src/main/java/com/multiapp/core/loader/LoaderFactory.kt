@@ -1754,7 +1754,18 @@ class LoaderFactory : AppComponentFactory() {
         if (callerClass != null) {
             val targetClass = callerClass.name
             val stubFallbackMode = getSystemProperty("debug.multiapp.stubapp.fallback", "0")
-            if (jiaguLoaded && stubFallbackMode.equals("core", ignoreCase = true)) {
+            val processName = currentProcessName()
+            val isQqReaderChildProcess = isQqReaderProfile(config) && processName.contains(":")
+            if (jiaguLoaded && isQqReaderChildProcess) {
+                logW("  QQ Reader child process $processName registers StubApp core fallback")
+                try {
+                    bridge.registerStubCoreBootstrapMethods(guestCl, targetClass)
+                } catch (e: Throwable) {
+                    logW("  registerStubCoreBootstrapMethods exception: ${e.message}")
+                }
+            } else if (jiaguLoaded && stubFallbackMode.equals("core", ignoreCase = true) && isQqReaderProfile(config)) {
+                logW("  QQ Reader main process keeps original StubApp core natives; skip core fallback to preserve interface11")
+            } else if (jiaguLoaded && stubFallbackMode.equals("core", ignoreCase = true)) {
                 logD("  Registering StubApp core bootstrap methods")
                 try {
                     bridge.registerStubCoreBootstrapMethods(guestCl, targetClass)
@@ -2265,7 +2276,25 @@ class LoaderFactory : AppComponentFactory() {
         // can prevent the protected
         // runtime from registering business natives like OnlineChapterDownloadTask.
         val stubFallbackMode = getSystemProperty("debug.multiapp.stubapp.fallback", "0")
+        val isCurrentQqReaderProfile = currentConfig?.let { isQqReaderProfile(it) } ?: (guestPackageName == "com.qq.reader")
+        val processName = currentProcessName()
+        val isQqReaderChildProcess = isCurrentQqReaderProfile && processName.contains(":")
         if (jiaguLoadedWithGuestClassLoader &&
+            isQqReaderChildProcess
+        ) {
+            logW("  preloadPackerLib: QQ Reader child process $processName registers StubApp core fallback")
+            try {
+                val registered = bridge.registerStubCoreBootstrapMethods(guestCl, targetClass)
+                logD("  preloadPackerLib: StubApp core bootstrap methods registered: $registered")
+            } catch (e: Throwable) {
+                logW("  preloadPackerLib: registerStubCoreBootstrapMethods exception: ${e.message}")
+            }
+        } else if (jiaguLoadedWithGuestClassLoader &&
+            stubFallbackMode.equals("core", ignoreCase = true) &&
+            isCurrentQqReaderProfile
+        ) {
+            logW("  preloadPackerLib: QQ Reader main process keeps original StubApp core natives; skip core fallback to preserve interface11")
+        } else if (jiaguLoadedWithGuestClassLoader &&
             stubFallbackMode.equals("core", ignoreCase = true)
         ) {
             logD("  preloadPackerLib: registering StubApp core bootstrap methods (interface5/interface11/interface20/interface21)")

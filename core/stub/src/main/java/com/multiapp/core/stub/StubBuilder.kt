@@ -1178,7 +1178,6 @@ class StubBuilder(
                 }
                 val targets = listOf(
                     "com.bytedance.android.dy.sdk.pangle.ZeusPlatformUtils->initZeus",
-                    "com.qq.reader.ReaderApplication->initLoginSDK",
                     "com.qq.reader.ReaderApplication->initPushSDK",
                     "com.qq.reader.shortcut.ShortcutManager->cihai",
                     "com.qq.reader.abtest_sdk.qdab->cihai",
