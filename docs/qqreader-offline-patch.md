@@ -2628,3 +2628,730 @@ You need to use a Theme.AppCompat theme (or descendant) with this activity.
 4. 如果登录页能打开，再继续抓微信/QQ 登录跳转和回调链路。
 
 后续更根本的修复方向：离线 patch 脚本应增加重建外层 manifest 的步骤，用 patched/original `origin.apk` 重新生成 activity theme，而不是长期依赖运行期补 theme。
+
+## 2026-06-17 v177 Login Native Hook2
+
+本轮目标是处理 v177 主题修复后继续出现的登录闪退。真机环境：
+
+```text
+device=192.168.2.78:39549
+package=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+```
+
+### 新崩溃点
+
+进入扫码登录页后，主题崩溃已经消失，但出现新的 JNI 缺失：
+
+```text
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.qrCodeV2(
+  com.yuewen.ywlogin.callbacks.DefaultYWCallback
+)
+```
+
+旧账号登录路径也存在同类问题：
+
+```text
+YWLoginManager.pwdLogin(Activity, String, String, YWCallBack)
+```
+
+### hook2 修改
+
+修改文件：
+
+```text
+core/hook/src/main/cpp/native-hook.cpp
+```
+
+变更内容：
+
+- `RegisterNatives` logger 增加 `YWLoginManager` 登录动作捕获。
+- 捕获到原始 `pwdLogin/sendPhoneCode/qrCodeV2` 函数指针时，wrapper 先记录再转调原始实现。
+- 捕获不到原始函数时，注册 fallback wrapper，避免 `UnsatisfiedLinkError` 直接杀进程。
+- `nativeRegisterBusinessStubs` 注册数从 6 增加到 9，新增：
+
+```text
+YWLoginManager.pwdLogin(...)
+YWLoginManager.sendPhoneCode(Context, String, int, int, YWCallBack)
+YWLoginManager.qrCodeV2(DefaultYWCallback)
+```
+
+构建与打包：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :app:assembleDebug
+.\tools\qqreader-offline-patch\build-qqreader-offline.ps1 -VersionTag v177-login-hook2 -InputCloneApk .tmp\qqreader-c9f8-current-base.apk -OutputApk .tmp\qqreader-c9f8-neutralized-v177-login-hook2-signed.apk -ForceExtract -ForceRepack -SkipVerify
+```
+
+产物：
+
+```text
+.tmp\qqreader-c9f8-neutralized-v177-login-hook2-signed.apk
+```
+
+### 真机结果
+
+日志文件：
+
+```text
+.tmp\device-logs\qqreader-v177-login-hook2-launch-20260617-103250.full.log
+.tmp\device-logs\qqreader-v177-login-hook2-login-button-20260617-103633.full.log
+.tmp\device-logs\qqreader-v177-login-hook2-pwd-login-20260617-103842.full.log
+.tmp\device-logs\qqreader-v177-login-hook2-pwd-login-20260617-103842.exit-info.txt
+```
+
+验证结论：
+
+- 分身启动成功，进程存活。
+- 进入登录页成功，不再出现 AppCompat theme 崩溃。
+- `qrCodeV2/pwdLogin` 不再触发 `UnsatisfiedLinkError` 闪退。
+- `exit-info` 中 hook2 验证期间没有新的主进程 `APP CRASH(EXCEPTION)`；最近主进程 crash 仍是 10:16 的旧包崩溃。
+
+关键日志：
+
+```text
+nativeRegisterBusinessStubs: registered=9 failed=0
+RegisterNatives YWLoginManager: wrapped pwdLogin original=0x0
+RegisterNatives YWLoginManager: wrapped sendPhoneCode original=0x0
+RegisterNatives YWLoginManager: wrapped qrCodeV2 original=0x0
+wrapped_ywlogin_pwdLogin: original native not registered; reported callback error
+```
+
+### 当前阻塞
+
+hook2 解决的是“登录动作 JNI 缺失导致闪退”，还没有解决“正常登录成功”。账号登录点击后 UI 仍卡在：
+
+```text
+正在登录，请稍候
+```
+
+原因是当前没有捕获到原始登录 native 实现，wrapper 只能防崩和上报错误，不能生成真实账号态、token、风控参数或服务端登录结果。候选库已经通过 guest ClassLoader 加载：
+
+```text
+libywad-own.so
+libnativekey.so
+libapp.so
+libentryexpro.so
+libQmt.so
+```
+
+但日志里没有出现来自这些库的 `YWLoginManager.pwdLogin/sendPhoneCode/qrCodeV2` 注册，只有 MultiApp 自己的 fallback 注册。
+
+### 下一步
+
+正常登录的下一步不是把登录方法 no-op，而是找出原始登录实现为什么没有注册：
+
+1. 重新解压当前 hook2 APK 或原始 QQ 阅读 APK，扫全部 `.so` 和 dex，确认登录 JNI 是否被隐藏、动态解密或根本不在候选库。
+2. 对 `System.loadLibrary/System.load/Runtime.nativeLoad` 加更细日志，记录 QQ 阅读尝试加载的原始库名和失败原因。
+3. 如果原始登录实现确实不在 native 层可见，需要转向 Java 层登录网络调用 hook，而不是继续补 native no-op。
+
+## 2026-06-17 v178/v179 Login Fallback Split
+
+用户确认当前重点不是签名问题，而是手机号登录为什么不能正常完成。基于 v177 hook2 日志重新拆分登录 fallback。
+
+### v178 结论
+
+hook2 的 `nativeRegisterBusinessStubs: registered=9` 能防止登录页 JNI 缺失闪退，但会提前把这些登录动作注册成 MultiApp wrapper：
+
+```text
+YWLoginManager.pwdLogin(...)
+YWLoginManager.sendPhoneCode(...)
+YWLoginManager.qrCodeV2(...)
+```
+
+手机号/密码登录点击后进入的是 `wrapped_ywlogin_pwdLogin`，且：
+
+```text
+wrapped_ywlogin_pwdLogin: original native not registered; reported callback error
+```
+
+这说明卡在“正在登录，请稍候”的原因不是签名失败，也不是服务端拒绝，而是原始 `pwdLogin/sendPhoneCode` native 没注册出来；MultiApp fallback 只是在防崩，不能产生真实登录态。
+
+v178 修改：
+
+```text
+core/hook/src/main/cpp/native-hook.cpp
+```
+
+- 新增 `debug.multiapp.ywlogin.action_fallback`。
+- 默认不注册 `pwdLogin/sendPhoneCode` fallback，让真实 YWLogin SDK 有机会自己注册。
+- 保留 `RegisterNatives` 捕获日志，用于判断是否出现非 `libmultiapp-native.so` 的原始函数指针。
+
+构建产物：
+
+```text
+.tmp\qqreader-c9f8-neutralized-v178-login-no-action-fallback-signed.apk
+```
+
+验证启动时确认：
+
+```text
+nativeRegisterBusinessStubs: YWLoginManager action fallback disabled; waiting for real SDK RegisterNatives
+nativeRegisterBusinessStubs: registered=6 failed=0
+```
+
+### v178 新暴露问题
+
+设备：
+
+```text
+192.168.2.119:35353
+```
+
+日志：
+
+```text
+.tmp\device-logs\qqreader-v178-crash-20260617-161005.full.log
+.tmp\device-logs\qqreader-v178-crash-20260617-161005.crash.log
+.tmp\device-logs\qqreader-v178-crash-20260617-161005.exit-info.txt
+.tmp\device-logs\qqreader-v178-no-online-fallback-start-20260617-161159.full.log
+```
+
+第一层崩溃来自章节 fallback，而不是登录：
+
+```text
+Fatal signal 11 (SIGSEGV)
+libmultiapp-native.so
+Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownloadFallbackStubs
+libart.so art::JavaVMExt::DecodeWeakGlobal
+```
+
+因此登录验证不能默认带入章节实验 fallback。测试脚本已调整：
+
+```text
+tools/qqreader-offline-patch/test-qqreader-offline.ps1
+OnlineStateFallback = 0
+```
+
+关掉章节 fallback 后，启动进入扫码登录页时暴露真实登录 JNI 缺失：
+
+```text
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.qrCodeV2(
+  com.yuewen.ywlogin.callbacks.DefaultYWCallback
+)
+at com.qq.reader.login.scanqrcode.viewmodel.qdaa.b
+at com.qq.reader.login.scanqrcode.ui.QRLoginScanQrCodeActivity.onCreate
+```
+
+### v179 当前策略
+
+扫码页会在 `onCreate` 默认调用 `qrCodeV2`，它不是手机号/密码登录动作本身，但会阻断进入登录页。因此 v179 采用更细拆分：
+
+- `qrCodeV2` 默认 fallback 防崩，允许登录页打开。
+- `pwdLogin/sendPhoneCode` 默认不 fallback，继续暴露真实手机号登录 native 是否注册。
+- `debug.multiapp.ywlogin.action_fallback=1` 才恢复旧的手机号/验证码动作 fallback。
+- `debug.multiapp.ywlogin.qrcode_fallback=0` 可关闭二维码 fallback 做纯诊断。
+
+当前必须继续验证的点：
+
+1. 重包 v179 并安装。
+2. 启动时确认：
+
+```text
+YWLoginManager action fallback disabled
+YWLoginManager qrCodeV2 fallback enabled
+```
+
+3. 进入手机号登录后点击登录/发送验证码。
+4. 如果出现 `pwdLogin/sendPhoneCode UnsatisfiedLinkError`，说明原始登录 native 仍未注册，下一步要追 `ReaderApplication.initLoginSDK` / YWLogin SDK 初始化链路或转 Java 登录网络链路。
+5. 如果捕获到 `RegisterNatives YWLoginManager: captured pwdLogin original=...`，再继续看服务端返回、风控参数和账号态。
+
+## 2026-06-17 v180-v183 Login Native vs Free Reading Split
+
+本轮继续验证 QQ 阅读分身登录链路时，必须记住一个关键边界：
+
+```text
+登录诊断包 != 免费正文阅读包
+```
+
+v174/v175 已验证免费章节正文可读，依赖的是：
+
+```text
+debug.multiapp.online.run_fallback=1
+debug.multiapp.online.materialize_eqct=1
+QqReaderEqctPlaintextCompat
+```
+
+如果为了登录诊断关闭或不注册 `OnlineChapterDownloadTask.run()` fallback，免费文章仍会在阅读页触发后台下载任务，然后因为 `run()` 没有 native 实现而闪退。
+
+### v180-v183 登录链路进展
+
+v179 之后继续拆分 YWLogin fallback：
+
+- `debug.multiapp.ywlogin.action_fallback=0` 默认不注册 `pwdLogin/sendPhoneCode` fallback，让真实 native 缺失直接暴露。
+- `debug.multiapp.ywlogin.qrcode_fallback=1` 默认注册 `qrCodeV2` fallback，避免扫码登录页启动即崩。
+- 新增 `OnlineChapterDownloadTask` state/queue 最小 stub，但不注册 `run()`：
+
+```text
+getDownloadChap()
+getDownloadChapters()
+setToDownloadChapters(List)
+isBackgroundRun()
+setBackgroundRun(boolean)
+hasRetryTag()
+setRetryTag()
+getScene()
+setScene(String)
+```
+
+v183 当前测试包：
+
+```text
+.tmp\qqreader-c9f8-neutralized-v183-online-task-queue-state-signed.apk
+package=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+device=192.168.2.119:35353
+```
+
+该包适合登录 native 缺失诊断，不适合作为免费正文阅读验证包。
+
+### 手机号登录当前阻塞
+
+手动点击手机号/密码登录后，真机日志确认崩溃点为：
+
+```text
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.pwdLogin(
+  android.app.Activity,
+  java.lang.String,
+  java.lang.String,
+  com.yuewen.ywlogin.login.YWCallBack
+)
+```
+
+证据文件：
+
+```text
+.tmp\device-logs\qqreader-v183-user-phone-action-watch-20260617-170402.full.log
+.tmp\device-logs\qqreader-v183-user-phone-action-watch-20260617-170402.crash.log
+.tmp\device-logs\qqreader-v183-user-phone-action-watch-20260617-170402.exit-info.txt
+```
+
+同一类问题也出现在验证码链路：
+
+```text
+YWLoginManager.sendPhoneCode(Context, String, int, int, YWCallBack)
+```
+
+结论：
+
+- 不是签名问题。
+- 当前只看到 MultiApp 自己注册 `YWLoginManager.getInstance/registerParameter/resetParameter/setDefaultParameters/fetchSettings/qrCodeV2`。
+- 没看到 `libywad-own.so/libnativekey.so/libapp.so/libentryexpro.so/libQmt.so` 注册真实 `pwdLogin/sendPhoneCode`。
+- `debug.multiapp.ywlogin.action_fallback=1` 只能防崩或回调错误，不能产生真实登录态。
+- 下一步要么找到真实 YWLogin SDK native 注册入口，要么绕开这些 native 方法，改走 Java 登录网络链路并调用 `YWLoginManager.saveLoginStatus(...)` 写回登录态。
+
+### 2026-06-17 免费文章闪退复盘
+
+用户反馈“免费文章也会闪退”后重新抓日志，确认这不是 v174/v175 正文方案失效，而是当前安装的是登录诊断包，`OnlineChapterDownloadTask.run()` 没有注册。
+
+证据文件：
+
+```text
+.tmp\device-logs\qqreader-free-read-retry-20260617-171836.full.log
+.tmp\device-logs\qqreader-free-read-retry-20260617-171836.exit-info.txt
+```
+
+关键崩溃：
+
+```text
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask.run()
+  at com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask.run(Native Method)
+  at com.qq.reader.cservice.onlineread.qdaa$qdaa.run(Unknown Source:2)
+  at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1302)
+```
+
+`exit-info` 同步确认：
+
+```text
+timestamp=2026-06-17 17:17:18.837
+process=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+reason=4 (APP CRASH(EXCEPTION))
+```
+
+操作判断：
+
+- 要验证登录：使用 v183 这类登录诊断包，保持 `pwdLogin/sendPhoneCode` 不 fallback，允许真实缺失暴露。
+- 要验证免费阅读：必须打“阅读版”包，启用 `OnlineChapterDownloadTask.run()` fallback、mini materialize 和 `QqReaderEqctPlaintextCompat`。
+- 不要用登录诊断包判断“免费章节方案坏了”；它本来就没有注册 `run()` fallback。
+
+下一步建议：
+
+1. 立刻重包一个 v184 reading 包，恢复：
+
+```text
+debug.multiapp.online.run_fallback=1
+debug.multiapp.online.materialize_eqct=1
+QqReaderEqctPlaintextCompat enabled
+```
+
+2. 登录链路另起 v184-login-java 或 v184-login-native-diag，不要污染阅读包。
+3. 后续文档和 APK 命名必须区分：
+
+```text
+qqreader-*-reading-*.apk
+qqreader-*-login-diag-*.apk
+```
+
+### 2026-06-17 v184 reading full fallback 注册阻塞
+
+v184 reading 包已经恢复 `OnlineChapterDownloadTask.run()` fallback，但启动阶段在 full fallback 注册处 native 崩溃，阻塞免费正文验证。
+
+证据文件：
+
+```text
+.tmp\qqreader-v184-reading-run-fallback-start-logcat.txt
+.tmp\qqreader-v184-reading-run-fallback-start-crash.txt
+.tmp\qqreader-v184-reading-run-fallback-start-exit-info.txt
+```
+
+关键日志：
+
+```text
+Installing OnlineChapterDownloadTask full fallback stubs
+Fatal signal 11 (SIGSEGV)
+libart.so art::JavaVMExt::DecodeWeakGlobal
+libmultiapp-native.so Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownloadFallbackStubs
+```
+
+当前判断：
+
+- 下一步阻塞点不是登录，而是阅读包 full fallback 注册本身。
+- 登录诊断包和阅读包继续分开；不要用登录包验证免费正文。
+- v184 崩溃点落在 native `CallObjectMethod` 路径，优先移除 `nativeRegisterOnlineChapterDownloadFallbackStubs()` 内部对 `remember_hook_classloader(env, clazz)` 的依赖。
+
+v185 修复方向：
+
+- Kotlin 侧由 `NativeHookBridge::class.java.classLoader` 显式传入 hook classloader。
+- native 侧只保存这个传入对象的 `NewGlobalRef`，不再对 `jclass clazz` 调 `Class.getClassLoader()`。
+- full fallback 注册改用本次传入 guest `classLoader` 的局部 `ClassLoader.loadClass`，并在 `loadClass`、批量 `RegisterNatives`、`run` 注册前记录日志。
+
+验证目标：
+
+```text
+remember_hook_classloader_object: hook ClassLoader captured from NativeHookBridge
+nativeRegisterOnlineChapterDownloadFallbackStubs: loading OnlineChapterDownloadTask
+nativeRegisterOnlineChapterDownloadFallbackStubs: registering state/listener/url stubs
+nativeRegisterOnlineChapterDownloadFallbackStubs: registering run fallback
+nativeRegisterOnlineChapterDownloadFallbackStubs: run fallback registered
+```
+
+如果 v185 仍闪退，优先看日志最后停在哪个阶段，而不是继续猜登录链路。
+
+### 2026-06-17 v189 恢复 LSPlant 旧成功初始化路径
+
+用户指出不应绕过 LSPlant，应先修复 LSPlant 初始化。经 `git log -S` / `git show` 对比确认：
+
+- `f666d38 chore: 保存项目基线 - QQ Reader v174 正文加载打通` 中存在旧成功路径。
+- `4603d45 feat: 项目整改 - 安全修复 + CI/CD + 模块拆分 + LSPlant修复` 对 `core/hook/src/main/cpp/native-hook.cpp` 做了大规模改动，并删除/改掉以下关键兼容点：
+  - `multiapp_get_method_shorty`
+  - `GetMethodShorty fallback`
+  - `init_lsplant_internal`
+  - `JNI_OnLoad: early LSPlant init begin`
+
+v188 的失败根因不是 v175 文档方案失效，而是 Android 16 / API 36 上 LSPlant 找不到 ART 私有符号：
+
+```text
+LSPlant : Failed to find GetMethodShorty
+nativeInitLsplant: lsplant::Init returned false
+```
+
+v189 修复内容：
+
+- 在 `resolve_libart_symbol()` 中恢复 `_ZN3artL15GetMethodShortyEP7_JNIEnvP10_jmethodID` / `_ZN3art15GetMethodShortyEP7_JNIEnvP10_jmethodID` 到 `multiapp_get_method_shorty` 的 fallback。
+- 恢复 `GetMethodShorty fallback` shorty 缓存，在调用 `g_lsplant_hook()` 前缓存 target/callback shorty。
+- `nativeInitLsplant()` 开始时调用 `init_shadowhook_for_runtime("nativeInitLsplant")`。
+- 恢复 `JNI_OnLoad` early init，避免 Java 层后置初始化错过早期 hook 时机。
+
+验证命令：
+
+```powershell
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :core:hook:assembleDebug :app:assembleDebug
+.\tools\qqreader-offline-patch\build-qqreader-offline.ps1 -VersionTag v189-restore-lsplant-v168 -OutputApk .tmp\qqreader-c9f8-neutralized-v189-restore-lsplant-v168-signed.apk -ForceExtract -ForceRepack -SkipVerify
+.\tools\qqreader-offline-patch\test-qqreader-offline.ps1 -Connect 192.168.2.119:40097 -VersionTag v189-restore-lsplant-v168 -Apk .tmp\qqreader-c9f8-neutralized-v189-restore-lsplant-v168-signed.apk -WaitSeconds 45
+```
+
+v189 证据文件：
+
+```text
+.tmp\qqreader-v189-restore-lsplant-v168-start-logcat.txt
+.tmp\qqreader-v189-restore-lsplant-v168-start-crash.txt
+```
+
+关键日志：
+
+```text
+JNI_OnLoad: early LSPlant init begin
+libart resolver: using MultiApp GetMethodShorty fallback for _ZN3artL15GetMethodShortyEP7_JNIEnvP10_jmethodID
+nativeInitLsplant: LSPlant initialized successfully!
+HookEngine: === LSPlant.init() 成功 ===
+nativeRegisterBusinessStubs: YWLoginManager action fallback disabled; waiting for real SDK RegisterNatives
+nativeRegisterBusinessStubs: registered=9 failed=0
+```
+
+结论：
+
+- LSPlant 初始化问题已经从“找不到 GetMethodShorty”推进为“初始化成功”。
+- v189 仍闪退，但已不是 LSPlant 初始化失败。
+- 新崩溃点为 JNI 引用类型错误：
+
+```text
+Abort message: 'Attempt to delete global reference reference as local JNI reference'
+native: Java_com_multiapp_core_hook_NativeHookBridge_nativeHookMethodWithBackup
+```
+
+### 2026-06-17 v190 修复 LSPlant backup 引用删除崩溃
+
+v189 崩溃原因：
+
+- `g_lsplant_hook()` 在当前 Android 16 设备上返回的 backup 是 global reference。
+- 当前 `nativeHookMethodWithBackup()` 对它执行：
+
+```cpp
+jobject globalBackup = env->NewGlobalRef(backup);
+env->DeleteLocalRef(backup);
+return globalBackup;
+```
+
+- `DeleteLocalRef(global)` 会触发 ART abort：
+
+```text
+local_reference_table.cc:452] Attempt to delete global reference reference as local JNI reference
+```
+
+v190 修复内容：
+
+- `nativeHookMethodWithBackup()` 不再 `NewGlobalRef(backup)`，也不再 `DeleteLocalRef(backup)`，直接返回 LSPlant backup。
+- `nativeHookMethod()` 成功后也不再 `DeleteLocalRef(backup)`，避免同类 abort。
+
+验证状态：
+
+```text
+BUILD SUCCESSFUL: :core:hook:assembleDebug :app:assembleDebug
+Generated APK: .tmp\qqreader-c9f8-neutralized-v190-lsplant-backup-ref-fix-signed.apk
+```
+
+v190 尚未完成真机验证。原因是设备无线调试端口在验证前掉线：
+
+```text
+192.168.2.119:40097 offline
+adb install failed: device offline
+adb connect 192.168.2.119:40097 timed out
+```
+
+下一步拿到新的无线调试端口后直接执行：
+
+```powershell
+.\tools\qqreader-offline-patch\test-qqreader-offline.ps1 -Connect <ip:port> -VersionTag v190-lsplant-backup-ref-fix -Apk .tmp\qqreader-c9f8-neutralized-v190-lsplant-backup-ref-fix-signed.apk -WaitSeconds 60
+```
+
+v190 验证目标：
+
+```text
+必须仍看到：
+JNI_OnLoad: early LSPlant init begin
+using MultiApp GetMethodShorty fallback
+nativeInitLsplant: LSPlant initialized successfully
+HookEngine: === LSPlant.init() 成功 ===
+
+必须不再看到：
+Attempt to delete global reference reference as local JNI reference
+Fatal signal 6 at nativeHookMethodWithBackup
+```
+
+如果 v190 继续闪退，下一步不要回滚 LSPlant 修复，直接抓新日志并定位新的最后崩溃点。当前已证明 LSPlant 初始化本身可以恢复。
+
+### 2026-06-18 v191/v192 LSPlant pass-through 异常语义修复
+
+新的无线调试端口：
+
+```text
+device=192.168.2.119:37869
+package=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+```
+
+v190 真机验证结果：
+
+- `v190-lsplant-backup-ref-fix` 已确认不再出现 `Attempt to delete global reference reference as local JNI reference`。
+- LSPlant 保持初始化成功，`nativeHookMethodWithBackup` 能返回 backup。
+- 新崩溃变为 Java 层 `LoaderFactory.preloadNativeForClass()` NPE，根因不是 LSPlant，而是通用反检测 hook 改变了 `Class.forName` 语义。
+
+v190 关键证据：
+
+```text
+.tmp\qqreader-v190-lsplant-backup-ref-fix-start-logcat.txt
+.tmp\qqreader-v190-lsplant-backup-ref-fix-start-crash.txt
+HookEngine: === LSPlant.init() 成功 ===
+nativeHookMethodWithBackup: success
+LoaderFactory POC failed
+Caused by: java.lang.NullPointerException
+  at com.multiapp.core.loader.LoaderFactory.preloadNativeForClass(LoaderFactory.kt:2526)
+```
+
+v191 修复内容：
+
+- `PackerDetectionBypass.hookClassForName()` 改用 `hookMethodPassThrough(...)`，普通类名继续调用原方法。
+- `PackerDetectionBypass.hookClassLoaderLoadClass()` 也改用 `hookMethodPassThrough(...)`。
+- 命中 hook 框架特征类名时，不再让 `beforeCallback` 返回 `null`，而是把类名改写到 `com.multiapp.blocked.*`，让原始 `Class.forName/loadClass` 自然返回 `ClassNotFoundException`。
+
+v191 真机结果：
+
+```text
+APK=.tmp\qqreader-c9f8-neutralized-v191-class-forname-pass-through-signed.apk
+log=.tmp\qqreader-v191-class-forname-pass-through-start-logcat.txt
+crash=.tmp\qqreader-v191-class-forname-pass-through-start-crash.txt
+```
+
+v191 证明 `LoaderFactory.preloadNativeForClass` 的 NPE 已消失，但暴露出更底层的 pass-through 异常吞噬问题：
+
+```text
+java.lang.RuntimeException: Unable to start activity ... DefaultAliasSplashActivity
+Caused by: android.view.InflateException: Binary XML file line #29 in android:layout/screen_simple
+Caused by: java.lang.NullPointerException: Attempt to invoke virtual method
+'java.lang.Class java.lang.Class.asSubclass(java.lang.Class)' on a null object reference
+HookEngine: hookMethodPassThrough: callOriginal failed for forName
+Caused by: java.lang.ClassNotFoundException: android.widget.ViewStub
+Caused by: java.lang.NullPointerException: ClassLoader.loadClass returned null for android.widget.ViewStub
+```
+
+根因：
+
+- `SimpleHooker.callback()` 对所有 hook 回调异常都 catch 后返回默认值。
+- 对 `hookMethodPassThrough` 来说这是错误语义；`ClassNotFoundException` 应该继续抛给 Android framework，由 `LayoutInflater` 捕获后尝试下一个 view 前缀。
+- 被吞掉后对象返回值变成 `null`，最终形成 `Class.asSubclass()` NPE。
+
+v192 修复内容：
+
+- `SimpleHooker.callOriginal()` 解包 `InvocationTargetException`，抛出真实 `targetException`。
+- `SimpleHooker` 增加 `swallowCallbackExceptions` 参数，默认保持旧 skip-mode 行为。
+- `HookEngine.hookMethodPassThrough()` 和 `HookEngine.hookMethodAround()` 使用 `swallowCallbackExceptions=false`，不再把原方法异常吞成默认返回值。
+
+验证命令：
+
+```powershell
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :core:hook:assembleDebug :app:assembleDebug
+.\tools\qqreader-offline-patch\build-qqreader-offline.ps1 -VersionTag v192-pass-through-exception-propagation -OutputApk .tmp\qqreader-c9f8-neutralized-v192-pass-through-exception-propagation-signed.apk -ForceExtract -ForceRepack -SkipVerify
+.\tools\qqreader-offline-patch\test-qqreader-offline.ps1 -Connect 192.168.2.119:37869 -VersionTag v192-pass-through-exception-propagation -Apk .tmp\qqreader-c9f8-neutralized-v192-pass-through-exception-propagation-signed.apk -WaitSeconds 60
+```
+
+v192 结果：
+
+```text
+BUILD SUCCESSFUL
+install=Success
+LaunchState=COLD
+Activity=com.qq.reader.activity.launch.DefaultAliasSplashActivity
+No new AndroidRuntime FATAL in v192 crash file
+pidof=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8 -> 20732
+```
+
+v192 阅读链路证据：
+
+```text
+.tmp\qqreader-v192-pass-through-exception-propagation-start-logcat.txt
+HookEngine: === LSPlant.init() 成功 ===
+nativeHookMethodWithBackup: success
+stub_online_run: protocol fallback returned resultCode=0
+stub_online_run: mini materialize result .../14.eqct size=6782
+stub_online_run: mini materialize result .../15.eqct size=8184
+stub_online_run: mini materialize result .../13.eqct size=7279
+stub_online_run: completed via mini materialized eqct resultCode=0
+```
+
+UI 验证：
+
+```text
+adb wakeup + am start 后，uiautomator 显示当前 package 为
+com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+并处于阅读器页面，包含：
+com.qq.reader:id/cvCurrentPager
+com.qq.reader:id/pagefooter
+com.qq.reader:id/read_page_status_bar
+```
+
+当前结论：
+
+- LSPlant 初始化已经恢复，不应再把当前问题归类为 LSPlant 初始化失败。
+- v189 修复 LSPlant 初始化，v190 修复 LSPlant backup JNI 引用，v191 修复 `Class.forName` 普通路径，v192 修复 pass-through 异常传播。
+- v192 已能启动并进入阅读器页，免费章节 fallback 已能生成 `.eqct`。
+- 手机号登录尚未在 v192 上完成手动真机验证；登录仍要重点确认 `YWLoginManager.pwdLogin/sendPhoneCode` 是否能走真实 native 或 Java 登录链路。
+
+下一步：
+
+1. 在手机上从 v192 当前应用进入登录页，手动触发手机号登录/发送验证码。
+2. Codex 只负责抓日志，不需要用户解释崩溃；重点搜索：
+
+```text
+YWLoginManager
+pwdLogin
+sendPhoneCode
+qrCodeV2
+nativeRegisterBusinessStubs
+wrapped_ywlogin
+AndroidRuntime
+FATAL EXCEPTION
+UnsatisfiedLinkError
+```
+
+3. 如果仍是 `pwdLogin/sendPhoneCode UnsatisfiedLinkError`，下一步不要再改阅读 fallback，转到登录链路：恢复真实 YWLogin SDK native 注册，或实现 Java 登录网络链路并写回 `YWLoginManager.saveLoginStatus(...)`。
+
+补充抓取：
+
+```text
+.tmp\qqreader-v192-login-manual-window-logcat.txt
+.tmp\qqreader-v192-login-manual-window-crash.txt
+.tmp\qqreader-v192-login-manual-window-exit-info.txt
+```
+
+该 90 秒窗口没有捕获到 QQ 阅读 `YWLoginManager/pwdLogin/sendPhoneCode/qrCodeV2` 相关动作，也没有新的 QQ 阅读 `AndroidRuntime FATAL`。这只能证明 v192 当前阅读页稳定，不能证明手机号登录已成功；登录验证仍需要手动触发登录按钮后重新抓日志。
+
+### 2026-06-18 v193 最终 pass-through 语义包
+
+v192 后做了一次代码语义收尾：
+
+- `hookMethod()` 恢复默认 `SimpleHooker(method) { ... }`，保留 skip-mode/防崩 hook 的旧异常吞噬语义。
+- `hookMethodPassThrough()` 使用 `swallowCallbackExceptions=false`。
+- `hookMethodAround()` 也使用 `swallowCallbackExceptions=false`。
+
+验证产物：
+
+```text
+APK=.tmp\qqreader-c9f8-neutralized-v193-pass-through-final-semantics-signed.apk
+log=.tmp\qqreader-v193-pass-through-final-semantics-start-logcat.txt
+crash=.tmp\qqreader-v193-pass-through-final-semantics-start-crash.txt
+```
+
+验证结果：
+
+```text
+install=Success
+LaunchState=COLD
+pidof=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8 -> 24098
+HookEngine: === LSPlant.init() 成功 ===
+nativeHookMethodWithBackup: success
+hookMethodPassThrough: successfully hooked java.lang.Class.forName
+hookMethodPassThrough: successfully hooked java.lang.ClassLoader.loadClass
+hookMethodAround: successfully hooked com.qq.reader.cservice.onlineread.qdae.search
+```
+
+v193 未再出现 v191 的崩溃特征：
+
+```text
+ClassLoader.loadClass returned null
+Class.asSubclass(...) on a null object reference
+AndroidRuntime FATAL EXCEPTION
+```
+
+UI 证据：
+
+```text
+uiautomator package=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+页面包含书籍详情/试读内容、下载、听书、免费试读等节点。
+```
+
+当前可交付结论：
+
+- v193 是目前应继续使用的 QQ 阅读专项包。
+- LSPlant 初始化、backup hook、pass-through 异常传播、阅读页启动均已在真机验证。
+- 登录仍未完成验证；下一步只围绕手机号登录按钮实际点击后的日志判断，不再回到 LSPlant 初始化问题。

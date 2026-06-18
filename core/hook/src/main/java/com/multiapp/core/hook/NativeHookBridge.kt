@@ -340,13 +340,33 @@ class NativeHookBridge {
         }
     }
 
+    fun registerOnlineChapterStateStubs(classLoader: ClassLoader): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeRegisterOnlineChapterStateStubs(classLoader)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerOnlineChapterStateStubs failed")
+            false
+        }
+    }
+
     fun registerOnlineChapterDownloadFallbackStubs(classLoader: ClassLoader): Boolean {
         if (!nativeLibLoaded) return false
         return try {
+            rememberHookClassLoader()
             nativeRegisterOnlineChapterDownloadFallbackStubs(classLoader)
         } catch (e: Throwable) {
             Timber.tag(TAG).w(e, "registerOnlineChapterDownloadFallbackStubs failed")
             false
+        }
+    }
+
+    private fun rememberHookClassLoader() {
+        val hookClassLoader = NativeHookBridge::class.java.classLoader ?: return
+        try {
+            nativeRememberHookClassLoader(hookClassLoader)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "rememberHookClassLoader failed")
         }
     }
 
@@ -735,6 +755,8 @@ class NativeHookBridge {
     private external fun nativeRegisterStubBootstrapMethods(classLoader: ClassLoader, className: String): Boolean
     private external fun nativeRegisterBusinessStubs(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterQrencryptStubs(classLoader: ClassLoader): Boolean
+    private external fun nativeRegisterOnlineChapterStateStubs(classLoader: ClassLoader): Boolean
+    private external fun nativeRememberHookClassLoader(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterOnlineChapterDownloadFallbackStubs(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterAllMissingNativeMethods(classLoader: ClassLoader): Int
     private external fun nativeSetIntegrityRedirect(fromPath: String, toPath: String)

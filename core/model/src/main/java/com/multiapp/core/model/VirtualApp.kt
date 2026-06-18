@@ -47,6 +47,12 @@ data class VirtualApp(
     val storageEncrypted: Boolean = false,
     /** Main activity class name */
     val mainActivity: String? = null,
+    /** Whether this app is installed as a system app on the host device */
+    val isSystemApp: Boolean = false,
+    /** Product route used when building a clone */
+    val cloneProfile: CloneProfile = CloneProfile.NORMAL,
+    /** Human-readable risk label for the app picker */
+    val riskLabel: String = "普通",
     /** All declared activities */
     val activities: List<String> = emptyList(),
     /** All declared services */

@@ -1,6 +1,9 @@
 package com.multiapp.feature.settings
 
 import android.content.Context
+import android.app.LocaleManager
+import android.os.Build
+import android.os.LocaleList
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
@@ -63,6 +66,7 @@ class SettingsRepository @Inject constructor(
         context.settingsDataStore.edit { prefs ->
             prefs[KEY_LANGUAGE] = language.value
         }
+        applyLanguage(language)
     }
 
     fun getCacheSize(): Long {
@@ -85,5 +89,20 @@ class SettingsRepository @Inject constructor(
         if (!dir.exists()) return 0L
         if (dir.isFile) return dir.length()
         return dir.listFiles()?.sumOf { getDirSize(it) } ?: 0L
+    }
+
+    private fun applyLanguage(language: Language) {
+        val localeTag = language.code
+        if (Build.VERSION.SDK_INT >= 33) {
+            val localeManager = context.getSystemService(LocaleManager::class.java)
+            localeManager?.applicationLocales = LocaleList.forLanguageTags(localeTag)
+            return
+        }
+        @Suppress("DEPRECATION")
+        val config = context.resources.configuration
+        @Suppress("DEPRECATION")
+        config.setLocales(LocaleList.forLanguageTags(localeTag))
+        @Suppress("DEPRECATION")
+        context.resources.updateConfiguration(config, context.resources.displayMetrics)
     }
 }

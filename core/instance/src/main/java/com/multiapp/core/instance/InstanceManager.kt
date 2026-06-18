@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Log
 import com.multiapp.core.identity.DeviceIdentityPool
 import com.multiapp.core.model.IdentityConfig
+import com.multiapp.core.model.CloneProfile
 import com.multiapp.core.hook.IdentitySpoofingEngine
 import com.multiapp.core.installer.StubInstaller
 import com.multiapp.core.manifest.ComponentExtractor
@@ -116,7 +117,12 @@ class InstanceManager @Inject constructor(
         )
 
         // 4. DEX Patch (可选 — 对加固 APK 执行检测代码删除)
-        val patchedDexPaths = runDexPatch(originApkFile, instanceId)
+        val cloneProfile = app.cloneProfile
+        val patchedDexPaths = if (cloneProfile == CloneProfile.NORMAL) {
+            emptyList()
+        } else {
+            runDexPatch(originApkFile, instanceId)
+        }
 
         onProgress("构建Stub")
         Log.w("InstanceMgr", "building stub APK")
@@ -129,7 +135,9 @@ class InstanceManager @Inject constructor(
             originalSignatures = listOf(app.apkPath),
             authorityMap = identity.authorityMap,
             deviceIdentity = deviceIdentityConfig,
-            patchedDexPaths = patchedDexPaths
+            patchedDexPaths = patchedDexPaths,
+            cloneProfile = cloneProfile,
+            appLabel = app.appName
         )
 
         // 6. 构建 Stub APK
@@ -180,7 +188,9 @@ class InstanceManager @Inject constructor(
             stubPackageName = identity.stubPackageName,
             identityJson = identityJson,
             createdAt = now,
-            status = InstanceStatus.READY.name
+            status = InstanceStatus.READY.name,
+            appName = app.appName,
+            cloneProfile = cloneProfile.name
         )
         instanceDatabase.instanceDao().insert(entity)
         Log.w("InstanceMgr", "instance saved to database")
@@ -192,7 +202,9 @@ class InstanceManager @Inject constructor(
             stubPackageName = identity.stubPackageName,
             identity = identity,
             createdAt = now,
-            status = InstanceStatus.READY
+            status = InstanceStatus.READY,
+            appName = app.appName,
+            cloneProfile = cloneProfile
         )
         _instances.update { it + info }
 
@@ -268,7 +280,8 @@ class InstanceManager @Inject constructor(
             stubPackageName = identity.stubPackageName,
             identityJson = identityJson,
             createdAt = now,
-            status = InstanceStatus.READY.name
+            status = InstanceStatus.READY.name,
+            appName = identity.originalPackageName.substringAfterLast(".")
         )
         instanceDatabase.instanceDao().insert(entity)
 
@@ -278,7 +291,8 @@ class InstanceManager @Inject constructor(
             stubPackageName = identity.stubPackageName,
             identity = identity,
             createdAt = now,
-            status = InstanceStatus.READY
+            status = InstanceStatus.READY,
+            appName = identity.originalPackageName.substringAfterLast(".")
         )
         _instances.update { it + info }
 
@@ -308,7 +322,11 @@ class InstanceManager @Inject constructor(
                         InstanceStatus.valueOf(entity.status)
                     } catch (_: Exception) {
                         InstanceStatus.ERROR
-                    }
+                    },
+                    appName = entity.appName.ifBlank { entity.originalPackageName.substringAfterLast(".") },
+                    cloneProfile = runCatching { CloneProfile.valueOf(entity.cloneProfile) }.getOrDefault(CloneProfile.NORMAL),
+                    lastLaunchState = entity.lastLaunchState,
+                    lastError = entity.lastError
                 )
             } catch (e: Exception) {
                 Timber.e(e, "InstanceManager: failed to parse instance ${entity.instanceId}")
@@ -375,7 +393,11 @@ data class InstanceInfo(
     val stubPackageName: String,
     val identity: IdentityConfig,
     val createdAt: Long,
-    val status: InstanceStatus
+    val status: InstanceStatus,
+    val appName: String = originalPackageName.substringAfterLast("."),
+    val cloneProfile: CloneProfile = CloneProfile.NORMAL,
+    val lastLaunchState: String = "",
+    val lastError: String = ""
 )
 
 enum class InstanceStatus {

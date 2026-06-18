@@ -4,6 +4,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.util.Log
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -39,17 +41,23 @@ import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceStatus
+import com.multiapp.core.model.CloneProfile
 import com.multiapp.core.model.VirtualApp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LauncherScreen(
-    viewModel: LauncherViewModel = hiltViewModel()
-) {
+fun LauncherScreen() {
+    val viewModel: LauncherViewModel = hiltViewModel()
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     var showAppPicker by remember { mutableStateOf(false) }
+    var showAddSource by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf<InstanceInfo?>(null) }
+    val apkPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) viewModel.createInstanceFromApkUri(context, uri)
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -91,7 +99,7 @@ fun LauncherScreen(
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { showAppPicker = true },
+                onClick = { showAddSource = true },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 icon = { Icon(Icons.Default.Add, contentDescription = null) },
@@ -106,7 +114,7 @@ fun LauncherScreen(
                     error = uiState.error!!,
                     onRetry = { viewModel.loadInstances() }
                 )
-                uiState.instances.isEmpty() && uiState.creationStep == null -> EmptyState(onAdd = { showAppPicker = true })
+                uiState.instances.isEmpty() && uiState.creationStep == null -> EmptyStatePlaceholder(onAdd = { showAddSource = true })
                 else -> AppGrid(
                     instances = uiState.instances,
                     onLaunch = { instance ->
@@ -145,6 +153,26 @@ fun LauncherScreen(
                 CreationProgressDialog(step = step)
             }
         }
+    }
+
+    if (showAddSource) {
+        AlertDialog(
+            onDismissRequest = { showAddSource = false },
+            title = { Text("添加分身") },
+            text = { Text("选择应用来源。普通用户建议从已安装应用选择；APK 文件适合本地安装包测试。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    showAddSource = false
+                    showAppPicker = true
+                }) { Text("从已安装应用选择") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    showAddSource = false
+                    apkPicker.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream"))
+                }) { Text("从 APK 文件安装") }
+            }
+        )
     }
 
     if (showAppPicker) {
@@ -356,7 +384,7 @@ private fun AppGridItem(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = instance.originalPackageName.substringAfterLast("."),
+                text = instance.appName.ifBlank { instance.originalPackageName.substringAfterLast(".") },
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -367,6 +395,21 @@ private fun AppGridItem(
 
             // Status chip
             InstanceStatusChip(status = instance.status)
+            if (instance.lastLaunchState.isNotBlank()) {
+                Text(
+                    text = instance.lastLaunchState,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (instance.status == InstanceStatus.ERROR) {
+                        MaterialTheme.colorScheme.error
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center
+                )
+            }
 
             // Context menu
             DropdownMenu(
@@ -411,7 +454,7 @@ private fun AppGridItem(
 // LoadingState, ErrorState, EmptyState 已提取到 core/designsystem/CommonComponents.kt
 
 @Composable
-private fun EmptyState(onAdd: () -> Unit) {
+private fun EmptyStatePlaceholder(onAdd: () -> Unit) {
     EmptyState(
         icon = Icons.Default.CloudDownload,
         title = "暂无分身应用",
@@ -440,17 +483,26 @@ private fun AppPickerSheet(
 ) {
     val allApps by viewModel.allApps.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
+    var appFilter by remember { mutableStateOf(AppFilter.THIRD_PARTY) }
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         viewModel.loadAllApps(context.packageManager)
     }
 
-    val filteredApps = if (searchQuery.isBlank()) allApps
-    else allApps.filter {
-        it.appName.contains(searchQuery, ignoreCase = true) ||
-            it.packageName.contains(searchQuery, ignoreCase = true)
-    }
+    val filteredApps = allApps
+        .filter {
+            when (appFilter) {
+                AppFilter.THIRD_PARTY -> !it.isSystemApp
+                AppFilter.SYSTEM -> it.isSystemApp
+                AppFilter.ALL -> true
+            }
+        }
+        .filter {
+            searchQuery.isBlank() ||
+                it.appName.contains(searchQuery, ignoreCase = true) ||
+                it.packageName.contains(searchQuery, ignoreCase = true)
+        }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(modifier = Modifier.padding(horizontal = 16.dp)) {
@@ -460,6 +512,29 @@ private fun AppPickerSheet(
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(bottom = 16.dp)
             )
+
+            SingleChoiceSegmentedButtonRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp)
+            ) {
+                AppFilter.entries.forEachIndexed { index, filter ->
+                    SegmentedButton(
+                        selected = appFilter == filter,
+                        onClick = { appFilter = filter },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = AppFilter.entries.size),
+                        label = {
+                            Text(
+                                when (filter) {
+                                    AppFilter.THIRD_PARTY -> "第三方"
+                                    AppFilter.SYSTEM -> "系统"
+                                    AppFilter.ALL -> "全部"
+                                }
+                            )
+                        }
+                    )
+                }
+            }
 
             // Search bar
             OutlinedTextField(
@@ -529,7 +604,13 @@ private fun AppPickerSheet(
                             app = app,
                             onClick = {
                                 Log.w("LauncherScreen", "AppPickerItem clicked: ${app.packageName}")
-                                onAppSelected(app)
+                                if (app.cloneProfile == CloneProfile.QQ_READER_SPECIAL) {
+                                    Toast.makeText(context, "QQ 阅读需要使用专项实验路线", Toast.LENGTH_SHORT).show()
+                                } else if (app.mainActivity == null) {
+                                    Toast.makeText(context, "该应用没有启动入口，不能创建普通分身", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    onAppSelected(app)
+                                }
                             }
                         )
                     }
@@ -539,6 +620,12 @@ private fun AppPickerSheet(
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
+}
+
+private enum class AppFilter {
+    THIRD_PARTY,
+    SYSTEM,
+    ALL
 }
 
 @Composable
@@ -592,6 +679,20 @@ private fun AppPickerItem(
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            AssistChip(
+                onClick = {},
+                label = { Text(app.riskLabel, style = MaterialTheme.typography.labelSmall) },
+                enabled = false,
+                colors = AssistChipDefaults.assistChipColors(
+                    disabledLabelColor = when {
+                        app.cloneProfile == CloneProfile.QQ_READER_SPECIAL -> MaterialTheme.colorScheme.error
+                        app.mainActivity == null -> MaterialTheme.colorScheme.error
+                        app.isSystemApp -> MaterialTheme.colorScheme.tertiary
+                        else -> MaterialTheme.colorScheme.primary
+                    }
+                )
             )
         }
     }

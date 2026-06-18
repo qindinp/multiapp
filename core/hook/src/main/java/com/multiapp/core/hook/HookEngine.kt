@@ -172,7 +172,7 @@ class HookEngine private constructor() {
         }
 
         lateinit var hooker: SimpleHooker
-        hooker = SimpleHooker(method) { args ->
+        hooker = SimpleHooker(method, swallowCallbackExceptions = false) { args ->
             val receiver = if (args.isNotEmpty() && !java.lang.reflect.Modifier.isStatic(method.modifiers)) args[0] else null
             val originalMethodArgs = if (args.isNotEmpty() && !java.lang.reflect.Modifier.isStatic(method.modifiers)) {
                 args.sliceArray(1 until args.size)
@@ -241,7 +241,7 @@ class HookEngine private constructor() {
         }
 
         lateinit var hooker: SimpleHooker
-        hooker = SimpleHooker(method) { args ->
+        hooker = SimpleHooker(method, swallowCallbackExceptions = false) { args ->
             val isStatic = java.lang.reflect.Modifier.isStatic(method.modifiers)
             val receiver = if (args.isNotEmpty() && !isStatic) args[0] else null
             val methodArgs = if (args.isNotEmpty() && !isStatic) args.sliceArray(1 until args.size) else args

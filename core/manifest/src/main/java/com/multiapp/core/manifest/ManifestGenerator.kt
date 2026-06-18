@@ -1,5 +1,7 @@
 package com.multiapp.core.manifest
 
+import com.multiapp.core.model.CloneProfile
+
 /**
  * 生成 Stub APK 的 AndroidManifest.xml (二进制 XML)
  *
@@ -31,7 +33,7 @@ class ManifestGenerator {
         if (manifest.applicationClass != null) {
             sb.appendLine("""        android:name="${manifest.applicationClass}"""")
         }
-        sb.appendLine("""        android:label="${config.stubPackageName}" android:extractNativeLibs="true" android:debuggable="true">""")
+        sb.appendLine("""        android:label="${config.appLabel}" android:extractNativeLibs="true" android:debuggable="true">""")
         sb.appendLine("""        <activity android:name="${launcherActivity.name}" android:exported="true" android:enabled="true"${componentAttrs(launcherActivity)}>""")
         sb.appendLine("""            <intent-filter>""")
         sb.appendLine("""                <action android:name="android.intent.action.MAIN" />""")
@@ -115,7 +117,9 @@ data class StubConfig(
     val authorityMap: Map<String, String>,
     val deviceIdentity: DeviceIdentityConfig,
     val patchedDexPaths: List<String> = emptyList(),
-    val xposedModules: List<String> = emptyList()
+    val xposedModules: List<String> = emptyList(),
+    val cloneProfile: CloneProfile = CloneProfile.NORMAL,
+    val appLabel: String = originalPackageName.substringAfterLast(".")
 )
 
 data class DeviceIdentityConfig(

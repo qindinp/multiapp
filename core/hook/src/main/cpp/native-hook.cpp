@@ -998,7 +998,7 @@ static jobject g_guest_classloader = nullptr;
 static jobject g_hook_classloader = nullptr;
 static jclass g_findclass_target_class = nullptr;
 static std::unordered_set<std::string> g_findclass_targets; // e.g. {"com/stub/StubApp", "com/qihoo/util/StubApp"}
-我的意思是现在你的验证QQ阅读分身的阻塞点是什么，全都改成可调试的，还是你的文档进展呢static jmethodID g_classloader_loadclass = nullptr;
+static jmethodID g_classloader_loadclass = nullptr;
 
 static bool ensure_classloader_loadclass(JNIEnv* env) {
     if (g_classloader_loadclass != nullptr) return true;
@@ -1049,6 +1049,30 @@ static void remember_hook_classloader(JNIEnv* env, jclass bridgeClass) {
 }
 static void* g_orig_findclass = nullptr; // 原始 FindClass 函数指针
 
+static bool remember_hook_classloader_object(JNIEnv* env, jobject classLoader, const char* source) {
+    if (g_hook_classloader != nullptr) return true;
+    if (classLoader == nullptr) {
+        LOGW("remember_hook_classloader_object: null ClassLoader from %s", source);
+        return false;
+    }
+    jobject globalLoader = env->NewGlobalRef(classLoader);
+    if (globalLoader == nullptr) {
+        LOGW("remember_hook_classloader_object: NewGlobalRef failed from %s", source);
+        return false;
+    }
+    g_hook_classloader = globalLoader;
+    LOGI("remember_hook_classloader_object: hook ClassLoader captured from %s", source);
+    return true;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeRememberHookClassLoader(
+    JNIEnv* env, jclass clazz, jobject classLoader)
+{
+    (void)clazz;
+    return remember_hook_classloader_object(env, classLoader, "NativeHookBridge") ? JNI_TRUE : JNI_FALSE;
+}
+
 // Type alias matching ART's native signature for Runtime.nativeLoad
 // static jni: (JNIEnv*, jclass, jstring filename, jobject classLoader, jclass caller) -> jstring
 typedef jstring (*NativeLoadFn)(JNIEnv*, jclass, jstring, jobject, jclass);
@@ -1057,13 +1081,23 @@ typedef jint (*FockItFn)(JNIEnv*, jclass, jbyteArray, jint);
 typedef void (*FockAkFn)(JNIEnv*, jclass, jbyteArray, jint, jbyteArray);
 typedef jstring (*FockSnFn)(JNIEnv*, jclass, jbyteArray, jint);
 typedef jstring (*FockUrkFn)(JNIEnv*, jclass);
+typedef void (*YwPwdLoginFn)(JNIEnv*, jobject, jobject, jstring, jstring, jobject);
+typedef void (*YwSendPhoneCodeFn)(JNIEnv*, jobject, jobject, jstring, jint, jint, jobject);
+typedef void (*YwQrCodeV2Fn)(JNIEnv*, jobject, jobject);
 
 static jstring JNICALL stub_fock_sign_md5(JNIEnv* env, jclass clazz, jbyteArray data, jint len);
+static void notify_ywlogin_error(JNIEnv* env, jobject callback, const char* message);
+static void JNICALL wrapped_ywlogin_pwdLogin(JNIEnv* env, jobject thiz, jobject activity, jstring account, jstring password, jobject callback);
+static void JNICALL wrapped_ywlogin_sendPhoneCode(JNIEnv* env, jobject thiz, jobject context, jstring phone, jint type, jint scene, jobject callback);
+static void JNICALL wrapped_ywlogin_qrCodeV2(JNIEnv* env, jobject thiz, jobject callback);
 
 static FockItFn g_orig_fock_it = nullptr;
 static FockAkFn g_orig_fock_ak = nullptr;
 static FockSnFn g_orig_fock_sn = nullptr;
 static FockUrkFn g_orig_fock_urk = nullptr;
+static YwPwdLoginFn g_orig_ywlogin_pwdLogin = nullptr;
+static YwSendPhoneCodeFn g_orig_ywlogin_sendPhoneCode = nullptr;
+static YwQrCodeV2Fn g_orig_ywlogin_qrCodeV2 = nullptr;
 static std::mutex g_fock_bootstrap_mutex;
 static std::mutex g_fock_sn_mutex;
 static bool g_fock_bootstrap_done = false;
@@ -1306,6 +1340,41 @@ static jint hooked_RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMet
         for (jint i = 0; i < nMethods; i++) {
             capture_stubapp_native(methods[i].name, methods[i].signature, methods[i].fnPtr);
         }
+    }
+    if (className == "com.yuewen.ywlogin.login.YWLoginManager" &&
+        methods != nullptr && nMethods > 0) {
+        patchedMethods.assign(methods, methods + nMethods);
+        for (jint i = 0; i < nMethods; i++) {
+            const char* name = patchedMethods[i].name ? patchedMethods[i].name : "";
+            const char* sig = patchedMethods[i].signature ? patchedMethods[i].signature : "";
+            void* fnPtr = patchedMethods[i].fnPtr;
+            if (strcmp(name, "pwdLogin") == 0 &&
+                strcmp(sig, "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Lcom/yuewen/ywlogin/login/YWCallBack;)V") == 0) {
+                if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
+                    g_orig_ywlogin_pwdLogin = (YwPwdLoginFn)fnPtr;
+                    LOGW("RegisterNatives YWLoginManager: captured pwdLogin original=%s", describe_native_address(fnPtr).c_str());
+                }
+                patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_pwdLogin;
+                LOGW("RegisterNatives YWLoginManager: wrapped pwdLogin original=%p", (void*)g_orig_ywlogin_pwdLogin);
+            } else if (strcmp(name, "sendPhoneCode") == 0 &&
+                strcmp(sig, "(Landroid/content/Context;Ljava/lang/String;IILcom/yuewen/ywlogin/login/YWCallBack;)V") == 0) {
+                if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
+                    g_orig_ywlogin_sendPhoneCode = (YwSendPhoneCodeFn)fnPtr;
+                    LOGW("RegisterNatives YWLoginManager: captured sendPhoneCode original=%s", describe_native_address(fnPtr).c_str());
+                }
+                patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_sendPhoneCode;
+                LOGW("RegisterNatives YWLoginManager: wrapped sendPhoneCode original=%p", (void*)g_orig_ywlogin_sendPhoneCode);
+            } else if (strcmp(name, "qrCodeV2") == 0 &&
+                strcmp(sig, "(Lcom/yuewen/ywlogin/callbacks/DefaultYWCallback;)V") == 0) {
+                if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
+                    g_orig_ywlogin_qrCodeV2 = (YwQrCodeV2Fn)fnPtr;
+                    LOGW("RegisterNatives YWLoginManager: captured qrCodeV2 original=%s", describe_native_address(fnPtr).c_str());
+                }
+                patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_qrCodeV2;
+                LOGW("RegisterNatives YWLoginManager: wrapped qrCodeV2 original=%p", (void*)g_orig_ywlogin_qrCodeV2);
+            }
+        }
+        methodsToRegister = patchedMethods.data();
     }
     if (className == "com.yuewen.fock.Fock" && methods != nullptr && nMethods > 0) {
         patchedMethods.assign(methods, methods + nMethods);
@@ -2360,6 +2429,8 @@ static int find_loaded_library_callback(struct dl_phdr_info* info, size_t size, 
     return 1;
 }
 
+static const char* multiapp_get_method_shorty(JNIEnv* env, jmethodID mid);
+
 static bool refresh_libart_info() {
     if (g_libart_base != 0 && !g_libart_path.empty()) return true;
 
@@ -2463,6 +2534,11 @@ static void* resolve_symbol_from_elf_sections(
 
 static void* resolve_libart_symbol(std::string_view symbol_name, bool prefix_match) {
     if (symbol_name.empty()) return nullptr;
+    if (!prefix_match && (symbol_name == "_ZN3artL15GetMethodShortyEP7_JNIEnvP10_jmethodID" ||
+        symbol_name == "_ZN3art15GetMethodShortyEP7_JNIEnvP10_jmethodID")) {
+        LOGW("libart resolver: using MultiApp GetMethodShorty fallback for %.*s", (int)symbol_name.size(), symbol_name.data());
+        return reinterpret_cast<void*>(multiapp_get_method_shorty);
+    }
 
     if (!prefix_match && g_libart_handle != nullptr) {
         std::string name(symbol_name);
@@ -3286,7 +3362,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallFindClassHook(
 static jobject JNICALL stub_ywlogin_getInstance(JNIEnv* env, jclass clazz);
 static void JNICALL stub_ywlogin_registerParameter(JNIEnv* env, jclass clazz, jobject getter);
 static void JNICALL stub_ywlogin_resetParameter(JNIEnv* env, jobject thiz, jstring key, jstring value);
+static void JNICALL stub_ywlogin_pwdLogin(JNIEnv* env, jobject thiz, jobject activity, jstring account, jstring password, jobject callback);
+static void JNICALL stub_ywlogin_sendPhoneCode(JNIEnv* env, jobject thiz, jobject context, jstring phone, jint type, jint scene, jobject callback);
+static void JNICALL stub_ywlogin_qrCodeV2(JNIEnv* env, jobject thiz, jobject callback);
 static jstring JNICALL stub_easyencrypt_md5_key(JNIEnv* env, jclass clazz);
+static jbyteArray JNICALL stub_easyencrypt_bytes_identity(JNIEnv* env, jclass clazz, jbyteArray data);
 static jobject JNICALL stub_online_getDownloadChap(JNIEnv* env, jobject thiz);
 static jobject JNICALL stub_online_getDownloadChapters(JNIEnv* env, jobject thiz);
 static void JNICALL stub_online_setToDownloadChapters(JNIEnv* env, jobject thiz, jobject chapters);
@@ -3376,18 +3456,24 @@ static void register_qrencrypt_stubs(JNIEnv* env) {
     jclass easyClass = (jclass)env->CallObjectMethod(g_guest_classloader, g_classloader_loadclass, easyName);
     env->DeleteLocalRef(easyName);
     if (easyClass != nullptr) {
-        JNINativeMethod method = {
-            const_cast<char*>("getMd5Key"),
-            const_cast<char*>("()Ljava/lang/String;"),
-            (void*)stub_easyencrypt_md5_key
+        JNINativeMethod methods[] = {
+            {const_cast<char*>("getMd5Key"),
+             const_cast<char*>("()Ljava/lang/String;"),
+             (void*)stub_easyencrypt_md5_key},
+            {const_cast<char*>("decrypt"),
+             const_cast<char*>("([B)[B"),
+             (void*)stub_easyencrypt_bytes_identity},
+            {const_cast<char*>("encrypt"),
+             const_cast<char*>("([B)[B"),
+             (void*)stub_easyencrypt_bytes_identity},
         };
-        if (env->RegisterNatives(easyClass, &method, 1) == JNI_OK) {
-            registered++;
-            LOGI("register_qrencrypt_stubs: EasyEncrypt.getMd5Key OK");
+        if (env->RegisterNatives(easyClass, methods, (jint)(sizeof(methods) / sizeof(methods[0]))) == JNI_OK) {
+            registered += (int)(sizeof(methods) / sizeof(methods[0]));
+            LOGI("register_qrencrypt_stubs: EasyEncrypt methods OK");
         } else {
             if (env->ExceptionCheck()) env->ExceptionClear();
             failed++;
-            LOGW("register_qrencrypt_stubs: EasyEncrypt.getMd5Key failed");
+            LOGW("register_qrencrypt_stubs: EasyEncrypt methods failed");
         }
         env->DeleteLocalRef(easyClass);
     } else {
@@ -3565,7 +3651,105 @@ static void JNICALL stub_ywlogin_fetchSettings(JNIEnv* env, jobject thiz, jobjec
     LOGI("stub_ywlogin_fetchSettings: stub (no-op)");
 }
 
+static void notify_ywlogin_error(JNIEnv* env, jobject callback, const char* message) {
+    if (env == nullptr || callback == nullptr) return;
+    jclass callbackClass = env->GetObjectClass(callback);
+    if (callbackClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return;
+    }
+    jmethodID onError = env->GetMethodID(callbackClass, "onError", "(ILjava/lang/String;)V");
+    env->DeleteLocalRef(callbackClass);
+    if (onError == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("notify_ywlogin_error: callback has no onError(int,String)");
+        return;
+    }
+    jstring msg = env->NewStringUTF(message != nullptr ? message : "MultiApp login native unavailable");
+    env->CallVoidMethod(callback, onError, -9001, msg);
+    env->DeleteLocalRef(msg);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("notify_ywlogin_error: callback onError threw");
+    }
+}
+
 // 其他可能的 native 方法 stub
+static void JNICALL wrapped_ywlogin_pwdLogin(
+        JNIEnv* env,
+        jobject thiz,
+        jobject activity,
+        jstring account,
+        jstring password,
+        jobject callback) {
+    if (g_orig_ywlogin_pwdLogin != nullptr) {
+        LOGW("wrapped_ywlogin_pwdLogin: forwarding original=%p", (void*)g_orig_ywlogin_pwdLogin);
+        g_orig_ywlogin_pwdLogin(env, thiz, activity, account, password, callback);
+        return;
+    }
+    notify_ywlogin_error(env, callback, "MultiApp login native unavailable");
+    LOGE("wrapped_ywlogin_pwdLogin: original native not registered; reported callback error");
+}
+
+static void JNICALL wrapped_ywlogin_sendPhoneCode(
+        JNIEnv* env,
+        jobject thiz,
+        jobject context,
+        jstring phone,
+        jint type,
+        jint scene,
+        jobject callback) {
+    if (g_orig_ywlogin_sendPhoneCode != nullptr) {
+        LOGW("wrapped_ywlogin_sendPhoneCode: forwarding original=%p type=%d scene=%d",
+             (void*)g_orig_ywlogin_sendPhoneCode, type, scene);
+        g_orig_ywlogin_sendPhoneCode(env, thiz, context, phone, type, scene, callback);
+        return;
+    }
+    notify_ywlogin_error(env, callback, "MultiApp send phone code native unavailable");
+    LOGE("wrapped_ywlogin_sendPhoneCode: original native not registered; reported callback error");
+}
+
+static void JNICALL wrapped_ywlogin_qrCodeV2(
+        JNIEnv* env,
+        jobject thiz,
+        jobject callback) {
+    if (g_orig_ywlogin_qrCodeV2 != nullptr) {
+        LOGW("wrapped_ywlogin_qrCodeV2: forwarding original=%p", (void*)g_orig_ywlogin_qrCodeV2);
+        g_orig_ywlogin_qrCodeV2(env, thiz, callback);
+        return;
+    }
+    notify_ywlogin_error(env, callback, "MultiApp QR login native unavailable");
+    LOGE("wrapped_ywlogin_qrCodeV2: original native not registered; reported callback error");
+}
+
+static void JNICALL stub_ywlogin_pwdLogin(
+        JNIEnv* env,
+        jobject thiz,
+        jobject activity,
+        jstring account,
+        jstring password,
+        jobject callback) {
+    wrapped_ywlogin_pwdLogin(env, thiz, activity, account, password, callback);
+}
+
+static void JNICALL stub_ywlogin_sendPhoneCode(
+        JNIEnv* env,
+        jobject thiz,
+        jobject context,
+        jstring phone,
+        jint type,
+        jint scene,
+        jobject callback) {
+    wrapped_ywlogin_sendPhoneCode(env, thiz, context, phone, type, scene, callback);
+}
+
+static void JNICALL stub_ywlogin_qrCodeV2(
+        JNIEnv* env,
+        jobject thiz,
+        jobject callback) {
+    wrapped_ywlogin_qrCodeV2(env, thiz, callback);
+}
+
 static void JNICALL stub_ywlogin_void(JNIEnv* env, jclass clazz) {
     // 通用 void stub
 }
@@ -3585,6 +3769,31 @@ static jstring JNICALL stub_easyencrypt_md5_key(JNIEnv* env, jclass clazz) {
     // This avoids the obsolete native registration name mismatch without
     // returning an empty key that breaks caller-side signatures.
     return env->NewStringUTF("51076a5fd0b1fd440c06277855f27311");
+}
+
+static jbyteArray JNICALL stub_easyencrypt_bytes_identity(JNIEnv* env, jclass clazz, jbyteArray data) {
+    (void)clazz;
+    if (data == nullptr) {
+        return nullptr;
+    }
+    jsize len = env->GetArrayLength(data);
+    jbyteArray out = env->NewByteArray(len);
+    if (out == nullptr) {
+        return nullptr;
+    }
+    if (len > 0) {
+        std::vector<jbyte> bytes((size_t)len);
+        env->GetByteArrayRegion(data, 0, len, bytes.data());
+        if (env->ExceptionCheck()) {
+            return nullptr;
+        }
+        env->SetByteArrayRegion(out, 0, len, bytes.data());
+        if (env->ExceptionCheck()) {
+            return nullptr;
+        }
+    }
+    LOGI("stub_easyencrypt_bytes_identity: len=%d", (int)len);
+    return out;
 }
 
 static jobject get_object_field(JNIEnv* env, jobject thiz, const char* name, const char* sig) {
@@ -4950,6 +5159,68 @@ static jobject read_online_search_via_reader_protocol(
     return result;
 }
 
+static bool materialize_mini_content_eqct(
+        JNIEnv* env,
+        jobject tag,
+        const std::string& bid,
+        jint cid,
+        const std::string& expectedEqctPath) {
+    if (bid.empty() || cid <= 0 || expectedEqctPath.empty()) {
+        LOGW("stub_online_run: mini materialize JNI skipped bid=%s cid=%d expectedEqct=%s",
+             bid.c_str(),
+             cid,
+             expectedEqctPath.c_str());
+        return false;
+    }
+    if (g_hook_classloader == nullptr) {
+        LOGW("stub_online_run: mini materialize JNI unavailable: no hook ClassLoader");
+        return false;
+    }
+    if (!ensure_classloader_loadclass(env)) {
+        LOGW("stub_online_run: mini materialize JNI unavailable: no ClassLoader.loadClass");
+        return false;
+    }
+
+    jstring helperName = env->NewStringUTF("com.multiapp.core.hook.QqReaderOnlineProtocolFallback");
+    jclass helperClass = helperName == nullptr ? nullptr :
+            (jclass)env->CallObjectMethod(g_hook_classloader, g_classloader_loadclass, helperName);
+    if (helperName != nullptr) env->DeleteLocalRef(helperName);
+    if (helperClass == nullptr) {
+        clear_logged_exception(env, "stub_online_run load mini materialize helper");
+        LOGW("stub_online_run: mini materialize helper class not found");
+        return false;
+    }
+
+    jmethodID materialize = env->GetStaticMethodID(
+            helperClass,
+            "materializeMiniContentEqct",
+            "(Ljava/lang/Object;Ljava/lang/String;ILjava/lang/String;)Z");
+    if (materialize == nullptr) {
+        clear_logged_exception(env, "stub_online_run mini materialize helper method");
+        env->DeleteLocalRef(helperClass);
+        return false;
+    }
+
+    jstring jBid = env->NewStringUTF(bid.c_str());
+    jstring jExpected = env->NewStringUTF(expectedEqctPath.c_str());
+    bool ok = false;
+    if (jBid != nullptr && jExpected != nullptr) {
+        ok = env->CallStaticBooleanMethod(helperClass, materialize, tag, jBid, cid, jExpected) == JNI_TRUE;
+    }
+    bool noException = !clear_logged_exception(env, "stub_online_run mini materialize helper call");
+    if (jBid != nullptr) env->DeleteLocalRef(jBid);
+    if (jExpected != nullptr) env->DeleteLocalRef(jExpected);
+    env->DeleteLocalRef(helperClass);
+
+    long long size = file_size_or_negative(expectedEqctPath);
+    LOGW("stub_online_run: mini materialize JNI result ok=%d noException=%d expectedEqct=%s size=%lld",
+         ok ? 1 : 0,
+         noException ? 1 : 0,
+         expectedEqctPath.c_str(),
+         size);
+    return ok && noException && size > 0;
+}
+
 static std::string replace_query_param_value(
         const std::string& url,
         const std::string& key,
@@ -5187,6 +5458,35 @@ static void JNICALL stub_online_run(JNIEnv* env, jobject thiz) {
              expectedEqctPath.c_str(),
              file_size_or_negative(expectedEqctPath));
     } else if (callbackResult != nullptr && callbackCode == 0) {
+        if (allowMaterialize && !hasUsableChapterFile && !expectedEqctPath.empty() && effectiveCid > 0) {
+            std::lock_guard<std::mutex> onlineLock(g_online_materialize_mutex);
+            materialized = materialize_mini_content_eqct(
+                    env,
+                    tag,
+                    !tagBookId.empty() ? tagBookId : bidStr,
+                    effectiveCid,
+                    expectedEqctPath);
+            hasUsableChapterFile = materialized && file_size_or_negative(expectedEqctPath) > 0;
+            if (hasUsableChapterFile && notify_online_download_success(env, thiz, callbackResult)) {
+                LOGW("stub_online_run: completed via mini materialized eqct resultCode=%d expectedEqct=%s size=%lld",
+                     callbackCode,
+                     expectedEqctPath.c_str(),
+                     file_size_or_negative(expectedEqctPath));
+                if (fetchedResult != nullptr) env->DeleteLocalRef(fetchedResult);
+                if (bid != nullptr) env->DeleteLocalRef(bid);
+                if (bookName != nullptr) env->DeleteLocalRef(bookName);
+                if (scene != nullptr) env->DeleteLocalRef(scene);
+                if (bookTaskId != nullptr) env->DeleteLocalRef(bookTaskId);
+                if (taskDownloadListener != nullptr) env->DeleteLocalRef(taskDownloadListener);
+                if (downloadListener != nullptr) env->DeleteLocalRef(downloadListener);
+                if (result != nullptr) env->DeleteLocalRef(result);
+                if (preloadResult != nullptr) env->DeleteLocalRef(preloadResult);
+                if (tag != nullptr) env->DeleteLocalRef(tag);
+                if (listener != nullptr) env->DeleteLocalRef(listener);
+                if (chapters != nullptr) env->DeleteLocalRef(chapters);
+                return;
+            }
+        }
         LOGW("stub_online_run: ReadOnlineResult success but no usable chapter file allow=%d materialized=%d hasUsable=%d expectedEqct=%s expectedEqctSize=%lld fallbackAll=%s; dispatching failed",
              allowMaterialize ? 1 : 0,
              materialized ? 1 : 0,
@@ -5767,10 +6067,23 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
         void* fnPtr;
     };
 
-    StubEntry stubs[] = {
+    auto ywlogin_action_fallback_enabled = []() -> bool {
+        char value[PROP_VALUE_MAX] = {0};
+        int len = __system_property_get("debug.multiapp.ywlogin.action_fallback", value);
+        if (len <= 0) return false;
+        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0;
+    };
+    auto ywlogin_qrcode_fallback_enabled = []() -> bool {
+        char value[PROP_VALUE_MAX] = {0};
+        int len = __system_property_get("debug.multiapp.ywlogin.qrcode_fallback", value);
+        if (len <= 0) return true;
+        return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0;
+    };
+
+    std::vector<StubEntry> stubs = {
         // Minimal login entry shims. Without these, ReaderApplication crashes
-        // in initLoginSDK before the main UI is created. Keep the rest of
-        // YWLoginManager untouched; blanket stubbing breaks content APIs.
+        // in initLoginSDK before the main UI is created. Keep login actions
+        // untouched so the real YWLogin SDK can RegisterNatives later.
         {"com.yuewen.ywlogin.login.YWLoginManager", "getInstance",
          "()Lcom/yuewen/ywlogin/login/YWLoginManager;", (void*)stub_ywlogin_getInstance},
         {"com.yuewen.ywlogin.login.YWLoginManager", "registerParameter",
@@ -5783,11 +6096,32 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
          "(Lcom/yuewen/ywlogin/callbacks/DefaultYWCallback;)V", (void*)stub_ywlogin_fetchSettings},
         {"com.qq.reader.common.utils.crypto.EasyEncrypt", "getMd5Key",
          "()Ljava/lang/String;", (void*)stub_easyencrypt_md5_key},
+        {"com.qq.reader.common.utils.crypto.EasyEncrypt", "decrypt",
+         "([B)[B", (void*)stub_easyencrypt_bytes_identity},
+        {"com.qq.reader.common.utils.crypto.EasyEncrypt", "encrypt",
+         "([B)[B", (void*)stub_easyencrypt_bytes_identity},
         // Keep Fock payload signing/encryption untouched. Faking those avoids
         // crashes but causes bookcity responses to fail.
         // libfock.so JNI_OnLoad 返回 -1 → 函数指针表为空 → 调用即 SIGSEGV
         // 注册多种签名（反射无法确定确切签名），全部返回空字符串
     };
+
+    if (ywlogin_action_fallback_enabled()) {
+        stubs.push_back({"com.yuewen.ywlogin.login.YWLoginManager", "pwdLogin",
+                         "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Lcom/yuewen/ywlogin/login/YWCallBack;)V", (void*)wrapped_ywlogin_pwdLogin});
+        stubs.push_back({"com.yuewen.ywlogin.login.YWLoginManager", "sendPhoneCode",
+                         "(Landroid/content/Context;Ljava/lang/String;IILcom/yuewen/ywlogin/login/YWCallBack;)V", (void*)wrapped_ywlogin_sendPhoneCode});
+        LOGW("nativeRegisterBusinessStubs: YWLoginManager action fallback enabled by debug.multiapp.ywlogin.action_fallback");
+    } else {
+        LOGI("nativeRegisterBusinessStubs: YWLoginManager action fallback disabled; waiting for real SDK RegisterNatives");
+    }
+    if (ywlogin_qrcode_fallback_enabled()) {
+        stubs.push_back({"com.yuewen.ywlogin.login.YWLoginManager", "qrCodeV2",
+                         "(Lcom/yuewen/ywlogin/callbacks/DefaultYWCallback;)V", (void*)wrapped_ywlogin_qrCodeV2});
+        LOGW("nativeRegisterBusinessStubs: YWLoginManager qrCodeV2 fallback enabled");
+    } else {
+        LOGI("nativeRegisterBusinessStubs: YWLoginManager qrCodeV2 fallback disabled");
+    }
 
     int registered = 0;
     int failed = 0;
@@ -5827,11 +6161,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownloadFallbackStubs(
+Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterStateStubs(
     JNIEnv* env, jclass clazz, jobject classLoader)
 {
+    (void)clazz;
     if (classLoader == nullptr) return JNI_FALSE;
-    remember_hook_classloader(env, clazz);
 
     if (!ensure_classloader_loadclass(env)) {
         return JNI_FALSE;
@@ -5842,6 +6176,79 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownload
     env->DeleteLocalRef(name);
     if (targetClass == nullptr) {
         if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeRegisterOnlineChapterStateStubs: class not found");
+        return JNI_FALSE;
+    }
+
+    JNINativeMethod methods[] = {
+        {const_cast<char*>("getDownloadChap"),
+         const_cast<char*>("()Ljava/util/ArrayList;"), (void*)stub_online_getDownloadChap},
+        {const_cast<char*>("getDownloadChapters"),
+         const_cast<char*>("()Ljava/util/HashSet;"), (void*)stub_online_getDownloadChapters},
+        {const_cast<char*>("setToDownloadChapters"),
+         const_cast<char*>("(Ljava/util/List;)V"), (void*)stub_online_setToDownloadChapters},
+        {const_cast<char*>("isBackgroundRun"),
+         const_cast<char*>("()Z"), (void*)stub_online_isBackgroundRun},
+        {const_cast<char*>("setBackgroundRun"),
+         const_cast<char*>("(Z)V"), (void*)stub_online_setBackgroundRun},
+        {const_cast<char*>("hasRetryTag"),
+         const_cast<char*>("()Z"), (void*)stub_online_hasRetryTag},
+        {const_cast<char*>("setRetryTag"),
+         const_cast<char*>("()V"), (void*)stub_online_setRetryTag},
+        {const_cast<char*>("getScene"),
+         const_cast<char*>("()Ljava/lang/String;"), (void*)stub_online_getScene},
+        {const_cast<char*>("setScene"),
+         const_cast<char*>("(Ljava/lang/String;)V"), (void*)stub_online_setScene},
+    };
+
+    jint result = env->RegisterNatives(targetClass, methods, (jint)(sizeof(methods) / sizeof(methods[0])));
+    if (result != JNI_OK) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeRegisterOnlineChapterStateStubs: RegisterNatives failed code=%d", result);
+        env->DeleteLocalRef(targetClass);
+        return JNI_FALSE;
+    }
+
+    env->DeleteLocalRef(targetClass);
+    LOGI("nativeRegisterOnlineChapterStateStubs: registered %d methods", (int)(sizeof(methods) / sizeof(methods[0])));
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownloadFallbackStubs(
+    JNIEnv* env, jclass clazz, jobject classLoader)
+{
+    (void)clazz;
+    if (classLoader == nullptr) return JNI_FALSE;
+
+    jclass clClass = env->FindClass("java/lang/ClassLoader");
+    if (clClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeRegisterOnlineChapterDownloadFallbackStubs: ClassLoader class not found");
+        return JNI_FALSE;
+    }
+    jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    env->DeleteLocalRef(clClass);
+    if (loadClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeRegisterOnlineChapterDownloadFallbackStubs: ClassLoader.loadClass not found");
+        return JNI_FALSE;
+    }
+
+    jstring name = env->NewStringUTF("com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask");
+    if (name == nullptr) {
+        LOGW("nativeRegisterOnlineChapterDownloadFallbackStubs: NewStringUTF class name failed");
+        return JNI_FALSE;
+    }
+    LOGI("nativeRegisterOnlineChapterDownloadFallbackStubs: loading OnlineChapterDownloadTask");
+    jclass targetClass = (jclass)env->CallObjectMethod(classLoader, loadClass, name);
+    env->DeleteLocalRef(name);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("nativeRegisterOnlineChapterDownloadFallbackStubs: loadClass threw");
+        return JNI_FALSE;
+    }
+    if (targetClass == nullptr) {
         LOGW("nativeRegisterOnlineChapterDownloadFallbackStubs: class not found");
         return JNI_FALSE;
     }
@@ -5877,6 +6284,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownload
          const_cast<char*>("(Ljava/lang/String;)Ljava/io/File;"), (void*)stub_online_downloadChapterFile},
     };
 
+    LOGI("nativeRegisterOnlineChapterDownloadFallbackStubs: registering state/listener/url stubs");
     jint result = env->RegisterNatives(targetClass, methods, (jint)(sizeof(methods) / sizeof(methods[0])));
     if (result != JNI_OK) {
         if (env->ExceptionCheck()) env->ExceptionClear();
@@ -5887,6 +6295,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterOnlineChapterDownload
 
     int registered = (int)(sizeof(methods) / sizeof(methods[0]));
     if (online_run_fallback_enabled()) {
+        LOGI("nativeRegisterOnlineChapterDownloadFallbackStubs: registering run fallback");
         JNINativeMethod runMethod = {
             const_cast<char*>("run"),
             const_cast<char*>("()V"),
@@ -6631,6 +7040,106 @@ static bool g_lsplant_initialized = false;
 // ShadowHook stub 跟踪（用于 unhook）
 static std::unordered_map<void*, void*> g_lsplant_hook_stubs;
 static std::shared_mutex g_lsplant_stub_mutex;
+static std::unordered_map<jmethodID, std::string> g_method_shorty_cache;
+static std::mutex g_method_shorty_mutex;
+
+static char class_to_shorty_char(JNIEnv* env, jobject class_obj, bool is_return_type) {
+    if (class_obj == nullptr) return is_return_type ? 'V' : 'L';
+    jclass classClass = env->FindClass("java/lang/Class");
+    if (classClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return is_return_type ? 'V' : 'L';
+    }
+    jmethodID getName = env->GetMethodID(classClass, "getName", "()Ljava/lang/String;");
+    if (getName == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(classClass);
+        return is_return_type ? 'V' : 'L';
+    }
+    jstring nameObj = static_cast<jstring>(env->CallObjectMethod(class_obj, getName));
+    if (env->ExceptionCheck() || nameObj == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(classClass);
+        return is_return_type ? 'V' : 'L';
+    }
+    const char* name = env->GetStringUTFChars(nameObj, nullptr);
+    char result = 'L';
+    if (name != nullptr) {
+        if (strcmp(name, "void") == 0) result = 'V';
+        else if (strcmp(name, "boolean") == 0) result = 'Z';
+        else if (strcmp(name, "byte") == 0) result = 'B';
+        else if (strcmp(name, "char") == 0) result = 'C';
+        else if (strcmp(name, "short") == 0) result = 'S';
+        else if (strcmp(name, "int") == 0) result = 'I';
+        else if (strcmp(name, "long") == 0) result = 'J';
+        else if (strcmp(name, "float") == 0) result = 'F';
+        else if (strcmp(name, "double") == 0) result = 'D';
+        env->ReleaseStringUTFChars(nameObj, name);
+    }
+    env->DeleteLocalRef(nameObj);
+    env->DeleteLocalRef(classClass);
+    return result;
+}
+
+static std::string build_shorty_for_reflected_executable(JNIEnv* env, jobject method_obj) {
+    if (method_obj == nullptr) return "V";
+    std::string shorty;
+    jclass methodClass = env->FindClass("java/lang/reflect/Method");
+    bool isMethod = methodClass != nullptr && env->IsInstanceOf(method_obj, methodClass);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (isMethod) {
+        jmethodID getReturnType = env->GetMethodID(methodClass, "getReturnType", "()Ljava/lang/Class;");
+        jobject returnType = getReturnType != nullptr ? env->CallObjectMethod(method_obj, getReturnType) : nullptr;
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        shorty.push_back(class_to_shorty_char(env, returnType, true));
+        if (returnType != nullptr) env->DeleteLocalRef(returnType);
+    } else {
+        shorty.push_back('V');
+    }
+    if (methodClass != nullptr) env->DeleteLocalRef(methodClass);
+    jclass executableClass = env->FindClass("java/lang/reflect/Executable");
+    jmethodID getParameterTypes = executableClass != nullptr ? env->GetMethodID(executableClass, "getParameterTypes", "()[Ljava/lang/Class;") : nullptr;
+    jobjectArray params = getParameterTypes != nullptr ? static_cast<jobjectArray>(env->CallObjectMethod(method_obj, getParameterTypes)) : nullptr;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (params != nullptr) {
+        jsize count = env->GetArrayLength(params);
+        for (jsize i = 0; i < count; ++i) {
+            jobject param = env->GetObjectArrayElement(params, i);
+            shorty.push_back(class_to_shorty_char(env, param, false));
+            if (param != nullptr) env->DeleteLocalRef(param);
+        }
+        env->DeleteLocalRef(params);
+    }
+    if (executableClass != nullptr) env->DeleteLocalRef(executableClass);
+    return shorty.empty() ? std::string("V") : shorty;
+}
+
+static void cache_reflected_method_shorty(JNIEnv* env, jobject method_obj, const char* label) {
+    if (method_obj == nullptr) return;
+    jmethodID mid = env->FromReflectedMethod(method_obj);
+    if (mid == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("GetMethodShorty fallback: FromReflectedMethod failed for %s", label ? label : "method");
+        return;
+    }
+    std::string shorty = build_shorty_for_reflected_executable(env, method_obj);
+    {
+        std::lock_guard<std::mutex> lock(g_method_shorty_mutex);
+        g_method_shorty_cache[mid] = shorty;
+    }
+    LOGI("GetMethodShorty fallback: cached %s mid=%p shorty=%s", label ? label : "method", mid, shorty.c_str());
+}
+
+static const char* multiapp_get_method_shorty(JNIEnv* env, jmethodID mid) {
+    (void)env;
+    std::lock_guard<std::mutex> lock(g_method_shorty_mutex);
+    auto it = g_method_shorty_cache.find(mid);
+    if (it != g_method_shorty_cache.end()) {
+        return it->second.c_str();
+    }
+    LOGW("GetMethodShorty fallback: cache miss mid=%p", mid);
+    return "V";
+}
 
 /**
  * 初始化 LSPlant：dlopen + dlsym + InitInfo 配置
@@ -6646,6 +7155,11 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInitLsplant(
     }
 
     LOGI("nativeInitLsplant: starting LSPlant initialization...");
+
+    if (!init_shadowhook_for_runtime("nativeInitLsplant")) {
+        LOGE("nativeInitLsplant: shadowhook backend unavailable");
+        return JNI_FALSE;
+    }
 
     // Enable bypass so hooked_dlopen allows lsplant loading
     g_lsplant_dlopen_bypass = true;
@@ -6877,13 +7391,15 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeHookMethod(
     }
 
     // 调用 lsplant::Hook(env, targetMethod, hookerObject, callbackMethod)
+    cache_reflected_method_shorty(env, targetMethod, "target");
+    cache_reflected_method_shorty(env, callbackMethodObj, "callback");
+
     jobject backup = g_lsplant_hook(env, targetMethod, hookerObject, callbackMethodObj);
 
     env->DeleteLocalRef(hookerClass);
     env->DeleteLocalRef(callbackMethodObj);
 
     if (backup != nullptr) {
-        env->DeleteLocalRef(backup);
         LOGI("nativeHookMethod: hook succeeded");
         return JNI_TRUE;
     } else {
@@ -6921,15 +7437,16 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeHookMethodWithBackup(
         env->DeleteLocalRef(hookerClass);
         return nullptr;
     }
+    cache_reflected_method_shorty(env, targetMethod, "target");
+    cache_reflected_method_shorty(env, callbackMethodObj, "callback");
+
     jobject backup = g_lsplant_hook(env, targetMethod, hookerObject, callbackMethodObj);
     env->DeleteLocalRef(hookerClass);
     env->DeleteLocalRef(callbackMethodObj);
 
     if (backup != nullptr) {
-        jobject globalBackup = env->NewGlobalRef(backup);
-        env->DeleteLocalRef(backup);
-        LOGI("nativeHookMethodWithBackup: success, backup=%p", globalBackup);
-        return globalBackup;
+        LOGI("nativeHookMethodWithBackup: success, backup=%p", backup);
+        return backup;
     }
     LOGE("nativeHookMethodWithBackup: lsplant::Hook returned null");
     return nullptr;
@@ -6960,6 +7477,21 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDeoptimizeMethod(
     (void)clazz;
     if (!g_lsplant_initialized || g_lsplant_deoptimize == nullptr) return JNI_FALSE;
     return g_lsplant_deoptimize(env, method) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved)
+{
+    (void)reserved;
+    JNIEnv* env = nullptr;
+    if (vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6) != JNI_OK || env == nullptr) {
+        LOGE("JNI_OnLoad: GetEnv failed");
+        return JNI_ERR;
+    }
+
+    LOGI("JNI_OnLoad: early LSPlant init begin");
+    jboolean ok = Java_com_multiapp_core_hook_NativeHookBridge_nativeInitLsplant(env, nullptr, nullptr);
+    LOGI("JNI_OnLoad: early LSPlant init result=%d", ok == JNI_TRUE ? 1 : 0);
+    return JNI_VERSION_1_6;
 }
 
 } // extern "C"

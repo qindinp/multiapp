@@ -16,6 +16,7 @@ import java.lang.reflect.Modifier
  */
 class SimpleHooker(
     private val method: Executable,
+    private val swallowCallbackExceptions: Boolean = true,
     private val handler: (Array<Any?>) -> Any?
 ) {
     private val isStatic = Modifier.isStatic(method.modifiers)
@@ -34,14 +35,18 @@ class SimpleHooker(
         val receiver = if (isStatic) null else args.firstOrNull()
         val methodArgs = if (isStatic) args else args.drop(1).toTypedArray()
 
-        return if (backupMethod is java.lang.reflect.Method) {
-            backupMethod.invoke(receiver, *methodArgs)
-        } else if (backupMethod is java.lang.reflect.Constructor<*>) {
-            backupMethod.newInstance(*methodArgs)
-        } else {
-            throw IllegalStateException(
-                "Unsupported backup type: ${backupMethod?.javaClass?.name}"
-            )
+        return try {
+            if (backupMethod is java.lang.reflect.Method) {
+                backupMethod.invoke(receiver, *methodArgs)
+            } else if (backupMethod is java.lang.reflect.Constructor<*>) {
+                backupMethod.newInstance(*methodArgs)
+            } else {
+                throw IllegalStateException(
+                    "Unsupported backup type: ${backupMethod?.javaClass?.name}"
+                )
+            }
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            throw e.targetException ?: e
         }
     }
 
@@ -58,7 +63,11 @@ class SimpleHooker(
             handler(args)
         } catch (e: Throwable) {
             android.util.Log.e("SimpleHooker", "callback error for ${method.name}: ${e.message}", e)
-            getDefaultValue(returnType)
+            if (swallowCallbackExceptions) {
+                getDefaultValue(returnType)
+            } else {
+                throw e
+            }
         }
     }
 

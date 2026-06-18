@@ -432,7 +432,7 @@ class BinaryXmlEncoder {
         if (applicationThemeId != 0) {
             attrs.add(XmlAttr(ANDROID_NS_URI, "theme", "", typedValue = applicationThemeId, dataType = TYPE_REFERENCE))
         }
-        attrs.add(XmlAttr(ANDROID_NS_URI, "label", config.stubPackageName))
+        attrs.add(XmlAttr(ANDROID_NS_URI, "label", config.appLabel))
         attrs.add(XmlAttr(ANDROID_NS_URI, "extractNativeLibs", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN))
         attrs.add(XmlAttr(ANDROID_NS_URI, "debuggable", "true", typedValue = -1, dataType = TYPE_INT_BOOLEAN))
         return attrs

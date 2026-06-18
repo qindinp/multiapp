@@ -10,7 +10,7 @@ import javax.inject.Singleton
 /**
  * Room 数据库 — 持久化实例信息
  */
-@Database(entities = [InstanceEntity::class], version = 2, exportSchema = true)
+@Database(entities = [InstanceEntity::class], version = 3, exportSchema = true)
 abstract class InstanceDatabase : RoomDatabase() {
     abstract fun instanceDao(): InstanceDao
 
@@ -19,6 +19,14 @@ abstract class InstanceDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // 预留: 下次 schema 变更时在此添加 ALTER TABLE 语句
                 // db.execSQL("ALTER TABLE instances ADD COLUMN new_column TEXT")
+            }
+        }
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE instances ADD COLUMN appName TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE instances ADD COLUMN cloneProfile TEXT NOT NULL DEFAULT 'NORMAL'")
+                db.execSQL("ALTER TABLE instances ADD COLUMN lastLaunchState TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE instances ADD COLUMN lastError TEXT NOT NULL DEFAULT ''")
             }
         }
     }
@@ -31,7 +39,11 @@ data class InstanceEntity(
     val stubPackageName: String,
     val identityJson: String,
     val createdAt: Long,
-    val status: String
+    val status: String,
+    val appName: String = "",
+    val cloneProfile: String = "NORMAL",
+    val lastLaunchState: String = "",
+    val lastError: String = ""
 )
 
 @Dao

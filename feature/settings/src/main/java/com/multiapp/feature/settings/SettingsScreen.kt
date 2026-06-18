@@ -29,9 +29,8 @@ import com.multiapp.core.common.formatBytes
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(
-    viewModel: SettingsViewModel = hiltViewModel()
-) {
+fun SettingsScreen() {
+    val viewModel: SettingsViewModel = hiltViewModel()
     val uiState by viewModel.uiState.collectAsState()
 
     Scaffold(

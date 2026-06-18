@@ -40,7 +40,7 @@ object AppModule {
             context,
             InstanceDatabase::class.java,
             "multiapp_instances.db"
-        ).addMigrations(InstanceDatabase.MIGRATION_1_2)
+        ).addMigrations(InstanceDatabase.MIGRATION_1_2, InstanceDatabase.MIGRATION_2_3)
          .build()
     }
 }

@@ -98,9 +98,34 @@ object ActivityThemeCompat {
             } else {
                 val appInfo = activity.applicationInfo
                 if (appInfo != null && appInfo.theme == 0) {
-                    appInfo.theme = android.R.style.Theme_Material_Light_NoActionBar
-                    Log.d(TAG, "Activity theme fallback: $className -> Theme_Material_Light_NoActionBar")
-                    android.R.style.Theme_Material_Light_NoActionBar
+                    // 优先尝试 AppCompat 主题（解决 AppCompatActivity 要求 Theme.AppCompat 的问题）
+                    val appCompatTheme = resolveAppCompatTheme(activity, guestPackageName, stubPackageName)
+                    if (appCompatTheme != 0) {
+                        appInfo.theme = appCompatTheme
+                        activity.setTheme(appCompatTheme)
+                        replaceFieldIfPresent(activity, "mThemeResource", appCompatTheme)
+                        Log.d(TAG, "Activity theme fallback (AppCompat): $className -> 0x${Integer.toHexString(appCompatTheme)}")
+                        appCompatTheme
+                    } else if (isAppCompatActivity(activity)) {
+                        // Activity 继承 AppCompatActivity 但找不到 AppCompat 主题时，尝试从宿主 APK 加载
+                        val hostAppCompatTheme = resolveAppCompatThemeFromHost(activity)
+                        if (hostAppCompatTheme != 0) {
+                            appInfo.theme = hostAppCompatTheme
+                            activity.setTheme(hostAppCompatTheme)
+                            replaceFieldIfPresent(activity, "mThemeResource", hostAppCompatTheme)
+                            Log.d(TAG, "Activity theme fallback (host AppCompat): $className -> 0x${Integer.toHexString(hostAppCompatTheme)}")
+                            hostAppCompatTheme
+                        } else {
+                            // 最终 fallback：使用 Material 主题，但记录警告
+                            appInfo.theme = android.R.style.Theme_Material_Light_NoActionBar
+                            Log.w(TAG, "Activity theme fallback (Material, but activity is AppCompat!): $className")
+                            android.R.style.Theme_Material_Light_NoActionBar
+                        }
+                    } else {
+                        appInfo.theme = android.R.style.Theme_Material_Light_NoActionBar
+                        Log.d(TAG, "Activity theme fallback (Material): $className -> Theme_Material_Light_NoActionBar")
+                        android.R.style.Theme_Material_Light_NoActionBar
+                    }
                 } else {
                     Log.w(TAG, "Activity theme is 0 for $className")
                     0
@@ -392,5 +417,80 @@ object ActivityThemeCompat {
 
     private fun shouldUseActivityAsInflaterContext(activity: android.app.Activity): Boolean {
         return activity.javaClass.name == "com.qq.reader.activity.ReaderPageActivity"
+    }
+
+    /**
+     * 从 Activity context 的资源中解析 AppCompat 主题。
+     */
+    private fun resolveAppCompatTheme(
+        activity: android.app.Activity,
+        guestPkg: String?,
+        stubPkg: String?
+    ): Int {
+        val res = activity.resources
+        val candidates = listOf(
+            "Theme.AppCompat.Light.NoActionBar",
+            "Theme.AppCompat.DayNight.NoActionBar",
+            "Theme.AppCompat.NoActionBar",
+            "Theme.AppCompat.Light.DarkActionBar",
+            "Theme.AppCompat.Light",
+            "Theme.AppCompat",
+        )
+        for (name in candidates) {
+            for (pkg in listOfNotNull(guestPkg, stubPkg)) {
+                try {
+                    val id = res.getIdentifier(name, "style", pkg)
+                    if (id != 0) return id
+                } catch (_: Throwable) { }
+            }
+        }
+        return 0
+    }
+
+    /**
+     * 检查 Activity 是否继承自 AppCompatActivity。
+     */
+    private fun isAppCompatActivity(activity: android.app.Activity): Boolean {
+        var clazz: Class<*>? = activity.javaClass
+        while (clazz != null) {
+            if (clazz.name == "androidx.appcompat.app.AppCompatActivity" ||
+                clazz.name == "androidx.appcompat.app.AppCompatActivity" ||
+                clazz.name.contains("AppCompatActivity")) {
+                return true
+            }
+            clazz = clazz.superclass
+        }
+        return false
+    }
+
+    /**
+     * 从宿主 APK（multiapp 自身）的资源中解析 AppCompat 主题。
+     * 当 guest/stub 包中找不到 AppCompat 主题时使用。
+     */
+    private fun resolveAppCompatThemeFromHost(activity: android.app.Activity): Int {
+        val candidates = listOf(
+            "Theme_AppCompat_Light_NoActionBar",
+            "Theme_AppCompat_DayNight_NoActionBar",
+            "Theme_AppCompat_Light",
+        )
+        // 尝试从宿主 APK 的资源中查找
+        for (name in candidates) {
+            try {
+                val id = activity.resources.getIdentifier(name, "style", "com.multiapp.app")
+                if (id != 0) return id
+            } catch (_: Throwable) { }
+        }
+        // 尝试从 androidx.appcompat 包中查找
+        try {
+            val appCompatR = Class.forName("androidx.appcompat.R\$style")
+            for (name in candidates) {
+                try {
+                    val field = appCompatR.getField(name)
+                    val id = field.getInt(null)
+                    if (id != 0) return id
+                } catch (_: Throwable) { }
+            }
+        } catch (_: Throwable) { }
+        return 0
     }
 }

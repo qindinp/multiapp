@@ -10,6 +10,7 @@ import com.android.apksig.ApkSigner
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.multiapp.core.common.ConfigEncryptor
+import com.multiapp.core.model.CloneProfile
 import timber.log.Timber
 import android.util.Log
 import java.io.File
@@ -123,7 +124,11 @@ class StubBuilder(
             // 配合 I/O 重定向欺骗壳的完整性校验
             val injectableApk = File(workDir, "origin_inject.apk")
             originApk.copyTo(injectableApk, overwrite = true)
-            injectPackerLibLoad(injectableApk)
+            if (config.cloneProfile != CloneProfile.NORMAL) {
+                injectPackerLibLoad(injectableApk, config.cloneProfile)
+            } else {
+                Log.w("StubBuilder", "profile=NORMAL: skip protected-app DEX/native patching")
+            }
             Log.w("StubBuilder", "injectableApk: ${injectableApk.length()} bytes")
 
             // 6. 组装 APK (含 patched DEX)
@@ -139,6 +144,7 @@ class StubBuilder(
                 originApk = injectableApk,
                 originalApk = originApk,  // 未修改的原始 APK（用于完整性校验重定向）
                 configFile = configFile,
+                config = config,
                 iconFile = iconFile,
                 patchedDexFiles = patchedDexFiles,
                 xposedModuleFiles = xposedModuleFiles,
@@ -345,6 +351,8 @@ class StubBuilder(
             "instanceId" to config.instanceId,
             "stubPackageName" to config.stubPackageName,
             "originalPackageName" to config.originalPackageName,
+            "cloneProfile" to config.cloneProfile.name,
+            "appLabel" to config.appLabel,
             "launchActivity" to config.launchActivity,
             "authorityMap" to config.authorityMap,
             "deviceIdentity" to mapOf(
@@ -419,6 +427,7 @@ class StubBuilder(
         originApk: File,
         originalApk: File? = null,
         configFile: File,
+        config: StubConfig,
         iconFile: File?,
         patchedDexFiles: List<File> = emptyList(),
         xposedModuleFiles: List<File> = emptyList(),
@@ -530,7 +539,7 @@ class StubBuilder(
             // lib/ native libraries — 从原始 APK 中提取并打包
             // loader.dex 依赖 libmultiapp-native.so（shadowhook PLT hook）
             // 必须打进 Stub APK 的 lib/ 目录，否则 native hook 全部失效
-            packageNativeLibs(originApk, zos)
+            packageNativeLibs(originApk, zos, config.cloneProfile)
         }
 
         Timber.d("StubBuilder: APK assembled, size=${outputFile.length()} bytes")
@@ -542,7 +551,7 @@ class StubBuilder(
      * loader.dex 依赖 libmultiapp-native.so（shadowhook PLT hook），
      * 必须打进 Stub APK 的 lib/ 目录。同时打包原始 APK 的 native libs。
      */
-    private fun packageNativeLibs(originApk: File, zos: ZipOutputStream) {
+    private fun packageNativeLibs(originApk: File, zos: ZipOutputStream, cloneProfile: CloneProfile) {
         // 打包所有可用 ABI 的 native libs, 避免目标设备 ABI 不匹配
         val writtenEntries = mutableSetOf<String>()
         var count = packageHookNativeLibs(zos, writtenEntries)
@@ -561,7 +570,8 @@ class StubBuilder(
                         var data = zip.getInputStream(entry).readBytes()
 
                         // Patch libjiagu_vip.so: JNI_OnLoad 的 return -1 改为 return 0
-                        if (entry.name.contains("libjiagu_vip.so") && !entry.name.contains("_x86")) {
+                        if (cloneProfile == CloneProfile.QQ_READER_SPECIAL &&
+                            entry.name.contains("libjiagu_vip.so") && !entry.name.contains("_x86")) {
                             data = patchJiaguLoad(data, entry.name)
                         }
 
@@ -1100,7 +1110,7 @@ class StubBuilder(
      *
      * 构建时注入确保 origin APK 提取后 DEX 已包含加载调用。
      */
-    private fun injectPackerLibLoad(originApk: File) {
+    private fun injectPackerLibLoad(originApk: File, cloneProfile: CloneProfile) {
         try {
             val workDir = File(originApk.parentFile, "dex_inject")
             workDir.mkdirs()
@@ -1146,11 +1156,13 @@ class StubBuilder(
             }
 
             var injected = false
-            for (className in packerClasses) {
-                if (patcher.injectLoadLibrary(dexFiles, className, "load", "jiagu_vip")) {
-                    Log.w("StubBuilder", "injectPackerLibLoad: injected into $className.load()")
-                    injected = true
-                    break
+            if (cloneProfile == CloneProfile.QQ_READER_SPECIAL) {
+                for (className in packerClasses) {
+                    if (patcher.injectLoadLibrary(dexFiles, className, "load", "jiagu_vip")) {
+                        Log.w("StubBuilder", "injectPackerLibLoad: injected into $className.load()")
+                        injected = true
+                        break
+                    }
                 }
             }
 
@@ -1160,6 +1172,10 @@ class StubBuilder(
 
             // 中和不需要的初始化方法
             try {
+                if (cloneProfile != CloneProfile.QQ_READER_SPECIAL) {
+                    Log.w("StubBuilder", "injectPackerLibLoad: skip QQ Reader neutralizers for $cloneProfile")
+                    throw SkipNeutralizeException()
+                }
                 val targets = listOf(
                     "com.bytedance.android.dy.sdk.pangle.ZeusPlatformUtils->initZeus",
                     "com.qq.reader.ReaderApplication->initLoginSDK",
@@ -1177,6 +1193,8 @@ class StubBuilder(
                 Log.w("StubBuilder", "injectPackerLibLoad: neutralize targets: $targets")
                 val neutralized = patcher.neutralizeMethods(dexFiles, targets)
                 Log.w("StubBuilder", "injectPackerLibLoad: neutralized $neutralized methods")
+            } catch (e: SkipNeutralizeException) {
+                // Expected for non-QQ Reader protected profiles.
             } catch (e: Throwable) {
                 Log.w("StubBuilder", "injectPackerLibLoad: neutralize failed: ${e.message}")
             }
@@ -1210,6 +1228,8 @@ class StubBuilder(
             Log.w("StubBuilder", "injectPackerLibLoad failed: ${e.message}")
         }
     }
+
+    private class SkipNeutralizeException : RuntimeException()
 
     /**
      * 获取 LoaderFactory DEX

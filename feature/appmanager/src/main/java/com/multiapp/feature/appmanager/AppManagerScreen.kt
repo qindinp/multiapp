@@ -41,9 +41,8 @@ import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppManagerScreen(
-    viewModel: AppManagerViewModel = hiltViewModel()
-) {
+fun AppManagerScreen() {
+    val viewModel: AppManagerViewModel = hiltViewModel()
     val uiState by viewModel.uiState.collectAsState()
     var showDetailDialog by remember { mutableStateOf<InstanceInfo?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }

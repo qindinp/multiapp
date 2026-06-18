@@ -1188,7 +1188,7 @@ class LoaderFactory : AppComponentFactory() {
             null
         }
         logD("  PackerRuntimeDispatcher result: jiaguLoaded=${packerResult?.jiaguLoaded}, stubLoad=${packerResult?.stubAppLoadSucceeded}")
-        installAppSpecificPostLoadHooks(realGuestClassLoader, packerResult, appInfo.dataDir)
+        installAppSpecificPostLoadHooks(realGuestClassLoader, packerResult, appInfo.dataDir, config)
 
         // Stage 2: after the packer bootstrap, load business SDK libraries
         // through ART nativeLoad with guest ClassLoader ownership. This keeps
@@ -1198,17 +1198,27 @@ class LoaderFactory : AppComponentFactory() {
         if (!onlineChapterNativeBound) {
             logW("  Stage2 OnlineChapterDownloadTask.run not bound")
         }
-        if (isTruthyProperty("debug.multiapp.online.state_fallback", true)) {
-            logW("  Installing OnlineChapterDownloadTask background-state fallback stubs")
+        if (isQqReaderProfile(config)) {
+            logW("  Installing OnlineChapterDownloadTask minimal state stubs")
+            try {
+                val stateRegistered =
+                    NativeHookBridge.getInstance().registerOnlineChapterStateStubs(realGuestClassLoader)
+                logD("  Stage2 online chapter state stubs registered: $stateRegistered")
+            } catch (e: Throwable) {
+                logW("  Stage2 online chapter state stub registration failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+        if (isQqReaderProfile(config) && isTruthyProperty("debug.multiapp.online.state_fallback", true)) {
+            logW("  Installing OnlineChapterDownloadTask full fallback stubs")
             try {
                 val fallbackRegistered =
                     NativeHookBridge.getInstance().registerOnlineChapterDownloadFallbackStubs(realGuestClassLoader)
-                logD("  Stage2 online chapter fallback stubs registered: $fallbackRegistered")
+                logD("  Stage2 online chapter full fallback stubs registered: $fallbackRegistered")
             } catch (e: Throwable) {
-                logW("  Stage2 online chapter fallback registration failed: ${e.javaClass.simpleName}: ${e.message}")
+                logW("  Stage2 online chapter full fallback registration failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         } else {
-            logD("  Stage2 online chapter fallback stubs disabled; preserving shell native bindings")
+            logD("  Stage2 online chapter full fallback stubs disabled; preserving shell native bindings")
         }
 
         // 验证 LoadedApk.mApplicationInfo 与 mBound.appInfo 是同一引用
@@ -1655,8 +1665,13 @@ class LoaderFactory : AppComponentFactory() {
     private fun installAppSpecificPostLoadHooks(
         guestCl: ClassLoader,
         packerResult: com.multiapp.core.hook.PackerLoadResult?,
-        dataDir: String?
+        dataDir: String?,
+        config: PocConfig
     ) {
+        if (!isQqReaderProfile(config)) {
+            logD("  App-specific post-load hooks skipped for profile=${config.cloneProfile} pkg=${config.originalPkg}")
+            return
+        }
         val bridge = com.multiapp.core.hook.NativeHookBridge.getInstance()
         val hookEngine = com.multiapp.core.hook.HookEngine.getInstance()
         val lsplantOk = try { hookEngine.initLsplant(guestCl) } catch (_: Throwable) { false }
@@ -2421,6 +2436,7 @@ class LoaderFactory : AppComponentFactory() {
             className = "com.yuewen.ywlogin.login.YWLoginManager",
             methodName = "getInstance",
             libDir = libDir,
+            loadAllCandidates = true,
             preferredLibraries = listOf(
                 "libywlogin.so",
                 "libYWLogin.so",
@@ -2462,7 +2478,8 @@ class LoaderFactory : AppComponentFactory() {
         className: String,
         methodName: String,
         libDir: File,
-        preferredLibraries: List<String>
+        preferredLibraries: List<String>,
+        loadAllCandidates: Boolean = false
     ): Boolean {
         val callerClass = try {
             Class.forName(className, false, classLoader)
@@ -2509,7 +2526,8 @@ class LoaderFactory : AppComponentFactory() {
                 callerClass = callerClass,
                 className = className,
                 methodName = methodName,
-                libs = candidates
+                libs = candidates,
+                loadAllCandidates = loadAllCandidates
             )
         ) {
             return true
@@ -2528,24 +2546,28 @@ class LoaderFactory : AppComponentFactory() {
         callerClass: Class<*>,
         className: String,
         methodName: String,
-        libs: List<File>
+        libs: List<File>,
+        loadAllCandidates: Boolean = false
     ): Boolean {
+        var bound = false
         for (lib in libs) {
             val ok = bridge.loadLibraryForGuest(lib.absolutePath, classLoader, callerClass)
             logD("  Stage2 nativeLoad ${lib.name}: $ok")
             if (ok && isNativeMethodBoundAfterSuccessfulLoad(callerClass, methodName, className, lib.name)) {
                 logD("  Stage2 native method bound after ${lib.name}: $className.$methodName")
-                return true
+                bound = true
+                if (!loadAllCandidates) return true
             }
 
             val helperOk = loadGuestLibraryViaInjectedHelper(classLoader, lib.name.removePrefix("lib").removeSuffix(".so"))
             logD("  Stage2 NativeLibLoader ${lib.name}: $helperOk")
             if (helperOk && isNativeMethodBound(callerClass, methodName)) {
                 logD("  Stage2 native method bound via NativeLibLoader after ${lib.name}: $className.$methodName")
-                return true
+                bound = true
+                if (!loadAllCandidates) return true
             }
         }
-        return false
+        return bound
     }
 
     private fun isNativeMethodBoundAfterSuccessfulLoad(
@@ -2639,7 +2661,12 @@ class LoaderFactory : AppComponentFactory() {
 
     private fun applyActivityThemeIfKnown(activity: android.app.Activity, className: String) {
         try {
-            val themeId = resolveActivityTheme(className)
+            val forceAppCompatTheme = needsQqReaderLoginAppCompatTheme(className)
+            val themeId = if (forceAppCompatTheme) {
+                findAppCompatThemeFromOrigin(className)
+            } else {
+                resolveActivityTheme(className)
+            }
             if (themeId != 0) {
                 // 设置 ApplicationInfo.theme，让框架在 attach 后自动应用
                 activity.setTheme(themeId)
@@ -2647,13 +2674,22 @@ class LoaderFactory : AppComponentFactory() {
                     appInfo.theme = themeId
                 }
                 replaceFieldIfPresent(activity, "mThemeResource", themeId)
-                logD("  Activity theme set early: $className -> 0x${Integer.toHexString(themeId)}")
+                logD("  Activity theme set early: $className -> 0x${Integer.toHexString(themeId)}, forceAppCompat=$forceAppCompatTheme")
             } else {
-                // ★ 兜底：用系统主题，避免 theme=0 导致 Resources$NotFoundException
+                // 兜底：优先从原始资源中查找 AppCompat 主题，避免
+                // "You need to use a Theme.AppCompat theme" 崩溃
                 val appInfo = activity.applicationInfo
                 if (appInfo != null && appInfo.theme == 0) {
-                    appInfo.theme = android.R.style.Theme_Material_Light_NoActionBar
-                    logD("  Activity theme fallback: $className -> Theme_Material_Light_NoActionBar")
+                    val appCompatThemeId = findAppCompatThemeFromOrigin(className)
+                    if (appCompatThemeId != 0) {
+                        appInfo.theme = appCompatThemeId
+                        activity.setTheme(appCompatThemeId)
+                        replaceFieldIfPresent(activity, "mThemeResource", appCompatThemeId)
+                        logD("  Activity theme fallback (AppCompat): $className -> 0x${Integer.toHexString(appCompatThemeId)}")
+                    } else {
+                        appInfo.theme = android.R.style.Theme_Material_Light_NoActionBar
+                        logD("  Activity theme fallback (Material): $className -> Theme_Material_Light_NoActionBar")
+                    }
                 } else {
                     logW("  Activity theme is 0 for $className")
                 }
@@ -2688,6 +2724,75 @@ class LoaderFactory : AppComponentFactory() {
                 // Try the next package identity.
             }
         }
+        return 0
+    }
+
+    /**
+     * 从原始 APK 资源中查找 AppCompat 主题。
+     * 尝试解析常见的 AppCompat 主题名称，返回第一个有效 ID。
+     */
+    private fun needsQqReaderLoginAppCompatTheme(className: String): Boolean {
+        if (guestPackageName != "com.qq.reader" && stubPackageName?.startsWith("com.qq.reader.") != true) {
+            return false
+        }
+        return className == "com.qq.reader.login.scanqrcode.ui.QRLoginScanQrCodeActivity" ||
+            className == "com.qq.reader.login.client.impl.QRLoginActivity" ||
+            className.startsWith("com.yuewen.ywlogin.") ||
+            className.startsWith("com.qq.reader.common.login.") ||
+            className.contains(".login.", ignoreCase = true)
+    }
+
+    private fun findAppCompatThemeFromOrigin(className: String? = null): Int {
+        val res = originResources ?: return 0
+        // 1. 先检查已有的 theme candidates 是否本身是 AppCompat 主题
+        // 2. 尝试通过名称解析常见 AppCompat 主题
+        val candidates = listOf(
+            "Theme.AppCompat.Light.NoActionBar",
+            "Theme.AppCompat.DayNight.NoActionBar",
+            "Theme.AppCompat.NoActionBar",
+            "Theme.AppCompat.Light.DarkActionBar",
+            "Theme.AppCompat.Light",
+            "Theme.AppCompat",
+            "Theme_AppCompat_Light_NoActionBar",
+            "Theme_AppCompat_DayNight_NoActionBar",
+            "Theme_AppCompat_NoActionBar",
+            "Theme_AppCompat_Light_DarkActionBar",
+            "Theme_AppCompat_Light",
+            "Theme_AppCompat",
+        )
+        for (name in candidates) {
+            try {
+                val id = res.getIdentifier(name, "style", guestPackageName ?: stubPackageName)
+                if (id != 0) {
+                    logD("  findAppCompatThemeFromOrigin: resolved '$name' for $className -> 0x${Integer.toHexString(id)}")
+                    return id
+                }
+            } catch (_: Throwable) { }
+        }
+        val loginThemeCandidates = listOf(
+            "com.qq.reader.common.login.view.PhoneLoginActivity",
+            "com.yuewen.ywlogin.ui.phone.PhoneAreaActivity",
+            "com.qq.reader.activity.WebBrowserForContents",
+            "com.qq.reader.activity.WebTransparentActivity",
+        )
+        for (candidate in loginThemeCandidates) {
+            val id = originActivityThemes[candidate] ?: 0
+            if (id != 0) {
+                logD("  findAppCompatThemeFromOrigin: using login activity theme $candidate for $className -> 0x${Integer.toHexString(id)}")
+                return id
+            }
+        }
+        for ((cls, tid) in originActivityThemes) {
+            if (tid != 0 && cls.contains("login", ignoreCase = true)) {
+                logD("  findAppCompatThemeFromOrigin: using login-like theme $cls for $className -> 0x${Integer.toHexString(tid)}")
+                return tid
+            }
+        }
+        if (originApplicationThemeId != 0) {
+            logD("  findAppCompatThemeFromOrigin: fallback originApplicationThemeId for $className -> 0x${Integer.toHexString(originApplicationThemeId)}")
+            return originApplicationThemeId
+        }
+        logD("  findAppCompatThemeFromOrigin: no AppCompat theme found")
         return 0
     }
 
@@ -2847,8 +2952,12 @@ class LoaderFactory : AppComponentFactory() {
                 patchResourceObjectGraph(wrappedContext.resources, resources, "wrappedContext.resources")
             }
 
-            val themeId = originActivityThemes[activity.javaClass.name]
-                ?: originApplicationThemeId
+            val className = activity.javaClass.name
+            val themeId = if (needsQqReaderLoginAppCompatTheme(className)) {
+                findAppCompatThemeFromOrigin(className)
+            } else {
+                originActivityThemes[className] ?: originApplicationThemeId
+            }
             applyOriginActivityTheme(activity, wrappedContext, themeId)
 
             val inflaterContext = if (shouldUseActivityAsInflaterContext(activity)) {
@@ -3154,8 +3263,10 @@ class LoaderFactory : AppComponentFactory() {
                 logE("stubPackageName not found in config JSON!")
                 throw IllegalStateException("stubPackageName not found in config")
             }
-            logD("  parsed: originalPkg=$originalPkg, stubPkg=$stubPkg")
-            return PocConfig(originalPkg = originalPkg, stubPkg = stubPkg)
+            val cloneProfile = json.regexFind("\"cloneProfile\"\\s*:\\s*\"([^\"]+)\"")
+                ?: if (originalPkg == "com.qq.reader") "QQ_READER_SPECIAL" else "NORMAL"
+            logD("  parsed: originalPkg=$originalPkg, stubPkg=$stubPkg, cloneProfile=$cloneProfile")
+            return PocConfig(originalPkg = originalPkg, stubPkg = stubPkg, cloneProfile = cloneProfile)
         }
     }
 
@@ -3870,8 +3981,13 @@ class LoaderFactory : AppComponentFactory() {
      */
     data class PocConfig(
         val originalPkg: String,
-        val stubPkg: String
+        val stubPkg: String,
+        val cloneProfile: String = "NORMAL"
     )
+
+    private fun isQqReaderProfile(config: PocConfig): Boolean {
+        return config.cloneProfile == "QQ_READER_SPECIAL" || config.originalPkg == "com.qq.reader"
+    }
 
     // ========================================================================
     // 签名伪装升级 — SignatureDisguiseManager

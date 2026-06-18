@@ -145,13 +145,15 @@ object PackerDetectionBypass {
             return
         }
 
-        val hooked = hookEngine.hookMethod(
+        val hooked = hookEngine.hookMethodPassThrough(
             method,
             beforeCallback = { _, args ->
-                val className = args.firstOrNull() as? String ?: return@hookMethod null
+                val className = args.firstOrNull() as? String ?: return@hookMethodPassThrough null
                 if (containsHookIndicator(className)) {
                     Timber.tag(TAG).d("Blocking Class.forName for: $className")
-                    throw ClassNotFoundException("Class not found: $className")
+                    return@hookMethodPassThrough args.copyOf().also {
+                        it[0] = blockedClassName(className)
+                    }
                 }
                 null // proceed with original args
             }
@@ -169,13 +171,15 @@ object PackerDetectionBypass {
             return
         }
 
-        val hooked = hookEngine.hookMethod(
+        val hooked = hookEngine.hookMethodPassThrough(
             method,
             beforeCallback = { _, args ->
-                val className = args.firstOrNull() as? String ?: return@hookMethod null
+                val className = args.firstOrNull() as? String ?: return@hookMethodPassThrough null
                 if (containsHookIndicator(className)) {
                     Timber.tag(TAG).d("Blocking ClassLoader.loadClass for: $className")
-                    throw ClassNotFoundException("Class not found: $className")
+                    return@hookMethodPassThrough args.copyOf().also {
+                        it[0] = blockedClassName(className)
+                    }
                 }
                 null
             }
@@ -186,6 +190,11 @@ object PackerDetectionBypass {
     private fun containsHookIndicator(className: String): Boolean {
         val lower = className.lowercase()
         return HOOK_INDICATORS.any { lower.contains(it) }
+    }
+
+    private fun blockedClassName(className: String): String {
+        val safe = className.replace(Regex("[^A-Za-z0-9_]"), "_")
+        return "com.multiapp.blocked.$safe"
     }
 
     // ---------------------------------------------------------------------------
