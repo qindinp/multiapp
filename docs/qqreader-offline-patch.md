@@ -3473,3 +3473,84 @@ Stage2 YWLogin login actions are not bound; pwdLogin/sendPhoneCode will fail unl
 - 如果下一包日志显示 `pwdLogin=missing sendPhoneCode=missing`，说明继续加载 `libywad-own.so/libnativekey.so/libapp.so/libentryexpro.so/libQmt.so` 仍没有恢复真实登录 native，不能再把 Stage2 `.so` 加载成功当成登录链路修复。
 - 如果日志显示 `pwdLogin=bound sendPhoneCode=bound`，再进入真实手机号登录测试，继续看服务端返回、风控参数、验证码和登录态写入。
 - `debug.multiapp.ywlogin.action_fallback=1` 仍只作为防闪退诊断开关；它不能作为“正常登录可用”的完成标准。
+
+### 2026-06-18 v194 手动登录日志结论
+
+提交：
+
+```text
+516e828 fix: add QQ Reader login binding diagnostics
+```
+
+手动登录抓取文件：
+
+```text
+.tmp\qqreader-login-manual-20260618-094100-logcat.txt
+.tmp\qqreader-login-manual-20260618-094100-crash.txt
+.tmp\qqreader-login-manual-20260618-094100-exit-info.txt
+```
+
+设备：
+
+```text
+192.168.2.119:37869
+```
+
+分身包：
+
+```text
+com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+```
+
+关键证据：
+
+```text
+Stage2 YWLoginManager.getInstance preload result=true
+Stage2 YWLogin native binding report: pwdLogin=missing ptr=0x0 sendPhoneCode=missing ptr=0x0 qrCodeV2=missing ptr=0x0
+Stage2 YWLogin login actions are not bound; pwdLogin/sendPhoneCode will fail unless debug.multiapp.ywlogin.action_fallback=1
+```
+
+同一轮手动测试里出现 3 次 Java exception crash：
+
+```text
+09:40:49 pwdLogin -> UnsatisfiedLinkError
+09:41:12 sendPhoneCode -> UnsatisfiedLinkError
+09:41:34 pwdLogin -> UnsatisfiedLinkError
+```
+
+crash buffer 中的两条代表性堆栈：
+
+```text
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.pwdLogin(...)
+  at com.yuewen.ywlogin.login.YWLoginManager.pwdLogin(Native Method)
+  at com.yuewen.ywlogin.YWLogin.pwdLogin(Unknown Source:13)
+  at com.yuewen.ywlogin.ui.model.LoginModel.pwdLogin(Unknown Source:11)
+  at com.yuewen.ywlogin.ui.presenter.LoginPresenter.loginByAccount(Unknown Source:4)
+  at com.yuewen.ywlogin.ui.activity.LoginActivity.loginByPassWord(Unknown Source:92)
+```
+
+```text
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.sendPhoneCode(...)
+  at com.yuewen.ywlogin.login.YWLoginManager.sendPhoneCode(Native Method)
+  at com.yuewen.ywlogin.YWLogin.sendPhoneCode(Unknown Source:9)
+  at com.qq.reader.qrlogin.qdab.search(Unknown Source:85)
+  at com.qq.reader.login.client.impl.QRLoginActivity.search(Unknown Source:29)
+```
+
+exit-info：
+
+```text
+09:41:34 reason=4 (APP CRASH(EXCEPTION))
+09:41:13 reason=4 (APP CRASH(EXCEPTION))
+09:40:51 reason=4 (APP CRASH(EXCEPTION))
+```
+
+结论：
+
+- 当前设备上运行的是包含 v194 绑定报告的新包，不是旧包误判。
+- QQ 阅读登录闪退仍不是主题、LSPlant、启动或阅读页问题。
+- `libywad-own.so/libnativekey.so/libapp.so/libentryexpro.so/libQmt.so` 可以 `nativeLoad` 成功，但没有注册真实 `pwdLogin/sendPhoneCode`。
+- `NativeHookBridge.nativeRegisterBusinessStubs` 只注册了当前 MultiApp stub/fallback 方法，例如 `getInstance/registerParameter/resetParameter/setDefaultParameters/fetchSettings/qrCodeV2`；它没有恢复真实登录动作。
+- 下一步必须查真实 YWLogin native 注册入口或走 Java 登录链路；继续只加 `.so` 预加载没有证据能解决手机号登录。
