@@ -47,6 +47,7 @@ class QqReaderProfileTest {
         assertFalse(result.providerDiagInstalled)
         assertFalse(result.protocolDiagInstalled)
         assertFalse(result.eqctCompatInstalled)
+        assertFalse(result.loginDiagInstalled)
         assertFalse(result.anyInstalled)
     }
 
@@ -91,5 +92,6 @@ class QqReaderProfileTest {
         assertFalse(result.providerDiag)
         assertFalse(result.protocolDiag)
         assertFalse(result.eqctCompat)
+        assertFalse(result.loginDiag)
     }
 }

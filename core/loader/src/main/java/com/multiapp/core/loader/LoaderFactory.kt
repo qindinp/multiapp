@@ -1690,6 +1690,8 @@ class LoaderFactory : AppComponentFactory() {
                 logD("  QQReader protocol diag installed: $protocolDiagOk")
                 val eqctCompatOk = com.multiapp.core.hook.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
                 logD("  QQReader eqct plaintext compat installed: $eqctCompatOk")
+                val loginDiagOk = com.multiapp.core.hook.QqReaderYwLoginJavaDiag.install(hookEngine, guestCl)
+                logD("  QQReader YWLogin java diag installed: $loginDiagOk")
             }
         } catch (e: Throwable) {
             logD("  QQReader diag hooks skipped: ${e.javaClass.simpleName}: ${e.message}")
@@ -2156,6 +2158,8 @@ class LoaderFactory : AppComponentFactory() {
                         logD("  preloadPackerLib: QQReader protocol diag installed: $protocolDiagOk")
                         val eqctCompatOk = com.multiapp.core.hook.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
                         logD("  preloadPackerLib: QQReader eqct plaintext compat installed: $eqctCompatOk")
+                        val loginDiagOk = com.multiapp.core.hook.QqReaderYwLoginJavaDiag.install(hookEngine, guestCl)
+                        logD("  preloadPackerLib: QQReader YWLogin java diag installed: $loginDiagOk")
                     }
                 } catch (e: Throwable) {
                     logD("  preloadPackerLib: QQReader java file diag skipped: ${e.javaClass.simpleName}: ${e.message}")

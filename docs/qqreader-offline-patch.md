@@ -3604,3 +3604,170 @@ Rejecting re-init on previously-failed class java.lang.Class<com.yuewen.ywlogin.
 - 保留 `getStubAppBindingReport()` 诊断。
 - QQ Reader 专项路径下，原始 `StubApp.interface11/interface20` 已绑定时保留原始 native，不再覆盖。
 - 登录问题继续聚焦真实 `YWLoginManager.pwdLogin/sendPhoneCode` 注册入口，或另行恢复 Java 登录链路；`debug.multiapp.ywlogin.action_fallback=1` 仍只能防闪退，不能作为登录成功标准。
+
+### 2026-06-18 v200 新设备登录日志
+
+设备：
+
+```text
+192.168.2.86:43063
+```
+
+安装确认：
+
+```text
+lastUpdateTime=2026-06-18 13:48:52
+```
+
+日志文件：
+
+```text
+.tmp\qqreader-login-v200-192.168.2.86-43063-20260618-135037-logcat.txt
+.tmp\qqreader-login-v200-192.168.2.86-43063-aftercrash-20260618-135210-crash.txt
+.tmp\qqreader-login-v200-192.168.2.86-43063-aftercrash-20260618-135210-exit-info.txt
+```
+
+启动阶段主进程证据：
+
+```text
+PackerRuntime.Jiagu: loadPackerLibrary: StubApp.load() invoked OK
+PackerRuntime.Jiagu: verifyRegisterNatives: StubApp.interface20 registered=true
+PackerRuntime.Jiagu: installStubFallback: QQ Reader StubApp native binding report:
+interface5=missing ptr=0x0 interface11=missing ptr=0x0 interface20=missing ptr=0x0 interface21=missing ptr=0x0
+PackerRuntime.Jiagu: installStubFallback: QQ Reader original StubApp core natives missing; registering core fallback
+nativeRegisterStubCoreBootstrapMethods: registered interface5/interface11/interface20/interface21
+```
+
+Stage2 登录 native 仍缺失：
+
+```text
+Stage2 YWLoginManager.getInstance preload result=true
+Stage2 YWLogin native binding report: pwdLogin=missing ptr=0x0 sendPhoneCode=missing ptr=0x0 qrCodeV2=missing ptr=0x0
+```
+
+手动密码登录崩溃：
+
+```text
+06-18 13:50:00.531 AndroidRuntime: FATAL EXCEPTION: main
+java.lang.UnsatisfiedLinkError: No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.pwdLogin(
+  android.app.Activity,
+  java.lang.String,
+  java.lang.String,
+  com.yuewen.ywlogin.login.YWCallBack
+)
+  at com.yuewen.ywlogin.login.YWLoginManager.pwdLogin(Native Method)
+  at com.yuewen.ywlogin.YWLogin.pwdLogin(Unknown Source:13)
+  at com.yuewen.ywlogin.ui.model.LoginModel.pwdLogin(Unknown Source:11)
+  at com.yuewen.ywlogin.ui.presenter.LoginPresenter.loginByAccount(Unknown Source:4)
+  at com.yuewen.ywlogin.ui.activity.LoginActivity.loginByPassWord(Unknown Source:92)
+  at com.yuewen.ywlogin.ui.activity.LoginActivity.onClick(Unknown Source:67)
+```
+
+exit-info：
+
+```text
+timestamp=2026-06-18 13:50:02.692
+process=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+reason=4 (APP CRASH(EXCEPTION))
+description=crash
+```
+
+补充判断：
+
+- v200 已排除 v199 的 pre-stub 强制 `<clinit>` 失败路径；本次没有 `Rejecting re-init on previously-failed class`。
+- `HookEngine ... loadClass com.yuewen.ywlogin.login.YWLoginManager.pwdLogin` 是全局 `ClassLoader.loadClass` 透传 hook 打出的 `ClassNotFoundException` 噪声，不是登录 hook 成功或失败的直接证据。
+- v198 的“原始 `StubApp.interface11/interface20` 已绑定”证据出现在 `:pushcore`，v200 主进程登录链路仍没有拿到原始 `StubApp` core native。
+- 下一步不能再只调 `.so` 预加载；要么找到主进程真实 `YWLoginManager.pwdLogin/sendPhoneCode` 注册入口，要么转 Java 层登录链路，在 `LoginModel.pwdLogin` / `LoginPresenter.loginByAccount` 之前拦截并实现真实登录/登录态写入诊断。
+
+### 2026-06-18 v201 Java 登录链路拦截诊断
+
+本轮新增 `QqReaderYwLoginJavaDiag`，用 LSPlant hook `com.yuewen.ywlogin.YWLogin` 的 Java 静态入口：
+
+```text
+pwdLogin(Activity, String, String, YWCallBack)
+sendPhoneCode(Context, String, int, int, YWCallBack)
+phoneLogin(String, String, String, YWCallBack)
+```
+
+静态 dump 证据：
+
+```text
+.tmp\v200-com_yuewen_ywlogin_ui_activity_LoginActivity.dump.txt
+LoginActivity.loginByPassWord()
+  -> LoginPresenter.loginByAccount(String,String)
+
+.tmp\v200-com_yuewen_ywlogin_ui_presenter_LoginPresenter.dump.txt
+LoginPresenter.loginByAccount(String,String)
+  -> LoginModel.pwdLogin(String,String)
+
+.tmp\v200-com_yuewen_ywlogin_ui_model_LoginModel.dump.txt
+LoginModel.pwdLogin(String,String)
+  -> YWLogin.pwdLogin(Activity,String,String,YWCallBack)
+
+.tmp\v200-com_yuewen_ywlogin_YWLogin.dump.txt
+YWLogin.pwdLogin(...)
+  -> YWLoginManager.getInstance().pwdLogin(...)
+```
+
+v201 构建与安装：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :app:assembleDebug
+BUILD SUCCESSFUL
+
+.tmp\qqreader-c9f8-neutralized-v201-java-login-diag-signed.apk
+lastUpdateTime=2026-06-18 14:27:52
+device=192.168.2.86:43063
+```
+
+v201 启动时 hook 安装成功：
+
+```text
+QqReaderYwLoginJavaDiag: java login diag installed=true results=[true, true, true]
+MultiApp.POC: QQReader YWLogin java diag installed: true
+```
+
+手动点账号密码登录后，Java hook 已经在 native 调用前命中，且拿到账号、密码长度和 callback 类型：
+
+```text
+QqReaderYwLoginJavaDiag: pwdLogin before
+activity=com.yuewen.ywlogin.ui.activity.LoginActivity
+account=17***08
+passwordLen=10
+callback=com.yuewen.ywlogin.ui.model.LoginModel$1
+```
+
+随后原始 native 仍失败，但这次异常被 Java hook 捕获，没有再触发 `AndroidRuntime FATAL EXCEPTION`：
+
+```text
+QqReaderYwLoginJavaDiag: pwdLogin native missing; suppressing process crash and notifying callback:
+No implementation found for void
+com.yuewen.ywlogin.login.YWLoginManager.pwdLogin(
+  android.app.Activity,
+  java.lang.String,
+  java.lang.String,
+  com.yuewen.ywlogin.login.YWCallBack
+)
+
+QqReaderYwLoginJavaDiag: callback onError invoked code=-90101
+```
+
+运行状态证据：
+
+```text
+pidof com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+20578
+
+.tmp\qqreader-login-v201-192-168-2-86-43063-20260618-143232-crash.txt
+未出现新的 AndroidRuntime / FATAL EXCEPTION / YWLoginManager.pwdLogin 崩溃
+```
+
+结论：
+
+- Java 层登录链路可以稳定拦截，位置选在 `YWLogin.pwdLogin(...)` 是有效的。
+- v201 只解决“点击登录不再因为 `YWLoginManager.pwdLogin` 未注册而闪退”，没有产生真实登录态。
+- 当前真实阻塞仍是 `YWLoginManager.pwdLogin/sendPhoneCode/phoneLogin/saveLoginStatus` native 未注册。
+- 下一步要继续做真实登录，不能停在 `onError` fallback：
+  - 优先继续追真实 native 注册入口，确认为什么主进程 `libjiagu_vip.so` 没有为 `YWLoginManager` 注册动作方法。
+  - 备选路线是实现 Java 网络登录链路，但还需要找到真实接口、签名参数、响应结构，以及绕过/替代 native `saveLoginStatus(...)` 的登录态落盘路径。

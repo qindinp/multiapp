@@ -28,11 +28,13 @@ object QqReaderProfile {
         val fileDiagInstalled: Boolean = false,
         val providerDiagInstalled: Boolean = false,
         val protocolDiagInstalled: Boolean = false,
-        val eqctCompatInstalled: Boolean = false
+        val eqctCompatInstalled: Boolean = false,
+        val loginDiagInstalled: Boolean = false
     ) {
         val anyInstalled: Boolean
             get() = shortcutHooked || pushHooked || pangleHooked ||
-                fileDiagInstalled || providerDiagInstalled || protocolDiagInstalled || eqctCompatInstalled
+                fileDiagInstalled || providerDiagInstalled || protocolDiagInstalled ||
+                eqctCompatInstalled || loginDiagInstalled
     }
 
     /**
@@ -60,7 +62,8 @@ object QqReaderProfile {
                 fileDiagInstalled = diag.fileDiag,
                 providerDiagInstalled = diag.providerDiag,
                 protocolDiagInstalled = diag.protocolDiag,
-                eqctCompatInstalled = diag.eqctCompat
+                eqctCompatInstalled = diag.eqctCompat,
+                loginDiagInstalled = diag.loginDiag
             )
         }
 
@@ -167,7 +170,8 @@ object QqReaderProfile {
         val fileDiag: Boolean = false,
         val providerDiag: Boolean = false,
         val protocolDiag: Boolean = false,
-        val eqctCompat: Boolean = false
+        val eqctCompat: Boolean = false,
+        val loginDiag: Boolean = false
     )
 
     /**
@@ -194,6 +198,10 @@ object QqReaderProfile {
             val eqctCompatOk = com.multiapp.core.hook.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
             Log.d(TAG, "QQReader eqct plaintext compat installed: $eqctCompatOk")
             result = result.copy(eqctCompat = eqctCompatOk)
+
+            val loginDiagOk = com.multiapp.core.hook.QqReaderYwLoginJavaDiag.install(hookEngine, guestCl)
+            Log.d(TAG, "QQReader YWLogin java diag installed: $loginDiagOk")
+            result = result.copy(loginDiag = loginDiagOk)
         } catch (e: Throwable) {
             Log.d(TAG, "QQReader diag hooks skipped: ${e.javaClass.simpleName}: ${e.message}")
         }
