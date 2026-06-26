@@ -294,14 +294,15 @@ QQ 阅读 `interface20` 属于 Phase E 诊断问题，不得反向拉回专项 p
 
 ### 0.11 Stub 过渡实现退役条件
 
-`Stub clone APK + LoaderFactory` 只允许继续承担 launcher、evidence collector 和对照组
-职责。满足下列条件后，必须开始退役，而不是继续扩展：
+`Stub clone APK + LoaderFactory` 只允许继续承担 legacy evidence collector 和对照组
+职责。v2 新实例直接走 MultiApp-hosted container launch，不再生成新的 Stub APK。
+满足下列条件后，旧 Stub 链路必须开始退役，而不是继续扩展：
 
 | 条件 | 退役动作 |
 | --- | --- |
 | VirtualInstall DB 可持久化 origin APK、artifact、instance records | 创建流程改走 VirtualInstallService |
-| VirtualInstanceModel 能提供 package identity、data root、profile | Stub 参数传递降级为兼容入口 |
-| RuntimeBootstrap stage 可独立执行和记录 | LoaderFactory 只保留 thin entrypoint |
+| VirtualInstanceModel 能提供 package identity、data root、profile | 新实例从 MultiApp hosted container 按 instanceId 启动 |
+| RuntimeBootstrap stage 可独立执行和记录 | 新实例使用 hosted RuntimeBootstrap，LoaderFactory 只保留 legacy 对照 |
 | Virtual PMS/AMS/Provider/Storage 可覆盖普通 App 回归 | 停止在 LoaderFactory 中新增补偿逻辑 |
 | NativeDiagnosticsProfile 可输出 register-natives-only 证据 | 停止新增 business native stubs |
 
@@ -310,8 +311,8 @@ QQ 阅读 `interface20` 属于 Phase E 诊断问题，不得反向拉回专项 p
 1. `LoaderFactory.kt` 新增分支不得再以 `com.qq.reader`、`StubApp`、`interface20`、
    `libjiagu` 等特殊符号作为业务成功路径。
 2. 新增兼容能力必须落到 stage、profile、virtual service 或 diagnostics 模块。
-3. 一旦 VirtualInstall + RuntimeBootstrap 可以覆盖普通 App baseline，Stub 生成器只能
-   作为 legacy launcher，不再作为主容器内核。
+3. v2 新实例不得调用 `StubBuilder.build()` 生成独立安装包；旧 Stub 生成器只用于
+   legacy 对照和回归证据，不再作为主容器内核。
 
 ### 0.12 `interface20` 根因矩阵
 
@@ -402,7 +403,9 @@ Plan B 不包括默认补 `interface20`、默认替换壳方法、默认 no-op p
 
 MultiApp v2 不另起全新仓库，也不继续沿旧 `Stub clone APK + LoaderFactory` 路线小修小补。
 当前执行形态是 **in-repo kernel rewrite**：保留当前仓库、分支、构建系统、设备验证资产
-和历史证据，在 canonical Gradle module 中建设新的 container kernel。
+和历史证据，在 canonical Gradle module 中建设新的 container kernel。v2 新实例直接从
+MultiApp hosted container entry 启动，`Stub clone APK + LoaderFactory` 只保留为 legacy
+对照链路。
 
 执行文档：
 

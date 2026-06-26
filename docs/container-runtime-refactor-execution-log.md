@@ -242,6 +242,29 @@ Next implementation target:
 ```text
 VirtualInstallService + InstallRecordStore
 -> InstanceManager + VirtualInstanceRecord persistence
--> legacy Stub launcher reads instance records
--> RuntimeBootstrap takes over LoaderFactory outer flow
+-> Hosted Container Launch MVP
+-> Virtual PMS / AMS / Provider / Storage minimum loop
+```
+
+## 2026-06-26 v2 Final-State Execution Correction
+
+Correction:
+
+1. Updated the rewrite plan to remove the Step 4 transitional Stub launcher
+   path for v2 new instances.
+2. Replaced Step 4 with `Hosted Container Launch MVP`: MultiApp starts a
+   hosted container entry by `instanceId`, then `RuntimeBootstrap` consumes
+   `VirtualInstanceRecord` and `InstallRecord` directly.
+3. Clarified that v2 new instances must not generate or install new Stub APKs.
+4. Kept existing Stub APK / `LoaderFactory` only as legacy evidence and
+   comparison paths for old clones such as the current QQ Reader clone.
+
+Next implementation target:
+
+```text
+ContainerActivity / hosted container entry
+-> HostedRuntimeBootstrap consumes instanceId
+-> load origin APK dex/resources/native libs
+-> create guest Application or emit precise failed stage
+-> minimal test app launch baseline
 ```

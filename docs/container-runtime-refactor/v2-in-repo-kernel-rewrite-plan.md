@@ -17,8 +17,8 @@ MultiApp v2 采用 **当前仓库内的新内核式彻底重构**，不是另起
 保留当前仓库、分支、构建系统、设备验证资产和历史证据
 冻结旧 Stub transitional container 的功能增长
 在 canonical Gradle module 中建设 v2 container kernel
-逐步让新内核接管创建、实例、虚拟服务和 RuntimeBootstrap
-旧实现退到 legacy launcher / evidence collector / 对照组
+v2 新实例直接走 MultiApp-hosted container launch，不再生成新的 Stub APK
+旧实现只保留为 legacy evidence collector / 对照组
 ```
 
 一句话：**MultiApp v2 是当前项目的仓内内核重写，不是旧项目补丁，也不是 greenfield 项目。**
@@ -94,6 +94,7 @@ core/virtual
 
 core/loader
   - RuntimeBootstrap
+  - HostedRuntimeBootstrap
   - BootstrapStage
   - BootstrapResult
   - GuestContextStage
@@ -110,19 +111,24 @@ core/hook
   - Jiagu360Profile
   - optional LSPlant/Xposed runtime
 
+app/container
+  - hosted container entry
+  - ContainerActivity
+  - container process entry
+
 app/legacy-stub
-  - legacy stub launcher
   - evidence collector
   - compatibility comparison path
 ```
 
 关键边界：
 
-1. `LoaderFactory.kt` 只能逐步变成 thin entrypoint，不再承载容器内核。
-2. `StubBuilder` 只负责 legacy launcher，不再定义 instance identity。
-3. 虚拟安装和虚拟实例必须由 `VirtualInstallService` / `InstanceManager` 管理。
-4. PMS/AMS/Provider/Storage 兼容能力进入 `core/virtual`，不能散落在启动入口。
-5. protected baseline 默认关闭 LSPlant、Xposed、business native stubs、method replacement、
+1. v2 新实例不再以独立 Stub APK 作为启动和运行模型。
+2. `LoaderFactory.kt` 只能作为 legacy 对照链路逐步瘦身，不再承载 v2 容器内核。
+3. `StubBuilder` 只服务旧实例和对照验证，不再参与 v2 新实例创建。
+4. 虚拟安装和虚拟实例必须由 `VirtualInstallService` / `InstanceManager` 管理。
+5. PMS/AMS/Provider/Storage 兼容能力进入 `core/virtual`，不能散落在启动入口。
+6. protected baseline 默认关闭 LSPlant、Xposed、business native stubs、method replacement、
    no-op patches。
 
 ## 5. 分阶段执行计划
@@ -173,7 +179,7 @@ origin APK / installed package
 -> VirtualInstallService.importPackage()
 -> VirtualPackageRecord persisted
 -> InstallArtifactManifest persisted
--> legacy StubBuilder 只读取 install record 生成 launcher
+-> no Stub APK generated for v2 instances
 ```
 
 退出条件：
@@ -206,7 +212,8 @@ compatibilityMode
 protectedBaselinePolicy
 ```
 
-5. UI/CLI/工具脚本的创建动作改为先创建 instance，再进入 launcher/stub 生成。
+5. UI/CLI/工具脚本的创建动作改为只创建 instance record；启动交给 hosted container
+   entry，不进入 Stub APK 生成。
 
 退出条件：
 
@@ -214,7 +221,7 @@ protectedBaselinePolicy
 同一个 origin package 可创建两个实例
 两个实例 dataRoot 不同
 删除实例可以清理 record 和数据目录
-legacy launcher 可以从 instance record 启动目标实例
+MultiApp-hosted container 可以根据 instanceId 启动目标实例
 ```
 
 ### Phase 3：RuntimeBootstrap stage 化替换 LoaderFactory 巨型流程
@@ -261,7 +268,55 @@ QQ 阅读 baseline 能输出 CONFIG..APPLICATION 的成功/失败边界
 LoaderFactory 新增代码量受控，复杂逻辑迁入 stage 类
 ```
 
-### Phase 4：Virtual PMS / AMS / Provider / Storage 最小闭环
+### Phase 4：Hosted Container Launch MVP
+
+目标：v2 新实例直接从 MultiApp 容器入口启动，不再生成新的独立 Stub APK。
+
+任务：
+
+1. 新增 hosted container entry，例如：
+
+```text
+app/container/ContainerActivity
+app/container/ContainerProcess entry
+core/loader/HostedRuntimeBootstrap
+core/virtual/VirtualContextFactory
+core/virtual/VirtualActivityController
+```
+
+2. MultiApp 内启动流程改为：
+
+```text
+LauncherScreen / AppManager
+-> start ContainerActivity(instanceId)
+-> InstanceManager.load(instanceId)
+-> InstallRecordStore.load(installId)
+-> RuntimeBootstrap.run(instance)
+-> load guest dex/resources/native libs
+-> create guest Application
+-> launch guest launcher Activity through VirtualActivityController
+```
+
+3. `Intent extras` 只允许用于 MultiApp 启动自己的 `ContainerActivity`，作为进程内入口参数；
+   不作为跨 Stub APK 的实例身份事实源。
+4. 旧 `Stub clone APK + LoaderFactory` 不删除，但只作为 legacy 对照链路；v2 新实例不得再
+   调用 `StubBuilder.build()` 生成独立安装包。
+5. 第一轮只要求跑通 minimal test app 的主进程 launcher Activity，不要求一次覆盖所有
+   Service/Receiver/Provider/secondary process。
+
+退出条件：
+
+```text
+MultiApp 内可选择一个 VirtualInstanceRecord 启动
+启动链路不生成新的 Stub APK
+RuntimeBootstrapContext 携带 instanceId / installId / originPackageName
+能加载 origin APK dex 和 resources
+能创建 guest Application 或输出明确失败 stage
+minimal test app 至少进入 launcher Activity 或失败在可解释 stage
+旧 QQ 阅读 Stub APK 不受影响，继续作为 legacy 对照组
+```
+
+### Phase 5：Virtual PMS / AMS / Provider / Storage 最小闭环
 
 目标：让 guest 看到接近真实安装态的系统服务视图。
 
@@ -284,7 +339,7 @@ provider/storage 不串写
 notification/recent task 至少能归属到正确实例或有明确限制说明
 ```
 
-### Phase 5：NativeDiagnosticsProfile(register-natives-only)
+### Phase 6：NativeDiagnosticsProfile(register-natives-only)
 
 目标：解释 QQ 阅读 `interface20` 崩溃，不通过补 stub 掩盖问题。
 
@@ -325,13 +380,13 @@ unknown / insufficient evidence
 仍不启用 business stubs、method replacement、no-op patch 或默认 LSPlant
 ```
 
-### Phase 6：Protected App hook-free 兼容推进
+### Phase 7：Protected App hook-free 兼容推进
 
 目标：在不破壳、不改壳、不默认 Hook 的前提下，让 QQ 阅读原壳初始化成功。
 
 任务：
 
-1. 根据 Phase 5 verdict 修复容器真实安装态差异。
+1. 根据 Phase 6 verdict 修复容器真实安装态差异。
 2. 优先修：
 
 ```text
@@ -354,7 +409,7 @@ QQ 阅读不再死于 interface20 / RegisterNatives 缺失
 普通 App 回归不退化
 ```
 
-### Phase 7：产品化实例管理
+### Phase 8：产品化实例管理
 
 目标：让 v2 从工程验证变成可用的多开产品。
 
@@ -374,7 +429,7 @@ QQ 阅读不再死于 interface20 / RegisterNatives 缺失
 实例删除后无明显数据残留
 ```
 
-### Phase 8：可选 LSPlant/Xposed Runtime
+### Phase 9：可选 LSPlant/Xposed Runtime
 
 目标：在容器 baseline 稳定后，提供可选扩展能力。
 
@@ -395,7 +450,7 @@ QQ 阅读不再死于 interface20 / RegisterNatives 缺失
 ## 6. 代码迁移规则
 
 1. 生产代码必须放回 canonical Gradle module，不在 `docs/container-runtime-refactor/` 中运行。
-2. 旧实现可读、可对照、可调用，但不能继续承载新内核职责。
+2. 旧实现可读、可对照，但 v2 新实例不能调用旧 Stub APK 生成和 LoaderFactory 运行链路。
 3. 每次迁移只改一个边界：installer、instance、bootstrap、virtual service、diagnostics。
 4. 每个边界必须有单测或最小真机验证脚本。
 5. 不做“大爆炸式一次性替换”；采用 strangler pattern：新内核逐步接管旧入口。
@@ -410,7 +465,7 @@ core/installer/src/main/...      # 如新增模块成本过高，先落 core/mod
 core/instance/src/main/...
 core/loader/src/main/...
 core/hook/src/main/...
-app/src/main/...                 # 只保留入口、UI、legacy launcher glue
+app/src/main/...                 # MultiApp UI、hosted container entry、legacy 对照入口 glue
 tools/qqreader-baseline/...      # 真机 evidence automation，暂不默认纳入提交
 docs/container-runtime-refactor/ # 计划、证据、迁移日志
 ```
@@ -465,22 +520,24 @@ NativeDiagnosticsProfile verdict when enabled
 1. 新增 `VirtualInstallService` 接口和文件型 `InstallRecordStore`。
 2. 将 `VirtualPackageRecord` 接入 origin APK import 流程。
 3. 新增 `InstanceManager` 接口和文件型 `VirtualInstanceRecord` store。
-4. 让 legacy Stub 创建读取 `VirtualInstanceRecord`，而不是临时拼配置。
-5. 把 `LoaderFactory` 外层入口改成调用 `RuntimeBootstrap` orchestrator。
-6. 给每个 `BootstrapStage` 增加 reversibility 声明。
-7. 增加 `BootstrapResult` summary parser，供真机脚本生成摘要。
-8. 实现 `NativeDiagnosticsProfile(register-natives-only)` 的 evidence model。
+4. 新增 `ContainerActivity` / hosted container entry，从 MultiApp 内按 `instanceId` 启动。
+5. 新增 `HostedRuntimeBootstrap` 或等价入口，直接消费 `VirtualInstanceRecord` 和
+   `InstallRecord`，不生成 Stub APK。
+6. 加载 origin APK dex/resources/native libs，创建 guest `Application`，输出明确 stage 结果。
+7. 给 hosted bootstrap 的每个 stage 增加 reversibility 声明。
+8. 增加 `BootstrapResult` summary parser，供真机脚本生成摘要。
 9. 建立一个普通 App 双实例 baseline 用例。
-10. 重新跑 QQ 阅读 baseline，输出 `interface20` 根因矩阵 verdict。
+10. 跑 QQ 阅读 register-natives-only diagnostics，输出 `interface20` 根因矩阵 verdict。
 
 ## 11. 当前不做的事
 
 1. 不新建独立仓库。
-2. 不把 QQ 阅读专项 patch 写回默认路径。
-3. 不默认启用 LSPlant/Xposed。
-4. 不默认补 `interface20` native stub。
-5. 不做脱壳、改壳、破坏壳。
-6. 不承诺会员、支付、DRM、登录风控等业务能力兼容。
+2. 不为 v2 新实例生成新的 Stub APK。
+3. 不把 QQ 阅读专项 patch 写回默认路径。
+4. 不默认启用 LSPlant/Xposed。
+5. 不默认补 `interface20` native stub。
+6. 不做脱壳、改壳、破坏壳。
+7. 不承诺会员、支付、DRM、登录风控等业务能力兼容。
 
 ## 12. 下一步落地顺序
 
@@ -490,8 +547,8 @@ NativeDiagnosticsProfile verdict when enabled
 Step 1: 文档冻结 v2 in-repo kernel rewrite 决策
 Step 2: 实现 VirtualInstallService + InstallRecordStore
 Step 3: 实现 InstanceManager + VirtualInstanceRecord persistence
-Step 4: 让 Stub launcher 从 instance record 启动
-Step 5: RuntimeBootstrap 接管 LoaderFactory 外层流程
+Step 4: Hosted Container Launch MVP，从 MultiApp 内按 instanceId 启动
+Step 5: Virtual PMS / AMS / Provider / Storage 最小闭环
 Step 6: 普通 App 双实例 baseline
 Step 7: QQ 阅读 register-natives-only diagnostics
 ```
@@ -500,6 +557,7 @@ Step 7: QQ 阅读 register-natives-only diagnostics
 
 ```text
 创建实例不再以 Stub APK 为事实源头
+v2 新实例启动不再生成或安装 Stub APK
 启动流程不再以 LoaderFactory 巨型方法为事实源头
 普通 App 多实例隔离稳定
 QQ 阅读崩溃能被诊断矩阵解释并指向容器缺口
