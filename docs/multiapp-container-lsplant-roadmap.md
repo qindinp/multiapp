@@ -218,6 +218,165 @@ No implementation found for boolean com.stub.StubApp.interface20()
 - 与 v2 冲突的“LSPlant 作为加固 App 默认依赖”视为废弃。
 - 仍然有效的是：用户态容器优先、hook-free baseline 优先、证据优先、LSPlant 可选。
 
+### 0.8 合规与授权红线
+
+本路线的目标是验证自研容器兼容性和受控测试环境内的运行证据，不以规避商业加固、
+版权保护、DRM、登录风控、支付风控或服务端策略为目标。对 QQ 阅读、360 加固壳或
+其他商业保护组件的测试，必须先明确授权来源、测试范围、设备范围和数据范围。
+
+不可支持的默认方向：
+
+1. 不提供绕过授权、会员、支付、登录风控、内容保护或 DRM 的能力。
+2. 不把 native stub、method replacement、no-op patch 写成商业 App 的默认成功路径。
+3. 不把 LSPlant/Xposed 用作绕过目标 App 安全判断的默认依赖。
+4. 不把抓到的商业 App 内部符号、私有协议或策略逻辑沉淀为产品能力。
+
+如果后续要进入商业化验证，必须先补齐合规记录：测试 APK 来源、授权证明、设备清单、
+采集字段清单、留存周期和不可测试场景。没有这些记录时，受保护 App 只能作为
+兼容性研究样本，不能作为产品承诺对象。
+
+### 0.9 普通 App 回归前置与产品体验基线
+
+加固 App 不是第一验收门槛。容器内核每推进一层，必须先通过普通 App 回归，再进入
+protected baseline：
+
+```text
+普通 App 安装/创建实例
+-> 普通 App 首次启动/二次启动
+-> Activity/Service/Receiver/Provider 基础行为
+-> 文件、SharedPreferences、SQLite、media/storage 隔离
+-> 通知、桌面图标、recent task、卸载清理
+-> protected baseline 只观察，不 patch
+```
+
+产品体验基线必须形成可量化指标，至少包括：
+
+| 指标 | 初始口径 |
+| --- | --- |
+| clone 创建耗时 | 从选择 origin APK 到实例可启动 |
+| cold launch latency | `am start` 到首个 Activity resumed 或崩溃 |
+| warm launch latency | 已有实例数据下二次启动 |
+| instance identity | 图标、label、recent task、通知归属可区分 |
+| data isolation | 两个实例的数据目录、provider、外部文件互不串写 |
+| cleanup | 删除实例后数据、artifact、通知、快捷方式可清理 |
+
+只有普通 App 回归稳定后，QQ 阅读 baseline 的失败才有判断价值；否则无法区分是
+容器基础能力不足，还是 360 壳对当前环境不兼容。
+
+### 0.10 阶段编号映射与当前落点
+
+本文档保留了三套历史编号。为避免执行混乱，后续以 v2 Phase A-G 为权威编号，旧编号
+只作为索引：
+
+| v2 阶段 | 对应历史章节 | Sprint 对应 | 当前状态 |
+| --- | --- | --- | --- |
+| Phase A 冻结 Stub transitional container | Phase 0 | Sprint 1.1 | 进行中，禁止继续加专项业务逻辑 |
+| Phase B VirtualInstall/VirtualInstance | Phase 1 | Sprint 1.2 | 下一主线，接入真实创建流程 |
+| Phase C staged RuntimeBootstrap | Phase 2 | Sprint 1.3 | 已有 evidence primitives，需替换巨型流程 |
+| Phase D Virtual PMS/AMS/Provider/Storage | Phase 1/2/8 | 后续拆分 | 未完成，是最终容器内核 |
+| Phase E NativeDiagnosticsProfile | Phase 3/4/5 | Sprint 1.4/1.5 | QQ 阅读下一步，只诊断不 patch |
+| Phase F optional LSPlant/Xposed runtime | Phase 6 | 后续拆分 | 延后，不能承担容器职责 |
+| Phase G 兼容矩阵和产品回归 | Phase 7/8 | 后续拆分 | 贯穿所有阶段，先普通 App 后 protected App |
+
+当前落点：Phase A + Phase C 的证据层已经开始，Phase B/D 才是路线升级的核心；
+QQ 阅读 `interface20` 属于 Phase E 诊断问题，不得反向拉回专项 patch 路线。
+
+### 0.11 Stub 过渡实现退役条件
+
+`Stub clone APK + LoaderFactory` 只允许继续承担 launcher、evidence collector 和对照组
+职责。满足下列条件后，必须开始退役，而不是继续扩展：
+
+| 条件 | 退役动作 |
+| --- | --- |
+| VirtualInstall DB 可持久化 origin APK、artifact、instance records | 创建流程改走 VirtualInstallService |
+| VirtualInstanceModel 能提供 package identity、data root、profile | Stub 参数传递降级为兼容入口 |
+| RuntimeBootstrap stage 可独立执行和记录 | LoaderFactory 只保留 thin entrypoint |
+| Virtual PMS/AMS/Provider/Storage 可覆盖普通 App 回归 | 停止在 LoaderFactory 中新增补偿逻辑 |
+| NativeDiagnosticsProfile 可输出 register-natives-only 证据 | 停止新增 business native stubs |
+
+硬性 kill criteria：
+
+1. `LoaderFactory.kt` 新增分支不得再以 `com.qq.reader`、`StubApp`、`interface20`、
+   `libjiagu` 等特殊符号作为业务成功路径。
+2. 新增兼容能力必须落到 stage、profile、virtual service 或 diagnostics 模块。
+3. 一旦 VirtualInstall + RuntimeBootstrap 可以覆盖普通 App baseline，Stub 生成器只能
+   作为 legacy launcher，不再作为主容器内核。
+
+### 0.12 `interface20` 根因矩阵
+
+QQ 阅读当前失败点必须闭环到可证伪根因，不能直接用补 stub 判定成功：
+
+| 假设 | 需要的证据 | 判定 |
+| --- | --- | --- |
+| `JNI_OnLoad` 没有执行 | logcat/linker/maps 中没有目标 so 的 load/JNI_OnLoad 记录 | native load 或 namespace 问题 |
+| `JNI_OnLoad` 执行但 `RegisterNatives` 未执行 | 有 JNI_OnLoad，无 `RegisterNatives: class=com.stub.StubApp` | 壳初始化路径中断 |
+| `RegisterNatives` 绑定到错误 class | 有 RegisterNatives，但 class loader / jclass 不匹配 guest `StubApp` | ClassLoader identity 问题 |
+| `FindClass` 使用错误 ClassLoader | `FindClass(com/stub/StubApp)` 失败或落到宿主/错误 loader | thread context loader / JNI lookup 问题 |
+| native namespace 或 library search path 不一致 | `/proc/<pid>/maps`、`nativeLibraryDir`、linker error 与真实安装不同 | Virtual native libs 边界问题 |
+| 壳检测到容器后跳过注册 | 前面链路完整但关键注册被条件跳过，且真实安装对照正常 | 进入“baseline permanent failure”评审 |
+
+`NativeDiagnosticsProfile(register-natives-only)` 的验收不是“让 App 不崩”，而是输出足够
+证据把上述假设排除或确认。若确认是容器特征触发的主动拒绝，必须进入 Plan B 评审。
+
+### 0.13 Stage 可逆性与 rollback 语义
+
+RuntimeBootstrap 每个 stage 必须声明可逆性，避免把“回滚”写成无法兑现的承诺：
+
+| 类型 | 含义 | rollback 语义 |
+| --- | --- | --- |
+| reversible | 只改内存对象或可恢复引用 | 恢复原引用并继续或中止 |
+| precheck-only | 只读取和校验，不改变状态 | 记录失败并中止 |
+| irreversible | 已触发 native load、Application attach、provider 初始化等外部副作用 | 放弃本次启动、保留证据、清理可清理 artifact，不宣称状态恢复 |
+
+对 protected baseline，遇到 irreversible stage 失败时，默认动作是停止启动并保存证据；
+不能在同一轮启动里继续尝试 business stub、no-op patch 或 method replacement。
+
+### 0.14 设备矩阵、ADB 模板与 CI 门禁
+
+真机验证必须固定最小矩阵，避免单设备结论被误读：
+
+| 维度 | 最小记录 |
+| --- | --- |
+| device | model、Android version、API level、ABI、root 状态 |
+| memory/page | 4KB/16KB page size、`getprop ro.product.cpu.abi` |
+| package | origin package/version/signature digest、clone package、install time |
+| runtime | `nativeLibraryDir`、`sourceDir`、`publicSourceDir`、dataDir |
+| evidence | logcat、crash、exit-info、maps、tombstone、BootstrapResult |
+
+ADB 模板必须覆盖：
+
+```text
+precheck: adb devices / getprop / pm path / dumpsys package
+launch: am start + polling pid/activity state
+log: background logcat with timestamped file
+native: /proc/<pid>/maps, nativeLibraryDir comparison, linker messages
+crash: logcat crash buffer, tombstone pull, dumpsys activity exit-info
+summary: BootstrapResult parser + NativeDiagnosticsProfile verdict
+```
+
+CI 门禁从文档门禁开始，逐步转成脚本：
+
+1. `LoaderFactory.kt` LOC、分支数和特殊符号增长检查。
+2. 禁止 `com.qq.reader`、`interface20`、`libjiagu` 等符号扩散到非 profile/diagnostics 模块。
+3. `BootstrapResult` parser 必须能判定所有 stage 的 SUCCESS/FAILED/SKIPPED。
+4. protected baseline 单测必须确认 LSPlant、Xposed、business stubs、method replacement、
+   no-op patches 全部关闭。
+5. 普通 App baseline 回归失败时，不允许推进 protected App 兼容结论。
+
+### 0.15 Baseline permanent failure 与 Plan B
+
+如果 `NativeDiagnosticsProfile(register-natives-only)` 证明 QQ 阅读/360 壳在真实安装态可完成
+注册，但在容器环境中因可识别差异主动拒绝注册，且该差异无法通过 Virtual PMS/AMS/
+Provider/Storage/native namespace 的正当模拟消除，则判定为 baseline permanent failure。
+
+Plan B 只能有三类：
+
+1. 降级为“不支持该受保护 App/该版本”，保留证据和用户提示。
+2. 在明确授权的企业/研究环境中进入专项兼容实验，且实验结果不得变成默认产品能力。
+3. 延后到系统级、Profile/Work Profile、OEM 合作或 MDM 能力路线评估。
+
+Plan B 不包括默认补 `interface20`、默认替换方法、默认 no-op patch 或默认启用 LSPlant。
+
 日期：2026-06-25  
 状态：总方案与实施步骤  
 适用仓库：`C:\Users\Administrator\Desktop\1122\visual app\multiapp`

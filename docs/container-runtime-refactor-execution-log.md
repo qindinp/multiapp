@@ -179,3 +179,27 @@ Engineering interpretation:
 - The next phase is `NativeDiagnosticsProfile(register-natives-only)`, not a
   return to QQ Reader special patching, business stubs, no-op patches, or
   default LSPlant.
+
+## 2026-06-26 Route v2 Review Hardening
+
+Completed:
+
+1. Reviewed the external multi-role route review document:
+   `D:\wxjl\xwechat_files\wxid_tkcgnu0ggpcs22_00a3\msg\file\2026-06\doc-review-multiapp-lsplant-roadmap-2026-06-26.md`.
+2. Strengthened the v2 authoritative route in
+   `docs/multiapp-container-lsplant-roadmap.md` with explicit gates for:
+   - authorization and compliance boundaries
+   - ordinary App regression before protected-App conclusions
+   - Phase A-G / Phase 0-8 / Sprint 1.x mapping
+   - Stub transitional implementation retirement criteria
+   - `interface20` root-cause matrix
+   - stage reversibility and rollback semantics
+   - device matrix, ADB evidence template, and CI gates
+   - baseline permanent failure and Plan B decisions
+
+Result:
+
+- The route remains container-first and hook-free baseline first.
+- QQ Reader remains a protected baseline diagnostic target, not a reason to
+  revive default `QQ_READER_SPECIAL`, business native stubs, method replacement,
+  no-op patches, or default LSPlant.
