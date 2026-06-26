@@ -5,6 +5,10 @@ class RuntimeBootstrapRecorder(
 ) {
     private val records = mutableListOf<BootstrapResult>()
 
+    /** Read-only view of recorded results. */
+    val results: List<BootstrapResult>
+        get() = snapshot()
+
     @Synchronized
     fun record(result: BootstrapResult): BootstrapResult {
         records += result

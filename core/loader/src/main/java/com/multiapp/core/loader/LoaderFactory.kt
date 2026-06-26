@@ -180,6 +180,15 @@ class LoaderFactory : AppComponentFactory() {
     private var activityTaskManagerProxyInstalled = false
 
     @Volatile
+    private var qqReaderAutoLoginStarted = false
+
+    @Volatile
+    private var qqReaderStubAppAttachedLoadAttempted = false
+
+    @Volatile
+    private var qqReaderOriginalInterface11Attempted = false
+
+    @Volatile
     private var moduleLoader: ModuleLoader? = null
 
     @Volatile
@@ -189,6 +198,17 @@ class LoaderFactory : AppComponentFactory() {
 
     private val bootstrapRecorder = RuntimeBootstrapRecorder { result ->
         logBootstrapResult(result)
+    }
+
+    private val evidenceSink: EvidenceSink = RecorderEvidenceSink(bootstrapRecorder)
+
+    private val nativeHookPolicy = com.multiapp.core.hook.NativeHookPolicy.baseline()
+
+    private fun logPolicyDecision(decision: com.multiapp.core.hook.NativeHookPolicyDecision) {
+        logD(
+            "POLICY-GATE status=${decision.status} " +
+                decision.evidence.entries.joinToString(" ") { (key, value) -> "$key=$value" }
+        )
     }
 
     private fun logBootstrapResult(result: BootstrapResult) {
@@ -213,6 +233,7 @@ class LoaderFactory : AppComponentFactory() {
         ensureClassLoaderSwapped(cl)
         installActivityStartProxiesIfReady("instantiateActivity")
         val realCl = guestClassLoader ?: cl
+        tryRunQqReaderStubAppAttachedLoadFromActivityThread(realCl, "instantiateActivity")
         return try {
             val clazz = realCl.loadClass(className)
             val activity = clazz.getDeclaredConstructor().newInstance() as android.app.Activity
@@ -246,6 +267,7 @@ class LoaderFactory : AppComponentFactory() {
                 val app = at?.javaClass?.getDeclaredMethod("getApplication")
                     ?.apply { isAccessible = true }?.invoke(at) as? android.app.Application
                 if (app != null) {
+                    tryRunQqReaderStubAppAttachedLoad(app, realCl)
                     registerActivityContextWrapper(app)
                     logD("  Activity context wrapper registered from instantiateProvider")
 
@@ -331,17 +353,27 @@ class LoaderFactory : AppComponentFactory() {
             logD("  loaded: ${appClass.name}, creating instance...")
             val app = appClass.getDeclaredConstructor().newInstance() as Application
             logD("  Application created OK: ${app.javaClass.name}")
-            bootstrapRecorder.success(
-                RuntimeStage.APPLICATION,
-                "application created",
-                evidence = listOf(
-                    BootstrapEvidence("className", app.javaClass.name, "instantiateApplication"),
-                    BootstrapEvidence("requestedClassName", className, "instantiateApplication")
+            evidenceSink.emit(
+                BootstrapResult.success(
+                    RuntimeStage.APPLICATION,
+                    "application created",
+                    evidence = listOf(
+                        BootstrapEvidence("className", app.javaClass.name, "instantiateApplication"),
+                        BootstrapEvidence("requestedClassName", className, "instantiateApplication")
+                    )
                 )
             )
 
             // ★ ModuleLoader 集成：加载 Xposed 模块并分发 loadPackage 事件
-            tryInitModuleLoader(realCl, app)
+            val xposedDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+                nativeHookPolicy,
+                com.multiapp.core.hook.NativeHookCapability.XPOSED_MODULES,
+                "LoaderFactory.instantiateApplication"
+            )
+            logPolicyDecision(xposedDecision)
+            if (xposedDecision.allowed) {
+                tryInitModuleLoader(realCl, app)
+            }
 
             app
         } catch (e: Exception) {
@@ -352,22 +384,26 @@ class LoaderFactory : AppComponentFactory() {
                 val fallbackClass = realCl.loadClass(className)
                 val fallbackApp = fallbackClass.getDeclaredConstructor().newInstance() as Application
                 logD("  Fallback Application created OK: ${fallbackApp.javaClass.name}")
-                bootstrapRecorder.degraded(
-                    RuntimeStage.APPLICATION,
-                    "application fallback created",
-                    error = e,
-                    evidence = listOf(
-                        BootstrapEvidence("failedClassName", effectiveClassName, "instantiateApplication"),
-                        BootstrapEvidence("fallbackClassName", fallbackApp.javaClass.name, "instantiateApplication")
+                evidenceSink.emit(
+                    BootstrapResult.degraded(
+                        RuntimeStage.APPLICATION,
+                        "application fallback created",
+                        error = e,
+                        evidence = listOf(
+                            BootstrapEvidence("failedClassName", effectiveClassName, "instantiateApplication"),
+                            BootstrapEvidence("fallbackClassName", fallbackApp.javaClass.name, "instantiateApplication")
+                        )
                     )
                 )
                 fallbackApp
             } else {
-                bootstrapRecorder.failed(
-                    RuntimeStage.APPLICATION,
-                    "cannot create application $effectiveClassName",
-                    error = e,
-                    rollbackNote = "no fallback application class"
+                evidenceSink.emit(
+                    BootstrapResult.failed(
+                        RuntimeStage.APPLICATION,
+                        "cannot create application $effectiveClassName",
+                        error = e,
+                        rollbackNote = "no fallback application class"
+                    )
                 )
                 try { writeDebugLogToFile(cl) } catch (_: Exception) {}
                 throw RuntimeException("LoaderFactory POC failed: ${e.message}", e)
@@ -426,6 +462,200 @@ class LoaderFactory : AppComponentFactory() {
         }
     }
 
+    private fun tryRunQqReaderStubAppAttachedLoad(app: Application, classLoader: ClassLoader) {
+        val config = currentConfig
+        val isQqReader = config?.let { isQqReaderProfile(it) } ?: (guestPackageName == "com.qq.reader")
+        if (!isQqReader || qqReaderStubAppAttachedLoadAttempted) return
+        val stubFallbackDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+            nativeHookPolicy,
+            com.multiapp.core.hook.NativeHookCapability.BUSINESS_NATIVE_STUBS,
+            "LoaderFactory.tryRunQqReaderStubAppAttachedLoad.stubFallback"
+        )
+        logPolicyDecision(stubFallbackDecision)
+        if (!stubFallbackDecision.allowed) {
+            logD("  QQ Reader attached StubApp.load retry skipped by policy")
+            return
+        }
+        qqReaderStubAppAttachedLoadAttempted = true
+
+        val bridge = NativeHookBridge.getInstance()
+        val beforeReport = bridge.getStubAppBindingReport()
+        logW("  QQ Reader attached StubApp.load retry before report: $beforeReport")
+        if (beforeReport.contains("interface11=bound") && beforeReport.contains("interface20=bound")) {
+            logW("  QQ Reader attached StubApp.load retry skipped: original StubApp core already bound")
+            maybeRunQqReaderOriginalInterface11(
+                bridge = bridge,
+                classLoader = classLoader,
+                targetClass = "com.stub.StubApp",
+                app = app,
+                reason = "attached-load-before"
+            )
+            return
+        }
+
+        val stubClass = try {
+            classLoader.loadClass("com.stub.StubApp")
+        } catch (_: Throwable) {
+            try {
+                classLoader.loadClass("com.qihoo.util.StubApp")
+            } catch (e: Throwable) {
+                logW("  QQ Reader attached StubApp.load retry skipped: StubApp class not found: ${e.message}")
+                return
+            }
+        }
+
+        val context = app as android.content.Context
+        try {
+            val loadMethod = stubClass.getDeclaredMethod(
+                "load",
+                Application::class.java,
+                android.content.Context::class.java
+            )
+            loadMethod.isAccessible = true
+            logW("  QQ Reader attached StubApp.load(app, context) retry begin class=${stubClass.name}")
+            loadMethod.invoke(null, app, context)
+            logW("  QQ Reader attached StubApp.load(app, context) retry returned")
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            val cause = e.targetException ?: e.cause ?: e
+            logW("  QQ Reader attached StubApp.load(app, context) retry threw ${cause.javaClass.simpleName}: ${cause.message}")
+        } catch (e: Throwable) {
+            logW("  QQ Reader attached StubApp.load(app, context) retry failed ${e.javaClass.simpleName}: ${e.message}")
+        }
+
+        val afterReport = bridge.getStubAppBindingReport()
+        logW("  QQ Reader attached StubApp.load retry after report: $afterReport")
+        if (afterReport.contains("interface11=bound")) {
+            maybeRunQqReaderOriginalInterface11(
+                bridge = bridge,
+                classLoader = classLoader,
+                targetClass = stubClass.name,
+                app = app,
+                reason = "attached-load-after"
+            )
+        }
+        if (!afterReport.contains("interface11=bound") || !afterReport.contains("interface20=bound")) {
+            logW("  QQ Reader attached StubApp.load retry did not restore original core; registering fallback")
+            try {
+                val registered = bridge.registerStubCoreBootstrapMethods(classLoader, stubClass.name)
+                logW("  QQ Reader attached StubApp core fallback registered after retry: $registered")
+            } catch (e: Throwable) {
+                logW("  QQ Reader attached StubApp core fallback registration failed: ${e.javaClass.simpleName}: ${e.message}")
+            }
+        }
+    }
+
+    private fun tryRunQqReaderStubAppAttachedLoadFromActivityThread(
+        classLoader: ClassLoader,
+        reason: String
+    ) {
+        val app = try {
+            val at = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentActivityThread")
+                .apply { isAccessible = true }
+                .invoke(null)
+            at?.javaClass?.getDeclaredMethod("getApplication")
+                ?.apply { isAccessible = true }
+                ?.invoke(at) as? Application
+        } catch (e: Throwable) {
+            logW("  QQ Reader attached StubApp.load retry lookup failed at $reason: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
+        if (app == null) {
+            logD("  QQ Reader attached StubApp.load retry skipped at $reason: application is null")
+            return
+        }
+        logW("  QQ Reader attached StubApp.load retry requested from $reason")
+        tryRunQqReaderStubAppAttachedLoad(app, classLoader)
+    }
+
+    private fun maybeRunQqReaderOriginalInterface11(
+        bridge: NativeHookBridge,
+        classLoader: ClassLoader,
+        targetClass: String,
+        app: Application? = null,
+        reason: String
+    ) {
+        val config = currentConfig
+        val isQqReader = config?.let { isQqReaderProfile(it) } ?: (guestPackageName == "com.qq.reader")
+        if (!isQqReader || qqReaderOriginalInterface11Attempted) return
+        val businessStubDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+            nativeHookPolicy,
+            com.multiapp.core.hook.NativeHookCapability.BUSINESS_NATIVE_STUBS,
+            "LoaderFactory.maybeRunQqReaderOriginalInterface11.businessNativeStubs"
+        )
+        logPolicyDecision(businessStubDecision)
+        if (!businessStubDecision.allowed) {
+            logD("  QQ Reader original interface11/YWLogin path skipped by policy at $reason")
+            return
+        }
+
+        val stubReport = bridge.getStubAppBindingReport()
+        if (!stubReport.contains("interface11=bound")) {
+            logW("  QQ Reader original interface11 skipped at $reason: $stubReport")
+            return
+        }
+
+        if (app == null) {
+            logW("  QQ Reader original interface11/YWLogin <clinit> deferred at $reason: application is null")
+            return
+        }
+
+        qqReaderOriginalInterface11Attempted = true
+        val beforeYwLogin = bridge.getYwLoginBindingReport()
+        val beforeTokenDiag = bridge.getJiaguTokenDiag(59494)
+        logW(
+            "  QQ Reader original interface11(59494) begin at $reason " +
+                "target=$targetClass stub=$stubReport ywloginBefore=$beforeYwLogin tokenBefore=$beforeTokenDiag"
+        )
+        val interface20Ok = bridge.callOriginalStubInterface20(classLoader, targetClass)
+        logW(
+            "  QQ Reader original interface20() before YWLogin <clinit> at $reason " +
+                "ok=$interface20Ok tokenAfterInterface20=${bridge.getJiaguTokenDiag(59494)} " +
+                "ywloginAfterInterface20=${bridge.getYwLoginBindingReport()}"
+        )
+        val interface5Ok = bridge.callOriginalStubInterface5(classLoader, targetClass, app)
+        logW(
+            "  QQ Reader original interface5(app) before YWLogin <clinit> at $reason " +
+                "ok=$interface5Ok ywloginMid=${bridge.getYwLoginBindingReport()}"
+        )
+        try {
+            Class.forName("com.yuewen.ywlogin.login.YWLoginManager", true, classLoader)
+            val clinitReport = bridge.getYwLoginBindingReport()
+            val tokenAfterClinit = bridge.getJiaguTokenDiag(59494)
+            logW(
+                "  QQ Reader YWLoginManager <clinit> done at $reason " +
+                    "ywloginAfterClinit=$clinitReport tokenAfterClinit=$tokenAfterClinit"
+            )
+            if (clinitReport.contains("pwdLogin=bound") ||
+                clinitReport.contains("sendPhoneCode=bound") ||
+                clinitReport.contains("qrCodeV2=bound")
+            ) {
+                return
+            }
+        } catch (e: Throwable) {
+            logW("  QQ Reader YWLoginManager <clinit> failed at $reason: ${e.javaClass.simpleName}: ${e.message}")
+        }
+        val ok = bridge.callOriginalStubInterface11(classLoader, targetClass, 59494)
+        val afterStub = bridge.getStubAppBindingReport()
+        val afterYwLogin = bridge.getYwLoginBindingReport()
+        val afterTokenDiag = bridge.getJiaguTokenDiag(59494)
+        logW(
+            "  QQ Reader original interface11(59494) done at $reason " +
+                "ok=$ok stubAfter=$afterStub ywloginAfter=$afterYwLogin tokenAfter=$afterTokenDiag"
+        )
+        if (!afterYwLogin.contains("pwdLogin=bound") &&
+            !afterYwLogin.contains("sendPhoneCode=bound") &&
+            !afterYwLogin.contains("qrCodeV2=bound")
+        ) {
+            logW("  QQ Reader original YWLogin registration still missing at $reason; installing business stubs")
+            try {
+                bridge.registerBusinessStubs(classLoader)
+            } catch (e: Throwable) {
+                logW("  QQ Reader registerBusinessStubs after original attempt failed: ${e.message}")
+            }
+        }
+    }
+
     private fun ensureClassLoaderSwapped(cl: ClassLoader) {
         if (classLoaderReady) return
         synchronized(initLock) {
@@ -449,13 +679,15 @@ class LoaderFactory : AppComponentFactory() {
         logD("  Thread: ${Thread.currentThread().name}")
         logD("  ClassLoader: ${cl.javaClass.name}")
         logD("  ClassLoader parent: ${cl.parent?.javaClass?.name}")
-        bootstrapRecorder.success(
-            RuntimeStage.CONFIG,
-            "initializeInternal entered",
-            evidence = listOf(
-                BootstrapEvidence("thread", Thread.currentThread().name, "LoaderFactory"),
-                BootstrapEvidence("classLoader", cl.javaClass.name, "LoaderFactory"),
-                BootstrapEvidence("process", currentProcessName(), "LoaderFactory")
+        evidenceSink.emit(
+            BootstrapResult.success(
+                RuntimeStage.CONFIG,
+                "initializeInternal entered",
+                evidence = listOf(
+                    BootstrapEvidence("thread", Thread.currentThread().name, "LoaderFactory"),
+                    BootstrapEvidence("classLoader", cl.javaClass.name, "LoaderFactory"),
+                    BootstrapEvidence("process", currentProcessName(), "LoaderFactory")
+                )
             )
         )
 
@@ -608,13 +840,15 @@ class LoaderFactory : AppComponentFactory() {
             logD("  packageName: ${appInfo.packageName}")
             logD("  appComponentFactory: ${appInfo.appComponentFactory}")
             logD("  className: ${appInfo.className}")
-            bootstrapRecorder.success(
-                RuntimeStage.GUEST_CONTEXT,
-                "activity thread and appInfo resolved",
-                evidence = listOf(
-                    BootstrapEvidence("stubApkPath", stubApkPath, "ApplicationInfo"),
-                    BootstrapEvidence("dataDir", dataDir, "ApplicationInfo"),
-                    BootstrapEvidence("packageName", appInfo.packageName ?: "", "ApplicationInfo")
+            evidenceSink.emit(
+                BootstrapResult.success(
+                    RuntimeStage.GUEST_CONTEXT,
+                    "activity thread and appInfo resolved",
+                    evidence = listOf(
+                        BootstrapEvidence("stubApkPath", stubApkPath, "ApplicationInfo"),
+                        BootstrapEvidence("dataDir", dataDir, "ApplicationInfo"),
+                        BootstrapEvidence("packageName", appInfo.packageName ?: "", "ApplicationInfo")
+                    )
                 )
             )
 
@@ -656,12 +890,14 @@ class LoaderFactory : AppComponentFactory() {
             guestPackageName = config.originalPkg
             stubPackageName = config.stubPkg
             logD("  originalPkg=${config.originalPkg}, stubPkg=${config.stubPkg}")
-            bootstrapRecorder.success(
-                RuntimeStage.PACKAGE_METADATA,
-                "poc config loaded",
-                evidence = listOf(
-                    BootstrapEvidence("originalPkg", config.originalPkg, "PocConfig"),
-                    BootstrapEvidence("stubPkg", config.stubPkg, "PocConfig")
+            evidenceSink.emit(
+                BootstrapResult.success(
+                    RuntimeStage.PACKAGE_METADATA,
+                    "poc config loaded",
+                    evidence = listOf(
+                        BootstrapEvidence("originalPkg", config.originalPkg, "PocConfig"),
+                        BootstrapEvidence("stubPkg", config.stubPkg, "PocConfig")
+                    )
                 )
             )
             installActivityStartProxiesIfReady("after-readConfig", activityThread)
@@ -682,13 +918,15 @@ class LoaderFactory : AppComponentFactory() {
             if (originalApk != null) {
                 logD("  Original APK: ${originalApk.absolutePath}, size=${originalApk.length()}")
             }
-            bootstrapRecorder.success(
-                RuntimeStage.ORIGIN_APK,
-                "origin apk extracted",
-                evidence = listOf(
-                    BootstrapEvidence("originApk", originApk.absolutePath, "LoaderFactory"),
-                    BootstrapEvidence("originApkSize", originApk.length().toString(), "File"),
-                    BootstrapEvidence("originalApk", originalApk?.absolutePath ?: "", "LoaderFactory")
+            evidenceSink.emit(
+                BootstrapResult.success(
+                    RuntimeStage.ORIGIN_APK,
+                    "origin apk extracted",
+                    evidence = listOf(
+                        BootstrapEvidence("originApk", originApk.absolutePath, "LoaderFactory"),
+                        BootstrapEvidence("originApkSize", originApk.length().toString(), "File"),
+                        BootstrapEvidence("originalApk", originalApk?.absolutePath ?: "", "LoaderFactory")
+                    )
                 )
             )
 
@@ -699,13 +937,30 @@ class LoaderFactory : AppComponentFactory() {
             // 标记 native 库已加载（libmultiapp-native.so 在 stub APK 的 lib/ 中，
             // 被 stub ClassLoader 加载，但 NativeHookBridge 的 init 块用 boot ClassLoader 检测不到）
             NativeHookBridge.markNativeLibLoaded()
-            installNativeLoadHookIfAvailable()
+            val nativeLoadHookDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+                nativeHookPolicy,
+                com.multiapp.core.hook.NativeHookCapability.METHOD_REPLACEMENT,
+                "LoaderFactory.installNativeLoadHookIfAvailable.nativeLoadHook"
+            )
+            val registerLoggerDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+                nativeHookPolicy,
+                com.multiapp.core.hook.NativeHookCapability.REGISTER_NATIVES_LOGGING,
+                "LoaderFactory.installNativeLoadHookIfAvailable.registerNativesLogger"
+            )
+            logPolicyDecision(nativeLoadHookDecision)
+            logPolicyDecision(registerLoggerDecision)
+            installNativeLoadHookIfAvailable(
+                nativeLoadHookAllowed = nativeLoadHookDecision.allowed,
+                registerLoggerAllowed = registerLoggerDecision.allowed
+            )
             logSignal("after native hook install")
-            bootstrapRecorder.success(
-                RuntimeStage.NATIVE_LIBS,
-                "native environment install attempted",
-                evidence = listOf(
-                    BootstrapEvidence("nativeBridge", "marked-loaded", "NativeHookBridge")
+            evidenceSink.emit(
+                BootstrapResult.success(
+                    RuntimeStage.NATIVE_LIBS,
+                    "native environment install attempted",
+                    evidence = listOf(
+                        BootstrapEvidence("nativeBridge", "marked-loaded", "NativeHookBridge")
+                    )
                 )
             )
 
@@ -714,25 +969,29 @@ class LoaderFactory : AppComponentFactory() {
             logD("Step 6: Swapping ClassLoader...")
             swapClassLoader(activityThread, appInfo, originApk, config, originalApk)
             logSignal("after swapClassLoader")
-            bootstrapRecorder.success(
-                RuntimeStage.CLASS_LOADER,
-                "class loader swapped",
-                evidence = listOf(
-                    BootstrapEvidence("guestClassLoader", guestClassLoader?.javaClass?.name ?: "", "LoaderFactory"),
-                    BootstrapEvidence("originNativeLibDir", originNativeLibDir ?: "", "LoaderFactory")
+            evidenceSink.emit(
+                BootstrapResult.success(
+                    RuntimeStage.CLASS_LOADER,
+                    "class loader swapped",
+                    evidence = listOf(
+                        BootstrapEvidence("guestClassLoader", guestClassLoader?.javaClass?.name ?: "", "LoaderFactory"),
+                        BootstrapEvidence("originNativeLibDir", originNativeLibDir ?: "", "LoaderFactory")
+                    )
                 )
             )
             logD("=== POC LoaderFactory complete ===")
 
         } catch (e: Exception) {
-            bootstrapRecorder.failed(
-                currentStage,
-                "initializeInternal failed",
-                error = e,
-                evidence = listOf(
-                    BootstrapEvidence("classLoader", cl.javaClass.name, "LoaderFactory")
-                ),
-                rollbackNote = "dump debug log and rethrow"
+            evidenceSink.emit(
+                BootstrapResult.failed(
+                    currentStage,
+                    "initializeInternal failed",
+                    error = e,
+                    evidence = listOf(
+                        BootstrapEvidence("classLoader", cl.javaClass.name, "LoaderFactory")
+                    ),
+                    rollbackNote = "dump debug log and rethrow"
+                )
             )
             logSignal("initializeInternal failed ${e.javaClass.name}: ${e.message}")
             logE("=== POC LoaderFactory FAILED ===", e)
@@ -742,7 +1001,10 @@ class LoaderFactory : AppComponentFactory() {
         }
     }
 
-    private fun installNativeLoadHookIfAvailable() {
+    private fun installNativeLoadHookIfAvailable(
+        nativeLoadHookAllowed: Boolean,
+        registerLoggerAllowed: Boolean
+    ) {
         try {
             logSignal("installNativeLoadHookIfAvailable entered")
             val candidates = arrayOf(
@@ -751,12 +1013,20 @@ class LoaderFactory : AppComponentFactory() {
                 "com.stub.StubApplication",
                 originApplicationClass
             ).filterNotNull().distinct().toTypedArray()
-            val installed = NativeHookBridge.getInstance().hookRuntimeNativeLoad(candidates)
-            logD("  Runtime.nativeLoad hook installed=$installed, fallbackCallers=${candidates.joinToString()}")
-            logSignal("Runtime.nativeLoad hook installed=$installed")
-            val registerLoggerInstalled = NativeHookBridge.getInstance().installRegisterNativesLogger()
-            logD("  RegisterNatives logger installed=$registerLoggerInstalled")
-            logSignal("RegisterNatives logger installed=$registerLoggerInstalled")
+            if (nativeLoadHookAllowed) {
+                val installed = NativeHookBridge.getInstance().hookRuntimeNativeLoad(candidates)
+                logD("  Runtime.nativeLoad hook installed=$installed, fallbackCallers=${candidates.joinToString()}")
+                logSignal("Runtime.nativeLoad hook installed=$installed")
+            } else {
+                logSignal("Runtime.nativeLoad hook skipped by policy")
+            }
+            if (registerLoggerAllowed) {
+                val registerLoggerInstalled = NativeHookBridge.getInstance().installRegisterNativesLogger()
+                logD("  RegisterNatives logger installed=$registerLoggerInstalled")
+                logSignal("RegisterNatives logger installed=$registerLoggerInstalled")
+            } else {
+                logSignal("RegisterNatives logger skipped by policy")
+            }
         } catch (e: Throwable) {
             logSignal("installNativeLoadHookIfAvailable failed ${e.javaClass.name}: ${e.message}")
             logW("  Runtime.nativeLoad hook unavailable: ${e.javaClass.simpleName}: ${e.message}")
@@ -1173,10 +1443,21 @@ class LoaderFactory : AppComponentFactory() {
         logD("  Kept packageName as stub: ${appInfo.packageName}")
 
         val originLibDir = extractOriginNativeLibs(originApk)
+        val installedOriginLibDir = resolveInstalledOriginNativeLibDir(config)
+        val preferredOriginLibDir = installedOriginLibDir ?: originLibDir
         val nativeSearchPaths = mutableListOf<String>()
-        if (originLibDir != null && originLibDir.isDirectory) {
-            nativeSearchPaths += originLibDir.absolutePath
-            logD("  Found extracted origin lib dir: ${originLibDir.absolutePath}")
+        if (preferredOriginLibDir != null && preferredOriginLibDir.isDirectory) {
+            nativeSearchPaths += preferredOriginLibDir.absolutePath
+            if (preferredOriginLibDir == installedOriginLibDir) {
+                logW("  Using installed origin native lib dir first: ${preferredOriginLibDir.absolutePath}")
+            } else {
+                logD("  Found extracted origin lib dir: ${preferredOriginLibDir.absolutePath}")
+            }
+            if (originLibDir != null && originLibDir.isDirectory &&
+                originLibDir.absolutePath != preferredOriginLibDir.absolutePath) {
+                nativeSearchPaths += originLibDir.absolutePath
+                logD("  Added extracted origin lib dir as fallback: ${originLibDir.absolutePath}")
+            }
         } else {
             logD("  No extracted origin lib dir available")
         }
@@ -1191,7 +1472,7 @@ class LoaderFactory : AppComponentFactory() {
             .distinct()
             .joinToString(File.pathSeparator)
         if (nativeLibraryPath.isNotBlank()) {
-            val exposedNativeLibDir = originLibDir?.absolutePath ?: nativeSearchPaths.first()
+            val exposedNativeLibDir = preferredOriginLibDir?.absolutePath ?: nativeSearchPaths.first()
             appInfo.nativeLibraryDir = exposedNativeLibDir
             originNativeLibDir = exposedNativeLibDir
             logD("  Updated nativeLibraryDir -> ${appInfo.nativeLibraryDir}")
@@ -1283,11 +1564,13 @@ class LoaderFactory : AppComponentFactory() {
             originApkPath = originApk.absolutePath,
             originalApkPath = originalApk?.absolutePath,
             originalPackageName = config.originalPkg,
+            stubPackageName = config.stubPkg,
             cloneProfile = config.cloneProfile,
             dataDir = appInfo.dataDir,
             stubApkPath = appInfo.sourceDir,
             bridge = com.multiapp.core.hook.NativeHookBridge.getInstance(),
             hookEngine = com.multiapp.core.hook.HookEngine.getInstance(),
+            nativeHookPolicy = nativeHookPolicy,
         )
         val packerResult = try {
             com.multiapp.core.hook.PackerRuntimeDispatcher.getInstance().execute(packerContext)
@@ -1302,28 +1585,56 @@ class LoaderFactory : AppComponentFactory() {
         // through ART nativeLoad with guest ClassLoader ownership. This keeps
         // RegisterNatives bindings such as YWLoginManager.getInstance attached
         // to the real guest classes instead of the loader/stub namespace.
-        val onlineChapterNativeBound = preloadGuestRuntimeNativeLibraries(realGuestClassLoader)
-        if (!onlineChapterNativeBound) {
+        val stage2NativeDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+            nativeHookPolicy,
+            com.multiapp.core.hook.NativeHookCapability.BUSINESS_NATIVE_STUBS,
+            "LoaderFactory.preloadGuestRuntimeNativeLibraries"
+        )
+        logPolicyDecision(stage2NativeDecision)
+        val onlineChapterNativeBound = if (stage2NativeDecision.allowed) {
+            preloadGuestRuntimeNativeLibraries(realGuestClassLoader)
+        } else {
+            false
+        }
+        if (!onlineChapterNativeBound && stage2NativeDecision.allowed) {
             logW("  Stage2 OnlineChapterDownloadTask.run not bound")
+        } else if (!stage2NativeDecision.allowed) {
+            logD("  Stage2 native preload skipped by policy")
         }
         if (isQqReaderProfile(config)) {
-            logW("  Installing OnlineChapterDownloadTask minimal state stubs")
-            try {
-                val stateRegistered =
-                    NativeHookBridge.getInstance().registerOnlineChapterStateStubs(realGuestClassLoader)
-                logD("  Stage2 online chapter state stubs registered: $stateRegistered")
-            } catch (e: Throwable) {
-                logW("  Stage2 online chapter state stub registration failed: ${e.javaClass.simpleName}: ${e.message}")
+            val stateStubDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+                nativeHookPolicy,
+                com.multiapp.core.hook.NativeHookCapability.BUSINESS_NATIVE_STUBS,
+                "LoaderFactory.onlineChapterStateStubs"
+            )
+            logPolicyDecision(stateStubDecision)
+            if (stateStubDecision.allowed) {
+                logW("  Installing OnlineChapterDownloadTask minimal state stubs")
+                try {
+                    val stateRegistered =
+                        NativeHookBridge.getInstance().registerOnlineChapterStateStubs(realGuestClassLoader)
+                    logD("  Stage2 online chapter state stubs registered: $stateRegistered")
+                } catch (e: Throwable) {
+                    logW("  Stage2 online chapter state stub registration failed: ${e.javaClass.simpleName}: ${e.message}")
+                }
             }
         }
         if (isQqReaderProfile(config) && isTruthyProperty("debug.multiapp.online.state_fallback", true)) {
-            logW("  Installing OnlineChapterDownloadTask full fallback stubs")
-            try {
-                val fallbackRegistered =
-                    NativeHookBridge.getInstance().registerOnlineChapterDownloadFallbackStubs(realGuestClassLoader)
-                logD("  Stage2 online chapter full fallback stubs registered: $fallbackRegistered")
-            } catch (e: Throwable) {
-                logW("  Stage2 online chapter full fallback registration failed: ${e.javaClass.simpleName}: ${e.message}")
+            val fullFallbackDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+                nativeHookPolicy,
+                com.multiapp.core.hook.NativeHookCapability.BUSINESS_NATIVE_STUBS,
+                "LoaderFactory.onlineChapterFullFallbackStubs"
+            )
+            logPolicyDecision(fullFallbackDecision)
+            if (fullFallbackDecision.allowed) {
+                logW("  Installing OnlineChapterDownloadTask full fallback stubs")
+                try {
+                    val fallbackRegistered =
+                        NativeHookBridge.getInstance().registerOnlineChapterDownloadFallbackStubs(realGuestClassLoader)
+                    logD("  Stage2 online chapter full fallback stubs registered: $fallbackRegistered")
+                } catch (e: Throwable) {
+                    logW("  Stage2 online chapter full fallback registration failed: ${e.javaClass.simpleName}: ${e.message}")
+                }
             }
         } else {
             logD("  Stage2 online chapter full fallback stubs disabled; preserving shell native bindings")
@@ -1402,7 +1713,15 @@ class LoaderFactory : AppComponentFactory() {
         logD("  swapClassLoader complete")
 
         // 加载嵌入的 Xposed 模块（ClassLoader 已就绪）
-        loadXposedModules(config, realGuestClassLoader)
+        val embeddedXposedDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+            nativeHookPolicy,
+            com.multiapp.core.hook.NativeHookCapability.XPOSED_MODULES,
+            "LoaderFactory.loadXposedModules"
+        )
+        logPolicyDecision(embeddedXposedDecision)
+        if (embeddedXposedDecision.allowed) {
+            loadXposedModules(config, realGuestClassLoader)
+        }
     }
 
     private fun applyOriginApplicationInfoFields(
@@ -1780,8 +2099,32 @@ class LoaderFactory : AppComponentFactory() {
             logD("  App-specific post-load hooks skipped for profile=${config.cloneProfile} pkg=${config.originalPkg}")
             return
         }
-        val bridge = com.multiapp.core.hook.NativeHookBridge.getInstance()
+        val appSpecificDecisions = com.multiapp.core.hook.NativeHookPolicyGate.decisionsForComponents(
+            policy = nativeHookPolicy,
+            components = mapOf(
+                com.multiapp.core.hook.NativeHookCapability.LSPLANT_METHOD_HOOKS to
+                    "LoaderFactory.installAppSpecificPostLoadHooks.lsplant",
+                com.multiapp.core.hook.NativeHookCapability.BUSINESS_NATIVE_STUBS to
+                    "LoaderFactory.installAppSpecificPostLoadHooks.businessNativeStubs",
+                com.multiapp.core.hook.NativeHookCapability.METHOD_REPLACEMENT to
+                    "LoaderFactory.installAppSpecificPostLoadHooks.methodReplacement",
+                com.multiapp.core.hook.NativeHookCapability.NO_OP_PATCHES to
+                    "LoaderFactory.installAppSpecificPostLoadHooks.noOpPatches"
+            )
+        )
+        appSpecificDecisions.forEach { logPolicyDecision(it) }
+        val lsPlantDecision = appSpecificDecisions.first {
+            it.evidence["capability"] == com.multiapp.core.hook.NativeHookCapability.LSPLANT_METHOD_HOOKS.name
+        }
+        val stubsDecision = appSpecificDecisions.first {
+            it.evidence["capability"] == com.multiapp.core.hook.NativeHookCapability.BUSINESS_NATIVE_STUBS.name
+        }
+        if (!lsPlantDecision.allowed) {
+            logD("  App-specific post-load hooks skipped by policy")
+            return
+        }
         val hookEngine = com.multiapp.core.hook.HookEngine.getInstance()
+        val bridge = com.multiapp.core.hook.NativeHookBridge.getInstance()
         val lsplantOk = try { hookEngine.initLsplant(guestCl) } catch (_: Throwable) { false }
         val jiaguLoaded = packerResult?.jiaguLoaded == true
 
@@ -1861,7 +2204,7 @@ class LoaderFactory : AppComponentFactory() {
         } catch (_: Throwable) {
             try { Class.forName("com.qihoo.util.StubApp", false, guestCl) } catch (_: Throwable) { null }
         }
-        if (callerClass != null) {
+        if (callerClass != null && stubsDecision.allowed) {
             val targetClass = callerClass.name
             val stubFallbackMode = getSystemProperty("debug.multiapp.stubapp.fallback", "0")
             val processName = currentProcessName()
@@ -2046,6 +2389,10 @@ class LoaderFactory : AppComponentFactory() {
         logD("  preloadPackerLib: initializing native hooks (ShadowHook)")
         val hooksOk = bridge.initNativeHooks()
         logD("  preloadPackerLib: native hooks initialized: $hooksOk")
+        currentConfig?.let { config ->
+            bridge.setJiaguPackageSpoof(config.stubPkg, config.originalPkg)
+            logD("  preloadPackerLib: jiagu package spoof ${config.stubPkg} -> ${config.originalPkg}")
+        }
 
         // ── Step 1: 先装 FindClass hook ──
         // preloadNativeLibraries 内部会 dlopen + 手动调用 JNI_OnLoad。
@@ -2204,12 +2551,22 @@ class LoaderFactory : AppComponentFactory() {
                 }
 
                 // ★ 再注册关键业务 stub（覆盖批量注册中的 null 返回 stub）
-                logD("  preloadPackerLib: registering business native stubs (after StubApp.load)")
-                try {
-                    val businessRegistered = bridge.registerBusinessStubs(guestCl)
-                    logD("  preloadPackerLib: business stubs registered: $businessRegistered")
-                } catch (e: Throwable) {
-                    logW("  preloadPackerLib: registerBusinessStubs exception: ${e.message}")
+                val deferQqReaderBusinessStubs = currentConfig?.let { cfg ->
+                    jiaguLoadedWithGuestClassLoader &&
+                        isQqReaderProfile(cfg) &&
+                        !currentProcessName().contains(":") &&
+                        bridge.getStubAppBindingReport().contains("interface11=bound")
+                } ?: false
+                if (deferQqReaderBusinessStubs) {
+                    logW("  preloadPackerLib: QQ Reader defers business native stubs until original YWLogin <clinit> attempt")
+                } else {
+                    logD("  preloadPackerLib: registering business native stubs (after StubApp.load)")
+                    try {
+                        val businessRegistered = bridge.registerBusinessStubs(guestCl)
+                        logD("  preloadPackerLib: business stubs registered: $businessRegistered")
+                    } catch (e: Throwable) {
+                        logW("  preloadPackerLib: registerBusinessStubs exception: ${e.message}")
+                    }
                 }
 
                 logD("  preloadPackerLib: registering qrencrypt native stubs")
@@ -2226,13 +2583,18 @@ class LoaderFactory : AppComponentFactory() {
                 logD("  preloadPackerLib: LSPlant initialized: $lsplantOk")
 
                 // AntiDetectionEngine 初始化 — 反检测引擎接入启动流程
-                try {
-                    val antiDetect = com.multiapp.core.hook.AntiDetectionEngine(hookEngine, bridge)
-                    antiDetect.initialize()
-                    antiDetect.enableAntiDetection("default", com.multiapp.core.hook.DetectionLevel.MODERATE)
-                    logD("  preloadPackerLib: AntiDetectionEngine initialized and enabled (MODERATE)")
-                } catch (e: Throwable) {
-                    logW("  preloadPackerLib: AntiDetectionEngine init failed: ${e.javaClass.simpleName}: ${e.message}")
+                val skipJavaPackerBypass = currentConfig?.let { cfg -> isQqReaderProfile(cfg) } ?: false
+                if (skipJavaPackerBypass) {
+                    logW("  preloadPackerLib: skipping AntiDetectionEngine Java packer bypass for QQ Reader")
+                } else {
+                    try {
+                        val antiDetect = com.multiapp.core.hook.AntiDetectionEngine(hookEngine, bridge)
+                        antiDetect.initialize()
+                        antiDetect.enableAntiDetection("default", com.multiapp.core.hook.DetectionLevel.MODERATE)
+                        logD("  preloadPackerLib: AntiDetectionEngine initialized and enabled (MODERATE)")
+                    } catch (e: Throwable) {
+                        logW("  preloadPackerLib: AntiDetectionEngine init failed: ${e.javaClass.simpleName}: ${e.message}")
+                    }
                 }
 
                 // 跳过 Pangle 广告 SDK 初始化（Zeus.init 方法不存在）
@@ -2468,6 +2830,14 @@ class LoaderFactory : AppComponentFactory() {
             }
         } else {
             logD("  preloadPackerLib: StubApp native fallback disabled; preserving shell registrations")
+        }
+        if (jiaguLoadedWithGuestClassLoader && isCurrentQqReaderProfile && !isQqReaderChildProcess) {
+            maybeRunQqReaderOriginalInterface11(
+                bridge = bridge,
+                classLoader = guestCl,
+                targetClass = targetClass,
+                reason = "preloadPackerLib-post-stub-fallback"
+            )
         }
     }
 
@@ -3086,12 +3456,46 @@ class LoaderFactory : AppComponentFactory() {
             }
             override fun onActivityCreated(a: android.app.Activity, s: android.os.Bundle?) {}
             override fun onActivityStarted(a: android.app.Activity) {}
-            override fun onActivityResumed(a: android.app.Activity) {}
+            override fun onActivityResumed(a: android.app.Activity) {
+                maybeAutoOpenQqReaderLogin(a)
+            }
             override fun onActivityPaused(a: android.app.Activity) {}
             override fun onActivityStopped(a: android.app.Activity) {}
             override fun onActivitySaveInstanceState(a: android.app.Activity, o: android.os.Bundle) {}
             override fun onActivityDestroyed(a: android.app.Activity) {}
         })
+    }
+
+    private fun maybeAutoOpenQqReaderLogin(activity: android.app.Activity) {
+        val config = currentConfig ?: return
+        if (!isQqReaderProfile(config)) return
+        if (!isTruthyProperty("debug.multiapp.ywlogin.auto_open", false)) return
+
+        val className = activity.javaClass.name
+        if (className == "com.qq.reader.login.client.impl.QRLoginActivity" ||
+            className.startsWith("com.yuewen.ywlogin.ui.")
+        ) {
+            return
+        }
+        if (qqReaderAutoLoginStarted) return
+        qqReaderAutoLoginStarted = true
+
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            try {
+                val intent = Intent().apply {
+                    component = ComponentName(
+                        activity.packageName,
+                        "com.qq.reader.login.client.impl.QRLoginActivity"
+                    )
+                    addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                }
+                activity.startActivity(intent)
+                logW("QQ Reader auto_open login started from $className")
+            } catch (t: Throwable) {
+                qqReaderAutoLoginStarted = false
+                logE("QQ Reader auto_open login failed from $className", t)
+            }
+        }, 1000L)
     }
 
     private fun syncActivityResourceContext(
@@ -3632,6 +4036,53 @@ class LoaderFactory : AppComponentFactory() {
             return true
         }
         return isTruthyProperty("debug.multiapp.patch_jiagu", false)
+    }
+
+    private fun resolveInstalledOriginNativeLibDir(config: PocConfig): File? {
+        if (!isQqReaderProfile(config) ||
+            !isTruthyProperty("debug.multiapp.jiagu.use_installed_origin_lib", false)) {
+            return null
+        }
+
+        val forcedDir = getSystemProperty("debug.multiapp.jiagu.installed_origin_lib_dir", "").trim()
+        if (forcedDir.isNotEmpty()) {
+            val dir = File(forcedDir)
+            val jiagu = File(dir, "libjiagu_vip.so")
+            if (dir.isDirectory && jiagu.isFile) {
+                logW("  Installed origin native lib dir forced by prop: ${dir.absolutePath}")
+                return dir
+            }
+            logW("  Forced installed origin native lib dir unusable: ${dir.absolutePath}, jiagu=${jiagu.exists()}")
+        }
+
+        return try {
+            val at = Class.forName("android.app.ActivityThread")
+                .getDeclaredMethod("currentActivityThread")
+                .apply { isAccessible = true }
+                .invoke(null)
+            val getSystemContext = at.javaClass.getDeclaredMethod("getSystemContext")
+            getSystemContext.isAccessible = true
+            val systemContext = getSystemContext.invoke(at) as android.content.Context
+            val installedInfo = systemContext.packageManager.getApplicationInfo(config.originalPkg, 0)
+            val dirPath = installedInfo.nativeLibraryDir
+            if (dirPath.isNullOrBlank()) {
+                logW("  Installed origin native lib dir empty for ${config.originalPkg}")
+                null
+            } else {
+                val dir = File(dirPath)
+                val jiagu = File(dir, "libjiagu_vip.so")
+                if (dir.isDirectory && jiagu.isFile) {
+                    logW("  Installed origin native lib dir resolved: ${dir.absolutePath}")
+                    dir
+                } else {
+                    logW("  Installed origin native lib dir unusable: ${dir.absolutePath}, jiagu=${jiagu.exists()}")
+                    null
+                }
+            }
+        } catch (e: Throwable) {
+            logW("  Installed origin native lib dir resolve failed: ${e.javaClass.simpleName}: ${e.message}")
+            null
+        }
     }
 
     private fun shouldKeepOriginNativeLibsWritable(): Boolean {
