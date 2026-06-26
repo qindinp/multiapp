@@ -98,7 +98,8 @@ core/hook
   - optional LSPlant/Xposed runtime
 ```
 
-容器目标不是“把某个加固 App 绕过去”，而是让 guest 视角尽量接近真实安装态：
+容器目标不是破坏、修改或替换加固壳，而是兼容壳对真实安装环境的预期，让 guest
+视角尽量接近真实安装态：
 
 ```text
 PackageInfo / ApplicationInfo
@@ -218,22 +219,32 @@ No implementation found for boolean com.stub.StubApp.interface20()
 - 与 v2 冲突的“LSPlant 作为加固 App 默认依赖”视为废弃。
 - 仍然有效的是：用户态容器优先、hook-free baseline 优先、证据优先、LSPlant 可选。
 
-### 0.8 合规与授权红线
+### 0.8 开源学习定位、壳兼容边界与商业参照
 
-本路线的目标是验证自研容器兼容性和受控测试环境内的运行证据，不以规避商业加固、
-版权保护、DRM、登录风控、支付风控或服务端策略为目标。对 QQ 阅读、360 加固壳或
-其他商业保护组件的测试，必须先明确授权来源、测试范围、设备范围和数据范围。
+本项目定位为开源学习和容器技术研究，目标是做 **兼容壳的 App 级虚拟化容器**，不是
+破坏壳、脱壳、改壳或替换壳。对 QQ 阅读、360 加固壳等样本的验证，应理解为：容器
+需要尽量提供接近真实安装态的 PMS/AMS/Provider/Storage/ClassLoader/native namespace
+环境，让原壳自己的初始化链路可以正常完成。
 
-不可支持的默认方向：
+市面上存在悟空分身、团团分身、比翼多开等同类商业多开/分身方案，这说明“容器化兼容
+加固 App”是现实存在的工程方向。本项目可以把这些产品作为外部能力参照，但不能直接
+推断其内部实现、授权关系、系统权限、OEM 合作或风控处理方式。
 
-1. 不提供绕过授权、会员、支付、登录风控、内容保护或 DRM 的能力。
-2. 不把 native stub、method replacement、no-op patch 写成商业 App 的默认成功路径。
-3. 不把 LSPlant/Xposed 用作绕过目标 App 安全判断的默认依赖。
-4. 不把抓到的商业 App 内部符号、私有协议或策略逻辑沉淀为产品能力。
+工程边界：
 
-如果后续要进入商业化验证，必须先补齐合规记录：测试 APK 来源、授权证明、设备清单、
-采集字段清单、留存周期和不可测试场景。没有这些记录时，受保护 App 只能作为
-兼容性研究样本，不能作为产品承诺对象。
+1. 允许研究和实现容器环境兼容：包身份、签名视图、路径、provider、storage、native
+   library namespace、ClassLoader identity、`JNI_OnLoad` / `FindClass` / `RegisterNatives`
+   等。
+2. 允许通过 diagnostics 观察壳初始化为什么失败，但默认不修改壳代码、不替换壳逻辑、
+   不把 native stub 当作成功路径。
+3. 不把 LSPlant/Xposed 作为 protected baseline 的默认依赖；它们只能是可选扩展层或
+   诊断层，不能代替容器内核。
+4. 不把会员、支付、DRM、登录风控、服务端策略等业务能力作为兼容目标；这些不是容器
+   运行环境兼容问题。
+
+因此，QQ 阅读的目标应表述为“容器兼容其原壳初始化和正常启动”，而不是“绕过壳”。
+如果后续做公开发布或商业化，需要补齐项目声明、测试样本来源、问题复现范围和不可支持
+场景，但这不改变当前开源学习项目的技术主线。
 
 ### 0.9 普通 App 回归前置与产品体验基线
 
@@ -366,16 +377,26 @@ CI 门禁从文档门禁开始，逐步转成脚本：
 ### 0.15 Baseline permanent failure 与 Plan B
 
 如果 `NativeDiagnosticsProfile(register-natives-only)` 证明 QQ 阅读/360 壳在真实安装态可完成
-注册，但在容器环境中因可识别差异主动拒绝注册，且该差异无法通过 Virtual PMS/AMS/
-Provider/Storage/native namespace 的正当模拟消除，则判定为 baseline permanent failure。
+注册，但在容器环境中失败，不能直接判定“此 App 不支持”。先要判断失败差异是否属于
+容器应补齐的真实安装态能力，例如 Virtual PMS/AMS/Provider/Storage、native namespace、
+ClassLoader identity、签名视图、路径视图或进程/包身份一致性。
 
-Plan B 只能有三类：
+只有在这些容器职责已经补齐，且证据仍显示原壳主动拒绝当前容器环境时，才进入
+baseline permanent failure 评审。
 
-1. 降级为“不支持该受保护 App/该版本”，保留证据和用户提示。
-2. 在明确授权的企业/研究环境中进入专项兼容实验，且实验结果不得变成默认产品能力。
-3. 延后到系统级、Profile/Work Profile、OEM 合作或 MDM 能力路线评估。
+Plan B 分层：
 
-Plan B 不包括默认补 `interface20`、默认替换方法、默认 no-op patch 或默认启用 LSPlant。
+1. 继续补容器内核：优先修 Virtual PMS/AMS/Provider/Storage/native namespace 等真实
+   安装态差异，这是对标同类商业分身方案的主路线。
+2. 扩充 diagnostics：记录 `JNI_OnLoad`、`FindClass`、`RegisterNatives`、maps、linker、
+   class loader、package identity 的差异，不改变壳逻辑。
+3. 评估系统级或更高权限路线：Profile/Work Profile、系统插件、OEM/MDM 类能力可作为
+   远期参照，但不影响当前用户态容器主线。
+4. 对单个版本临时标记“不支持/待兼容”，保留证据和复现脚本，避免用错误 patch 掩盖
+   容器缺口。
+
+Plan B 不包括默认补 `interface20`、默认替换壳方法、默认 no-op patch、默认破坏壳或默认
+启用 LSPlant。兼容壳的方向是让原壳在容器内正常完成自己的初始化，而不是接管壳。
 
 日期：2026-06-25  
 状态：总方案与实施步骤  

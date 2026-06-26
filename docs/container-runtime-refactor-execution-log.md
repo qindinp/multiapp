@@ -188,7 +188,8 @@ Completed:
    `D:\wxjl\xwechat_files\wxid_tkcgnu0ggpcs22_00a3\msg\file\2026-06\doc-review-multiapp-lsplant-roadmap-2026-06-26.md`.
 2. Strengthened the v2 authoritative route in
    `docs/multiapp-container-lsplant-roadmap.md` with explicit gates for:
-   - authorization and compliance boundaries
+   - open-source learning scope, shell-compatibility boundaries, and commercial
+     multi-app product references
    - ordinary App regression before protected-App conclusions
    - Phase A-G / Phase 0-8 / Sprint 1.x mapping
    - Stub transitional implementation retirement criteria
@@ -200,6 +201,22 @@ Completed:
 Result:
 
 - The route remains container-first and hook-free baseline first.
-- QQ Reader remains a protected baseline diagnostic target, not a reason to
-  revive default `QQ_READER_SPECIAL`, business native stubs, method replacement,
-  no-op patches, or default LSPlant.
+- QQ Reader remains a protected baseline diagnostic target. The target is to
+  make the original shell initialize normally in a compatible container
+  environment, not to damage, replace, or bypass the shell with default
+  `QQ_READER_SPECIAL`, business native stubs, method replacement, no-op patches,
+  or default LSPlant.
+
+## 2026-06-26 Route v2 Scope Correction
+
+Correction:
+
+1. Reworded the v2 route to state that MultiApp is an open-source learning and
+   container research project.
+2. Reframed protected-App support as shell compatibility: preserve the original
+   shell and make the container match real install-state expectations.
+3. Added commercial multi-app products as market references while avoiding
+   assumptions about their internal permissions, OEM relationships, or risk
+   handling.
+4. Changed Plan B ordering so the first fallback is to continue fixing the
+   container kernel, not to prematurely mark a protected App as unsupported.
