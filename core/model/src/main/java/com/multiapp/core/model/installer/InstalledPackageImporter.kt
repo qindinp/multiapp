@@ -7,6 +7,7 @@ import com.multiapp.core.model.VirtualComponentRecord
 import com.multiapp.core.model.VirtualPackageRecord
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.CancellationException
 
 /**
  * Imports installed packages from the device into virtual install records.
@@ -91,6 +92,8 @@ class InstalledPackageImporter(
                     recordPath = recordPath
                 )
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }

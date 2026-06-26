@@ -30,3 +30,7 @@
 
 # FileItem — if present
 -keep class com.multiapp.core.model.FileItem { *; }
+
+# Installer package — InstallRecord and ComponentInfo serialized by Gson
+-keep class com.multiapp.core.model.installer.InstallRecord { *; }
+-keep class com.multiapp.core.model.installer.ComponentInfo { *; }
