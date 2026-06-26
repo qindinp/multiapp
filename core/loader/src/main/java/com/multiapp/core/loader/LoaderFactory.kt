@@ -187,6 +187,23 @@ class LoaderFactory : AppComponentFactory() {
 
     private val initLock = Any()
 
+    private val bootstrapRecorder = RuntimeBootstrapRecorder { result ->
+        logBootstrapResult(result)
+    }
+
+    private fun logBootstrapResult(result: BootstrapResult) {
+        val evidence = result.evidence.joinToString(prefix = "[", postfix = "]") {
+            "${it.key}=${it.value}"
+        }
+        val error = result.errorClass?.let {
+            " error=${it.substringAfterLast('.')}:${result.errorMessage}"
+        } ?: ""
+        logD(
+            "BOOTSTRAP stage=${result.stage.name} status=${result.status.name} " +
+                "message=${result.message} evidence=$evidence$error"
+        )
+    }
+
     override fun instantiateActivity(
         cl: ClassLoader,
         className: String,
@@ -314,6 +331,14 @@ class LoaderFactory : AppComponentFactory() {
             logD("  loaded: ${appClass.name}, creating instance...")
             val app = appClass.getDeclaredConstructor().newInstance() as Application
             logD("  Application created OK: ${app.javaClass.name}")
+            bootstrapRecorder.success(
+                RuntimeStage.APPLICATION,
+                "application created",
+                evidence = listOf(
+                    BootstrapEvidence("className", app.javaClass.name, "instantiateApplication"),
+                    BootstrapEvidence("requestedClassName", className, "instantiateApplication")
+                )
+            )
 
             // ★ ModuleLoader 集成：加载 Xposed 模块并分发 loadPackage 事件
             tryInitModuleLoader(realCl, app)
@@ -327,8 +352,23 @@ class LoaderFactory : AppComponentFactory() {
                 val fallbackClass = realCl.loadClass(className)
                 val fallbackApp = fallbackClass.getDeclaredConstructor().newInstance() as Application
                 logD("  Fallback Application created OK: ${fallbackApp.javaClass.name}")
+                bootstrapRecorder.degraded(
+                    RuntimeStage.APPLICATION,
+                    "application fallback created",
+                    error = e,
+                    evidence = listOf(
+                        BootstrapEvidence("failedClassName", effectiveClassName, "instantiateApplication"),
+                        BootstrapEvidence("fallbackClassName", fallbackApp.javaClass.name, "instantiateApplication")
+                    )
+                )
                 fallbackApp
             } else {
+                bootstrapRecorder.failed(
+                    RuntimeStage.APPLICATION,
+                    "cannot create application $effectiveClassName",
+                    error = e,
+                    rollbackNote = "no fallback application class"
+                )
                 try { writeDebugLogToFile(cl) } catch (_: Exception) {}
                 throw RuntimeException("LoaderFactory POC failed: ${e.message}", e)
             }
@@ -402,11 +442,22 @@ class LoaderFactory : AppComponentFactory() {
     }
 
     private fun initializeInternal(cl: ClassLoader) {
+        bootstrapRecorder.reset()
+        var currentStage = RuntimeStage.CONFIG
         logSignal("LoaderFactory.initializeInternal entered")
         logD("=== POC LoaderFactory starting ===")
         logD("  Thread: ${Thread.currentThread().name}")
         logD("  ClassLoader: ${cl.javaClass.name}")
         logD("  ClassLoader parent: ${cl.parent?.javaClass?.name}")
+        bootstrapRecorder.success(
+            RuntimeStage.CONFIG,
+            "initializeInternal entered",
+            evidence = listOf(
+                BootstrapEvidence("thread", Thread.currentThread().name, "LoaderFactory"),
+                BootstrapEvidence("classLoader", cl.javaClass.name, "LoaderFactory"),
+                BootstrapEvidence("process", currentProcessName(), "LoaderFactory")
+            )
+        )
 
         // 保底：安装 UncaughtExceptionHandler，确保崩溃前写日志到文件
         val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -496,6 +547,7 @@ class LoaderFactory : AppComponentFactory() {
             }
 
             // 1. 获取 ActivityThread
+            currentStage = RuntimeStage.GUEST_CONTEXT
             logD("Step 1: Getting ActivityThread...")
             val activityThread = try {
                 Class.forName("android.app.ActivityThread")
@@ -556,6 +608,15 @@ class LoaderFactory : AppComponentFactory() {
             logD("  packageName: ${appInfo.packageName}")
             logD("  appComponentFactory: ${appInfo.appComponentFactory}")
             logD("  className: ${appInfo.className}")
+            bootstrapRecorder.success(
+                RuntimeStage.GUEST_CONTEXT,
+                "activity thread and appInfo resolved",
+                evidence = listOf(
+                    BootstrapEvidence("stubApkPath", stubApkPath, "ApplicationInfo"),
+                    BootstrapEvidence("dataDir", dataDir, "ApplicationInfo"),
+                    BootstrapEvidence("packageName", appInfo.packageName ?: "", "ApplicationInfo")
+                )
+            )
 
             // ── HookPipeline: 阶段化 Hook 编排（渐进式集成，与原有代码并行） ──
             logD("Step 2.5: HookPipeline execute...")
@@ -588,16 +649,26 @@ class LoaderFactory : AppComponentFactory() {
             }
 
             // 3. 从 Stub APK assets 读取配置
+            currentStage = RuntimeStage.PACKAGE_METADATA
             logD("Step 3: Reading config...")
             val config = readConfig(stubApkPath)
             currentConfig = config
             guestPackageName = config.originalPkg
             stubPackageName = config.stubPkg
             logD("  originalPkg=${config.originalPkg}, stubPkg=${config.stubPkg}")
+            bootstrapRecorder.success(
+                RuntimeStage.PACKAGE_METADATA,
+                "poc config loaded",
+                evidence = listOf(
+                    BootstrapEvidence("originalPkg", config.originalPkg, "PocConfig"),
+                    BootstrapEvidence("stubPkg", config.stubPkg, "PocConfig")
+                )
+            )
             installActivityStartProxiesIfReady("after-readConfig", activityThread)
             installNotificationManagerPackageProxy(config)
 
             // 4. 解压 origin.apk
+            currentStage = RuntimeStage.ORIGIN_APK
             logD("Step 4: Extracting origin.apk...")
             val originApk = extractOriginApk(stubApkPath, dataDir)
             logD("  Origin APK: ${originApk.absolutePath}, size=${originApk.length()}")
@@ -611,8 +682,18 @@ class LoaderFactory : AppComponentFactory() {
             if (originalApk != null) {
                 logD("  Original APK: ${originalApk.absolutePath}, size=${originalApk.length()}")
             }
+            bootstrapRecorder.success(
+                RuntimeStage.ORIGIN_APK,
+                "origin apk extracted",
+                evidence = listOf(
+                    BootstrapEvidence("originApk", originApk.absolutePath, "LoaderFactory"),
+                    BootstrapEvidence("originApkSize", originApk.length().toString(), "File"),
+                    BootstrapEvidence("originalApk", originalApk?.absolutePath ?: "", "LoaderFactory")
+                )
+            )
 
             // 5. 安装 nativeLoad hook，确保加固壳的 JNI_OnLoad/RegisterNatives 能完整执行
+            currentStage = RuntimeStage.NATIVE_LIBS
             logSignal("before native hook install")
             logD("Step 5: Installing nativeLoad hook...")
             // 标记 native 库已加载（libmultiapp-native.so 在 stub APK 的 lib/ 中，
@@ -620,14 +701,39 @@ class LoaderFactory : AppComponentFactory() {
             NativeHookBridge.markNativeLibLoaded()
             installNativeLoadHookIfAvailable()
             logSignal("after native hook install")
+            bootstrapRecorder.success(
+                RuntimeStage.NATIVE_LIBS,
+                "native environment install attempted",
+                evidence = listOf(
+                    BootstrapEvidence("nativeBridge", "marked-loaded", "NativeHookBridge")
+                )
+            )
 
             // 6. 替换 ClassLoader
+            currentStage = RuntimeStage.CLASS_LOADER
             logD("Step 6: Swapping ClassLoader...")
             swapClassLoader(activityThread, appInfo, originApk, config, originalApk)
             logSignal("after swapClassLoader")
+            bootstrapRecorder.success(
+                RuntimeStage.CLASS_LOADER,
+                "class loader swapped",
+                evidence = listOf(
+                    BootstrapEvidence("guestClassLoader", guestClassLoader?.javaClass?.name ?: "", "LoaderFactory"),
+                    BootstrapEvidence("originNativeLibDir", originNativeLibDir ?: "", "LoaderFactory")
+                )
+            )
             logD("=== POC LoaderFactory complete ===")
 
         } catch (e: Exception) {
+            bootstrapRecorder.failed(
+                currentStage,
+                "initializeInternal failed",
+                error = e,
+                evidence = listOf(
+                    BootstrapEvidence("classLoader", cl.javaClass.name, "LoaderFactory")
+                ),
+                rollbackNote = "dump debug log and rethrow"
+            )
             logSignal("initializeInternal failed ${e.javaClass.name}: ${e.message}")
             logE("=== POC LoaderFactory FAILED ===", e)
             try { writeDebugLogToFile(cl) } catch (_: Exception) {}

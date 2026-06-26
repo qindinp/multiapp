@@ -94,12 +94,27 @@ Completed:
 2. Added `RuntimeBootstrapRecorderTest`.
 3. Validated the recorder together with the existing `RuntimeBootstrapTest`.
 
-Working tree note:
+Follow-up integration:
 
-- `LoaderFactory` outer-edge `BOOTSTRAP` wiring has been compiled and tested in
-  the local working tree, but `LoaderFactory.kt` already contains unrelated
-  dirty QQ Reader experiments. It must be isolated into a separate focused
-  commit before being treated as delivered.
+- Isolated `LoaderFactory` outer-edge `BOOTSTRAP` wiring from unrelated dirty
+  QQ Reader experiments.
+- Emits `BootstrapResult` records for:
+  - `CONFIG`
+  - `GUEST_CONTEXT`
+  - `PACKAGE_METADATA`
+  - `ORIGIN_APK`
+  - `NATIVE_LIBS`
+  - `CLASS_LOADER`
+  - `APPLICATION`
+- Records failure at the current runtime stage before dumping debug logs and
+  rethrowing.
+
+Workbench:
+
+- Added `docs/container-runtime-refactor/` as the branch workbench for plans,
+  migration notes, evidence, and draft patches.
+- Runtime source remains in canonical Gradle module paths so each slice stays
+  buildable and testable.
 
 Verification:
 
