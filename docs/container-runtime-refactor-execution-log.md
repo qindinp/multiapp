@@ -84,3 +84,35 @@ Result: `BUILD SUCCESSFUL`
 Next target is now the first integration point: feed real runtime/log evidence
 into `Jiagu360Profile` without enabling fallback stubs, LSPlant, Xposed modules,
 method replacement, or no-op patches in protected-app baseline mode.
+
+## 2026-06-26 Runtime Evidence Recorder Slice
+
+Completed:
+
+1. Added `RuntimeBootstrapRecorder` as an in-process recorder for
+   `BootstrapResult` events.
+2. Added `RuntimeBootstrapRecorderTest`.
+3. Validated the recorder together with the existing `RuntimeBootstrapTest`.
+
+Working tree note:
+
+- `LoaderFactory` outer-edge `BOOTSTRAP` wiring has been compiled and tested in
+  the local working tree, but `LoaderFactory.kt` already contains unrelated
+  dirty QQ Reader experiments. It must be isolated into a separate focused
+  commit before being treated as delivered.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests com.multiapp.core.loader.RuntimeBootstrapRecorderTest --tests com.multiapp.core.loader.RuntimeBootstrapTest "-Dkotlin.compiler.execution.strategy=in-process" --console=plain
+.\gradlew.bat :core:model:testDebugUnitTest :core:loader:testDebugUnitTest :core:hook:testDebugUnitTest "-Dkotlin.compiler.execution.strategy=in-process" --console=plain
+```
+
+Result: `BUILD SUCCESSFUL`
+
+Runtime note:
+
+- The intended runtime log marker is `BOOTSTRAP stage=<stage> status=<status> ...`.
+- This is still an evidence layer only. It does not make LSPlant, Xposed,
+  native business stubs, method replacement, or no-op patches part of the
+  protected-app baseline path.
