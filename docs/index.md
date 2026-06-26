@@ -4,6 +4,12 @@ Use this page as the current documentation entry point.
 
 ## Active Runtime Work
 
+- `docs\multiapp-container-lsplant-roadmap.md`: current top-level plan for the
+  self-developed MultiApp container + LSPlant route, including architecture,
+  Android 16 constraints, team ownership, phases, and acceptance gates.
+- `docs\container-runtime-refactor-execution-log.md`: execution log for the
+  `container-runtime-refactor` branch, including completed foundation slices
+  and verification commands.
 - `docs\current-repository-state.md`: current branch state, commit scope,
   active QQ Reader blocker, and verification command.
 - `docs\qqreader-offline-patch.md`: QQ Reader offline clone patch flow and the

@@ -1,0 +1,114 @@
+package com.multiapp.core.loader
+
+enum class RuntimeStage(val order: Int) {
+    CONFIG(0),
+    ORIGIN_APK(10),
+    PACKAGE_METADATA(20),
+    NATIVE_LIBS(30),
+    RESOURCES(40),
+    CLASS_LOADER(50),
+    GUEST_CONTEXT(60),
+    APPLICATION(70);
+
+    companion object {
+        fun ordered(): List<RuntimeStage> = values().sortedBy { it.order }
+    }
+}
+
+enum class BootstrapStatus {
+    SUCCESS,
+    FAILED,
+    SKIPPED,
+    DEGRADED
+}
+
+data class BootstrapEvidence(
+    val key: String,
+    val value: String,
+    val source: String = ""
+) {
+    init {
+        require(key.isNotBlank()) { "key must not be blank" }
+    }
+}
+
+data class BootstrapResult(
+    val stage: RuntimeStage,
+    val status: BootstrapStatus,
+    val message: String = "",
+    val evidence: List<BootstrapEvidence> = emptyList(),
+    val durationMs: Long = 0,
+    val rollbackNote: String? = null,
+    val errorClass: String? = null,
+    val errorMessage: String? = null
+) {
+    init {
+        require(durationMs >= 0) { "durationMs must be non-negative" }
+    }
+
+    val isSuccessful: Boolean
+        get() = status == BootstrapStatus.SUCCESS
+
+    val isTerminalFailure: Boolean
+        get() = status == BootstrapStatus.FAILED
+
+    companion object {
+        fun success(
+            stage: RuntimeStage,
+            message: String = "",
+            evidence: List<BootstrapEvidence> = emptyList(),
+            durationMs: Long = 0
+        ): BootstrapResult = BootstrapResult(
+            stage = stage,
+            status = BootstrapStatus.SUCCESS,
+            message = message,
+            evidence = evidence,
+            durationMs = durationMs
+        )
+
+        fun failed(
+            stage: RuntimeStage,
+            message: String,
+            error: Throwable? = null,
+            evidence: List<BootstrapEvidence> = emptyList(),
+            durationMs: Long = 0,
+            rollbackNote: String? = null
+        ): BootstrapResult = BootstrapResult(
+            stage = stage,
+            status = BootstrapStatus.FAILED,
+            message = message,
+            evidence = evidence,
+            durationMs = durationMs,
+            rollbackNote = rollbackNote,
+            errorClass = error?.javaClass?.name,
+            errorMessage = error?.message
+        )
+
+        fun skipped(
+            stage: RuntimeStage,
+            message: String = "",
+            evidence: List<BootstrapEvidence> = emptyList()
+        ): BootstrapResult = BootstrapResult(
+            stage = stage,
+            status = BootstrapStatus.SKIPPED,
+            message = message,
+            evidence = evidence
+        )
+
+        fun degraded(
+            stage: RuntimeStage,
+            message: String,
+            error: Throwable? = null,
+            evidence: List<BootstrapEvidence> = emptyList(),
+            durationMs: Long = 0
+        ): BootstrapResult = BootstrapResult(
+            stage = stage,
+            status = BootstrapStatus.DEGRADED,
+            message = message,
+            evidence = evidence,
+            durationMs = durationMs,
+            errorClass = error?.javaClass?.name,
+            errorMessage = error?.message
+        )
+    }
+}

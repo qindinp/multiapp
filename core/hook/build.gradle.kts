@@ -33,6 +33,10 @@ android {
         prefab = true
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     buildTypes {
         release {
             consumerProguardFiles("proguard-rules.pro")
