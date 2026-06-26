@@ -22,11 +22,42 @@ data class RegisterNativesEvidence(
     val methodCount: Int,
     val result: Int,
     val source: String = "",
-    val originalShellPath: Boolean = false
+    val callerIsJiagu: Boolean = false,
+    val allMultiAppMethods: Boolean = false,
+    val hasInterface11: Boolean = false,
+    val hasInterface20: Boolean = false,
+    val jiaguComplete: Boolean = false,
+    private val explicitOriginalShellPath: Boolean? = null
 ) {
     init {
         require(className.isNotBlank()) { "className must not be blank" }
         require(methodCount >= 0) { "methodCount must be non-negative" }
+    }
+
+    val originalShellPath: Boolean
+        get() = explicitOriginalShellPath ?: (
+            callerIsJiagu &&
+                !allMultiAppMethods &&
+                result == 0 &&
+                methodCount >= 10 &&
+                hasInterface11 &&
+                hasInterface20
+            )
+
+    companion object {
+        fun withExplicitOriginalShellPath(
+            className: String,
+            methodCount: Int,
+            result: Int,
+            source: String = "",
+            originalShellPath: Boolean
+        ): RegisterNativesEvidence = RegisterNativesEvidence(
+            className = className,
+            methodCount = methodCount,
+            result = result,
+            source = source,
+            explicitOriginalShellPath = originalShellPath
+        )
     }
 }
 
@@ -107,7 +138,7 @@ class Jiagu360Profile {
         }
 
         val stubRegistration = context.registerNativesEvents.firstOrNull { event ->
-            event.className == STUB_APP_CLASS &&
+            event.className in SHELL_CLASSES &&
                 event.methodCount >= EXPECTED_STUB_NATIVE_COUNT &&
                 event.result == 0 &&
                 event.originalShellPath
@@ -119,7 +150,7 @@ class Jiagu360Profile {
                 source = stubRegistration.source
             )
         } else {
-            missing += "original StubApp RegisterNatives count >= $EXPECTED_STUB_NATIVE_COUNT"
+            missing += "original shell StubApp RegisterNatives from libjiagu_vip.so count >= $EXPECTED_STUB_NATIVE_COUNT with interface11/interface20"
         }
 
         val interface20Error = context.errors.any { error ->

@@ -80,6 +80,54 @@ class NativeHookBridge {
                 Timber.tag(TAG).w("libmultiapp-native.so not available: ${e.message}"); false
             }
         }
+
+        /**
+         * Parse a key=value format RegisterNatives evidence report.
+         *
+         * Required fields: className, methodCount, result.
+         * Boolean fields accept: 1/0/true/false (case insensitive).
+         * Returns null if the report is null, empty, or missing required fields.
+         */
+        internal fun parseRegisterNativesEvidenceReport(report: String?): RegisterNativesEvidence? {
+            if (report.isNullOrBlank()) return null
+
+            val map = report.replace(";", "\n")
+                .lines()
+                .map { it.trim() }
+                .filter { it.contains("=") }
+                .associate {
+                    val idx = it.indexOf('=')
+                    it.substring(0, idx).trim() to it.substring(idx + 1).trim()
+                }
+                .filter { it.key.isNotEmpty() }
+
+            val className = map["className"] ?: return null
+            val methodCountStr = map["methodCount"] ?: return null
+            val resultStr = map["result"] ?: return null
+            val methodCount = methodCountStr.toIntOrNull() ?: return null
+            val result = resultStr.toIntOrNull() ?: return null
+
+            fun parseBool(key: String): Boolean? = map[key]?.let { v ->
+                when (v.lowercase()) {
+                    "1", "true" -> true
+                    "0", "false" -> false
+                    else -> null
+                }
+            }
+
+            return RegisterNativesEvidence(
+                className = className,
+                methodCount = methodCount,
+                result = result,
+                source = map["source"] ?: "",
+                callerIsJiagu = parseBool("callerIsJiagu") ?: false,
+                allMultiAppMethods = parseBool("allMultiAppMethods") ?: false,
+                hasInterface11 = parseBool("hasInterface11") ?: false,
+                hasInterface20 = parseBool("hasInterface20") ?: false,
+                jiaguComplete = parseBool("jiaguComplete") ?: false,
+                explicitOriginalShellPath = parseBool("originalShellPath")
+            )
+        }
     }
 
     private val pathRedirections = ConcurrentHashMap<String, String>()
@@ -135,6 +183,21 @@ class NativeHookBridge {
         }
     }
 
+    fun installJiaguJniDiagHooks(): Boolean {
+        if (!nativeLibLoaded) {
+            android.util.Log.w(TAG, "Jiagu JNI diag hooks not available: native lib not loaded")
+            return false
+        }
+        return try {
+            val result = nativeInstallJiaguJniDiagHooks()
+            android.util.Log.i(TAG, "Jiagu JNI diag hooks installed=$result")
+            result
+        } catch (e: Throwable) {
+            android.util.Log.w(TAG, "Jiagu JNI diag hooks install failed: ${e.message}", e)
+            false
+        }
+    }
+
     fun getYwLoginBindingReport(): String {
         if (!nativeLibLoaded) return "native-lib-not-loaded"
         return try {
@@ -150,6 +213,21 @@ class NativeHookBridge {
             nativeGetStubAppBindingReport()
         } catch (e: Throwable) {
             "error=${e.javaClass.simpleName}: ${e.message}"
+        }
+    }
+
+    /**
+     * Get structured RegisterNatives evidence from the native layer.
+     * Returns null if native lib not loaded, JNI call fails, or report cannot be parsed.
+     */
+    fun getStubAppRegisterNativesEvidence(): RegisterNativesEvidence? {
+        if (!nativeLibLoaded) return null
+        return try {
+            val report = nativeGetStubAppRegisterNativesEvidenceReport()
+            parseRegisterNativesEvidenceReport(report)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "getStubAppRegisterNativesEvidence failed")
+            null
         }
     }
 
@@ -265,6 +343,22 @@ class NativeHookBridge {
         }
     }
 
+    fun dumpJiaguRuntimeRanges(dumpDir: java.io.File): Int {
+        if (!nativeLibLoaded) {
+            android.util.Log.w(TAG, "dumpJiaguRuntimeRanges: native lib not loaded")
+            return 0
+        }
+        return try {
+            dumpDir.mkdirs()
+            val count = nativeDumpJiaguRuntimeRanges(dumpDir.absolutePath)
+            android.util.Log.i(TAG, "dumpJiaguRuntimeRanges: dumped $count ranges to ${dumpDir.absolutePath}")
+            count
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "dumpJiaguRuntimeRanges exception: ${e.message}", e)
+            0
+        }
+    }
+
     /**
      * 璁剧疆 FindClass hook 鐨?guest ClassLoader 鍜屽€欓€夌洰鏍囩被鍚嶅垪琛ㄣ€?
      * 褰?JNI_OnLoad 涓?FindClass 鏌ユ壘浠讳竴鍊欓€夌被鏃讹紝閫氳繃 guest ClassLoader 鍔犺浇銆?
@@ -325,6 +419,46 @@ class NativeHookBridge {
         } catch (e: Throwable) {
             Timber.tag(TAG).w(e, "registerStubCoreBootstrapMethods failed")
             false
+        }
+    }
+
+    fun callOriginalStubInterface11(classLoader: ClassLoader, className: String, value: Int): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeCallOriginalStubInterface11(classLoader, className, value)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "callOriginalStubInterface11 failed")
+            false
+        }
+    }
+
+    fun callOriginalStubInterface5(classLoader: ClassLoader, className: String, application: android.app.Application): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeCallOriginalStubInterface5(classLoader, className, application)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "callOriginalStubInterface5 failed")
+            false
+        }
+    }
+
+    fun callOriginalStubInterface20(classLoader: ClassLoader, className: String): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            nativeCallOriginalStubInterface20(classLoader, className)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "callOriginalStubInterface20 failed")
+            false
+        }
+    }
+
+    fun getJiaguTokenDiag(value: Int): String {
+        if (!nativeLibLoaded) return "nativeLibLoaded=false"
+        return try {
+            nativeGetJiaguTokenDiag(value)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "getJiaguTokenDiag failed")
+            "error=${e.javaClass.simpleName}: ${e.message}"
         }
     }
 
@@ -432,6 +566,10 @@ class NativeHookBridge {
         if (nativeHooksAvailable) nativeSetIntegrityRedirect(fromPath, toPath)
     }
 
+    fun setJiaguPackageSpoof(stubPackageName: String, originalPackageName: String) {
+        if (nativeHooksAvailable) nativeSetJiaguPackageSpoof(stubPackageName, originalPackageName)
+    }
+
     fun clearIntegrityRedirect() {
         if (nativeHooksAvailable) nativeClearIntegrityRedirect()
     }
@@ -447,6 +585,18 @@ class NativeHookBridge {
      */
     fun gotHookLibrary(libName: String) {
         if (nativeHooksAvailable) nativeGotHookLibrary(libName)
+    }
+
+    /**
+     * 预解析 ELF 并记录 GOT 偏移量，但不调用 dlopen。
+     * 用于在 StubApp.load() 之前预解析壳库，为后续 GOT hook 做准备。
+     * 实际的 GOT patch 在 dlopen 后由 got_hook_immediate 完成。
+     *
+     * @param libPath .so 文件绝对路径
+     * @return 预解析的 GOT 条目数量
+     */
+    fun preParseAndInstallGotHooks(libPath: String): Int {
+        return if (nativeHooksAvailable) nativePreParseAndInstallGotHooks(libPath) else 0
     }
 
     /**
@@ -762,8 +912,10 @@ class NativeHookBridge {
     private external fun nativeIsInitialized(): Boolean
     private external fun nativeInstallRuntimeLoadHook(fallbackCallerClasses: Array<String>): Boolean
     private external fun nativeInstallRegisterNativesLogger(): Boolean
+    private external fun nativeInstallJiaguJniDiagHooks(): Boolean
     private external fun nativeGetYwLoginBindingReport(): String
     private external fun nativeGetStubAppBindingReport(): String
+    private external fun nativeGetStubAppRegisterNativesEvidenceReport(): String
     private external fun nativePreloadLibraries(libPaths: Array<String>): Int
     private external fun nativeLoadLibraryForGuest(libPath: String, classLoader: ClassLoader, callerClass: Class<*>): Int
     private external fun nativeDlopenOnly(libPath: String): Int
@@ -772,6 +924,10 @@ class NativeHookBridge {
     private external fun nativeRegisterStubMethods(classLoader: ClassLoader, className: String): Boolean
     private external fun nativeRegisterStubInterface20Only(classLoader: ClassLoader, className: String): Boolean
     private external fun nativeRegisterStubCoreBootstrapMethods(classLoader: ClassLoader, className: String): Boolean
+    private external fun nativeCallOriginalStubInterface11(classLoader: ClassLoader, className: String, value: Int): Boolean
+    private external fun nativeCallOriginalStubInterface5(classLoader: ClassLoader, className: String, application: android.app.Application): Boolean
+    private external fun nativeCallOriginalStubInterface20(classLoader: ClassLoader, className: String): Boolean
+    private external fun nativeGetJiaguTokenDiag(value: Int): String
     private external fun nativeRegisterStubBootstrapMethods(classLoader: ClassLoader, className: String): Boolean
     private external fun nativeRegisterBusinessStubs(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterQrencryptStubs(classLoader: ClassLoader): Boolean
@@ -780,9 +936,11 @@ class NativeHookBridge {
     private external fun nativeRegisterOnlineChapterDownloadFallbackStubs(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterAllMissingNativeMethods(classLoader: ClassLoader): Int
     private external fun nativeSetIntegrityRedirect(fromPath: String, toPath: String)
+    private external fun nativeSetJiaguPackageSpoof(stubPackageName: String, originalPackageName: String)
     private external fun nativeClearIntegrityRedirect()
     private external fun nativeSetSuppressSelfSigkill(enabled: Boolean)
     private external fun nativeGotHookLibrary(libName: String)
+    private external fun nativePreParseAndInstallGotHooks(libPath: String): Int
 
     // LSPlant integration
     private external fun nativeInitLsplant(libDir: String?): Boolean
@@ -796,6 +954,7 @@ class NativeHookBridge {
     // P0: DEX + SO dump
     private external fun nativeDumpDexFromClassLoader(classLoader: ClassLoader, dumpDir: String): Int
     private external fun nativeDumpLoadedLibraries(dumpDir: String, targetLib: String?): Int
+    private external fun nativeDumpJiaguRuntimeRanges(dumpDir: String): Int
 
     private fun tryLoadNativeLibrary(): Boolean = nativeLibLoaded
 

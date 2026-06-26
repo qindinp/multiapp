@@ -27,13 +27,22 @@ class PackerRuntimeDispatcher {
                 instance ?: PackerRuntimeDispatcher().also { instance = it }
             }
         }
+
+        fun withRuntimesForTest(runtimes: List<PackerRuntime>): PackerRuntimeDispatcher =
+            PackerRuntimeDispatcher(registerDefaults = false).apply {
+                runtimes.forEach { register(it) }
+            }
     }
 
     private val runtimes = mutableListOf<PackerRuntime>()
 
-    init {
-        // 注册所有已知的 PackerRuntime 实现
-        register(JiaguRuntime())
+    constructor() : this(registerDefaults = true)
+
+    private constructor(registerDefaults: Boolean) {
+        if (registerDefaults) {
+            // 注册所有已知的 PackerRuntime 实现
+            register(JiaguRuntime())
+        }
     }
 
     /**
@@ -82,6 +91,19 @@ class PackerRuntimeDispatcher {
 
         Log.i(TAG, "Executing packer runtime: ${runtime.name}")
 
+        if (context.nativeHookPolicy.isHookFreeBaselineCompatible()) {
+            val diagnostics = strictBaselineSkipDiagnostics(
+                policy = context.nativeHookPolicy,
+                runtimeName = runtime.name
+            )
+            diagnostics.forEach { Log.i(TAG, it) }
+            return PackerLoadResult(
+                jiaguLoaded = false,
+                stubAppLoadSucceeded = false,
+                diagnostics = diagnostics
+            )
+        }
+
         // Step 1: 准备文件和环境
         try {
             val prepared = runtime.prepareFiles(context)
@@ -103,36 +125,61 @@ class PackerRuntimeDispatcher {
         // 打印诊断信息
         loadResult.diagnostics.forEach { Log.d(TAG, "  [${runtime.name}] $it") }
 
-        // Step 3: 验证 RegisterNatives
-        val verified = try {
+        // Step 3: 验证 RegisterNatives (evidence + legacy)
+        val verifiedByEvidence = loadResult.registerNativesEvidence.any { it.originalShellPath }
+        val verifiedByLegacy = try {
             runtime.verifyRegisterNatives(context.guestClassLoader)
         } catch (e: Throwable) {
             Log.w(TAG, "verifyRegisterNatives() failed: ${e.message}")
             false
         }
-        Log.i(TAG, "RegisterNatives verified: $verified")
+        val verified = verifiedByEvidence || verifiedByLegacy
+        Log.i(TAG, "RegisterNatives verified: evidence=$verifiedByEvidence, legacy=$verifiedByLegacy, result=$verified")
+        val verifiedLoadResult = if (verified) loadResult.copy(stubNativesVerified = true) else loadResult
 
         // Step 4: 安装加载后 hook
         try {
-            runtime.installPostLoadHooks(context, loadResult)
+            runtime.installPostLoadHooks(context, verifiedLoadResult)
         } catch (e: Throwable) {
             Log.w(TAG, "installPostLoadHooks() failed: ${e.message}")
         }
 
         // Step 5: 安装 stub fallback
         try {
-            runtime.installStubFallback(context, loadResult)
+            runtime.installStubFallback(context, verifiedLoadResult)
         } catch (e: Throwable) {
             Log.w(TAG, "installStubFallback() failed: ${e.message}")
         }
 
-        Log.i(TAG, "Packer runtime ${runtime.name} complete: jiaguLoaded=${loadResult.jiaguLoaded}, stubLoad=${loadResult.stubAppLoadSucceeded}, verified=$verified")
+        Log.i(TAG, "Packer runtime ${runtime.name} complete: jiaguLoaded=${verifiedLoadResult.jiaguLoaded}, stubLoad=${verifiedLoadResult.stubAppLoadSucceeded}, verified=$verified")
 
-        return loadResult
+        return verifiedLoadResult
     }
 
     /**
      * 获取所有已注册的 Runtime 名称（用于诊断）。
      */
     fun getRegisteredRuntimeNames(): List<String> = runtimes.map { it.name }
+
+    private fun strictBaselineSkipDiagnostics(
+        policy: NativeHookPolicy,
+        runtimeName: String
+    ): List<String> {
+        val decisions = NativeHookPolicyGate.decisionsForComponents(
+            policy = policy,
+            components = mapOf(
+                NativeHookCapability.LSPLANT_METHOD_HOOKS to "PackerRuntimeDispatcher.installPostLoadHooks",
+                NativeHookCapability.XPOSED_MODULES to "PackerRuntimeDispatcher.installPostLoadHooks",
+                NativeHookCapability.BUSINESS_NATIVE_STUBS to "PackerRuntimeDispatcher.installStubFallback",
+                NativeHookCapability.METHOD_REPLACEMENT to "PackerRuntimeDispatcher.installPostLoadHooks",
+                NativeHookCapability.NO_OP_PATCHES to "PackerRuntimeDispatcher.installPostLoadHooks"
+            )
+        )
+        val summary = "PACKER_RUNTIME_SKIPPED runtime=$runtimeName status=SKIPPED " +
+            "policyMode=${policy.mode.name} reason=strict hook-free baseline fallbackSkipped=true"
+        return listOf(summary) + decisions.map { decision ->
+            "policyGate runtime=$runtimeName status=${decision.status} " +
+                decision.evidence.entries.joinToString(" ") { (key, value) -> "$key=$value" }
+        }
+    }
 }

@@ -55,6 +55,10 @@
 #include <chrono>
 #include <fstream>
 
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
 // ShadowHook — Android 16 compatible inline hook library (ByteDance)
 #include "shadowhook.h"
 
@@ -115,6 +119,7 @@ typedef int (*orig_rename_t)(const char*, const char*);
 typedef int (*orig_system_property_get_t)(const char*, char*);
 typedef long (*orig_ptrace_t)(int, pid_t, void*, void*);
 typedef void* (*orig_dlopen_t)(const char*, int);
+typedef void* (*orig_android_dlopen_ext_t)(const char*, int, const void*);
 typedef void (*orig_exit_t)(int);
 typedef void (*orig_abort_t)();
 typedef int (*orig_kill_t)(pid_t, int);
@@ -138,6 +143,8 @@ static orig_rename_t real_rename = nullptr;
 static orig_system_property_get_t real_system_property_get = nullptr;
 static orig_ptrace_t real_ptrace = nullptr;
 static orig_dlopen_t real_dlopen = nullptr;
+static orig_android_dlopen_ext_t real_android_dlopen_ext = nullptr;
+static orig_android_dlopen_ext_t real_loader_android_dlopen_ext = nullptr;
 static orig_exit_t real_exit = nullptr;
 static orig_exit_t real__exit = nullptr;
 static orig_abort_t real_abort = nullptr;
@@ -146,6 +153,21 @@ static orig_abort_t real_abort = nullptr;
 // This is needed because nativeInitLsplant calls dlopen("liblsplant.so")
 // which would otherwise be blocked by the anti-detection hook
 static thread_local bool g_lsplant_dlopen_bypass = false;
+
+static void got_hook_library_callback_wrapper(const char* path);
+static void patch_loaded_jiagu_vip_self_kill_callsites();
+
+static void on_native_library_loaded_early(const char* apiName, const char* filename, void* handle) {
+    if (handle == nullptr || filename == nullptr || strstr(filename, "libjiagu_vip.so") == nullptr) {
+        return;
+    }
+    LOGW("%s: libjiagu_vip.so loaded early, installing GOT/self-kill hooks before JNI_OnLoad path=%s handle=%p",
+         apiName,
+         filename,
+         handle);
+    got_hook_library_callback_wrapper(filename);
+    patch_loaded_jiagu_vip_self_kill_callsites();
+}
 
 // ==================== Path Redirection Logic ====================
 
@@ -515,6 +537,26 @@ static void* hooked_dlopen(const char* filename, int flags) {
     return real_dlopen(filename, flags);
 }
 
+static void* hooked_android_dlopen_ext(const char* filename, int flags, const void* extinfo) {
+    if (real_android_dlopen_ext == nullptr) {
+        LOGW("android_dlopen_ext: original pointer is null for %s", filename ? filename : "null");
+        return nullptr;
+    }
+    void* handle = real_android_dlopen_ext(filename, flags, extinfo);
+    on_native_library_loaded_early("android_dlopen_ext", filename, handle);
+    return handle;
+}
+
+static void* hooked_loader_android_dlopen_ext(const char* filename, int flags, const void* extinfo) {
+    if (real_loader_android_dlopen_ext == nullptr) {
+        LOGW("__loader_android_dlopen_ext: original pointer is null for %s", filename ? filename : "null");
+        return nullptr;
+    }
+    void* handle = real_loader_android_dlopen_ext(filename, flags, extinfo);
+    on_native_library_loaded_early("__loader_android_dlopen_ext", filename, handle);
+    return handle;
+}
+
 static void hooked_exit(int status) {
     LOGW("exit intercepted: status=%d", status);
     if (status == 1) {
@@ -546,6 +588,44 @@ static void hooked_abort() {
     _exit(134);
 }
 
+// ==================== dl_iterate_phdr Hook ====================
+// 360 加固壳使用 dl_iterate_phdr 枚举已加载库来检测 hook 框架。
+// 我们需要过滤掉 libmultiapp-native.so、liblsplant.so、libshadowhook.so 等。
+
+static const char* g_hidden_libs[] = {
+    "libmultiapp-native.so",
+    "liblsplant.so",
+    "libshadowhook.so",
+    "libshadowhook_nothing.so",
+    "libc++_shared.so",
+    nullptr
+};
+
+struct DlIteratePhdrWrapper {
+    int (*original_callback)(struct dl_phdr_info*, size_t, void*);
+    void* original_data;
+};
+
+static int wrapped_dl_iterate_phdr_callback(struct dl_phdr_info* info, size_t size, void* data) {
+    auto* wrapper = static_cast<DlIteratePhdrWrapper*>(data);
+    if (info != nullptr && info->dlpi_name != nullptr) {
+        for (int i = 0; g_hidden_libs[i] != nullptr; i++) {
+            if (strstr(info->dlpi_name, g_hidden_libs[i]) != nullptr) {
+                return 0; // skip hidden library
+            }
+        }
+    }
+    return wrapper->original_callback(info, size, wrapper->original_data);
+}
+
+static int (*real_dl_iterate_phdr)(int (*callback)(struct dl_phdr_info*, size_t, void*), void* data) = nullptr;
+
+static int hooked_dl_iterate_phdr(int (*callback)(struct dl_phdr_info*, size_t, void*), void* data) {
+    if (real_dl_iterate_phdr == nullptr) return 0;
+    DlIteratePhdrWrapper wrapper{callback, data};
+    return real_dl_iterate_phdr(wrapped_dl_iterate_phdr_callback, &wrapper);
+}
+
 // ==================== ShadowHook Installation ====================
 
 /**
@@ -575,6 +655,8 @@ static HookEntry g_hook_entries[] = {
     {nullptr,       "exit",                    (void*)hooked_exit,                 (void**)&real_exit},
     {nullptr,       "_exit",                   (void*)hooked__exit,                (void**)&real__exit},
     {"libdl.so",    "dlopen",                  (void*)hooked_dlopen,               (void**)&real_dlopen},
+    {"libdl.so",    "android_dlopen_ext",      (void*)hooked_android_dlopen_ext,   (void**)&real_android_dlopen_ext},
+    {"libdl.so",    "__loader_android_dlopen_ext", (void*)hooked_loader_android_dlopen_ext, (void**)&real_loader_android_dlopen_ext},
 };
 static constexpr int g_hook_count = sizeof(g_hook_entries) / sizeof(g_hook_entries[0]);
 
@@ -993,6 +1075,12 @@ static std::atomic_int g_online_chapter_register_count{0};
 // FindClass hook: 在 JNI_OnLoad 中用 guest ClassLoader 查找加固壳类
 static void patch_loaded_jiagu_vip_self_kill_callsites();
 static bool patch_jiagu_self_kill_from_return_address(void* caller);
+static bool patch_jiagu_vip_env_check(uintptr_t base, const char* path);
+static void dump_decrypted_jiagu_code();
+static int dump_jiagu_runtime_ranges(const char* dump_dir);
+static uintptr_t find_loaded_library_base(const char* path);
+static bool is_readable_proc_range(uintptr_t address, size_t length);
+static bool patch_arm64_instruction(uintptr_t address, uint32_t expected_mask, uint32_t expected_value, uint32_t replacement);
 
 static jobject g_guest_classloader = nullptr;
 static jobject g_hook_classloader = nullptr;
@@ -1049,6 +1137,44 @@ static void remember_hook_classloader(JNIEnv* env, jclass bridgeClass) {
 }
 static void* g_orig_findclass = nullptr; // 原始 FindClass 函数指针
 
+static bool g_jiagu_jni_diag_hooks_installed = false;
+static void* g_orig_get_method_id = nullptr;
+static void* g_orig_get_static_method_id = nullptr;
+static void* g_orig_get_field_id = nullptr;
+static void* g_orig_get_static_field_id = nullptr;
+static void* g_orig_call_object_method_v = nullptr;
+static void* g_orig_call_object_method_a = nullptr;
+static void* g_orig_call_boolean_method_v = nullptr;
+static void* g_orig_call_boolean_method_a = nullptr;
+static void* g_orig_call_int_method_v = nullptr;
+static void* g_orig_call_int_method_a = nullptr;
+static void* g_orig_call_void_method_v = nullptr;
+static void* g_orig_call_void_method_a = nullptr;
+static void* g_orig_call_static_object_method_v = nullptr;
+static void* g_orig_call_static_object_method_a = nullptr;
+static void* g_orig_call_static_boolean_method_v = nullptr;
+static void* g_orig_call_static_boolean_method_a = nullptr;
+static void* g_orig_call_static_int_method_v = nullptr;
+static void* g_orig_call_static_int_method_a = nullptr;
+static void* g_orig_call_static_void_method_v = nullptr;
+static void* g_orig_call_static_void_method_a = nullptr;
+static void* g_orig_get_string_utf_length = nullptr;
+static void* g_orig_get_string_utf_chars = nullptr;
+static void* g_orig_release_string_utf_chars = nullptr;
+static void* g_orig_get_array_length = nullptr;
+static void* g_orig_get_byte_array_elements = nullptr;
+static void* g_orig_release_byte_array_elements = nullptr;
+static void* g_orig_exception_occurred = nullptr;
+static void* g_orig_exception_clear = nullptr;
+static void* g_orig_exception_check = nullptr;
+static std::mutex g_jiagu_jni_diag_mutex;
+static std::unordered_map<jmethodID, std::string> g_jiagu_jni_method_names;
+static std::unordered_map<jfieldID, std::string> g_jiagu_jni_field_names;
+static thread_local bool g_jiagu_jni_diag_in_hook = false;
+static std::mutex g_jiagu_pkg_spoof_mutex;
+static std::string g_jiagu_stub_package;
+static std::string g_jiagu_original_package;
+
 static bool remember_hook_classloader_object(JNIEnv* env, jobject classLoader, const char* source) {
     if (g_hook_classloader != nullptr) return true;
     if (classLoader == nullptr) {
@@ -1073,10 +1199,58 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRememberHookClassLoader(
     return remember_hook_classloader_object(env, classLoader, "NativeHookBridge") ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeSetJiaguPackageSpoof(
+    JNIEnv* env, jobject thiz, jstring stubPackageName, jstring originalPackageName)
+{
+    (void)thiz;
+    const char* stubChars = stubPackageName != nullptr ? env->GetStringUTFChars(stubPackageName, nullptr) : nullptr;
+    const char* originalChars = originalPackageName != nullptr ? env->GetStringUTFChars(originalPackageName, nullptr) : nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_pkg_spoof_mutex);
+        g_jiagu_stub_package = stubChars != nullptr ? stubChars : "";
+        g_jiagu_original_package = originalChars != nullptr ? originalChars : "";
+    }
+    LOGI("nativeSetJiaguPackageSpoof: stub=%s original=%s",
+         stubChars != nullptr ? stubChars : "<null>",
+         originalChars != nullptr ? originalChars : "<null>");
+    if (stubChars != nullptr) env->ReleaseStringUTFChars(stubPackageName, stubChars);
+    if (originalChars != nullptr) env->ReleaseStringUTFChars(originalPackageName, originalChars);
+}
+
 // Type alias matching ART's native signature for Runtime.nativeLoad
 // static jni: (JNIEnv*, jclass, jstring filename, jobject classLoader, jclass caller) -> jstring
 typedef jstring (*NativeLoadFn)(JNIEnv*, jclass, jstring, jobject, jclass);
 typedef jint (*RegisterNativesFn)(JNIEnv*, jclass, const JNINativeMethod*, jint);
+typedef jmethodID (*GetMethodIDFn)(JNIEnv*, jclass, const char*, const char*);
+typedef jmethodID (*GetStaticMethodIDFn)(JNIEnv*, jclass, const char*, const char*);
+typedef jfieldID (*GetFieldIDFn)(JNIEnv*, jclass, const char*, const char*);
+typedef jfieldID (*GetStaticFieldIDFn)(JNIEnv*, jclass, const char*, const char*);
+typedef jobject (*CallObjectMethodVFn)(JNIEnv*, jobject, jmethodID, va_list);
+typedef jobject (*CallObjectMethodAFn)(JNIEnv*, jobject, jmethodID, const jvalue*);
+typedef jboolean (*CallBooleanMethodVFn)(JNIEnv*, jobject, jmethodID, va_list);
+typedef jboolean (*CallBooleanMethodAFn)(JNIEnv*, jobject, jmethodID, const jvalue*);
+typedef jint (*CallIntMethodVFn)(JNIEnv*, jobject, jmethodID, va_list);
+typedef jint (*CallIntMethodAFn)(JNIEnv*, jobject, jmethodID, const jvalue*);
+typedef void (*CallVoidMethodVFn)(JNIEnv*, jobject, jmethodID, va_list);
+typedef void (*CallVoidMethodAFn)(JNIEnv*, jobject, jmethodID, const jvalue*);
+typedef jobject (*CallStaticObjectMethodVFn)(JNIEnv*, jclass, jmethodID, va_list);
+typedef jobject (*CallStaticObjectMethodAFn)(JNIEnv*, jclass, jmethodID, const jvalue*);
+typedef jboolean (*CallStaticBooleanMethodVFn)(JNIEnv*, jclass, jmethodID, va_list);
+typedef jboolean (*CallStaticBooleanMethodAFn)(JNIEnv*, jclass, jmethodID, const jvalue*);
+typedef jint (*CallStaticIntMethodVFn)(JNIEnv*, jclass, jmethodID, va_list);
+typedef jint (*CallStaticIntMethodAFn)(JNIEnv*, jclass, jmethodID, const jvalue*);
+typedef void (*CallStaticVoidMethodVFn)(JNIEnv*, jclass, jmethodID, va_list);
+typedef void (*CallStaticVoidMethodAFn)(JNIEnv*, jclass, jmethodID, const jvalue*);
+typedef jsize (*GetStringUTFLengthFn)(JNIEnv*, jstring);
+typedef const char* (*GetStringUTFCharsFn)(JNIEnv*, jstring, jboolean*);
+typedef void (*ReleaseStringUTFCharsFn)(JNIEnv*, jstring, const char*);
+typedef jsize (*GetArrayLengthFn)(JNIEnv*, jarray);
+typedef jbyte* (*GetByteArrayElementsFn)(JNIEnv*, jbyteArray, jboolean*);
+typedef void (*ReleaseByteArrayElementsFn)(JNIEnv*, jbyteArray, jbyte*, jint);
+typedef jthrowable (*ExceptionOccurredFn)(JNIEnv*);
+typedef void (*ExceptionClearFn)(JNIEnv*);
+typedef jboolean (*ExceptionCheckFn)(JNIEnv*);
 typedef jint (*FockItFn)(JNIEnv*, jclass, jbyteArray, jint);
 typedef void (*FockAkFn)(JNIEnv*, jclass, jbyteArray, jint, jbyteArray);
 typedef jstring (*FockSnFn)(JNIEnv*, jclass, jbyteArray, jint);
@@ -1098,6 +1272,12 @@ static FockUrkFn g_orig_fock_urk = nullptr;
 static YwPwdLoginFn g_orig_ywlogin_pwdLogin = nullptr;
 static YwSendPhoneCodeFn g_orig_ywlogin_sendPhoneCode = nullptr;
 static YwQrCodeV2Fn g_orig_ywlogin_qrCodeV2 = nullptr;
+static std::mutex g_ywlogin_defaults_mutex;
+static jobject g_ywlogin_default_parameters = nullptr;
+static jobject g_ywlogin_application = nullptr;
+static jobject g_ywlogin_sign_callback = nullptr;
+static jobject g_ywlogin_parameter_getter = nullptr;
+static jobject g_ywlogin_manager_instance = nullptr;
 static std::mutex g_fock_bootstrap_mutex;
 static std::mutex g_fock_sn_mutex;
 static bool g_fock_bootstrap_done = false;
@@ -1105,11 +1285,207 @@ static bool g_fock_bootstrap_done = false;
 using StubInterfaceAppFn = void (*)(JNIEnv*, jclass, jobject);
 using StubInterface11Fn = void (*)(JNIEnv*, jclass, jint);
 using StubInterface20Fn = jboolean (*)(JNIEnv*, jclass);
+using JiaguTokenInsertFn = uintptr_t (*)(void*, void*, void*);
+using JiaguBuildRegisterVectorFn = uintptr_t (*)(void*);
+using JiaguTokenManagerInitFn = uintptr_t (*)();
+using JiaguRegisterGateFn = uintptr_t (*)(void*, void*);
+using JiaguInterface20RegisterFn = void (*)(void*);
+using JiaguPayloadBuildFn = void (*)(void*, void*, void*, int, int, void*, void*);
+using JiaguCompareFn = int (*)(const void*, const void*, size_t);
+using JiaguEnvProbeFn = int (*)(void*);
+using JiaguStringEqualsFn = int (*)(const void*, const void*);
+using JiaguPayloadCheckFn = int (*)(void*);
+using JiaguQiniuCheckFn = int (*)(void*);
+using JiaguPostPayloadStatusFn = int (*)(void*);
+using JiaguPostPayloadObjectFn = void* (*)(void*);
+using JiaguPostPayloadMaterializeFn = void (*)(void*, void*, void*, void*, int, int);
+using JiaguAfterMaterializeNormalizeFn = void (*)(void*);
 
 static StubInterfaceAppFn g_orig_stub_interface5 = nullptr;
 static StubInterface11Fn g_orig_stub_interface11 = nullptr;
 static StubInterface20Fn g_orig_stub_interface20 = nullptr;
 static StubInterfaceAppFn g_orig_stub_interface21 = nullptr;
+static JiaguTokenInsertFn g_orig_jiagu_token_insert = nullptr;
+static void* g_jiagu_token_insert_hook_stub = nullptr;
+static std::mutex g_jiagu_token_insert_hook_mutex;
+static std::atomic_bool g_jiagu_token_insert_hook_installed{false};
+static std::atomic_int g_jiagu_token_insert_hook_attempts{0};
+static std::atomic_int g_jiagu_token_insert_hook_failures{0};
+static std::atomic_int g_jiagu_token_insert_calls{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_manager{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_owner{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_payload{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_owner_vec_begin{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_owner_vec_end{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_owner_vec_cap{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_payload_word0{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_payload_word8{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_manager_root_after{0};
+static std::atomic<uintptr_t> g_jiagu_token_insert_last_manager_count_after{0};
+static std::atomic<uint32_t> g_jiagu_token_insert_last_payload_key{0};
+static JiaguBuildRegisterVectorFn g_orig_jiagu_build_register_vector = nullptr;
+static void* g_jiagu_build_register_vector_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_build_register_vector_hook_installed{false};
+static std::atomic_int g_jiagu_build_register_vector_calls{0};
+static std::atomic<uintptr_t> g_jiagu_build_register_vector_last_arg{0};
+static std::atomic<uintptr_t> g_jiagu_build_register_vector_last_result{0};
+static std::atomic<uintptr_t> g_jiagu_build_register_vector_last_begin{0};
+static std::atomic<uintptr_t> g_jiagu_build_register_vector_last_end{0};
+static std::atomic<uintptr_t> g_jiagu_build_register_vector_last_first_item{0};
+static std::atomic<uintptr_t> g_jiagu_build_register_vector_last_first_payload_begin{0};
+static std::atomic<uintptr_t> g_jiagu_build_register_vector_last_first_payload_end{0};
+static JiaguTokenManagerInitFn g_orig_jiagu_token_manager_init = nullptr;
+static void* g_jiagu_token_manager_init_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_token_manager_init_hook_installed{false};
+static std::atomic_int g_jiagu_token_manager_init_calls{0};
+static std::atomic<uintptr_t> g_jiagu_token_manager_init_last_result{0};
+static std::atomic<uintptr_t> g_jiagu_token_manager_init_last_root{0};
+static std::atomic<uintptr_t> g_jiagu_token_manager_init_last_count{0};
+static JiaguRegisterGateFn g_orig_jiagu_register_gate = nullptr;
+static void* g_jiagu_register_gate_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_register_gate_hook_installed{false};
+static std::atomic_int g_jiagu_register_gate_calls{0};
+static std::atomic<uintptr_t> g_jiagu_register_gate_last_registry{0};
+static std::atomic<uintptr_t> g_jiagu_register_gate_last_key_arg{0};
+static std::atomic<uintptr_t> g_jiagu_register_gate_last_result{0};
+static std::mutex g_jiagu_register_gate_key_mutex;
+static std::string g_jiagu_register_gate_last_key;
+static JiaguInterface20RegisterFn g_orig_jiagu_interface20_register = nullptr;
+static void* g_jiagu_interface20_register_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_interface20_register_hook_installed{false};
+static std::atomic_int g_jiagu_interface20_register_calls{0};
+static std::atomic<uintptr_t> g_jiagu_interface20_register_last_env{0};
+static JiaguPayloadBuildFn g_orig_jiagu_payload_build = nullptr;
+static void* g_jiagu_payload_build_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_payload_build_hook_installed{false};
+static std::atomic_int g_jiagu_payload_build_calls{0};
+static std::atomic<uintptr_t> g_jiagu_payload_build_last_env{0};
+static std::atomic<uintptr_t> g_jiagu_payload_build_last_arg1{0};
+static std::atomic<uintptr_t> g_jiagu_payload_build_last_s1{0};
+static std::atomic<uintptr_t> g_jiagu_payload_build_last_s2{0};
+static std::atomic<uintptr_t> g_jiagu_payload_build_last_s3{0};
+static std::atomic_int g_jiagu_payload_build_last_flag3{0};
+static std::atomic_int g_jiagu_payload_build_last_flag4{0};
+static std::mutex g_jiagu_payload_build_mutex;
+static std::string g_jiagu_payload_build_last_s1_text;
+static std::string g_jiagu_payload_build_last_s2_text;
+static std::string g_jiagu_payload_build_last_s3_text;
+static JiaguPayloadCheckFn g_orig_jiagu_payload_check = nullptr;
+static void* g_jiagu_payload_check_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_payload_check_hook_installed{false};
+static std::atomic_int g_jiagu_payload_check_calls{0};
+static std::atomic<uintptr_t> g_jiagu_payload_check_last_arg{0};
+static std::atomic_int g_jiagu_payload_check_last_result{0};
+static std::atomic_int g_jiagu_payload_check_last_forced{0};
+static std::mutex g_jiagu_payload_check_mutex;
+static std::string g_jiagu_payload_check_last_text;
+static JiaguPostPayloadStatusFn g_orig_jiagu_post_payload_status = nullptr;
+static void* g_jiagu_post_payload_status_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_post_payload_status_hook_installed{false};
+static std::atomic_int g_jiagu_post_payload_status_calls{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_status_last_arg{0};
+static std::atomic_int g_jiagu_post_payload_status_last_result{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_status_last_caller_off{0};
+static JiaguPostPayloadObjectFn g_orig_jiagu_post_payload_object = nullptr;
+static void* g_jiagu_post_payload_object_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_post_payload_object_hook_installed{false};
+static std::atomic_int g_jiagu_post_payload_object_calls{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_object_last_arg{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_object_last_result{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_object_last_caller_off{0};
+static JiaguPostPayloadMaterializeFn g_orig_jiagu_post_payload_materialize = nullptr;
+static void* g_jiagu_post_payload_materialize_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_post_payload_materialize_hook_installed{false};
+static std::atomic_int g_jiagu_post_payload_materialize_calls{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_materialize_last_caller_off{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_materialize_last_arg0{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_materialize_last_arg1{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_materialize_last_arg2{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_materialize_last_arg3{0};
+static std::atomic_int g_jiagu_post_payload_materialize_last_flag4{0};
+static std::atomic_int g_jiagu_post_payload_materialize_last_flag5{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_materialize_slot270{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_materialize_slot290{0};
+static std::atomic<uintptr_t> g_jiagu_post_payload_materialize_slot2f0{0};
+static std::atomic<uint32_t> g_jiagu_post_payload_materialize_slot358{0};
+static std::mutex g_jiagu_post_payload_materialize_mutex;
+static std::string g_jiagu_post_payload_materialize_arg1_text;
+static std::string g_jiagu_post_payload_materialize_arg2_text;
+static std::string g_jiagu_post_payload_materialize_arg3_text;
+static std::string g_jiagu_post_payload_materialize_slot270_text;
+static std::string g_jiagu_post_payload_materialize_slot290_text;
+static std::string g_jiagu_post_payload_materialize_slot2f0_text;
+static JiaguAfterMaterializeNormalizeFn g_orig_jiagu_after_materialize_normalize = nullptr;
+static void* g_jiagu_after_materialize_normalize_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_after_materialize_normalize_hook_installed{false};
+static std::atomic_int g_jiagu_after_materialize_normalize_calls{0};
+static std::atomic<uintptr_t> g_jiagu_after_materialize_normalize_last_caller_off{0};
+static std::atomic_bool g_jiagu_force_post_payload_branch_patched{false};
+static std::atomic_bool g_jiagu_force_pre_materialize_gate1_patched{false};
+static std::atomic_bool g_jiagu_force_pre_materialize_gate2_patched{false};
+static std::atomic_bool g_jiagu_force_qiniu_gate_patched{false};
+static JiaguCompareFn g_orig_jiagu_compare = nullptr;
+static std::atomic_bool g_jiagu_compare_hook_installed{false};
+static std::atomic_int g_jiagu_compare_calls{0};
+static std::atomic_int g_jiagu_compare_logged_calls{0};
+static std::atomic<uintptr_t> g_jiagu_compare_got_slot{0};
+static std::atomic<uintptr_t> g_jiagu_compare_last_caller_off{0};
+static std::atomic<uintptr_t> g_jiagu_compare_last_arg0{0};
+static std::atomic<uintptr_t> g_jiagu_compare_last_arg1{0};
+static std::atomic<size_t> g_jiagu_compare_last_len{0};
+static std::atomic_int g_jiagu_compare_last_result{0};
+static std::mutex g_jiagu_compare_mutex;
+static std::string g_jiagu_compare_last_left;
+static std::string g_jiagu_compare_last_right;
+static JiaguEnvProbeFn g_orig_jiagu_env_probe = nullptr;
+static void* g_jiagu_env_probe_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_env_probe_hook_installed{false};
+static std::atomic_int g_jiagu_env_probe_calls{0};
+static std::atomic<uintptr_t> g_jiagu_env_probe_last_caller_off{0};
+static std::atomic<uintptr_t> g_jiagu_env_probe_last_arg{0};
+static std::atomic_int g_jiagu_env_probe_last_result{0};
+static JiaguQiniuCheckFn g_orig_jiagu_qiniu_check = nullptr;
+static void* g_jiagu_qiniu_check_hook_stub = nullptr;
+static std::atomic_bool g_jiagu_qiniu_check_hook_installed{false};
+static std::atomic_int g_jiagu_qiniu_check_calls{0};
+static std::atomic<uintptr_t> g_jiagu_qiniu_check_last_caller_off{0};
+static std::atomic<uintptr_t> g_jiagu_qiniu_check_last_arg{0};
+static std::atomic_int g_jiagu_qiniu_check_last_result{0};
+static JiaguStringEqualsFn g_orig_jiagu_string_equals = nullptr;
+static std::atomic_bool g_jiagu_string_equals_hook_installed{false};
+static std::atomic_int g_jiagu_string_equals_calls{0};
+static std::atomic<uintptr_t> g_jiagu_string_equals_got_slot{0};
+static std::atomic<uintptr_t> g_jiagu_string_equals_last_caller_off{0};
+static std::atomic<uintptr_t> g_jiagu_string_equals_last_arg0{0};
+static std::atomic<uintptr_t> g_jiagu_string_equals_last_arg1{0};
+static std::atomic_int g_jiagu_string_equals_last_result{0};
+static std::mutex g_jiagu_string_equals_mutex;
+static std::string g_jiagu_string_equals_last_left;
+static std::string g_jiagu_string_equals_last_right;
+static std::atomic<uintptr_t> g_jiagu_payload_build_slot_before{0};
+static std::atomic<uintptr_t> g_jiagu_payload_build_slot_after{0};
+static std::atomic<uintptr_t> g_jiagu_payload_build_slot8_before{0};
+static std::atomic<uintptr_t> g_jiagu_payload_build_slot8_after{0};
+static std::mutex g_stubapp_register_mutex;
+static int g_stubapp_register_calls = 0;
+static int g_stubapp_jiagu_register_calls = 0;
+static int g_stubapp_multiapp_register_calls = 0;
+static int g_stubapp_jiagu_complete_calls = 0;
+static int g_stubapp_last_count = 0;
+static int g_stubapp_last_result = JNI_ERR;
+static bool g_stubapp_last_caller_is_jiagu = false;
+static bool g_stubapp_last_all_multiapp = false;
+static bool g_stubapp_last_has_interface11 = false;
+static bool g_stubapp_last_has_interface20 = false;
+static bool g_stubapp_original_jiagu_complete = false;
+static bool g_stubapp_saw_jiagu_interface11 = false;
+static bool g_stubapp_saw_jiagu_interface20 = false;
+static std::string g_stubapp_last_class;
+static std::string g_stubapp_last_caller;
+
+static bool clear_logged_exception(JNIEnv* env, const char* label);
+static void install_jiagu_token_insert_hook_from_stubapp(const char* source);
+static void install_jiagu_fill_loop_hooks_from_stubapp(const char* source);
 
 static std::atomic<long long> s_diag_last_check{0};
 static std::atomic_bool s_diag_cached{false};
@@ -1286,6 +1662,15 @@ static bool is_multiapp_native_fn(void* fnPtr) {
     return strstr(info.dli_fname, "libmultiapp-native.so") != nullptr;
 }
 
+static bool is_address_from_library(void* address, const char* libraryName) {
+    if (address == nullptr || libraryName == nullptr) return false;
+    Dl_info info{};
+    if (dladdr(address, &info) == 0 || info.dli_fname == nullptr) {
+        return false;
+    }
+    return strstr(info.dli_fname, libraryName) != nullptr;
+}
+
 static std::string describe_native_address(void* address) {
     if (address == nullptr) return "<null>";
     Dl_info info{};
@@ -1306,6 +1691,912 @@ static std::string describe_native_address(void* address) {
     return std::string(buf);
 }
 
+static bool jiagu_jni_diag_caller(void* caller, uintptr_t* outOffset, const char** outWindow) {
+    if (caller == nullptr) return false;
+    Dl_info info{};
+    if (dladdr(caller, &info) == 0 || info.dli_fname == nullptr || info.dli_fbase == nullptr) {
+        return false;
+    }
+    if (strstr(info.dli_fname, "libjiagu_vip.so") == nullptr) {
+        return false;
+    }
+    uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+    if (pc < base) return false;
+    uintptr_t off = pc - base;
+    struct Window { uintptr_t center; uintptr_t radius; const char* name; };
+    const Window windows[] = {
+        {0x10d3f4, 0x500, "interface20"},
+        {0x11b9c8, 0xd00, "interface20-sigcheck"},
+        {0x11cf5c, 0x900, "interface20-fencrypt"},
+        {0x11d310, 0xb00, "interface20-filecheck"},
+        {0x11d644, 0x400, "interface20-error"},
+        {0x116c94, 0x600, "interface20-fencrypt-input"},
+        {0x123438, 0x600, "interface20-qiniu-check"},
+        {0x258bac, 0x300, "onload-dispatch"},
+        {0x25a5dc, 0x500, "decrypt-func"},
+        {0x25a7ac, 0x500, "register-func"},
+        {0x25b508, 0x500, "env-check-a"},
+        {0x25ba74, 0x500, "env-check-b"},
+        {0x25bde4, 0x700, "env-check"},
+    };
+    for (const auto& window : windows) {
+        uintptr_t start = window.center > window.radius ? window.center - window.radius : 0;
+        uintptr_t end = window.center + window.radius;
+        if (off >= start && off <= end) {
+            if (outOffset != nullptr) *outOffset = off;
+            if (outWindow != nullptr) *outWindow = window.name;
+            return true;
+        }
+    }
+    return false;
+}
+
+static std::string jiagu_jni_describe_method(jmethodID method) {
+    if (method == nullptr) return "<null-method>";
+    std::lock_guard<std::mutex> lock(g_jiagu_jni_diag_mutex);
+    auto it = g_jiagu_jni_method_names.find(method);
+    if (it != g_jiagu_jni_method_names.end()) return it->second;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%p", method);
+    return std::string(buf);
+}
+
+static std::string jiagu_jni_describe_field(jfieldID field) {
+    if (field == nullptr) return "<null-field>";
+    std::lock_guard<std::mutex> lock(g_jiagu_jni_diag_mutex);
+    auto it = g_jiagu_jni_field_names.find(field);
+    if (it != g_jiagu_jni_field_names.end()) return it->second;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%p", field);
+    return std::string(buf);
+}
+
+static void jiagu_jni_remember_method(jmethodID method, const std::string& desc) {
+    if (method == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_jiagu_jni_diag_mutex);
+    g_jiagu_jni_method_names[method] = desc;
+}
+
+static void jiagu_jni_remember_field(jfieldID field, const std::string& desc) {
+    if (field == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_jiagu_jni_diag_mutex);
+    g_jiagu_jni_field_names[field] = desc;
+}
+
+static jmethodID hooked_GetMethodID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
+    auto orig = (GetMethodIDFn)g_orig_get_method_id;
+    if (orig == nullptr) return nullptr;
+    if (g_jiagu_jni_diag_in_hook) return orig(env, clazz, name, sig);
+    void* caller = __builtin_return_address(0);
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    bool log = jiagu_jni_diag_caller(caller, &off, &window);
+    std::string cls = "<not-logged>";
+    if (log) {
+        g_jiagu_jni_diag_in_hook = true;
+        cls = describe_java_class(env, clazz);
+        g_jiagu_jni_diag_in_hook = false;
+    }
+    jmethodID result = orig(env, clazz, name, sig);
+    if (log) {
+        g_jiagu_jni_diag_in_hook = true;
+        bool hasException = env->ExceptionCheck() == JNI_TRUE;
+        std::string desc = cls + "." + (name ? name : "<null>") + (sig ? sig : "<null>");
+        jiagu_jni_remember_method(result, desc);
+        LOGW("JiaguJNI GetMethodID callerOff=0x%lx window=%s target=%s result=%p exception=%d",
+             (unsigned long)off, window ? window : "<unknown>", desc.c_str(), result, hasException ? 1 : 0);
+        g_jiagu_jni_diag_in_hook = false;
+    }
+    return result;
+}
+
+static jmethodID hooked_GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
+    auto orig = (GetStaticMethodIDFn)g_orig_get_static_method_id;
+    if (orig == nullptr) return nullptr;
+    if (g_jiagu_jni_diag_in_hook) return orig(env, clazz, name, sig);
+    void* caller = __builtin_return_address(0);
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    bool log = jiagu_jni_diag_caller(caller, &off, &window);
+    std::string cls = "<not-logged>";
+    if (log) {
+        g_jiagu_jni_diag_in_hook = true;
+        cls = describe_java_class(env, clazz);
+        g_jiagu_jni_diag_in_hook = false;
+    }
+    jmethodID result = orig(env, clazz, name, sig);
+    if (log) {
+        g_jiagu_jni_diag_in_hook = true;
+        bool hasException = env->ExceptionCheck() == JNI_TRUE;
+        std::string desc = cls + "." + (name ? name : "<null>") + (sig ? sig : "<null>") + " static";
+        jiagu_jni_remember_method(result, desc);
+        LOGW("JiaguJNI GetStaticMethodID callerOff=0x%lx window=%s target=%s result=%p exception=%d",
+             (unsigned long)off, window ? window : "<unknown>", desc.c_str(), result, hasException ? 1 : 0);
+        g_jiagu_jni_diag_in_hook = false;
+    }
+    return result;
+}
+
+static jfieldID hooked_GetFieldID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
+    auto orig = (GetFieldIDFn)g_orig_get_field_id;
+    if (orig == nullptr) return nullptr;
+    if (g_jiagu_jni_diag_in_hook) return orig(env, clazz, name, sig);
+    void* caller = __builtin_return_address(0);
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    bool log = jiagu_jni_diag_caller(caller, &off, &window);
+    std::string cls = "<not-logged>";
+    if (log) {
+        g_jiagu_jni_diag_in_hook = true;
+        cls = describe_java_class(env, clazz);
+        g_jiagu_jni_diag_in_hook = false;
+    }
+    jfieldID result = orig(env, clazz, name, sig);
+    if (log) {
+        g_jiagu_jni_diag_in_hook = true;
+        bool hasException = env->ExceptionCheck() == JNI_TRUE;
+        std::string desc = cls + "." + (name ? name : "<null>") + ":" + (sig ? sig : "<null>");
+        jiagu_jni_remember_field(result, desc);
+        LOGW("JiaguJNI GetFieldID callerOff=0x%lx window=%s target=%s result=%p exception=%d",
+             (unsigned long)off, window ? window : "<unknown>", desc.c_str(), result, hasException ? 1 : 0);
+        g_jiagu_jni_diag_in_hook = false;
+    }
+    return result;
+}
+
+static jfieldID hooked_GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
+    auto orig = (GetStaticFieldIDFn)g_orig_get_static_field_id;
+    if (orig == nullptr) return nullptr;
+    if (g_jiagu_jni_diag_in_hook) return orig(env, clazz, name, sig);
+    void* caller = __builtin_return_address(0);
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    bool log = jiagu_jni_diag_caller(caller, &off, &window);
+    std::string cls = "<not-logged>";
+    if (log) {
+        g_jiagu_jni_diag_in_hook = true;
+        cls = describe_java_class(env, clazz);
+        g_jiagu_jni_diag_in_hook = false;
+    }
+    jfieldID result = orig(env, clazz, name, sig);
+    if (log) {
+        g_jiagu_jni_diag_in_hook = true;
+        bool hasException = env->ExceptionCheck() == JNI_TRUE;
+        std::string desc = cls + "." + (name ? name : "<null>") + ":" + (sig ? sig : "<null>") + " static";
+        jiagu_jni_remember_field(result, desc);
+        LOGW("JiaguJNI GetStaticFieldID callerOff=0x%lx window=%s target=%s result=%p exception=%d",
+             (unsigned long)off, window ? window : "<unknown>", desc.c_str(), result, hasException ? 1 : 0);
+        g_jiagu_jni_diag_in_hook = false;
+    }
+    return result;
+}
+
+static std::string jiagu_jni_object_result_summary(JNIEnv* env, jobject result, const std::string& methodDesc, bool hasException) {
+    if (result == nullptr) return "<null>";
+    if (hasException) return "<pending-exception>";
+    if (methodDesc.find(")[B") != std::string::npos) {
+        auto bytes = reinterpret_cast<jbyteArray>(result);
+        jsize len = env->GetArrayLength(bytes);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            return "<byte-array-read-failed>";
+        }
+        constexpr jsize kPreview = 16;
+        jsize previewLen = len < kPreview ? len : kPreview;
+        jbyte preview[kPreview] = {};
+        if (previewLen > 0) {
+            env->GetByteArrayRegion(bytes, 0, previewLen, preview);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                return "<byte-array-read-failed>";
+            }
+        }
+        uint64_t fnv = 1469598103934665603ull;
+        constexpr jsize kHashChunk = 256;
+        jbyte chunk[kHashChunk] = {};
+        for (jsize pos = 0; pos < len; pos += kHashChunk) {
+            jsize chunkLen = len - pos;
+            if (chunkLen > kHashChunk) chunkLen = kHashChunk;
+            env->GetByteArrayRegion(bytes, pos, chunkLen, chunk);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                return "<byte-array-read-failed>";
+            }
+            for (jsize i = 0; i < chunkLen; ++i) {
+                fnv ^= static_cast<unsigned char>(chunk[i]);
+                fnv *= 1099511628211ull;
+            }
+        }
+        static const char* hex = "0123456789abcdef";
+        std::string firstHex;
+        firstHex.reserve(static_cast<size_t>(previewLen) * 2);
+        for (jsize i = 0; i < previewLen; ++i) {
+            unsigned char b = static_cast<unsigned char>(preview[i]);
+            firstHex.push_back(hex[b >> 4]);
+            firstHex.push_back(hex[b & 0x0f]);
+        }
+        char buf[256];
+        snprintf(buf, sizeof(buf), "[B len=%d fnv64=0x%016llx first%d=%s",
+                 static_cast<int>(len),
+                 static_cast<unsigned long long>(fnv),
+                 static_cast<int>(previewLen),
+                 firstHex.c_str());
+        return std::string(buf);
+    }
+    if (methodDesc.find(")Ljava/lang/String;") == std::string::npos) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%p", result);
+        return std::string(buf);
+    }
+    const char* chars = env->GetStringUTFChars((jstring)result, nullptr);
+    if (chars == nullptr) return "<string-read-failed>";
+    std::string text(chars);
+    env->ReleaseStringUTFChars((jstring)result, chars);
+    if (text.size() > 160) {
+        text.resize(160);
+        text += "...";
+    }
+    return "\"" + text + "\"";
+}
+
+static void jiagu_jni_log_object_call(JNIEnv* env, const char* api, void* caller, jmethodID method, jobject result) {
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    if (!jiagu_jni_diag_caller(caller, &off, &window)) return;
+    g_jiagu_jni_diag_in_hook = true;
+    bool hasException = env->ExceptionCheck() == JNI_TRUE;
+    std::string methodDesc = jiagu_jni_describe_method(method);
+    std::string resultDesc = jiagu_jni_object_result_summary(env, result, methodDesc, hasException);
+    LOGW("JiaguJNI %s callerOff=0x%lx window=%s method=%s result=%s exception=%d",
+         api, (unsigned long)off, window ? window : "<unknown>",
+         methodDesc.c_str(), resultDesc.c_str(), hasException ? 1 : 0);
+    g_jiagu_jni_diag_in_hook = false;
+}
+
+static jobject maybe_spoof_jiagu_current_package(JNIEnv* env, void* caller, jmethodID method, jobject result) {
+    if (result == nullptr) return result;
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    if (!jiagu_jni_diag_caller(caller, &off, &window)) return result;
+
+    std::string methodDesc = jiagu_jni_describe_method(method);
+    if (methodDesc.find("android.app.ActivityThread.currentPackageName()Ljava/lang/String;") == std::string::npos) {
+        return result;
+    }
+
+    std::string originalPackage;
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_pkg_spoof_mutex);
+        originalPackage = g_jiagu_original_package;
+    }
+    if (originalPackage.empty()) return result;
+
+    jstring spoofed = env->NewStringUTF(originalPackage.c_str());
+    if (spoofed == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("JiaguJNI currentPackageName spoof failed callerOff=0x%lx original=%s",
+             (unsigned long)off, originalPackage.c_str());
+        return result;
+    }
+
+    LOGW("JiaguJNI currentPackageName spoof callerOff=0x%lx window=%s originalResult=%p spoof=\"%s\"",
+         (unsigned long)off, window ? window : "<unknown>", result, originalPackage.c_str());
+    return spoofed;
+}
+
+static void jiagu_jni_log_boolean_call(JNIEnv* env, const char* api, void* caller, jmethodID method, jboolean result) {
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    if (!jiagu_jni_diag_caller(caller, &off, &window)) return;
+    g_jiagu_jni_diag_in_hook = true;
+    bool hasException = env->ExceptionCheck() == JNI_TRUE;
+    LOGW("JiaguJNI %s callerOff=0x%lx window=%s method=%s result=%d exception=%d",
+         api, (unsigned long)off, window ? window : "<unknown>",
+         jiagu_jni_describe_method(method).c_str(), result, hasException ? 1 : 0);
+    g_jiagu_jni_diag_in_hook = false;
+}
+
+static void jiagu_jni_log_int_call(JNIEnv* env, const char* api, void* caller, jmethodID method, jint result) {
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    if (!jiagu_jni_diag_caller(caller, &off, &window)) return;
+    g_jiagu_jni_diag_in_hook = true;
+    bool hasException = env->ExceptionCheck() == JNI_TRUE;
+    LOGW("JiaguJNI %s callerOff=0x%lx window=%s method=%s result=%d exception=%d",
+         api, (unsigned long)off, window ? window : "<unknown>",
+         jiagu_jni_describe_method(method).c_str(), result, hasException ? 1 : 0);
+    g_jiagu_jni_diag_in_hook = false;
+}
+
+static void jiagu_jni_log_void_call(JNIEnv* env, const char* api, void* caller, jmethodID method) {
+    uintptr_t off = 0;
+    const char* window = nullptr;
+    if (!jiagu_jni_diag_caller(caller, &off, &window)) return;
+    g_jiagu_jni_diag_in_hook = true;
+    bool hasException = env->ExceptionCheck() == JNI_TRUE;
+    LOGW("JiaguJNI %s callerOff=0x%lx window=%s method=%s exception=%d",
+         api, (unsigned long)off, window ? window : "<unknown>",
+         jiagu_jni_describe_method(method).c_str(), hasException ? 1 : 0);
+    g_jiagu_jni_diag_in_hook = false;
+}
+
+static jobject hooked_CallObjectMethod(JNIEnv* env, jobject obj, jmethodID method, ...) {
+    auto origV = (CallObjectMethodVFn)g_orig_call_object_method_v;
+    if (origV == nullptr) return nullptr;
+    va_list args;
+    va_start(args, method);
+    jobject result = origV(env, obj, method, args);
+    va_end(args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            bool hasException = env->ExceptionCheck() == JNI_TRUE;
+            std::string methodDesc = jiagu_jni_describe_method(method);
+            std::string resultDesc = jiagu_jni_object_result_summary(env, result, methodDesc, hasException);
+            LOGW("JiaguJNI CallObjectMethod callerOff=0x%lx window=%s method=%s result=%s exception=%d",
+                 (unsigned long)off, window ? window : "<unknown>",
+                 methodDesc.c_str(), resultDesc.c_str(), hasException ? 1 : 0);
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+    return result;
+}
+
+static jobject hooked_CallObjectMethodV(JNIEnv* env, jobject obj, jmethodID method, va_list args) {
+    auto origV = (CallObjectMethodVFn)g_orig_call_object_method_v;
+    if (origV == nullptr) return nullptr;
+    jobject result = origV(env, obj, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_object_call(env, "CallObjectMethodV", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static jobject hooked_CallObjectMethodA(JNIEnv* env, jobject obj, jmethodID method, const jvalue* args) {
+    auto origA = (CallObjectMethodAFn)g_orig_call_object_method_a;
+    if (origA == nullptr) return nullptr;
+    jobject result = origA(env, obj, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_object_call(env, "CallObjectMethodA", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static jboolean hooked_CallBooleanMethod(JNIEnv* env, jobject obj, jmethodID method, ...) {
+    auto origV = (CallBooleanMethodVFn)g_orig_call_boolean_method_v;
+    if (origV == nullptr) return JNI_FALSE;
+    va_list args;
+    va_start(args, method);
+    jboolean result = origV(env, obj, method, args);
+    va_end(args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            bool hasException = env->ExceptionCheck() == JNI_TRUE;
+            LOGW("JiaguJNI CallBooleanMethod callerOff=0x%lx window=%s method=%s result=%d exception=%d",
+                 (unsigned long)off, window ? window : "<unknown>",
+                 jiagu_jni_describe_method(method).c_str(), result, hasException ? 1 : 0);
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+    return result;
+}
+
+static jboolean hooked_CallBooleanMethodV(JNIEnv* env, jobject obj, jmethodID method, va_list args) {
+    auto origV = (CallBooleanMethodVFn)g_orig_call_boolean_method_v;
+    if (origV == nullptr) return JNI_FALSE;
+    jboolean result = origV(env, obj, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_boolean_call(env, "CallBooleanMethodV", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static jboolean hooked_CallBooleanMethodA(JNIEnv* env, jobject obj, jmethodID method, const jvalue* args) {
+    auto origA = (CallBooleanMethodAFn)g_orig_call_boolean_method_a;
+    if (origA == nullptr) return JNI_FALSE;
+    jboolean result = origA(env, obj, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_boolean_call(env, "CallBooleanMethodA", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static jint hooked_CallIntMethod(JNIEnv* env, jobject obj, jmethodID method, ...) {
+    auto origV = (CallIntMethodVFn)g_orig_call_int_method_v;
+    if (origV == nullptr) return 0;
+    va_list args;
+    va_start(args, method);
+    jint result = origV(env, obj, method, args);
+    va_end(args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            bool hasException = env->ExceptionCheck() == JNI_TRUE;
+            LOGW("JiaguJNI CallIntMethod callerOff=0x%lx window=%s method=%s result=%d exception=%d",
+                 (unsigned long)off, window ? window : "<unknown>",
+                 jiagu_jni_describe_method(method).c_str(), result, hasException ? 1 : 0);
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+    return result;
+}
+
+static jint hooked_CallIntMethodV(JNIEnv* env, jobject obj, jmethodID method, va_list args) {
+    auto origV = (CallIntMethodVFn)g_orig_call_int_method_v;
+    if (origV == nullptr) return 0;
+    jint result = origV(env, obj, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_int_call(env, "CallIntMethodV", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static jint hooked_CallIntMethodA(JNIEnv* env, jobject obj, jmethodID method, const jvalue* args) {
+    auto origA = (CallIntMethodAFn)g_orig_call_int_method_a;
+    if (origA == nullptr) return 0;
+    jint result = origA(env, obj, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_int_call(env, "CallIntMethodA", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static void hooked_CallVoidMethod(JNIEnv* env, jobject obj, jmethodID method, ...) {
+    auto origV = (CallVoidMethodVFn)g_orig_call_void_method_v;
+    if (origV == nullptr) return;
+    va_list args;
+    va_start(args, method);
+    origV(env, obj, method, args);
+    va_end(args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            bool hasException = env->ExceptionCheck() == JNI_TRUE;
+            LOGW("JiaguJNI CallVoidMethod callerOff=0x%lx window=%s method=%s exception=%d",
+                 (unsigned long)off, window ? window : "<unknown>",
+                 jiagu_jni_describe_method(method).c_str(), hasException ? 1 : 0);
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+}
+
+static void hooked_CallVoidMethodV(JNIEnv* env, jobject obj, jmethodID method, va_list args) {
+    auto origV = (CallVoidMethodVFn)g_orig_call_void_method_v;
+    if (origV == nullptr) return;
+    origV(env, obj, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_void_call(env, "CallVoidMethodV", __builtin_return_address(0), method);
+    }
+}
+
+static void hooked_CallVoidMethodA(JNIEnv* env, jobject obj, jmethodID method, const jvalue* args) {
+    auto origA = (CallVoidMethodAFn)g_orig_call_void_method_a;
+    if (origA == nullptr) return;
+    origA(env, obj, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_void_call(env, "CallVoidMethodA", __builtin_return_address(0), method);
+    }
+}
+
+static jobject hooked_CallStaticObjectMethod(JNIEnv* env, jclass clazz, jmethodID method, ...) {
+    auto origV = (CallStaticObjectMethodVFn)g_orig_call_static_object_method_v;
+    if (origV == nullptr) return nullptr;
+    va_list args;
+    va_start(args, method);
+    jobject result = origV(env, clazz, method, args);
+    va_end(args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        result = maybe_spoof_jiagu_current_package(env, caller, method, result);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            bool hasException = env->ExceptionCheck() == JNI_TRUE;
+            std::string methodDesc = jiagu_jni_describe_method(method);
+            std::string resultDesc = jiagu_jni_object_result_summary(env, result, methodDesc, hasException);
+            LOGW("JiaguJNI CallStaticObjectMethod callerOff=0x%lx window=%s method=%s result=%s exception=%d",
+                 (unsigned long)off, window ? window : "<unknown>",
+                 methodDesc.c_str(), resultDesc.c_str(), hasException ? 1 : 0);
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+    return result;
+}
+
+static jobject hooked_CallStaticObjectMethodV(JNIEnv* env, jclass clazz, jmethodID method, va_list args) {
+    auto origV = (CallStaticObjectMethodVFn)g_orig_call_static_object_method_v;
+    if (origV == nullptr) return nullptr;
+    jobject result = origV(env, clazz, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        result = maybe_spoof_jiagu_current_package(env, caller, method, result);
+        jiagu_jni_log_object_call(env, "CallStaticObjectMethodV", caller, method, result);
+    }
+    return result;
+}
+
+static jobject hooked_CallStaticObjectMethodA(JNIEnv* env, jclass clazz, jmethodID method, const jvalue* args) {
+    auto origA = (CallStaticObjectMethodAFn)g_orig_call_static_object_method_a;
+    if (origA == nullptr) return nullptr;
+    jobject result = origA(env, clazz, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        result = maybe_spoof_jiagu_current_package(env, caller, method, result);
+        jiagu_jni_log_object_call(env, "CallStaticObjectMethodA", caller, method, result);
+    }
+    return result;
+}
+
+static jboolean hooked_CallStaticBooleanMethod(JNIEnv* env, jclass clazz, jmethodID method, ...) {
+    auto origV = (CallStaticBooleanMethodVFn)g_orig_call_static_boolean_method_v;
+    if (origV == nullptr) return JNI_FALSE;
+    va_list args;
+    va_start(args, method);
+    jboolean result = origV(env, clazz, method, args);
+    va_end(args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            bool hasException = env->ExceptionCheck() == JNI_TRUE;
+            LOGW("JiaguJNI CallStaticBooleanMethod callerOff=0x%lx window=%s method=%s result=%d exception=%d",
+                 (unsigned long)off, window ? window : "<unknown>",
+                 jiagu_jni_describe_method(method).c_str(), result, hasException ? 1 : 0);
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+    return result;
+}
+
+static jboolean hooked_CallStaticBooleanMethodV(JNIEnv* env, jclass clazz, jmethodID method, va_list args) {
+    auto origV = (CallStaticBooleanMethodVFn)g_orig_call_static_boolean_method_v;
+    if (origV == nullptr) return JNI_FALSE;
+    jboolean result = origV(env, clazz, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_boolean_call(env, "CallStaticBooleanMethodV", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static jboolean hooked_CallStaticBooleanMethodA(JNIEnv* env, jclass clazz, jmethodID method, const jvalue* args) {
+    auto origA = (CallStaticBooleanMethodAFn)g_orig_call_static_boolean_method_a;
+    if (origA == nullptr) return JNI_FALSE;
+    jboolean result = origA(env, clazz, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_boolean_call(env, "CallStaticBooleanMethodA", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static jint hooked_CallStaticIntMethod(JNIEnv* env, jclass clazz, jmethodID method, ...) {
+    auto origV = (CallStaticIntMethodVFn)g_orig_call_static_int_method_v;
+    if (origV == nullptr) return 0;
+    va_list args;
+    va_start(args, method);
+    jint result = origV(env, clazz, method, args);
+    va_end(args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            bool hasException = env->ExceptionCheck() == JNI_TRUE;
+            LOGW("JiaguJNI CallStaticIntMethod callerOff=0x%lx window=%s method=%s result=%d exception=%d",
+                 (unsigned long)off, window ? window : "<unknown>",
+                 jiagu_jni_describe_method(method).c_str(), result, hasException ? 1 : 0);
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+    return result;
+}
+
+static jint hooked_CallStaticIntMethodV(JNIEnv* env, jclass clazz, jmethodID method, va_list args) {
+    auto origV = (CallStaticIntMethodVFn)g_orig_call_static_int_method_v;
+    if (origV == nullptr) return 0;
+    jint result = origV(env, clazz, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_int_call(env, "CallStaticIntMethodV", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static jint hooked_CallStaticIntMethodA(JNIEnv* env, jclass clazz, jmethodID method, const jvalue* args) {
+    auto origA = (CallStaticIntMethodAFn)g_orig_call_static_int_method_a;
+    if (origA == nullptr) return 0;
+    jint result = origA(env, clazz, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_int_call(env, "CallStaticIntMethodA", __builtin_return_address(0), method, result);
+    }
+    return result;
+}
+
+static void hooked_CallStaticVoidMethod(JNIEnv* env, jclass clazz, jmethodID method, ...) {
+    auto origV = (CallStaticVoidMethodVFn)g_orig_call_static_void_method_v;
+    if (origV == nullptr) return;
+    va_list args;
+    va_start(args, method);
+    origV(env, clazz, method, args);
+    va_end(args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            bool hasException = env->ExceptionCheck() == JNI_TRUE;
+            LOGW("JiaguJNI CallStaticVoidMethod callerOff=0x%lx window=%s method=%s exception=%d",
+                 (unsigned long)off, window ? window : "<unknown>",
+                 jiagu_jni_describe_method(method).c_str(), hasException ? 1 : 0);
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+}
+
+static void hooked_CallStaticVoidMethodV(JNIEnv* env, jclass clazz, jmethodID method, va_list args) {
+    auto origV = (CallStaticVoidMethodVFn)g_orig_call_static_void_method_v;
+    if (origV == nullptr) return;
+    origV(env, clazz, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_void_call(env, "CallStaticVoidMethodV", __builtin_return_address(0), method);
+    }
+}
+
+static void hooked_CallStaticVoidMethodA(JNIEnv* env, jclass clazz, jmethodID method, const jvalue* args) {
+    auto origA = (CallStaticVoidMethodAFn)g_orig_call_static_void_method_a;
+    if (origA == nullptr) return;
+    origA(env, clazz, method, args);
+    if (!g_jiagu_jni_diag_in_hook) {
+        jiagu_jni_log_void_call(env, "CallStaticVoidMethodA", __builtin_return_address(0), method);
+    }
+}
+
+static jsize hooked_GetStringUTFLength(JNIEnv* env, jstring str) {
+    auto orig = (GetStringUTFLengthFn)g_orig_get_string_utf_length;
+    if (orig == nullptr) return 0;
+    jsize result = orig(env, str);
+    if (!g_jiagu_jni_diag_in_hook) {
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(__builtin_return_address(0), &off, &window)) {
+            LOGW("JiaguJNI GetStringUTFLength callerOff=0x%lx window=%s str=%p result=%d",
+                 (unsigned long)off, window ? window : "<unknown>", str, static_cast<int>(result));
+        }
+    }
+    return result;
+}
+
+static const char* hooked_GetStringUTFChars(JNIEnv* env, jstring str, jboolean* isCopy) {
+    auto orig = (GetStringUTFCharsFn)g_orig_get_string_utf_chars;
+    if (orig == nullptr) return nullptr;
+    const char* result = orig(env, str, isCopy);
+    if (!g_jiagu_jni_diag_in_hook) {
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(__builtin_return_address(0), &off, &window)) {
+            char preview[97] = {};
+            if (result != nullptr) {
+                size_t len = strnlen(result, sizeof(preview) - 1);
+                memcpy(preview, result, len);
+                preview[len] = '\0';
+            }
+            LOGW("JiaguJNI GetStringUTFChars callerOff=0x%lx window=%s str=%p result=%p isCopy=%d preview=\"%s\"",
+                 (unsigned long)off, window ? window : "<unknown>", str, result,
+                 isCopy != nullptr && *isCopy == JNI_TRUE ? 1 : 0,
+                 result != nullptr ? preview : "<null>");
+        }
+    }
+    return result;
+}
+
+static void hooked_ReleaseStringUTFChars(JNIEnv* env, jstring str, const char* chars) {
+    auto orig = (ReleaseStringUTFCharsFn)g_orig_release_string_utf_chars;
+    if (orig == nullptr) return;
+    if (!g_jiagu_jni_diag_in_hook) {
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(__builtin_return_address(0), &off, &window)) {
+            LOGW("JiaguJNI ReleaseStringUTFChars callerOff=0x%lx window=%s str=%p chars=%p",
+                 (unsigned long)off, window ? window : "<unknown>", str, chars);
+        }
+    }
+    orig(env, str, chars);
+}
+
+static jsize hooked_GetArrayLength(JNIEnv* env, jarray array) {
+    auto orig = (GetArrayLengthFn)g_orig_get_array_length;
+    if (orig == nullptr) return 0;
+    jsize result = orig(env, array);
+    if (!g_jiagu_jni_diag_in_hook) {
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(__builtin_return_address(0), &off, &window)) {
+            LOGW("JiaguJNI GetArrayLength callerOff=0x%lx window=%s array=%p result=%d",
+                 (unsigned long)off, window ? window : "<unknown>", array, static_cast<int>(result));
+        }
+    }
+    return result;
+}
+
+static jbyte* hooked_GetByteArrayElements(JNIEnv* env, jbyteArray array, jboolean* isCopy) {
+    auto orig = (GetByteArrayElementsFn)g_orig_get_byte_array_elements;
+    if (orig == nullptr) return nullptr;
+    jbyte* result = orig(env, array, isCopy);
+    if (!g_jiagu_jni_diag_in_hook) {
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(__builtin_return_address(0), &off, &window)) {
+            LOGW("JiaguJNI GetByteArrayElements callerOff=0x%lx window=%s array=%p result=%p isCopy=%d",
+                 (unsigned long)off, window ? window : "<unknown>", array, result,
+                 isCopy != nullptr && *isCopy == JNI_TRUE ? 1 : 0);
+        }
+    }
+    return result;
+}
+
+static void hooked_ReleaseByteArrayElements(JNIEnv* env, jbyteArray array, jbyte* elems, jint mode) {
+    auto orig = (ReleaseByteArrayElementsFn)g_orig_release_byte_array_elements;
+    if (orig == nullptr) return;
+    if (!g_jiagu_jni_diag_in_hook) {
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(__builtin_return_address(0), &off, &window)) {
+            LOGW("JiaguJNI ReleaseByteArrayElements callerOff=0x%lx window=%s array=%p elems=%p mode=%d",
+                 (unsigned long)off, window ? window : "<unknown>", array, elems, static_cast<int>(mode));
+        }
+    }
+    orig(env, array, elems, mode);
+}
+
+static std::string jiagu_jni_describe_throwable(JNIEnv* env, jthrowable throwable) {
+    if (throwable == nullptr) return "<null>";
+
+    std::string className = "<throwable-class-unknown>";
+    jclass throwableObjectClass = env->GetObjectClass(throwable);
+    if (throwableObjectClass != nullptr) {
+        className = describe_java_class(env, throwableObjectClass);
+        env->DeleteLocalRef(throwableObjectClass);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+
+    std::string message;
+    jclass throwableClass = env->FindClass("java/lang/Throwable");
+    if (throwableClass != nullptr) {
+        jmethodID getMessage = env->GetMethodID(throwableClass, "getMessage", "()Ljava/lang/String;");
+        if (getMessage != nullptr) {
+            auto msgObj = (jstring)env->CallObjectMethod(throwable, getMessage);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            } else if (msgObj != nullptr) {
+                const char* chars = env->GetStringUTFChars(msgObj, nullptr);
+                if (chars != nullptr) {
+                    message = chars;
+                    env->ReleaseStringUTFChars(msgObj, chars);
+                }
+                env->DeleteLocalRef(msgObj);
+            }
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(throwableClass);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+
+    if (message.size() > 180) {
+        message.resize(180);
+        message += "...";
+    }
+    return message.empty() ? className : (className + ": " + message);
+}
+
+static jthrowable hooked_ExceptionOccurred(JNIEnv* env) {
+    auto orig = (ExceptionOccurredFn)g_orig_exception_occurred;
+    if (orig == nullptr) return nullptr;
+    jthrowable result = orig(env);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            g_jiagu_jni_diag_in_hook = true;
+            std::string desc = "<none>";
+            if (result != nullptr) {
+                auto clearOrig = (ExceptionClearFn)g_orig_exception_clear;
+                if (clearOrig != nullptr) clearOrig(env);
+                desc = jiagu_jni_describe_throwable(env, result);
+                env->Throw(result);
+            }
+            LOGW("JiaguJNI ExceptionOccurred callerOff=0x%lx window=%s result=%p throwable=%s",
+                 (unsigned long)off, window ? window : "<unknown>", result, desc.c_str());
+            g_jiagu_jni_diag_in_hook = false;
+        }
+    }
+    return result;
+}
+
+static void hooked_ExceptionClear(JNIEnv* env) {
+    auto orig = (ExceptionClearFn)g_orig_exception_clear;
+    if (orig == nullptr) return;
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            LOGW("JiaguJNI ExceptionClear callerOff=0x%lx window=%s",
+                 (unsigned long)off, window ? window : "<unknown>");
+        }
+    }
+    orig(env);
+}
+
+static jboolean hooked_ExceptionCheck(JNIEnv* env) {
+    auto orig = (ExceptionCheckFn)g_orig_exception_check;
+    if (orig == nullptr) return JNI_FALSE;
+    jboolean result = orig(env);
+    if (!g_jiagu_jni_diag_in_hook) {
+        void* caller = __builtin_return_address(0);
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(caller, &off, &window)) {
+            LOGW("JiaguJNI ExceptionCheck callerOff=0x%lx window=%s result=%d",
+                 (unsigned long)off, window ? window : "<unknown>", result ? 1 : 0);
+        }
+    }
+    return result;
+}
+
+static void update_stubapp_register_state(
+    const std::string& className,
+    const std::string& callerDesc,
+    bool callerIsJiagu,
+    bool allMultiAppMethods,
+    bool hasInterface11,
+    bool hasInterface20,
+    jint nMethods,
+    jint result) {
+    std::lock_guard<std::mutex> lock(g_stubapp_register_mutex);
+    g_stubapp_register_calls++;
+    g_stubapp_last_class = className;
+    g_stubapp_last_caller = callerDesc;
+    g_stubapp_last_count = nMethods;
+    g_stubapp_last_result = result;
+    g_stubapp_last_caller_is_jiagu = callerIsJiagu;
+    g_stubapp_last_all_multiapp = allMultiAppMethods;
+    g_stubapp_last_has_interface11 = hasInterface11;
+    g_stubapp_last_has_interface20 = hasInterface20;
+    if (callerIsJiagu) {
+        g_stubapp_jiagu_register_calls++;
+        if (hasInterface11) g_stubapp_saw_jiagu_interface11 = true;
+        if (hasInterface20) g_stubapp_saw_jiagu_interface20 = true;
+        if (result == JNI_OK && nMethods >= 10 && hasInterface11 && hasInterface20) {
+            g_stubapp_jiagu_complete_calls++;
+            g_stubapp_original_jiagu_complete = true;
+        }
+    }
+    if (allMultiAppMethods) {
+        g_stubapp_multiapp_register_calls++;
+    }
+}
+
 static void capture_stubapp_native(const char* name, const char* sig, void* fnPtr) {
     if (name == nullptr || sig == nullptr || fnPtr == nullptr) return;
     if (is_multiapp_native_fn(fnPtr)) {
@@ -1321,6 +2612,8 @@ static void capture_stubapp_native(const char* name, const char* sig, void* fnPt
     } else if (strcmp(name, "interface20") == 0 && strcmp(sig, "()Z") == 0) {
         g_orig_stub_interface20 = (StubInterface20Fn)fnPtr;
         LOGW("RegisterNatives StubApp: captured original interface20=%s", describe_native_address(fnPtr).c_str());
+        install_jiagu_token_insert_hook_from_stubapp("capture-interface20");
+        install_jiagu_fill_loop_hooks_from_stubapp("capture-interface20");
     } else if (strcmp(name, "interface21") == 0 && strcmp(sig, "(Landroid/app/Application;)V") == 0) {
         g_orig_stub_interface21 = (StubInterfaceAppFn)fnPtr;
         LOGW("RegisterNatives StubApp: captured original interface21=%s", describe_native_address(fnPtr).c_str());
@@ -1337,9 +2630,29 @@ static jint hooked_RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMet
     const JNINativeMethod* methodsToRegister = methods;
     if ((className == "com.stub.StubApp" || className == "com.qihoo.util.StubApp") &&
         methods != nullptr && nMethods > 0) {
+        bool callerIsJiagu = is_address_from_library(caller, "libjiagu_vip.so");
+        bool allMultiAppMethods = true;
+        bool hasInterface11 = false;
+        bool hasInterface20 = false;
         for (jint i = 0; i < nMethods; i++) {
+            const char* name = methods[i].name ? methods[i].name : "";
+            const char* sig = methods[i].signature ? methods[i].signature : "";
+            if (strcmp(name, "interface11") == 0 && strcmp(sig, "(I)V") == 0) {
+                hasInterface11 = true;
+            } else if (strcmp(name, "interface20") == 0 && strcmp(sig, "()Z") == 0) {
+                hasInterface20 = true;
+            }
+            if (!is_multiapp_native_fn(methods[i].fnPtr)) {
+                allMultiAppMethods = false;
+            }
             capture_stubapp_native(methods[i].name, methods[i].signature, methods[i].fnPtr);
         }
+        LOGW("RegisterNatives StubApp DIAG: count=%d callerIsJiagu=%d allMultiApp=%d hasInterface11=%d hasInterface20=%d",
+             nMethods,
+             callerIsJiagu ? 1 : 0,
+             allMultiAppMethods ? 1 : 0,
+             hasInterface11 ? 1 : 0,
+             hasInterface20 ? 1 : 0);
     }
     if (className == "com.yuewen.ywlogin.login.YWLoginManager" &&
         methods != nullptr && nMethods > 0) {
@@ -1438,6 +2751,51 @@ static jint hooked_RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMet
         return JNI_ERR;
     }
     jint result = ((RegisterNativesFn)g_orig_register_natives)(env, clazz, methodsToRegister, nMethods);
+    if ((className == "com.stub.StubApp" || className == "com.qihoo.util.StubApp") &&
+        methods != nullptr && nMethods > 0) {
+        bool callerIsJiagu = is_address_from_library(caller, "libjiagu_vip.so");
+        bool allMultiAppMethods = true;
+        bool hasInterface11 = false;
+        bool hasInterface20 = false;
+        for (jint i = 0; i < nMethods; i++) {
+            const char* name = methods[i].name ? methods[i].name : "";
+            const char* sig = methods[i].signature ? methods[i].signature : "";
+            if (strcmp(name, "interface11") == 0 && strcmp(sig, "(I)V") == 0) {
+                hasInterface11 = true;
+            } else if (strcmp(name, "interface20") == 0 && strcmp(sig, "()Z") == 0) {
+                hasInterface20 = true;
+            }
+            if (!is_multiapp_native_fn(methods[i].fnPtr)) {
+                allMultiAppMethods = false;
+            }
+        }
+        update_stubapp_register_state(
+            className,
+            callerDesc,
+            callerIsJiagu,
+            allMultiAppMethods,
+            hasInterface11,
+            hasInterface20,
+            nMethods,
+            result);
+        int registerCalls = 0;
+        int jiaguCalls = 0;
+        int jiaguCompleteCalls = 0;
+        int multiappCalls = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_stubapp_register_mutex);
+            registerCalls = g_stubapp_register_calls;
+            jiaguCalls = g_stubapp_jiagu_register_calls;
+            jiaguCompleteCalls = g_stubapp_jiagu_complete_calls;
+            multiappCalls = g_stubapp_multiapp_register_calls;
+        }
+        LOGW("RegisterNatives StubApp DIAG result=%d calls=%d jiaguCalls=%d jiaguComplete=%d multiappCalls=%d",
+             result,
+             registerCalls,
+             jiaguCalls,
+             jiaguCompleteCalls,
+             multiappCalls);
+    }
     if (result == JNI_OK && className == "com.qq.reader.cservice.onlineread.OnlineChapterDownloadTask") {
         int count = g_online_chapter_register_count.fetch_add(1, std::memory_order_relaxed) + 1;
         LOGW("RegisterNatives DIAG: OnlineChapterDownloadTask registered count=%d methods=%d", count, nMethods);
@@ -1474,6 +2832,99 @@ static bool installRegisterNativesLogger(JNIEnv* env) {
     g_register_natives_logger_installed = true;
     LOGI("installRegisterNativesLogger: installed (original=%p)", g_orig_register_natives);
     return true;
+}
+
+static bool replace_jni_table_entry(void** jniFunctions, int index, void* replacement, void** original, const char* name) {
+    if (jniFunctions == nullptr || replacement == nullptr || original == nullptr) return false;
+    if (jniFunctions[index] == replacement) return true;
+    if (*original == nullptr) {
+        *original = jniFunctions[index];
+    }
+    if (*original == nullptr) {
+        LOGE("installJiaguJniDiagHooks: original %s pointer is null", name);
+        return false;
+    }
+
+    uintptr_t page_size = sysconf(_SC_PAGESIZE);
+    uintptr_t page_start = (uintptr_t)&jniFunctions[index] & ~(page_size - 1);
+    if (mprotect((void*)page_start, page_size, PROT_READ | PROT_WRITE) != 0) {
+        LOGE("installJiaguJniDiagHooks: mprotect RW failed for %s errno=%d", name, errno);
+        return false;
+    }
+    jniFunctions[index] = replacement;
+    if (mprotect((void*)page_start, page_size, PROT_READ) != 0) {
+        LOGW("installJiaguJniDiagHooks: mprotect R failed for %s errno=%d", name, errno);
+    }
+    LOGI("installJiaguJniDiagHooks: hooked %s original=%p", name, *original);
+    return true;
+}
+
+static bool installJiaguJniDiagHooks(JNIEnv* env) {
+    if (g_jiagu_jni_diag_hooks_installed) {
+        LOGI("installJiaguJniDiagHooks: already installed");
+        return true;
+    }
+    void** jniFunctions = *reinterpret_cast<void***>(env);
+    bool ok = true;
+    ok &= replace_jni_table_entry(jniFunctions, 33, (void*)hooked_GetMethodID, &g_orig_get_method_id, "GetMethodID");
+    ok &= replace_jni_table_entry(jniFunctions, 94, (void*)hooked_GetFieldID, &g_orig_get_field_id, "GetFieldID");
+    ok &= replace_jni_table_entry(jniFunctions, 113, (void*)hooked_GetStaticMethodID, &g_orig_get_static_method_id, "GetStaticMethodID");
+    ok &= replace_jni_table_entry(jniFunctions, 144, (void*)hooked_GetStaticFieldID, &g_orig_get_static_field_id, "GetStaticFieldID");
+
+    g_orig_call_object_method_v = jniFunctions[35];
+    g_orig_call_object_method_a = jniFunctions[36];
+    g_orig_call_boolean_method_v = jniFunctions[38];
+    g_orig_call_boolean_method_a = jniFunctions[39];
+    g_orig_call_int_method_v = jniFunctions[50];
+    g_orig_call_int_method_a = jniFunctions[51];
+    g_orig_call_void_method_v = jniFunctions[62];
+    g_orig_call_void_method_a = jniFunctions[63];
+    g_orig_call_static_object_method_v = jniFunctions[115];
+    g_orig_call_static_object_method_a = jniFunctions[116];
+    g_orig_call_static_boolean_method_v = jniFunctions[118];
+    g_orig_call_static_boolean_method_a = jniFunctions[119];
+    g_orig_call_static_int_method_v = jniFunctions[130];
+    g_orig_call_static_int_method_a = jniFunctions[131];
+    g_orig_call_static_void_method_v = jniFunctions[136];
+    g_orig_call_static_void_method_a = jniFunctions[137];
+
+    ok &= replace_jni_table_entry(jniFunctions, 34, (void*)hooked_CallObjectMethod, &g_orig_call_object_method_v, "CallObjectMethod");
+    ok &= replace_jni_table_entry(jniFunctions, 35, (void*)hooked_CallObjectMethodV, &g_orig_call_object_method_v, "CallObjectMethodV");
+    ok &= replace_jni_table_entry(jniFunctions, 36, (void*)hooked_CallObjectMethodA, &g_orig_call_object_method_a, "CallObjectMethodA");
+    ok &= replace_jni_table_entry(jniFunctions, 37, (void*)hooked_CallBooleanMethod, &g_orig_call_boolean_method_v, "CallBooleanMethod");
+    ok &= replace_jni_table_entry(jniFunctions, 38, (void*)hooked_CallBooleanMethodV, &g_orig_call_boolean_method_v, "CallBooleanMethodV");
+    ok &= replace_jni_table_entry(jniFunctions, 39, (void*)hooked_CallBooleanMethodA, &g_orig_call_boolean_method_a, "CallBooleanMethodA");
+    ok &= replace_jni_table_entry(jniFunctions, 49, (void*)hooked_CallIntMethod, &g_orig_call_int_method_v, "CallIntMethod");
+    ok &= replace_jni_table_entry(jniFunctions, 50, (void*)hooked_CallIntMethodV, &g_orig_call_int_method_v, "CallIntMethodV");
+    ok &= replace_jni_table_entry(jniFunctions, 51, (void*)hooked_CallIntMethodA, &g_orig_call_int_method_a, "CallIntMethodA");
+    ok &= replace_jni_table_entry(jniFunctions, 61, (void*)hooked_CallVoidMethod, &g_orig_call_void_method_v, "CallVoidMethod");
+    ok &= replace_jni_table_entry(jniFunctions, 62, (void*)hooked_CallVoidMethodV, &g_orig_call_void_method_v, "CallVoidMethodV");
+    ok &= replace_jni_table_entry(jniFunctions, 63, (void*)hooked_CallVoidMethodA, &g_orig_call_void_method_a, "CallVoidMethodA");
+    ok &= replace_jni_table_entry(jniFunctions, 114, (void*)hooked_CallStaticObjectMethod, &g_orig_call_static_object_method_v, "CallStaticObjectMethod");
+    ok &= replace_jni_table_entry(jniFunctions, 115, (void*)hooked_CallStaticObjectMethodV, &g_orig_call_static_object_method_v, "CallStaticObjectMethodV");
+    ok &= replace_jni_table_entry(jniFunctions, 116, (void*)hooked_CallStaticObjectMethodA, &g_orig_call_static_object_method_a, "CallStaticObjectMethodA");
+    ok &= replace_jni_table_entry(jniFunctions, 117, (void*)hooked_CallStaticBooleanMethod, &g_orig_call_static_boolean_method_v, "CallStaticBooleanMethod");
+    ok &= replace_jni_table_entry(jniFunctions, 118, (void*)hooked_CallStaticBooleanMethodV, &g_orig_call_static_boolean_method_v, "CallStaticBooleanMethodV");
+    ok &= replace_jni_table_entry(jniFunctions, 119, (void*)hooked_CallStaticBooleanMethodA, &g_orig_call_static_boolean_method_a, "CallStaticBooleanMethodA");
+    ok &= replace_jni_table_entry(jniFunctions, 129, (void*)hooked_CallStaticIntMethod, &g_orig_call_static_int_method_v, "CallStaticIntMethod");
+    ok &= replace_jni_table_entry(jniFunctions, 130, (void*)hooked_CallStaticIntMethodV, &g_orig_call_static_int_method_v, "CallStaticIntMethodV");
+    ok &= replace_jni_table_entry(jniFunctions, 131, (void*)hooked_CallStaticIntMethodA, &g_orig_call_static_int_method_a, "CallStaticIntMethodA");
+    ok &= replace_jni_table_entry(jniFunctions, 135, (void*)hooked_CallStaticVoidMethod, &g_orig_call_static_void_method_v, "CallStaticVoidMethod");
+    ok &= replace_jni_table_entry(jniFunctions, 136, (void*)hooked_CallStaticVoidMethodV, &g_orig_call_static_void_method_v, "CallStaticVoidMethodV");
+    ok &= replace_jni_table_entry(jniFunctions, 137, (void*)hooked_CallStaticVoidMethodA, &g_orig_call_static_void_method_a, "CallStaticVoidMethodA");
+    ok &= replace_jni_table_entry(jniFunctions, 168, (void*)hooked_GetStringUTFLength, &g_orig_get_string_utf_length, "GetStringUTFLength");
+    ok &= replace_jni_table_entry(jniFunctions, 169, (void*)hooked_GetStringUTFChars, &g_orig_get_string_utf_chars, "GetStringUTFChars");
+    ok &= replace_jni_table_entry(jniFunctions, 170, (void*)hooked_ReleaseStringUTFChars, &g_orig_release_string_utf_chars, "ReleaseStringUTFChars");
+    ok &= replace_jni_table_entry(jniFunctions, 171, (void*)hooked_GetArrayLength, &g_orig_get_array_length, "GetArrayLength");
+    ok &= replace_jni_table_entry(jniFunctions, 184, (void*)hooked_GetByteArrayElements, &g_orig_get_byte_array_elements, "GetByteArrayElements");
+    ok &= replace_jni_table_entry(jniFunctions, 192, (void*)hooked_ReleaseByteArrayElements, &g_orig_release_byte_array_elements, "ReleaseByteArrayElements");
+    ok &= replace_jni_table_entry(jniFunctions, 15, (void*)hooked_ExceptionOccurred, &g_orig_exception_occurred, "ExceptionOccurred");
+    ok &= replace_jni_table_entry(jniFunctions, 17, (void*)hooked_ExceptionClear, &g_orig_exception_clear, "ExceptionClear");
+    ok &= replace_jni_table_entry(jniFunctions, 228, (void*)hooked_ExceptionCheck, &g_orig_exception_check, "ExceptionCheck");
+
+    g_jiagu_jni_diag_hooks_installed = ok;
+    LOGI("installJiaguJniDiagHooks: installed=%d", ok ? 1 : 0);
+    return ok;
 }
 
 /**
@@ -1579,6 +3030,12 @@ static jstring hooked_nativeLoad(JNIEnv* env, jclass runtimeClass,
         LOGE("hooked_nativeLoad: original ART nativeLoad pointer is null");
     }
 
+    // 壳的 JNI_OnLoad 执行后，dump 解密区域用于分析
+    if (strstr(path, "libjiagu_vip.so") != nullptr) {
+        LOGI("hooked_nativeLoad: libjiagu_vip.so loaded, dumping decrypted regions...");
+        dump_decrypted_jiagu_code();
+    }
+
     if (result == nullptr) {
         LOGI("hooked_nativeLoad: ART nativeLoad succeeded for '%s'", path);
     } else {
@@ -1605,7 +3062,6 @@ static jstring hooked_nativeLoad(JNIEnv* env, jclass runtimeClass,
  * 3. Register our hooked version via RegisterNatives
  */
 static bool installNativeLoadHook(JNIEnv* env) {
-    // Find java.lang.Runtime
     jclass runtimeClass = env->FindClass("java/lang/Runtime");
     if (runtimeClass == nullptr) {
         LOGE("installNativeLoadHook: cannot find java/lang/Runtime");
@@ -1613,78 +3069,66 @@ static bool installNativeLoadHook(JNIEnv* env) {
         return false;
     }
 
-    // Try to get the original native function pointer from libart.so
-    // The symbol name varies by ART version but we try the common ones
     void* libart = dlopen("libart.so", RTLD_NOLOAD);
     if (libart == nullptr) {
         LOGW("installNativeLoadHook: libart.so not found via RTLD_NOLOAD, trying dlopen");
         libart = dlopen("libart.so", RTLD_NOW);
     }
+    LOGI("installNativeLoadHook: libart=%p", libart);
 
     if (libart != nullptr) {
-        // ART internal symbol for Runtime_nativeLoad (static JNI method)
-        // Try multiple symbol names as it varies across Android versions
         const char* symbols[] = {
             "_ZN3artL18Runtime_nativeLoadEP7_JNIEnvP7_jclassP8_jstringP8_jobjectS5_",
+            "_ZN3art18Runtime_nativeLoadEP7_JNIEnvP7_jclassP8_jstringP8_jobjectS5_",
             "Runtime_nativeLoad",
+            "_ZN3art7Runtime12nativeLoadEP7_JNIEnvP8_jstringP8_jobjectS5_",
             nullptr
         };
 
         for (int i = 0; symbols[i] != nullptr; i++) {
             g_orig_nativeLoad_fn = dlsym(libart, symbols[i]);
             if (g_orig_nativeLoad_fn != nullptr) {
-                LOGI("installNativeLoadHook: found original at symbol '%s'", symbols[i]);
+                LOGI("installNativeLoadHook: found original at symbol '%s' ptr=%p", symbols[i], g_orig_nativeLoad_fn);
                 break;
             }
         }
+        if (g_orig_nativeLoad_fn == nullptr) {
+            LOGW("installNativeLoadHook: dlsym failed for all symbols, dlerror=%s", dlerror());
+        }
     }
 
-    if (g_orig_nativeLoad_fn == nullptr) {
-        // Fallback: use env->GetMethodID to verify the method exists,
-        // then rely on RegisterNatives to stash the original internally.
-        // We'll use a JNI trick: register, then we ARE the native now.
-        // To call original, we need the old function pointer.
-        // Without it, we try a different approach — call doLoad on Runtime directly.
-
-        // Try using JNI GetStaticMethodID to verify method exists
-        jmethodID nativeLoadMethod = env->GetStaticMethodID(
-            runtimeClass, "nativeLoad",
-            "(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;");
-        if (nativeLoadMethod == nullptr) {
-            LOGE("installNativeLoadHook: Runtime.nativeLoad method not found");
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            env->DeleteLocalRef(runtimeClass);
+    if (g_orig_nativeLoad_fn != nullptr) {
+        JNINativeMethod methods[] = {
+            {
+                const_cast<char*>("nativeLoad"),
+                const_cast<char*>("(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;"),
+                reinterpret_cast<void*>(hooked_nativeLoad)
+            }
+        };
+        jint result = env->RegisterNatives(runtimeClass, methods, 1);
+        env->DeleteLocalRef(runtimeClass);
+        if (result != JNI_OK) {
+            LOGE("installNativeLoadHook: RegisterNatives failed with code %d", result);
+            g_orig_nativeLoad_fn = nullptr;
             return false;
         }
+        LOGI("installNativeLoadHook: SUCCESS — Runtime.nativeLoad hooked via RegisterNatives");
+        return true;
+    }
 
-        // Without the original symbol, we can still hook but won't be able to forward.
-        // Use a wrapper approach: save the method ID and call via JNI CallStatic
-        // But this would recursively call our hook... So we MUST have the original.
-        LOGE("installNativeLoadHook: cannot find original native symbol in libart.so");
+    jmethodID nativeLoadMethod = env->GetStaticMethodID(
+        runtimeClass, "nativeLoad",
+        "(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;");
+    if (nativeLoadMethod == nullptr) {
+        LOGE("installNativeLoadHook: Runtime.nativeLoad method not found (hidden API blocked)");
+        if (env->ExceptionCheck()) env->ExceptionClear();
         env->DeleteLocalRef(runtimeClass);
         return false;
     }
 
-    // Register our hooked version
-    JNINativeMethod methods[] = {
-        {
-            const_cast<char*>("nativeLoad"),
-            const_cast<char*>("(Ljava/lang/String;Ljava/lang/ClassLoader;Ljava/lang/Class;)Ljava/lang/String;"),
-            reinterpret_cast<void*>(hooked_nativeLoad)
-        }
-    };
-
-    jint result = env->RegisterNatives(runtimeClass, methods, 1);
+    LOGE("installNativeLoadHook: cannot find original native symbol in libart.so");
     env->DeleteLocalRef(runtimeClass);
-
-    if (result != JNI_OK) {
-        LOGE("installNativeLoadHook: RegisterNatives failed with code %d", result);
-        g_orig_nativeLoad_fn = nullptr;
-        return false;
-    }
-
-    LOGI("installNativeLoadHook: SUCCESS — Runtime.nativeLoad hooked via RegisterNatives");
-    return true;
+    return false;
 }
 
 /**
@@ -1723,6 +3167,14 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallRegisterNativesLogger(
     return installRegisterNativesLogger(env) ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallJiaguJniDiagHooks(
+    JNIEnv* env, jobject thiz)
+{
+    (void)thiz;
+    return installJiaguJniDiagHooks(env) ? JNI_TRUE : JNI_FALSE;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_multiapp_core_hook_NativeHookBridge_nativeGetYwLoginBindingReport(
     JNIEnv* env, jobject thiz)
@@ -1747,11 +3199,48 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeGetStubAppBindingReport(
     JNIEnv* env, jobject thiz)
 {
     (void)thiz;
-    char buffer[768];
+    int registerCalls = 0;
+    int jiaguRegisterCalls = 0;
+    int multiappRegisterCalls = 0;
+    int jiaguCompleteCalls = 0;
+    int lastCount = 0;
+    int lastResult = JNI_ERR;
+    bool lastCallerIsJiagu = false;
+    bool lastAllMultiApp = false;
+    bool lastHasInterface11 = false;
+    bool lastHasInterface20 = false;
+    bool originalJiaguComplete = false;
+    bool sawJiaguInterface11 = false;
+    bool sawJiaguInterface20 = false;
+    std::string lastClass;
+    std::string lastCaller;
+    {
+        std::lock_guard<std::mutex> lock(g_stubapp_register_mutex);
+        registerCalls = g_stubapp_register_calls;
+        jiaguRegisterCalls = g_stubapp_jiagu_register_calls;
+        multiappRegisterCalls = g_stubapp_multiapp_register_calls;
+        jiaguCompleteCalls = g_stubapp_jiagu_complete_calls;
+        lastCount = g_stubapp_last_count;
+        lastResult = g_stubapp_last_result;
+        lastCallerIsJiagu = g_stubapp_last_caller_is_jiagu;
+        lastAllMultiApp = g_stubapp_last_all_multiapp;
+        lastHasInterface11 = g_stubapp_last_has_interface11;
+        lastHasInterface20 = g_stubapp_last_has_interface20;
+        originalJiaguComplete = g_stubapp_original_jiagu_complete;
+        sawJiaguInterface11 = g_stubapp_saw_jiagu_interface11;
+        sawJiaguInterface20 = g_stubapp_saw_jiagu_interface20;
+        lastClass = g_stubapp_last_class;
+        lastCaller = g_stubapp_last_caller;
+    }
+    char buffer[2048];
     snprintf(
         buffer,
         sizeof(buffer),
-        "interface5=%s ptr=%p interface11=%s ptr=%p interface20=%s ptr=%p interface21=%s ptr=%p",
+        "interface5=%s ptr=%p interface11=%s ptr=%p interface20=%s ptr=%p interface21=%s ptr=%p "
+        "stubRegCalls=%d jiaguRegCalls=%d multiappRegCalls=%d jiaguCompleteCalls=%d "
+        "originalJiaguComplete=%d sawJiaguInterface11=%d sawJiaguInterface20=%d "
+        "lastClass=%s lastCount=%d lastResult=%d lastCallerIsJiagu=%d lastAllMultiApp=%d "
+        "lastHasInterface11=%d lastHasInterface20=%d lastCaller=%s",
         g_orig_stub_interface5 != nullptr ? "bound" : "missing",
         (void*)g_orig_stub_interface5,
         g_orig_stub_interface11 != nullptr ? "bound" : "missing",
@@ -1759,8 +3248,2301 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeGetStubAppBindingReport(
         g_orig_stub_interface20 != nullptr ? "bound" : "missing",
         (void*)g_orig_stub_interface20,
         g_orig_stub_interface21 != nullptr ? "bound" : "missing",
-        (void*)g_orig_stub_interface21);
+        (void*)g_orig_stub_interface21,
+        registerCalls,
+        jiaguRegisterCalls,
+        multiappRegisterCalls,
+        jiaguCompleteCalls,
+        originalJiaguComplete ? 1 : 0,
+        sawJiaguInterface11 ? 1 : 0,
+        sawJiaguInterface20 ? 1 : 0,
+        lastClass.empty() ? "<none>" : lastClass.c_str(),
+        lastCount,
+        lastResult,
+        lastCallerIsJiagu ? 1 : 0,
+        lastAllMultiApp ? 1 : 0,
+        lastHasInterface11 ? 1 : 0,
+        lastHasInterface20 ? 1 : 0,
+        lastCaller.empty() ? "<none>" : lastCaller.c_str());
     return env->NewStringUTF(buffer);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeGetStubAppRegisterNativesEvidenceReport(
+    JNIEnv* env, jobject thiz)
+{
+    (void)thiz;
+    int registerCalls = 0;
+    int lastCount = 0;
+    int lastResult = JNI_ERR;
+    bool lastCallerIsJiagu = false;
+    bool lastAllMultiApp = false;
+    bool lastHasInterface11 = false;
+    bool lastHasInterface20 = false;
+    bool originalJiaguComplete = false;
+    std::string lastClass;
+    {
+        std::lock_guard<std::mutex> lock(g_stubapp_register_mutex);
+        registerCalls = g_stubapp_register_calls;
+        lastCount = g_stubapp_last_count;
+        lastResult = g_stubapp_last_result;
+        lastCallerIsJiagu = g_stubapp_last_caller_is_jiagu;
+        lastAllMultiApp = g_stubapp_last_all_multiapp;
+        lastHasInterface11 = g_stubapp_last_has_interface11;
+        lastHasInterface20 = g_stubapp_last_has_interface20;
+        originalJiaguComplete = g_stubapp_original_jiagu_complete;
+        lastClass = g_stubapp_last_class;
+    }
+
+    if (registerCalls == 0) {
+        return env->NewStringUTF("");
+    }
+
+    char buffer[1024];
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "className=%s\n"
+        "methodCount=%d\n"
+        "result=%d\n"
+        "source=native:RegisterNatives\n"
+        "callerIsJiagu=%d\n"
+        "allMultiAppMethods=%d\n"
+        "hasInterface11=%d\n"
+        "hasInterface20=%d\n"
+        "jiaguComplete=%d",
+        lastClass.empty() ? "com.stub.StubApp" : lastClass.c_str(),
+        lastCount,
+        lastResult,
+        lastCallerIsJiagu ? 1 : 0,
+        lastAllMultiApp ? 1 : 0,
+        lastHasInterface11 ? 1 : 0,
+        lastHasInterface20 ? 1 : 0,
+        originalJiaguComplete ? 1 : 0);
+    return env->NewStringUTF(buffer);
+}
+
+static bool read_jiagu_ptr(uintptr_t address, uintptr_t* out) {
+    if (out == nullptr || !is_readable_proc_range(address, sizeof(uintptr_t))) return false;
+    memcpy(out, reinterpret_cast<const void*>(address), sizeof(uintptr_t));
+    return true;
+}
+
+static bool read_jiagu_u32(uintptr_t address, uint32_t* out) {
+    if (out == nullptr || !is_readable_proc_range(address, sizeof(uint32_t))) return false;
+    memcpy(out, reinterpret_cast<const void*>(address), sizeof(uint32_t));
+    return true;
+}
+
+static bool read_jiagu_u8(uintptr_t address, uint8_t* out) {
+    if (out == nullptr || !is_readable_proc_range(address, sizeof(uint8_t))) return false;
+    memcpy(out, reinterpret_cast<const void*>(address), sizeof(uint8_t));
+    return true;
+}
+
+static std::string read_jiagu_c_string(uintptr_t address, size_t limit = 80) {
+    if (address == 0) return "<null>";
+    std::string out;
+    out.reserve(limit);
+    for (size_t i = 0; i < limit; ++i) {
+        uint8_t ch = 0;
+        if (!read_jiagu_u8(address + i, &ch)) {
+            return out.empty() ? "<unreadable>" : out + "<cut-unreadable>";
+        }
+        if (ch == 0) return out;
+        if (ch < 0x20 || ch >= 0x7f) {
+            out.push_back('.');
+        } else {
+            out.push_back(static_cast<char>(ch));
+        }
+    }
+    return out + "...";
+}
+
+static std::string read_jiagu_ascii_buffer(uintptr_t address, size_t length, size_t limit = 80) {
+    if (address == 0) return "<null>";
+    size_t capped = length < limit ? length : limit;
+    std::string out;
+    out.reserve(capped + 16);
+    for (size_t i = 0; i < capped; ++i) {
+        uint8_t ch = 0;
+        if (!read_jiagu_u8(address + i, &ch)) {
+            return out.empty() ? "<unreadable>" : out + "<cut-unreadable>";
+        }
+        if (ch == 0) {
+            out += "\\0";
+        } else if (ch < 0x20 || ch >= 0x7f) {
+            out.push_back('.');
+        } else {
+            out.push_back(static_cast<char>(ch));
+        }
+    }
+    if (length > capped) out += "...";
+    return out;
+}
+
+static std::string read_jiagu_libcpp_string(uintptr_t address, size_t limit = 80) {
+    if (address == 0) return "<null>";
+    uint8_t tag = 0;
+    if (!read_jiagu_u8(address, &tag)) return "<unreadable>";
+
+    uintptr_t length = 0;
+    uintptr_t data = 0;
+    if ((tag & 1) == 0) {
+        length = tag >> 1;
+        data = address + 1;
+    } else {
+        if (!read_jiagu_ptr(address + 0x8, &length) || !read_jiagu_ptr(address + 0x10, &data)) {
+            return "<unreadable-long>";
+        }
+    }
+
+    if (length > limit) length = limit;
+    std::string out;
+    out.reserve(static_cast<size_t>(length));
+    for (uintptr_t i = 0; i < length; ++i) {
+        uint8_t ch = 0;
+        if (!read_jiagu_u8(data + i, &ch)) {
+            return out.empty() ? "<string-data-unreadable>" : out + "<cut-unreadable>";
+        }
+        if (ch < 0x20 || ch >= 0x7f) {
+            out.push_back('.');
+        } else {
+            out.push_back(static_cast<char>(ch));
+        }
+    }
+    return out;
+}
+
+static size_t vector_count_from_begin_end(uintptr_t begin, uintptr_t end, size_t itemSize) {
+    if (begin == 0 || end < begin || itemSize == 0) return 0;
+    return static_cast<size_t>((end - begin) / itemSize);
+}
+
+static std::string build_jiagu_token_insert_hook_diag() {
+    uintptr_t ownerBegin = g_jiagu_token_insert_last_owner_vec_begin.load(std::memory_order_relaxed);
+    uintptr_t ownerEnd = g_jiagu_token_insert_last_owner_vec_end.load(std::memory_order_relaxed);
+    uintptr_t ownerCap = g_jiagu_token_insert_last_owner_vec_cap.load(std::memory_order_relaxed);
+    char buf[768];
+    snprintf(
+        buf,
+        sizeof(buf),
+        "insertHook={installed=%d attempts=%d failures=%d calls=%d original=%p stub=%p "
+        "lastManager=%p lastOwner=%p ownerPayloadVec=%p/%p/%p ownerPayloadCount=%zu "
+        "lastPayload=%p payloadKey=%u payloadWord0=%p payloadWord8=%p managerRootAfter=%p managerCountAfter=%zu}",
+        g_jiagu_token_insert_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_token_insert_hook_attempts.load(std::memory_order_relaxed),
+        g_jiagu_token_insert_hook_failures.load(std::memory_order_relaxed),
+        g_jiagu_token_insert_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_token_insert),
+        g_jiagu_token_insert_hook_stub,
+        reinterpret_cast<void*>(g_jiagu_token_insert_last_manager.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_token_insert_last_owner.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(ownerBegin),
+        reinterpret_cast<void*>(ownerEnd),
+        reinterpret_cast<void*>(ownerCap),
+        vector_count_from_begin_end(ownerBegin, ownerEnd, sizeof(uintptr_t)),
+        reinterpret_cast<void*>(g_jiagu_token_insert_last_payload.load(std::memory_order_relaxed)),
+        g_jiagu_token_insert_last_payload_key.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_jiagu_token_insert_last_payload_word0.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_token_insert_last_payload_word8.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_token_insert_last_manager_root_after.load(std::memory_order_relaxed)),
+        static_cast<size_t>(g_jiagu_token_insert_last_manager_count_after.load(std::memory_order_relaxed)));
+    return buf;
+}
+
+static std::string build_jiagu_fill_loop_hook_diag() {
+    uintptr_t vecBegin = g_jiagu_build_register_vector_last_begin.load(std::memory_order_relaxed);
+    uintptr_t vecEnd = g_jiagu_build_register_vector_last_end.load(std::memory_order_relaxed);
+    uintptr_t payloadBegin = g_jiagu_build_register_vector_last_first_payload_begin.load(std::memory_order_relaxed);
+    uintptr_t payloadEnd = g_jiagu_build_register_vector_last_first_payload_end.load(std::memory_order_relaxed);
+    std::string gateKey;
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_register_gate_key_mutex);
+        gateKey = g_jiagu_register_gate_last_key;
+    }
+    std::string payloadS1;
+    std::string payloadS2;
+    std::string payloadS3;
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_payload_build_mutex);
+        payloadS1 = g_jiagu_payload_build_last_s1_text;
+        payloadS2 = g_jiagu_payload_build_last_s2_text;
+        payloadS3 = g_jiagu_payload_build_last_s3_text;
+    }
+    std::string payloadCheckText;
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_payload_check_mutex);
+        payloadCheckText = g_jiagu_payload_check_last_text;
+    }
+    std::string cmpLeft;
+    std::string cmpRight;
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_compare_mutex);
+        cmpLeft = g_jiagu_compare_last_left;
+        cmpRight = g_jiagu_compare_last_right;
+    }
+    std::string eqLeft;
+    std::string eqRight;
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_string_equals_mutex);
+        eqLeft = g_jiagu_string_equals_last_left;
+        eqRight = g_jiagu_string_equals_last_right;
+    }
+    std::string materializeArg1;
+    std::string materializeArg2;
+    std::string materializeArg3;
+    std::string materializeSlot270;
+    std::string materializeSlot290;
+    std::string materializeSlot2f0;
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_post_payload_materialize_mutex);
+        materializeArg1 = g_jiagu_post_payload_materialize_arg1_text;
+        materializeArg2 = g_jiagu_post_payload_materialize_arg2_text;
+        materializeArg3 = g_jiagu_post_payload_materialize_arg3_text;
+        materializeSlot270 = g_jiagu_post_payload_materialize_slot270_text;
+        materializeSlot290 = g_jiagu_post_payload_materialize_slot290_text;
+        materializeSlot2f0 = g_jiagu_post_payload_materialize_slot2f0_text;
+    }
+    char buf[9000];
+    snprintf(
+        buf,
+        sizeof(buf),
+        "fillLoopHooks={buildVectorInstalled=%d buildVectorCalls=%d buildVectorOrig=%p buildVectorStub=%p "
+        "lastArg=%p lastVector=%p vector=%p/%p vectorCount=%zu firstItem=%p firstPayloadVec=%p/%p firstPayloadCount=%zu "
+        "managerInitInstalled=%d managerInitCalls=%d managerInitOrig=%p managerInitStub=%p manager=%p managerRoot=%p managerCount=%zu "
+        "gateInstalled=%d gateCalls=%d gateOrig=%p gateStub=%p gateRegistry=%p gateKeyArg=%p gateKey=%s gateResult=%zu "
+        "interface20RegInstalled=%d interface20RegCalls=%d interface20RegOrig=%p interface20RegStub=%p interface20RegEnv=%p "
+        "payloadBuildInstalled=%d payloadBuildCalls=%d payloadBuildOrig=%p payloadBuildStub=%p payloadEnv=%p payloadArg1=%p "
+        "payloadS1=%p:%s payloadS2=%p:%s payloadS3=%p:%s payloadFlags=%d/%d payloadSlot=%p->%p payloadSlot8=%p->%p "
+        "payloadCheckInstalled=%d payloadCheckCalls=%d payloadCheckOrig=%p payloadCheckStub=%p payloadCheckArg=%p payloadCheckResult=%d payloadCheckForced=%d payloadCheckText=%s "
+        "forcePostBranchPatched=%d forcePreMaterializeGate1Patched=%d forcePreMaterializeGate2Patched=%d forceQiniuGatePatched=%d "
+        "postStatusInstalled=%d postStatusCalls=%d postStatusOrig=%p postStatusStub=%p postStatusCallerOff=0x%lx postStatusArg=%p postStatusResult=%d "
+        "postObjectInstalled=%d postObjectCalls=%d postObjectOrig=%p postObjectStub=%p postObjectCallerOff=0x%lx postObjectArg=%p postObjectResult=%p "
+        "materializeInstalled=%d materializeCalls=%d materializeOrig=%p materializeStub=%p materializeCallerOff=0x%lx "
+        "materializeArgs=%p/%p/%p/%p flags=%d/%d materializeArgText=%s|%s|%s "
+        "materializeSlots=%p:%s/%p:%s/%p:%s slot358=%u "
+        "compareInstalled=%d compareCalls=%d compareLogged=%d compareGot=%p compareCallerOff=0x%lx "
+        "compareArgs=%p/%p len=%zu result=%d left=%s right=%s "
+        "envProbeInstalled=%d envProbeCalls=%d envProbeCallerOff=0x%lx envProbeArg=%p envProbeResult=%d "
+        "stringEqInstalled=%d stringEqCalls=%d stringEqGot=%p stringEqCallerOff=0x%lx stringEqArgs=%p/%p stringEqResult=%d stringEqLeft=%s stringEqRight=%s}",
+        g_jiagu_build_register_vector_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_build_register_vector_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_build_register_vector),
+        g_jiagu_build_register_vector_hook_stub,
+        reinterpret_cast<void*>(g_jiagu_build_register_vector_last_arg.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_build_register_vector_last_result.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(vecBegin),
+        reinterpret_cast<void*>(vecEnd),
+        vector_count_from_begin_end(vecBegin, vecEnd, sizeof(uintptr_t)),
+        reinterpret_cast<void*>(g_jiagu_build_register_vector_last_first_item.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(payloadBegin),
+        reinterpret_cast<void*>(payloadEnd),
+        vector_count_from_begin_end(payloadBegin, payloadEnd, sizeof(uintptr_t)),
+        g_jiagu_token_manager_init_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_token_manager_init_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_token_manager_init),
+        g_jiagu_token_manager_init_hook_stub,
+        reinterpret_cast<void*>(g_jiagu_token_manager_init_last_result.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_token_manager_init_last_root.load(std::memory_order_relaxed)),
+        static_cast<size_t>(g_jiagu_token_manager_init_last_count.load(std::memory_order_relaxed)),
+        g_jiagu_register_gate_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_register_gate_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_register_gate),
+        g_jiagu_register_gate_hook_stub,
+        reinterpret_cast<void*>(g_jiagu_register_gate_last_registry.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_register_gate_last_key_arg.load(std::memory_order_relaxed)),
+        gateKey.c_str(),
+        static_cast<size_t>(g_jiagu_register_gate_last_result.load(std::memory_order_relaxed)),
+        g_jiagu_interface20_register_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_interface20_register_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_interface20_register),
+        g_jiagu_interface20_register_hook_stub,
+        reinterpret_cast<void*>(g_jiagu_interface20_register_last_env.load(std::memory_order_relaxed)),
+        g_jiagu_payload_build_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_payload_build_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_payload_build),
+        g_jiagu_payload_build_hook_stub,
+        reinterpret_cast<void*>(g_jiagu_payload_build_last_env.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_payload_build_last_arg1.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_payload_build_last_s1.load(std::memory_order_relaxed)),
+        payloadS1.c_str(),
+        reinterpret_cast<void*>(g_jiagu_payload_build_last_s2.load(std::memory_order_relaxed)),
+        payloadS2.c_str(),
+        reinterpret_cast<void*>(g_jiagu_payload_build_last_s3.load(std::memory_order_relaxed)),
+        payloadS3.c_str(),
+        g_jiagu_payload_build_last_flag3.load(std::memory_order_relaxed),
+        g_jiagu_payload_build_last_flag4.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_jiagu_payload_build_slot_before.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_payload_build_slot_after.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_payload_build_slot8_before.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_payload_build_slot8_after.load(std::memory_order_relaxed)),
+        g_jiagu_payload_check_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_payload_check_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_payload_check),
+        g_jiagu_payload_check_hook_stub,
+        reinterpret_cast<void*>(g_jiagu_payload_check_last_arg.load(std::memory_order_relaxed)),
+        g_jiagu_payload_check_last_result.load(std::memory_order_relaxed),
+        g_jiagu_payload_check_last_forced.load(std::memory_order_relaxed),
+        payloadCheckText.c_str(),
+        g_jiagu_force_post_payload_branch_patched.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_force_pre_materialize_gate1_patched.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_force_pre_materialize_gate2_patched.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_force_qiniu_gate_patched.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_post_payload_status_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_post_payload_status_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_post_payload_status),
+        g_jiagu_post_payload_status_hook_stub,
+        static_cast<unsigned long>(g_jiagu_post_payload_status_last_caller_off.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_post_payload_status_last_arg.load(std::memory_order_relaxed)),
+        g_jiagu_post_payload_status_last_result.load(std::memory_order_relaxed),
+        g_jiagu_post_payload_object_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_post_payload_object_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_post_payload_object),
+        g_jiagu_post_payload_object_hook_stub,
+        static_cast<unsigned long>(g_jiagu_post_payload_object_last_caller_off.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_post_payload_object_last_arg.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_post_payload_object_last_result.load(std::memory_order_relaxed)),
+        g_jiagu_post_payload_materialize_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_post_payload_materialize_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_orig_jiagu_post_payload_materialize),
+        g_jiagu_post_payload_materialize_hook_stub,
+        static_cast<unsigned long>(g_jiagu_post_payload_materialize_last_caller_off.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_post_payload_materialize_last_arg0.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_post_payload_materialize_last_arg1.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_post_payload_materialize_last_arg2.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_post_payload_materialize_last_arg3.load(std::memory_order_relaxed)),
+        g_jiagu_post_payload_materialize_last_flag4.load(std::memory_order_relaxed),
+        g_jiagu_post_payload_materialize_last_flag5.load(std::memory_order_relaxed),
+        materializeArg1.c_str(),
+        materializeArg2.c_str(),
+        materializeArg3.c_str(),
+        reinterpret_cast<void*>(g_jiagu_post_payload_materialize_slot270.load(std::memory_order_relaxed)),
+        materializeSlot270.c_str(),
+        reinterpret_cast<void*>(g_jiagu_post_payload_materialize_slot290.load(std::memory_order_relaxed)),
+        materializeSlot290.c_str(),
+        reinterpret_cast<void*>(g_jiagu_post_payload_materialize_slot2f0.load(std::memory_order_relaxed)),
+        materializeSlot2f0.c_str(),
+        g_jiagu_post_payload_materialize_slot358.load(std::memory_order_relaxed),
+        g_jiagu_compare_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_compare_calls.load(std::memory_order_relaxed),
+        g_jiagu_compare_logged_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_jiagu_compare_got_slot.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_jiagu_compare_last_caller_off.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_compare_last_arg0.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_compare_last_arg1.load(std::memory_order_relaxed)),
+        g_jiagu_compare_last_len.load(std::memory_order_relaxed),
+        g_jiagu_compare_last_result.load(std::memory_order_relaxed),
+        cmpLeft.c_str(),
+        cmpRight.c_str(),
+        g_jiagu_env_probe_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_env_probe_calls.load(std::memory_order_relaxed),
+        static_cast<unsigned long>(g_jiagu_env_probe_last_caller_off.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_env_probe_last_arg.load(std::memory_order_relaxed)),
+        g_jiagu_env_probe_last_result.load(std::memory_order_relaxed),
+        g_jiagu_string_equals_hook_installed.load(std::memory_order_relaxed) ? 1 : 0,
+        g_jiagu_string_equals_calls.load(std::memory_order_relaxed),
+        reinterpret_cast<void*>(g_jiagu_string_equals_got_slot.load(std::memory_order_relaxed)),
+        static_cast<unsigned long>(g_jiagu_string_equals_last_caller_off.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_string_equals_last_arg0.load(std::memory_order_relaxed)),
+        reinterpret_cast<void*>(g_jiagu_string_equals_last_arg1.load(std::memory_order_relaxed)),
+        g_jiagu_string_equals_last_result.load(std::memory_order_relaxed),
+        eqLeft.c_str(),
+        eqRight.c_str());
+    return buf;
+}
+
+static int hooked_jiagu_compare(const void* left, const void* right, size_t len) {
+    void* caller = __builtin_return_address(0);
+    int result = 0;
+    if (g_orig_jiagu_compare != nullptr) {
+        result = g_orig_jiagu_compare(left, right, len);
+    } else {
+        result = 0;
+    }
+
+    g_jiagu_compare_calls.fetch_add(1, std::memory_order_relaxed);
+
+    Dl_info info{};
+    uintptr_t callerOff = 0;
+    bool logCall = false;
+    if (caller != nullptr &&
+        dladdr(caller, &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+        uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+        if (pc >= base) {
+            callerOff = pc - base;
+            logCall = callerOff >= 0x10d468 && callerOff <= 0x10fd00;
+        }
+    }
+
+    bool forcedEqual = false;
+    if (logCall && len == 1 && left != nullptr && right != nullptr) {
+        uint8_t leftByte = 0;
+        uint8_t rightByte = 0;
+        if (read_jiagu_u8(reinterpret_cast<uintptr_t>(left), &leftByte) &&
+            read_jiagu_u8(reinterpret_cast<uintptr_t>(right), &rightByte) &&
+            leftByte == '0' &&
+            rightByte == '1' &&
+            (callerOff == 0x10e0ec || callerOff == 0x10e36c || callerOff == 0x10e618)) {
+            result = 0;
+            forcedEqual = true;
+        }
+    }
+
+    if (logCall) {
+        int logged = g_jiagu_compare_logged_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+        std::string leftText = read_jiagu_ascii_buffer(reinterpret_cast<uintptr_t>(left), len);
+        std::string rightText = read_jiagu_ascii_buffer(reinterpret_cast<uintptr_t>(right), len);
+        g_jiagu_compare_last_caller_off.store(callerOff, std::memory_order_relaxed);
+        g_jiagu_compare_last_arg0.store(reinterpret_cast<uintptr_t>(left), std::memory_order_relaxed);
+        g_jiagu_compare_last_arg1.store(reinterpret_cast<uintptr_t>(right), std::memory_order_relaxed);
+        g_jiagu_compare_last_len.store(len, std::memory_order_relaxed);
+        g_jiagu_compare_last_result.store(result, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(g_jiagu_compare_mutex);
+            g_jiagu_compare_last_left = leftText;
+            g_jiagu_compare_last_right = rightText;
+        }
+        if (logged <= 80 || result == 0) {
+            LOGW("JiaguCompare call=%d callerOff=0x%lx left=%p right=%p len=%zu result=%d forced=%d leftText=%s rightText=%s",
+                 logged,
+                 static_cast<unsigned long>(callerOff),
+                 left,
+                 right,
+                 len,
+                 result,
+                 forcedEqual ? 1 : 0,
+                 leftText.c_str(),
+                 rightText.c_str());
+        }
+    }
+    return result;
+}
+
+static int hooked_jiagu_env_probe(void* arg) {
+    void* caller = __builtin_return_address(0);
+    int result = 0;
+    if (g_orig_jiagu_env_probe != nullptr) {
+        result = g_orig_jiagu_env_probe(arg);
+    }
+
+    int callIndex = g_jiagu_env_probe_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    uintptr_t callerOff = 0;
+    Dl_info info{};
+    if (caller != nullptr &&
+        dladdr(caller, &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+        uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+        if (pc >= base) callerOff = pc - base;
+    }
+    bool forcedSdk25 = false;
+    if (callerOff == 0x129918 || callerOff == 0x10eb7c) {
+        result = 0x19;
+        forcedSdk25 = true;
+    }
+    g_jiagu_env_probe_last_caller_off.store(callerOff, std::memory_order_relaxed);
+    g_jiagu_env_probe_last_arg.store(reinterpret_cast<uintptr_t>(arg), std::memory_order_relaxed);
+    g_jiagu_env_probe_last_result.store(result, std::memory_order_relaxed);
+    if (callerOff == 0x129918 || callerOff == 0x10eb7c || callIndex <= 8) {
+        LOGW("JiaguEnvProbe call=%d callerOff=0x%lx arg=%p result=%d forcedSdk25=%d",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             arg,
+             result,
+             forcedSdk25 ? 1 : 0);
+    }
+    return result;
+}
+
+static int hooked_jiagu_qiniu_check(void* envLike) {
+    void* caller = __builtin_return_address(0);
+    int result = 0;
+    if (g_orig_jiagu_qiniu_check != nullptr) {
+        result = g_orig_jiagu_qiniu_check(envLike);
+    }
+    int callIndex = g_jiagu_qiniu_check_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    uintptr_t callerOff = 0;
+    Dl_info info{};
+    if (caller != nullptr &&
+        dladdr(caller, &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+        uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+        if (pc >= base) callerOff = pc - base;
+    }
+    g_jiagu_qiniu_check_last_caller_off.store(callerOff, std::memory_order_relaxed);
+    g_jiagu_qiniu_check_last_arg.store(reinterpret_cast<uintptr_t>(envLike), std::memory_order_relaxed);
+    g_jiagu_qiniu_check_last_result.store(result, std::memory_order_relaxed);
+    if (callIndex <= 20 || callerOff == 0x10fb1c || result > 0x1e) {
+        LOGW("JiaguQiniuCheck call=%d callerOff=0x%lx env=%p result=%d",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             envLike,
+             result);
+    }
+    return result;
+}
+
+static int hooked_jiagu_string_equals(const void* left, const void* right) {
+    void* caller = __builtin_return_address(0);
+    int result = 0;
+    if (g_orig_jiagu_string_equals != nullptr) {
+        result = g_orig_jiagu_string_equals(left, right);
+    }
+
+    int callIndex = g_jiagu_string_equals_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    uintptr_t callerOff = 0;
+    bool logCall = false;
+    Dl_info info{};
+    if (caller != nullptr &&
+        dladdr(caller, &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+        uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+        if (pc >= base) {
+            callerOff = pc - base;
+            logCall = (callerOff >= 0x129000 && callerOff <= 0x12a100) ||
+                      (callerOff >= 0x10d468 && callerOff <= 0x10f800);
+        }
+    }
+
+    std::string leftText;
+    std::string rightText;
+    if (logCall) {
+        leftText = read_jiagu_ascii_buffer(reinterpret_cast<uintptr_t>(left), 64);
+        rightText = read_jiagu_ascii_buffer(reinterpret_cast<uintptr_t>(right), 64);
+        g_jiagu_string_equals_last_caller_off.store(callerOff, std::memory_order_relaxed);
+        g_jiagu_string_equals_last_arg0.store(reinterpret_cast<uintptr_t>(left), std::memory_order_relaxed);
+        g_jiagu_string_equals_last_arg1.store(reinterpret_cast<uintptr_t>(right), std::memory_order_relaxed);
+        g_jiagu_string_equals_last_result.store(result, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(g_jiagu_string_equals_mutex);
+            g_jiagu_string_equals_last_left = leftText;
+            g_jiagu_string_equals_last_right = rightText;
+        }
+    }
+    if (logCall && (callIndex <= 80 || callerOff == 0x12995c || callerOff == 0x10f270)) {
+        LOGW("JiaguStringEq call=%d callerOff=0x%lx left=%p:%s right=%p:%s result=%d",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             left,
+             leftText.c_str(),
+             right,
+             rightText.c_str(),
+             result);
+    }
+    return result;
+}
+
+static int hooked_jiagu_payload_check(void* textArg) {
+    int callIndex = g_jiagu_payload_check_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::string text = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(textArg));
+    int result = 0;
+    if (g_orig_jiagu_payload_check != nullptr) {
+        result = g_orig_jiagu_payload_check(textArg);
+    } else {
+        LOGW("JiaguPayloadCheck original missing; returning 0");
+    }
+    bool forced = false;
+    if (text == "com.qq.reader" && result == 0) {
+        result = 1;
+        forced = true;
+    }
+
+    g_jiagu_payload_check_last_arg.store(reinterpret_cast<uintptr_t>(textArg), std::memory_order_relaxed);
+    g_jiagu_payload_check_last_result.store(result, std::memory_order_relaxed);
+    g_jiagu_payload_check_last_forced.store(forced ? 1 : 0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_payload_check_mutex);
+        g_jiagu_payload_check_last_text = text;
+    }
+    if (callIndex <= 20 || result == 0 || forced) {
+        LOGW("JiaguPayloadCheck call=%d arg=%p text=%s result=%d forced=%d",
+             callIndex,
+             textArg,
+             text.c_str(),
+             result,
+             forced ? 1 : 0);
+    }
+    return result;
+}
+
+static int hooked_jiagu_post_payload_status(void* envLike) {
+    void* caller = __builtin_return_address(0);
+    int callIndex = g_jiagu_post_payload_status_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    int result = 0;
+    if (g_orig_jiagu_post_payload_status != nullptr) {
+        result = g_orig_jiagu_post_payload_status(envLike);
+    } else {
+        LOGW("JiaguPostPayloadStatus original missing; returning 0");
+    }
+    uintptr_t callerOff = 0;
+    Dl_info info{};
+    if (caller != nullptr &&
+        dladdr(caller, &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+        uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+        if (pc >= base) callerOff = pc - base;
+    }
+    g_jiagu_post_payload_status_last_arg.store(reinterpret_cast<uintptr_t>(envLike), std::memory_order_relaxed);
+    g_jiagu_post_payload_status_last_result.store(result, std::memory_order_relaxed);
+    g_jiagu_post_payload_status_last_caller_off.store(callerOff, std::memory_order_relaxed);
+    if (callIndex <= 20 || result != 0 || callerOff == 0x10ece0) {
+        LOGW("JiaguPostPayloadStatus call=%d callerOff=0x%lx env=%p result=%d",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             envLike,
+             result);
+    }
+    return result;
+}
+
+static void* hooked_jiagu_post_payload_object(void* envLike) {
+    void* caller = __builtin_return_address(0);
+    int callIndex = g_jiagu_post_payload_object_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    void* result = nullptr;
+    if (g_orig_jiagu_post_payload_object != nullptr) {
+        result = g_orig_jiagu_post_payload_object(envLike);
+    } else {
+        LOGW("JiaguPostPayloadObject original missing; returning null");
+    }
+    uintptr_t callerOff = 0;
+    Dl_info info{};
+    if (caller != nullptr &&
+        dladdr(caller, &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+        uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+        if (pc >= base) callerOff = pc - base;
+    }
+    g_jiagu_post_payload_object_last_arg.store(reinterpret_cast<uintptr_t>(envLike), std::memory_order_relaxed);
+    g_jiagu_post_payload_object_last_result.store(reinterpret_cast<uintptr_t>(result), std::memory_order_relaxed);
+    g_jiagu_post_payload_object_last_caller_off.store(callerOff, std::memory_order_relaxed);
+    if (callIndex <= 20 || result != nullptr || callerOff == 0x10ecec) {
+        LOGW("JiaguPostPayloadObject call=%d callerOff=0x%lx env=%p result=%p",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             envLike,
+             result);
+    }
+    return result;
+}
+
+static void hooked_jiagu_post_payload_materialize(
+    void* arg0,
+    void* arg1,
+    void* arg2,
+    void* arg3,
+    int flag4,
+    int flag5
+) {
+    void* caller = __builtin_return_address(0);
+    int callIndex = g_jiagu_post_payload_materialize_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    uintptr_t callerOff = 0;
+    uintptr_t base = 0;
+    Dl_info info{};
+    if (caller != nullptr &&
+        dladdr(caller, &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+        uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+        if (pc >= base) callerOff = pc - base;
+    }
+    if (base == 0 && g_orig_stub_interface20 != nullptr &&
+        dladdr(reinterpret_cast<void*>(g_orig_stub_interface20), &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    }
+
+    std::string arg1Text = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(arg1));
+    std::string arg2Text = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(arg2));
+    std::string arg3Text = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(arg3));
+    g_jiagu_post_payload_materialize_last_caller_off.store(callerOff, std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_last_arg0.store(reinterpret_cast<uintptr_t>(arg0), std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_last_arg1.store(reinterpret_cast<uintptr_t>(arg1), std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_last_arg2.store(reinterpret_cast<uintptr_t>(arg2), std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_last_arg3.store(reinterpret_cast<uintptr_t>(arg3), std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_last_flag4.store(flag4, std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_last_flag5.store(flag5, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_post_payload_materialize_mutex);
+        g_jiagu_post_payload_materialize_arg1_text = arg1Text;
+        g_jiagu_post_payload_materialize_arg2_text = arg2Text;
+        g_jiagu_post_payload_materialize_arg3_text = arg3Text;
+    }
+
+    if (callIndex <= 20 || callerOff == 0x10f5fc) {
+        LOGW("JiaguPostPayloadMaterialize enter call=%d callerOff=0x%lx args=%p/%p:%s/%p:%s/%p:%s flags=%d/%d",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             arg0,
+             arg1,
+             arg1Text.c_str(),
+             arg2,
+             arg2Text.c_str(),
+             arg3,
+             arg3Text.c_str(),
+             flag4,
+             flag5);
+    }
+
+    if (g_orig_jiagu_post_payload_materialize != nullptr) {
+        g_orig_jiagu_post_payload_materialize(arg0, arg1, arg2, arg3, flag4, flag5);
+    } else {
+        LOGW("JiaguPostPayloadMaterialize original missing; skipped");
+    }
+
+    uintptr_t slot270 = 0;
+    uintptr_t slot290 = 0;
+    uintptr_t slot2f0 = 0;
+    uint32_t slot358 = 0;
+    std::string slot270Text = "<no-base>";
+    std::string slot290Text = "<no-base>";
+    std::string slot2f0Text = "<no-base>";
+    if (base != 0) {
+        slot270 = base + 0x253270;
+        slot290 = base + 0x253290;
+        slot2f0 = base + 0x2532f0;
+        slot270Text = read_jiagu_libcpp_string(slot270);
+        slot290Text = read_jiagu_libcpp_string(slot290);
+        slot2f0Text = read_jiagu_libcpp_string(slot2f0);
+        read_jiagu_u32(base + 0x253358, &slot358);
+    }
+    g_jiagu_post_payload_materialize_slot270.store(slot270, std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_slot290.store(slot290, std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_slot2f0.store(slot2f0, std::memory_order_relaxed);
+    g_jiagu_post_payload_materialize_slot358.store(slot358, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_post_payload_materialize_mutex);
+        g_jiagu_post_payload_materialize_slot270_text = slot270Text;
+        g_jiagu_post_payload_materialize_slot290_text = slot290Text;
+        g_jiagu_post_payload_materialize_slot2f0_text = slot2f0Text;
+    }
+    if (callIndex <= 20 || callerOff == 0x10f5fc) {
+        LOGW("JiaguPostPayloadMaterialize leave call=%d callerOff=0x%lx slots=%p:%s/%p:%s/%p:%s slot358=%u",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             reinterpret_cast<void*>(slot270),
+             slot270Text.c_str(),
+             reinterpret_cast<void*>(slot290),
+             slot290Text.c_str(),
+             reinterpret_cast<void*>(slot2f0),
+             slot2f0Text.c_str(),
+             slot358);
+    }
+}
+
+static void hooked_jiagu_after_materialize_normalize(void* pathArg) {
+    void* caller = __builtin_return_address(0);
+    int callIndex = g_jiagu_after_materialize_normalize_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    uintptr_t callerOff = 0;
+    uintptr_t base = 0;
+    Dl_info info{};
+    if (caller != nullptr &&
+        dladdr(caller, &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+        uintptr_t pc = reinterpret_cast<uintptr_t>(caller);
+        if (pc >= base) callerOff = pc - base;
+    }
+    if (base == 0 && g_orig_stub_interface20 != nullptr &&
+        dladdr(reinterpret_cast<void*>(g_orig_stub_interface20), &info) != 0 &&
+        info.dli_fbase != nullptr &&
+        info.dli_fname != nullptr &&
+        strstr(info.dli_fname, "libjiagu_vip.so") != nullptr) {
+        base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    }
+    std::string before = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(pathArg), 160);
+    g_jiagu_after_materialize_normalize_last_caller_off.store(callerOff, std::memory_order_relaxed);
+    if (callIndex <= 20 || callerOff == 0x10fa10) {
+        LOGW("JiaguAfterMaterializeNormalize enter call=%d callerOff=0x%lx arg=%p text=%s",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             pathArg,
+             before.c_str());
+    }
+    if (g_orig_jiagu_after_materialize_normalize != nullptr) {
+        g_orig_jiagu_after_materialize_normalize(pathArg);
+    } else {
+        LOGW("JiaguAfterMaterializeNormalize original missing; skipped");
+    }
+    std::string after = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(pathArg), 160);
+    std::string slot2d0 = "<no-base>";
+    std::string slot350 = "<no-base>";
+    if (base != 0) {
+        slot2d0 = read_jiagu_libcpp_string(base + 0x2532d0, 160);
+        slot350 = read_jiagu_libcpp_string(base + 0x253350, 160);
+    }
+    if (callIndex <= 20 || callerOff == 0x10fa10) {
+        LOGW("JiaguAfterMaterializeNormalize leave call=%d callerOff=0x%lx arg=%p text=%s slot2d0=%s slot350=%s",
+             callIndex,
+             static_cast<unsigned long>(callerOff),
+             pathArg,
+             after.c_str(),
+             slot2d0.c_str(),
+             slot350.c_str());
+    }
+}
+
+static void hooked_jiagu_interface20_register(void* envLike) {
+    int callIndex = g_jiagu_interface20_register_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    g_jiagu_interface20_register_last_env.store(reinterpret_cast<uintptr_t>(envLike), std::memory_order_relaxed);
+    if (callIndex <= 20) {
+        LOGW("Jiagu10d468 enter call=%d env=%p", callIndex, envLike);
+    }
+    if (g_orig_jiagu_interface20_register != nullptr) {
+        g_orig_jiagu_interface20_register(envLike);
+    } else {
+        LOGW("Jiagu10d468 original missing; skipped");
+    }
+    if (callIndex <= 20) {
+        std::string tokenDiag = build_jiagu_token_insert_hook_diag();
+        std::string fillDiag = build_jiagu_fill_loop_hook_diag();
+        LOGW("Jiagu10d468 leave call=%d %s %s",
+             callIndex,
+             tokenDiag.c_str(),
+             fillDiag.c_str());
+    }
+}
+
+static void hooked_jiagu_payload_build(
+    void* envLike,
+    void* arg1,
+    void* s1,
+    int flag3,
+    int flag4,
+    void* s2,
+    void* s3
+) {
+    int callIndex = g_jiagu_payload_build_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::string s1Text = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(s1));
+    std::string s2Text = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(s2));
+    std::string s3Text = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(s3));
+
+    g_jiagu_payload_build_last_env.store(reinterpret_cast<uintptr_t>(envLike), std::memory_order_relaxed);
+    g_jiagu_payload_build_last_arg1.store(reinterpret_cast<uintptr_t>(arg1), std::memory_order_relaxed);
+    g_jiagu_payload_build_last_s1.store(reinterpret_cast<uintptr_t>(s1), std::memory_order_relaxed);
+    g_jiagu_payload_build_last_s2.store(reinterpret_cast<uintptr_t>(s2), std::memory_order_relaxed);
+    g_jiagu_payload_build_last_s3.store(reinterpret_cast<uintptr_t>(s3), std::memory_order_relaxed);
+    g_jiagu_payload_build_last_flag3.store(flag3, std::memory_order_relaxed);
+    g_jiagu_payload_build_last_flag4.store(flag4, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_payload_build_mutex);
+        g_jiagu_payload_build_last_s1_text = s1Text;
+        g_jiagu_payload_build_last_s2_text = s2Text;
+        g_jiagu_payload_build_last_s3_text = s3Text;
+    }
+
+    uintptr_t payloadSlotAddr = 0;
+    uintptr_t slotBefore = 0;
+    uintptr_t slotAfter = 0;
+    uintptr_t slot8Before = 0;
+    uintptr_t slot8After = 0;
+    Dl_info jiaguInfo{};
+    if (g_orig_stub_interface20 != nullptr &&
+        dladdr(reinterpret_cast<void*>(g_orig_stub_interface20), &jiaguInfo) != 0 &&
+        jiaguInfo.dli_fbase != nullptr &&
+        jiaguInfo.dli_fname != nullptr &&
+        strstr(jiaguInfo.dli_fname, "libjiagu_vip.so") != nullptr) {
+        payloadSlotAddr = reinterpret_cast<uintptr_t>(jiaguInfo.dli_fbase) + 0x253010;
+        read_jiagu_ptr(payloadSlotAddr, &slotBefore);
+        read_jiagu_ptr(payloadSlotAddr + 0x8, &slot8Before);
+        g_jiagu_payload_build_slot_before.store(slotBefore, std::memory_order_relaxed);
+        g_jiagu_payload_build_slot8_before.store(slot8Before, std::memory_order_relaxed);
+    }
+
+    if (callIndex <= 20) {
+        LOGW("JiaguPayloadBuild enter call=%d env=%p arg1=%p s1=%p:%s flags=%d/%d s2=%p:%s s3=%p:%s slot=%p before=%p before8=%p",
+             callIndex,
+             envLike,
+             arg1,
+             s1,
+             s1Text.c_str(),
+             flag3,
+             flag4,
+             s2,
+             s2Text.c_str(),
+             s3,
+             s3Text.c_str(),
+             reinterpret_cast<void*>(payloadSlotAddr),
+             reinterpret_cast<void*>(slotBefore),
+             reinterpret_cast<void*>(slot8Before));
+    }
+
+    if (g_orig_jiagu_payload_build != nullptr) {
+        g_orig_jiagu_payload_build(envLike, arg1, s1, flag3, flag4, s2, s3);
+    } else {
+        LOGW("JiaguPayloadBuild original missing; skipped");
+    }
+
+    if (payloadSlotAddr != 0) {
+        read_jiagu_ptr(payloadSlotAddr, &slotAfter);
+        read_jiagu_ptr(payloadSlotAddr + 0x8, &slot8After);
+        g_jiagu_payload_build_slot_after.store(slotAfter, std::memory_order_relaxed);
+        g_jiagu_payload_build_slot8_after.store(slot8After, std::memory_order_relaxed);
+        if (callIndex <= 20) {
+            LOGW("JiaguPayloadBuild leave call=%d slot=%p before=%p after=%p before8=%p after8=%p",
+                 callIndex,
+                 reinterpret_cast<void*>(payloadSlotAddr),
+                 reinterpret_cast<void*>(slotBefore),
+                 reinterpret_cast<void*>(slotAfter),
+                 reinterpret_cast<void*>(slot8Before),
+                 reinterpret_cast<void*>(slot8After));
+        }
+    }
+}
+
+static uintptr_t hooked_jiagu_build_register_vector(void* arg) {
+    int callIndex = g_jiagu_build_register_vector_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    uintptr_t result = 0;
+    if (g_orig_jiagu_build_register_vector != nullptr) {
+        result = g_orig_jiagu_build_register_vector(arg);
+    }
+
+    uintptr_t begin = 0;
+    uintptr_t end = 0;
+    uintptr_t firstItem = 0;
+    uintptr_t firstPayloadBegin = 0;
+    uintptr_t firstPayloadEnd = 0;
+    if (result != 0) {
+        read_jiagu_ptr(result, &begin);
+        read_jiagu_ptr(result + 0x8, &end);
+        if (begin != 0) {
+            read_jiagu_ptr(begin, &firstItem);
+        }
+        if (firstItem != 0) {
+            read_jiagu_ptr(firstItem + 0x160, &firstPayloadBegin);
+            read_jiagu_ptr(firstItem + 0x168, &firstPayloadEnd);
+        }
+    }
+
+    g_jiagu_build_register_vector_last_arg.store(reinterpret_cast<uintptr_t>(arg), std::memory_order_relaxed);
+    g_jiagu_build_register_vector_last_result.store(result, std::memory_order_relaxed);
+    g_jiagu_build_register_vector_last_begin.store(begin, std::memory_order_relaxed);
+    g_jiagu_build_register_vector_last_end.store(end, std::memory_order_relaxed);
+    g_jiagu_build_register_vector_last_first_item.store(firstItem, std::memory_order_relaxed);
+    g_jiagu_build_register_vector_last_first_payload_begin.store(firstPayloadBegin, std::memory_order_relaxed);
+    g_jiagu_build_register_vector_last_first_payload_end.store(firstPayloadEnd, std::memory_order_relaxed);
+
+    size_t vectorCount = vector_count_from_begin_end(begin, end, sizeof(uintptr_t));
+    size_t firstPayloadCount = vector_count_from_begin_end(firstPayloadBegin, firstPayloadEnd, sizeof(uintptr_t));
+    if (callIndex <= 20 || vectorCount > 0 || firstPayloadCount > 0) {
+        LOGW("JiaguBuildRegisterVector call=%d arg=%p result=%p vector=%p/%p count=%zu firstItem=%p firstPayloadVec=%p/%p firstPayloadCount=%zu",
+             callIndex,
+             arg,
+             reinterpret_cast<void*>(result),
+             reinterpret_cast<void*>(begin),
+             reinterpret_cast<void*>(end),
+             vectorCount,
+             reinterpret_cast<void*>(firstItem),
+             reinterpret_cast<void*>(firstPayloadBegin),
+             reinterpret_cast<void*>(firstPayloadEnd),
+             firstPayloadCount);
+    }
+    return result;
+}
+
+static uintptr_t hooked_jiagu_token_manager_init() {
+    int callIndex = g_jiagu_token_manager_init_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    uintptr_t result = 0;
+    if (g_orig_jiagu_token_manager_init != nullptr) {
+        result = g_orig_jiagu_token_manager_init();
+    }
+    uintptr_t root = 0;
+    uintptr_t count = 0;
+    if (result != 0) {
+        read_jiagu_ptr(result + 0x20, &root);
+        read_jiagu_ptr(result + 0x28, &count);
+    }
+    g_jiagu_token_manager_init_last_result.store(result, std::memory_order_relaxed);
+    g_jiagu_token_manager_init_last_root.store(root, std::memory_order_relaxed);
+    g_jiagu_token_manager_init_last_count.store(count, std::memory_order_relaxed);
+    if (callIndex <= 20) {
+        LOGW("JiaguTokenManagerInit call=%d result=%p root=%p treeCount=%zu",
+             callIndex,
+             reinterpret_cast<void*>(result),
+             reinterpret_cast<void*>(root),
+             static_cast<size_t>(count));
+    }
+    return result;
+}
+
+static uintptr_t hooked_jiagu_register_gate(void* registry, void* keyArg) {
+    int callIndex = g_jiagu_register_gate_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+    std::string key = read_jiagu_libcpp_string(reinterpret_cast<uintptr_t>(keyArg));
+    uintptr_t result = 0;
+    if (g_orig_jiagu_register_gate != nullptr) {
+        result = g_orig_jiagu_register_gate(registry, keyArg);
+    }
+    g_jiagu_register_gate_last_registry.store(reinterpret_cast<uintptr_t>(registry), std::memory_order_relaxed);
+    g_jiagu_register_gate_last_key_arg.store(reinterpret_cast<uintptr_t>(keyArg), std::memory_order_relaxed);
+    g_jiagu_register_gate_last_result.store(result, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_jiagu_register_gate_key_mutex);
+        g_jiagu_register_gate_last_key = key;
+    }
+    if (callIndex <= 20 || result == 0) {
+        LOGW("JiaguRegisterGate call=%d registry=%p keyArg=%p key=%s result=%zu",
+             callIndex,
+             registry,
+             keyArg,
+             key.c_str(),
+             static_cast<size_t>(result));
+    }
+    return result;
+}
+
+static uintptr_t hooked_jiagu_token_insert(void* manager, void* owner, void* payload) {
+    int callIndex = g_jiagu_token_insert_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    uintptr_t ownerBegin = 0;
+    uintptr_t ownerEnd = 0;
+    uintptr_t ownerCap = 0;
+    uintptr_t payloadWord0 = 0;
+    uintptr_t payloadWord8 = 0;
+    uint32_t payloadKey = 0;
+    uintptr_t ownerAddr = reinterpret_cast<uintptr_t>(owner);
+    uintptr_t payloadAddr = reinterpret_cast<uintptr_t>(payload);
+    if (ownerAddr != 0) {
+        read_jiagu_ptr(ownerAddr + 0x160, &ownerBegin);
+        read_jiagu_ptr(ownerAddr + 0x168, &ownerEnd);
+        read_jiagu_ptr(ownerAddr + 0x170, &ownerCap);
+    }
+    if (payloadAddr != 0) {
+        read_jiagu_ptr(payloadAddr, &payloadWord0);
+        read_jiagu_ptr(payloadAddr + 0x8, &payloadWord8);
+        read_jiagu_u32(payloadAddr + 0xc, &payloadKey);
+    }
+
+    g_jiagu_token_insert_last_manager.store(reinterpret_cast<uintptr_t>(manager), std::memory_order_relaxed);
+    g_jiagu_token_insert_last_owner.store(ownerAddr, std::memory_order_relaxed);
+    g_jiagu_token_insert_last_payload.store(payloadAddr, std::memory_order_relaxed);
+    g_jiagu_token_insert_last_owner_vec_begin.store(ownerBegin, std::memory_order_relaxed);
+    g_jiagu_token_insert_last_owner_vec_end.store(ownerEnd, std::memory_order_relaxed);
+    g_jiagu_token_insert_last_owner_vec_cap.store(ownerCap, std::memory_order_relaxed);
+    g_jiagu_token_insert_last_payload_word0.store(payloadWord0, std::memory_order_relaxed);
+    g_jiagu_token_insert_last_payload_word8.store(payloadWord8, std::memory_order_relaxed);
+    g_jiagu_token_insert_last_payload_key.store(payloadKey, std::memory_order_relaxed);
+
+    if (callIndex <= 20 || payloadKey == 59494) {
+        LOGW("JiaguTokenInsert enter call=%d manager=%p owner=%p ownerPayloadVec=%p/%p/%p ownerPayloadCount=%zu "
+             "payload=%p payloadKey=%u payloadWord0=%p payloadWord8=%p",
+             callIndex,
+             manager,
+             owner,
+             reinterpret_cast<void*>(ownerBegin),
+             reinterpret_cast<void*>(ownerEnd),
+             reinterpret_cast<void*>(ownerCap),
+             vector_count_from_begin_end(ownerBegin, ownerEnd, sizeof(uintptr_t)),
+             payload,
+             payloadKey,
+             reinterpret_cast<void*>(payloadWord0),
+             reinterpret_cast<void*>(payloadWord8));
+    }
+
+    uintptr_t result = 0;
+    if (payload == nullptr) {
+        result = 0;
+    } else if (g_orig_jiagu_token_insert != nullptr) {
+        result = g_orig_jiagu_token_insert(manager, owner, payload);
+    } else {
+        LOGW("JiaguTokenInsert original missing; skipping call");
+    }
+
+    uintptr_t rootAfter = 0;
+    uintptr_t countAfter = 0;
+    uintptr_t managerAddr = reinterpret_cast<uintptr_t>(manager);
+    if (managerAddr != 0) {
+        read_jiagu_ptr(managerAddr + 0x20, &rootAfter);
+        read_jiagu_ptr(managerAddr + 0x28, &countAfter);
+    }
+    g_jiagu_token_insert_last_manager_root_after.store(rootAfter, std::memory_order_relaxed);
+    g_jiagu_token_insert_last_manager_count_after.store(countAfter, std::memory_order_relaxed);
+
+    if (callIndex <= 20 || payloadKey == 59494) {
+        LOGW("JiaguTokenInsert leave call=%d result=%p rootAfter=%p treeCountAfter=%zu",
+             callIndex,
+             reinterpret_cast<void*>(result),
+             reinterpret_cast<void*>(rootAfter),
+             static_cast<size_t>(countAfter));
+    }
+    return result;
+}
+
+static bool arm64_branch_in_range(uintptr_t from, uintptr_t to, uint32_t* outInsn) {
+    int64_t diff = static_cast<int64_t>(to) - static_cast<int64_t>(from);
+    if ((diff & 0x3) != 0) return false;
+    int64_t imm26 = diff >> 2;
+    if (imm26 < -(1LL << 25) || imm26 >= (1LL << 25)) return false;
+    if (outInsn != nullptr) {
+        *outInsn = 0x14000000u | (static_cast<uint32_t>(imm26) & 0x03ffffffu);
+    }
+    return true;
+}
+
+static void* mmap_near_for_arm64_branch(uintptr_t target, size_t size) {
+    int pageSize = sysconf(_SC_PAGESIZE);
+    size_t allocSize = (size + static_cast<size_t>(pageSize) - 1) & ~(static_cast<size_t>(pageSize) - 1);
+    uintptr_t targetPage = target & ~(static_cast<uintptr_t>(pageSize) - 1);
+    constexpr uintptr_t kMaxBranchDistance = 0x07f00000; // Keep margin below B/BL +/-128MB.
+    for (uintptr_t delta = static_cast<uintptr_t>(pageSize); delta < kMaxBranchDistance; delta += 0x10000) {
+        uintptr_t candidates[2] = {targetPage + delta, targetPage > delta ? targetPage - delta : 0};
+        for (uintptr_t hint : candidates) {
+            if (hint == 0) continue;
+            void* mapped = mmap(
+                reinterpret_cast<void*>(hint),
+                allocSize,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                -1,
+                0);
+            if (mapped == MAP_FAILED) {
+                continue;
+            }
+            uint32_t branch = 0;
+            if (arm64_branch_in_range(target, reinterpret_cast<uintptr_t>(mapped), &branch)) {
+                (void)branch;
+                return mapped;
+            }
+            munmap(mapped, allocSize);
+        }
+    }
+
+    void* mapped = mmap(
+        nullptr,
+        allocSize,
+        PROT_READ | PROT_WRITE | PROT_EXEC,
+        MAP_PRIVATE | MAP_ANONYMOUS,
+        -1,
+        0);
+    if (mapped != MAP_FAILED) {
+        uint32_t branch = 0;
+        if (arm64_branch_in_range(target, reinterpret_cast<uintptr_t>(mapped), &branch)) {
+            (void)branch;
+            return mapped;
+        }
+        munmap(mapped, allocSize);
+    }
+    return nullptr;
+}
+
+static bool install_manual_entry_hook_with_first_insn_trampoline(
+    uintptr_t target,
+    uint32_t expectedFirstInsn,
+    void* hookFn,
+    void** originalOut,
+    void** stubOut,
+    const char* label,
+    const char* source
+) {
+#if defined(__aarch64__)
+    if (target == 0 || hookFn == nullptr || originalOut == nullptr || stubOut == nullptr) return false;
+    if (!is_readable_proc_range(target, sizeof(uint32_t))) {
+        LOGW("install_manual_entry_hook: target unreadable label=%s source=%s target=%p",
+             label ? label : "<null>",
+             source ? source : "<null>",
+             reinterpret_cast<void*>(target));
+        return false;
+    }
+    uint32_t before = *reinterpret_cast<uint32_t*>(target);
+    if (before != expectedFirstInsn) {
+        LOGW("install_manual_entry_hook: unexpected first insn label=%s source=%s target=%p before=0x%08x expected=0x%08x",
+             label ? label : "<null>",
+             source ? source : "<null>",
+             reinterpret_cast<void*>(target),
+             before,
+             expectedFirstInsn);
+        return false;
+    }
+
+    void* block = mmap_near_for_arm64_branch(target, 32);
+    if (block == nullptr) {
+        LOGW("install_manual_entry_hook: cannot allocate near block label=%s source=%s target=%p",
+             label ? label : "<null>",
+             source ? source : "<null>",
+             reinterpret_cast<void*>(target));
+        return false;
+    }
+
+    uintptr_t hookBridge = reinterpret_cast<uintptr_t>(block);
+    uintptr_t originalTrampoline = hookBridge + 16;
+    auto* hookCode = reinterpret_cast<uint32_t*>(hookBridge);
+    hookCode[0] = 0x58000051u; // ldr x17, #8
+    hookCode[1] = 0xd61f0220u; // br x17
+    *reinterpret_cast<uintptr_t*>(hookBridge + 8) = reinterpret_cast<uintptr_t>(hookFn);
+
+    auto* originalCode = reinterpret_cast<uint32_t*>(originalTrampoline);
+    originalCode[0] = expectedFirstInsn;
+    uint32_t backBranch = 0;
+    if (!arm64_branch_in_range(originalTrampoline + sizeof(uint32_t), target + sizeof(uint32_t), &backBranch)) {
+        LOGW("install_manual_entry_hook: original trampoline back branch out of range label=%s target=%p trampoline=%p",
+             label ? label : "<null>",
+             reinterpret_cast<void*>(target),
+             reinterpret_cast<void*>(originalTrampoline));
+        munmap(block, 32);
+        return false;
+    }
+    originalCode[1] = backBranch;
+    __builtin___clear_cache(
+        reinterpret_cast<char*>(block),
+        reinterpret_cast<char*>(hookBridge + 32));
+
+    uint32_t branchInsn = 0;
+    if (!arm64_branch_in_range(target, hookBridge, &branchInsn)) {
+        LOGW("install_manual_entry_hook: hook bridge out of branch range label=%s target=%p hookBridge=%p",
+             label ? label : "<null>",
+             reinterpret_cast<void*>(target),
+             reinterpret_cast<void*>(hookBridge));
+        munmap(block, 32);
+        return false;
+    }
+    if (!patch_arm64_instruction(target, 0xffffffffu, expectedFirstInsn, branchInsn)) {
+        munmap(block, 32);
+        return false;
+    }
+
+    *originalOut = reinterpret_cast<void*>(originalTrampoline);
+    *stubOut = block;
+    LOGW("install_manual_entry_hook: installed label=%s source=%s target=%p hookBridge=%p originalTrampoline=%p branch=0x%08x backBranch=0x%08x",
+         label ? label : "<null>",
+         source ? source : "<null>",
+         reinterpret_cast<void*>(target),
+         reinterpret_cast<void*>(hookBridge),
+         reinterpret_cast<void*>(originalTrampoline),
+         branchInsn,
+         backBranch);
+    return true;
+#else
+    (void)target;
+    (void)expectedFirstInsn;
+    (void)hookFn;
+    (void)originalOut;
+    (void)stubOut;
+    (void)label;
+    (void)source;
+    return false;
+#endif
+}
+
+static bool install_jiagu_token_insert_manual_branch_hook(uintptr_t target, const char* source) {
+#if defined(__aarch64__)
+    constexpr uint32_t kExpectedCbzX2 = 0xb4000b02u; // cbz x2, 0x179bd0
+    if (!is_readable_proc_range(target, sizeof(uint32_t))) {
+        LOGW("install_jiagu_token_insert_manual_hook: target unreadable source=%s target=%p",
+             source ? source : "<null>",
+             reinterpret_cast<void*>(target));
+        return false;
+    }
+    uint32_t before = *reinterpret_cast<uint32_t*>(target);
+    if (before != kExpectedCbzX2) {
+        LOGW("install_jiagu_token_insert_manual_hook: unexpected first insn source=%s target=%p before=0x%08x expected=0x%08x",
+             source ? source : "<null>",
+             reinterpret_cast<void*>(target),
+             before,
+             kExpectedCbzX2);
+        return false;
+    }
+
+    void* trampoline = mmap_near_for_arm64_branch(target, 16);
+    if (trampoline == nullptr) {
+        LOGW("install_jiagu_token_insert_manual_hook: cannot allocate near trampoline source=%s target=%p",
+             source ? source : "<null>",
+             reinterpret_cast<void*>(target));
+        return false;
+    }
+
+    auto* code = reinterpret_cast<uint32_t*>(trampoline);
+    code[0] = 0x58000051u; // ldr x17, #8
+    code[1] = 0xd61f0220u; // br x17
+    *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(trampoline) + 8) =
+        reinterpret_cast<uintptr_t>(hooked_jiagu_token_insert);
+    __builtin___clear_cache(
+        reinterpret_cast<char*>(trampoline),
+        reinterpret_cast<char*>(reinterpret_cast<uintptr_t>(trampoline) + 16));
+
+    uint32_t branchInsn = 0;
+    if (!arm64_branch_in_range(target, reinterpret_cast<uintptr_t>(trampoline), &branchInsn)) {
+        LOGW("install_jiagu_token_insert_manual_hook: trampoline out of branch range target=%p trampoline=%p",
+             reinterpret_cast<void*>(target),
+             trampoline);
+        munmap(trampoline, 16);
+        return false;
+    }
+
+    if (!patch_arm64_instruction(target, 0xffffffffu, kExpectedCbzX2, branchInsn)) {
+        munmap(trampoline, 16);
+        return false;
+    }
+
+    g_orig_jiagu_token_insert = reinterpret_cast<JiaguTokenInsertFn>(target + sizeof(uint32_t));
+    g_jiagu_token_insert_hook_stub = trampoline;
+    g_jiagu_token_insert_hook_installed.store(true, std::memory_order_relaxed);
+    LOGW("install_jiagu_token_insert_manual_hook: installed source=%s target=%p trampoline=%p branch=0x%08x originalCont=%p",
+         source ? source : "<null>",
+         reinterpret_cast<void*>(target),
+         trampoline,
+         branchInsn,
+         reinterpret_cast<void*>(target + sizeof(uint32_t)));
+    return true;
+#else
+    (void)target;
+    (void)source;
+    return false;
+#endif
+}
+
+static void install_jiagu_token_insert_hook_from_stubapp(const char* source) {
+    std::lock_guard<std::mutex> lock(g_jiagu_token_insert_hook_mutex);
+    if (g_jiagu_token_insert_hook_installed.load(std::memory_order_relaxed)) {
+        return;
+    }
+    if (g_orig_stub_interface20 == nullptr) {
+        LOGW("install_jiagu_token_insert_hook: skip source=%s interface20 missing", source ? source : "<null>");
+        return;
+    }
+
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(g_orig_stub_interface20), &info) == 0 ||
+        info.dli_fbase == nullptr ||
+        info.dli_fname == nullptr ||
+        strstr(info.dli_fname, "libjiagu_vip.so") == nullptr) {
+        LOGW("install_jiagu_token_insert_hook: skip source=%s interface20 addr=%s",
+             source ? source : "<null>",
+             describe_native_address(reinterpret_cast<void*>(g_orig_stub_interface20)).c_str());
+        return;
+    }
+
+    constexpr uintptr_t kTokenInsertOffset = 0x179a70;
+    uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    uintptr_t target = base + kTokenInsertOffset;
+    if (!is_readable_proc_range(target, sizeof(uint32_t))) {
+        LOGW("install_jiagu_token_insert_hook: target unreadable source=%s target=%p",
+             source ? source : "<null>",
+             reinterpret_cast<void*>(target));
+        return;
+    }
+
+    g_jiagu_token_insert_hook_attempts.fetch_add(1, std::memory_order_relaxed);
+    void* backup = nullptr;
+    void* stub = shadowhook_hook_sym_addr(
+        reinterpret_cast<void*>(target),
+        reinterpret_cast<void*>(hooked_jiagu_token_insert),
+        &backup);
+    if (stub == nullptr || backup == nullptr) {
+        int err = shadowhook_get_errno();
+        g_jiagu_token_insert_hook_failures.fetch_add(1, std::memory_order_relaxed);
+        LOGW("install_jiagu_token_insert_hook: failed source=%s target=%p errno=%d(%s)",
+             source ? source : "<null>",
+             reinterpret_cast<void*>(target),
+             err,
+             shadowhook_to_errmsg(err));
+        if (install_jiagu_token_insert_manual_branch_hook(target, source)) {
+            return;
+        }
+        return;
+    }
+
+    g_orig_jiagu_token_insert = reinterpret_cast<JiaguTokenInsertFn>(backup);
+    g_jiagu_token_insert_hook_stub = stub;
+    g_jiagu_token_insert_hook_installed.store(true, std::memory_order_relaxed);
+    LOGW("install_jiagu_token_insert_hook: installed source=%s target=%p original=%p stub=%p base=%p",
+         source ? source : "<null>",
+         reinterpret_cast<void*>(target),
+         backup,
+         stub,
+         reinterpret_cast<void*>(base));
+}
+
+static void install_jiagu_fill_loop_hooks_from_stubapp(const char* source) {
+    if (g_orig_stub_interface20 == nullptr) {
+        return;
+    }
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(g_orig_stub_interface20), &info) == 0 ||
+        info.dli_fbase == nullptr ||
+        info.dli_fname == nullptr ||
+        strstr(info.dli_fname, "libjiagu_vip.so") == nullptr) {
+        return;
+    }
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    if (!g_jiagu_force_post_payload_branch_patched.load(std::memory_order_relaxed)) {
+        constexpr uintptr_t kPostPayloadBranchOffset = 0x10ecd4;
+        constexpr uint32_t kExpectedPostPayloadBranch = 0x37004ba8u; // tbnz w8, #0, 0x10f648
+        constexpr uint32_t kArm64Nop = 0xd503201fu;
+        uintptr_t target = base + kPostPayloadBranchOffset;
+        if (patch_arm64_instruction(target, 0xffffffffu, kExpectedPostPayloadBranch, kArm64Nop)) {
+            g_jiagu_force_post_payload_branch_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: patched post-payload failure branch source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPostPayloadBranchOffset));
+        } else if (is_readable_proc_range(target, sizeof(uint32_t)) &&
+                   *reinterpret_cast<uint32_t*>(target) == kArm64Nop) {
+            g_jiagu_force_post_payload_branch_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: post-payload failure branch already patched source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPostPayloadBranchOffset));
+        } else {
+            LOGW("install_jiagu_fill_loop_hooks: post-payload failure branch patch failed source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPostPayloadBranchOffset));
+        }
+    }
+    if (!g_jiagu_force_qiniu_gate_patched.load(std::memory_order_relaxed)) {
+        constexpr uintptr_t kQiniuGateOffset = 0x10fb20;
+        constexpr uint32_t kExpectedQiniuGate = 0x54000a8cu; // b.gt 0x10fc70
+        constexpr uint32_t kArm64Nop = 0xd503201fu;
+        uintptr_t target = base + kQiniuGateOffset;
+        if (patch_arm64_instruction(target, 0xffffffffu, kExpectedQiniuGate, kArm64Nop)) {
+            g_jiagu_force_qiniu_gate_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: patched qiniu gate source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kQiniuGateOffset));
+        } else if (is_readable_proc_range(target, sizeof(uint32_t)) &&
+                   *reinterpret_cast<uint32_t*>(target) == kArm64Nop) {
+            g_jiagu_force_qiniu_gate_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: qiniu gate already patched source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kQiniuGateOffset));
+        } else {
+            LOGW("install_jiagu_fill_loop_hooks: qiniu gate patch failed source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kQiniuGateOffset));
+        }
+    }
+
+    {
+        constexpr uintptr_t kSecondCompareGateOffset = 0x10fc6c;
+        constexpr uint32_t kExpectedSecondCompareGate = 0x34000456u; // cbz w22, 0x10fcf4
+        constexpr uint32_t kArm64Nop = 0xd503201fu;
+        uintptr_t target = base + kSecondCompareGateOffset;
+        if (is_readable_proc_range(target, sizeof(uint32_t)) &&
+            *reinterpret_cast<uint32_t*>(target) != kArm64Nop) {
+            if (patch_arm64_instruction(target, 0xffffffffu, kExpectedSecondCompareGate, kArm64Nop)) {
+                LOGW("install_jiagu_fill_loop_hooks: patched second compare gate source=%s target=%p offset=0x%lx",
+                     source ? source : "<null>",
+                     reinterpret_cast<void*>(target),
+                     static_cast<unsigned long>(kSecondCompareGateOffset));
+            } else {
+                uint32_t actual = is_readable_proc_range(target, sizeof(uint32_t)) ? *reinterpret_cast<uint32_t*>(target) : 0;
+                LOGW("install_jiagu_fill_loop_hooks: second compare gate patch failed source=%s target=%p offset=0x%lx insn=0x%08x",
+                     source ? source : "<null>",
+                     reinterpret_cast<void*>(target),
+                     static_cast<unsigned long>(kSecondCompareGateOffset),
+                     actual);
+            }
+        }
+    }
+
+    if (!g_jiagu_force_pre_materialize_gate1_patched.load(std::memory_order_relaxed)) {
+        constexpr uintptr_t kPreMaterializeGate1Offset = 0x10efcc;
+        constexpr uint32_t kExpectedPreMaterializeGate1 = 0x350032f9u; // cbnz w25, 0x10f628
+        constexpr uint32_t kArm64Nop = 0xd503201fu;
+        uintptr_t target = base + kPreMaterializeGate1Offset;
+        if (patch_arm64_instruction(target, 0xffffffffu, kExpectedPreMaterializeGate1, kArm64Nop)) {
+            g_jiagu_force_pre_materialize_gate1_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: patched pre-materialize gate1 source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPreMaterializeGate1Offset));
+        } else if (is_readable_proc_range(target, sizeof(uint32_t)) &&
+                   *reinterpret_cast<uint32_t*>(target) == kArm64Nop) {
+            g_jiagu_force_pre_materialize_gate1_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: pre-materialize gate1 already patched source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPreMaterializeGate1Offset));
+        } else {
+            LOGW("install_jiagu_fill_loop_hooks: pre-materialize gate1 patch failed source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPreMaterializeGate1Offset));
+        }
+    }
+    if (!g_jiagu_force_pre_materialize_gate2_patched.load(std::memory_order_relaxed)) {
+        constexpr uintptr_t kPreMaterializeGate2Offset = 0x10efec;
+        constexpr uint32_t kExpectedPreMaterializeGate2 = 0x350031f9u; // cbnz w25, 0x10f628
+        constexpr uint32_t kArm64Nop = 0xd503201fu;
+        uintptr_t target = base + kPreMaterializeGate2Offset;
+        if (patch_arm64_instruction(target, 0xffffffffu, kExpectedPreMaterializeGate2, kArm64Nop)) {
+            g_jiagu_force_pre_materialize_gate2_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: patched pre-materialize gate2 source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPreMaterializeGate2Offset));
+        } else if (is_readable_proc_range(target, sizeof(uint32_t)) &&
+                   *reinterpret_cast<uint32_t*>(target) == kArm64Nop) {
+            g_jiagu_force_pre_materialize_gate2_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: pre-materialize gate2 already patched source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPreMaterializeGate2Offset));
+        } else {
+            LOGW("install_jiagu_fill_loop_hooks: pre-materialize gate2 patch failed source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kPreMaterializeGate2Offset));
+        }
+    }
+
+    if (!g_jiagu_force_qiniu_gate_patched.load(std::memory_order_relaxed)) {
+        constexpr uintptr_t kQiniuGateOffset = 0x10fb20;
+        constexpr uint32_t kExpectedQiniuGate = 0x54000a8cu; // b.gt 0x10fc70
+        constexpr uint32_t kArm64Nop = 0xd503201fu;
+        uintptr_t target = base + kQiniuGateOffset;
+        if (patch_arm64_instruction(target, 0xffffffffu, kExpectedQiniuGate, kArm64Nop)) {
+            g_jiagu_force_qiniu_gate_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: patched qiniu gate source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kQiniuGateOffset));
+        } else if (is_readable_proc_range(target, sizeof(uint32_t)) &&
+                   *reinterpret_cast<uint32_t*>(target) == kArm64Nop) {
+            g_jiagu_force_qiniu_gate_patched.store(true, std::memory_order_relaxed);
+            LOGW("install_jiagu_fill_loop_hooks: qiniu gate already patched source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kQiniuGateOffset));
+        } else {
+            LOGW("install_jiagu_fill_loop_hooks: qiniu gate patch failed source=%s target=%p offset=0x%lx",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(target),
+                 static_cast<unsigned long>(kQiniuGateOffset));
+        }
+    }
+
+    if (!g_jiagu_compare_hook_installed.load(std::memory_order_relaxed)) {
+        constexpr uintptr_t kCompareGotOffset = 0x246328;
+        uintptr_t slot = base + kCompareGotOffset;
+        uintptr_t original = 0;
+        if (!read_jiagu_ptr(slot, &original) || original == 0) {
+            LOGW("install_jiagu_compare_got_hook: unreadable source=%s slot=%p original=%p",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(slot),
+                 reinterpret_cast<void*>(original));
+        } else {
+            int pageSize = sysconf(_SC_PAGESIZE);
+            uintptr_t page = slot & ~(static_cast<uintptr_t>(pageSize) - 1);
+            if (mprotect(reinterpret_cast<void*>(page), pageSize, PROT_READ | PROT_WRITE) != 0) {
+                LOGW("install_jiagu_compare_got_hook: mprotect RW failed source=%s slot=%p errno=%d",
+                     source ? source : "<null>",
+                     reinterpret_cast<void*>(slot),
+                     errno);
+            } else {
+                auto* ptr = reinterpret_cast<uintptr_t*>(slot);
+                if (*ptr == original) {
+                    *ptr = reinterpret_cast<uintptr_t>(hooked_jiagu_compare);
+                    __builtin___clear_cache(reinterpret_cast<char*>(slot), reinterpret_cast<char*>(slot + sizeof(uintptr_t)));
+                    g_orig_jiagu_compare = reinterpret_cast<JiaguCompareFn>(original);
+                    g_jiagu_compare_got_slot.store(slot, std::memory_order_relaxed);
+                    g_jiagu_compare_hook_installed.store(true, std::memory_order_relaxed);
+                    LOGW("install_jiagu_compare_got_hook: installed source=%s slot=%p original=%p hook=%p",
+                         source ? source : "<null>",
+                         reinterpret_cast<void*>(slot),
+                         reinterpret_cast<void*>(original),
+                         reinterpret_cast<void*>(hooked_jiagu_compare));
+                } else {
+                    LOGW("install_jiagu_compare_got_hook: slot changed source=%s slot=%p before=%p current=%p",
+                         source ? source : "<null>",
+                         reinterpret_cast<void*>(slot),
+                         reinterpret_cast<void*>(original),
+                         reinterpret_cast<void*>(*ptr));
+                }
+                if (mprotect(reinterpret_cast<void*>(page), pageSize, PROT_READ) != 0) {
+                    LOGW("install_jiagu_compare_got_hook: mprotect R failed source=%s slot=%p errno=%d",
+                         source ? source : "<null>",
+                         reinterpret_cast<void*>(slot),
+                         errno);
+                }
+            }
+        }
+    }
+
+    if (!g_jiagu_string_equals_hook_installed.load(std::memory_order_relaxed)) {
+        constexpr uintptr_t kStringEqualsGotOffset = 0x2469d8;
+        uintptr_t slot = base + kStringEqualsGotOffset;
+        uintptr_t original = 0;
+        if (!read_jiagu_ptr(slot, &original) || original == 0) {
+            LOGW("install_jiagu_string_equals_got_hook: unreadable source=%s slot=%p original=%p",
+                 source ? source : "<null>",
+                 reinterpret_cast<void*>(slot),
+                 reinterpret_cast<void*>(original));
+        } else {
+            int pageSize = sysconf(_SC_PAGESIZE);
+            uintptr_t page = slot & ~(static_cast<uintptr_t>(pageSize) - 1);
+            if (mprotect(reinterpret_cast<void*>(page), pageSize, PROT_READ | PROT_WRITE) != 0) {
+                LOGW("install_jiagu_string_equals_got_hook: mprotect RW failed source=%s slot=%p errno=%d",
+                     source ? source : "<null>",
+                     reinterpret_cast<void*>(slot),
+                     errno);
+            } else {
+                auto* ptr = reinterpret_cast<uintptr_t*>(slot);
+                if (*ptr == original) {
+                    *ptr = reinterpret_cast<uintptr_t>(hooked_jiagu_string_equals);
+                    __builtin___clear_cache(reinterpret_cast<char*>(slot), reinterpret_cast<char*>(slot + sizeof(uintptr_t)));
+                    g_orig_jiagu_string_equals = reinterpret_cast<JiaguStringEqualsFn>(original);
+                    g_jiagu_string_equals_got_slot.store(slot, std::memory_order_relaxed);
+                    g_jiagu_string_equals_hook_installed.store(true, std::memory_order_relaxed);
+                    LOGW("install_jiagu_string_equals_got_hook: installed source=%s slot=%p original=%p hook=%p",
+                         source ? source : "<null>",
+                         reinterpret_cast<void*>(slot),
+                         reinterpret_cast<void*>(original),
+                         reinterpret_cast<void*>(hooked_jiagu_string_equals));
+                } else {
+                    LOGW("install_jiagu_string_equals_got_hook: slot changed source=%s slot=%p before=%p current=%p",
+                         source ? source : "<null>",
+                         reinterpret_cast<void*>(slot),
+                         reinterpret_cast<void*>(original),
+                         reinterpret_cast<void*>(*ptr));
+                }
+                if (mprotect(reinterpret_cast<void*>(page), pageSize, PROT_READ) != 0) {
+                    LOGW("install_jiagu_string_equals_got_hook: mprotect R failed source=%s slot=%p errno=%d",
+                         source ? source : "<null>",
+                         reinterpret_cast<void*>(slot),
+                         errno);
+                }
+            }
+        }
+    }
+
+    if (!g_jiagu_env_probe_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x206360,
+                0xa9be53f5u,
+                reinterpret_cast<void*>(hooked_jiagu_env_probe),
+                &original,
+                &stub,
+                "env-probe-0x206360",
+                source)) {
+            g_orig_jiagu_env_probe = reinterpret_cast<JiaguEnvProbeFn>(original);
+            g_jiagu_env_probe_hook_stub = stub;
+            g_jiagu_env_probe_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_qiniu_check_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x123438,
+                0xf81d0ff6u,
+                reinterpret_cast<void*>(hooked_jiagu_qiniu_check),
+                &original,
+                &stub,
+                "qiniu-check-0x123438",
+                source)) {
+            g_orig_jiagu_qiniu_check = reinterpret_cast<JiaguQiniuCheckFn>(original);
+            g_jiagu_qiniu_check_hook_stub = stub;
+            g_jiagu_qiniu_check_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_interface20_register_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x10d468,
+                0xa9ba6ffcu,
+                reinterpret_cast<void*>(hooked_jiagu_interface20_register),
+                &original,
+                &stub,
+                "interface20-register-0x10d468",
+                source)) {
+            g_orig_jiagu_interface20_register = reinterpret_cast<JiaguInterface20RegisterFn>(original);
+            g_jiagu_interface20_register_hook_stub = stub;
+            g_jiagu_interface20_register_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_payload_build_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x1298d0,
+                0xd102c3ffu,
+                reinterpret_cast<void*>(hooked_jiagu_payload_build),
+                &original,
+                &stub,
+                "payload-build-0x1298d0",
+                source)) {
+            g_orig_jiagu_payload_build = reinterpret_cast<JiaguPayloadBuildFn>(original);
+            g_jiagu_payload_build_hook_stub = stub;
+            g_jiagu_payload_build_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_payload_check_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x129c58,
+                0xd10403ffu,
+                reinterpret_cast<void*>(hooked_jiagu_payload_check),
+                &original,
+                &stub,
+                "payload-check-0x129c58",
+                source)) {
+            g_orig_jiagu_payload_check = reinterpret_cast<JiaguPayloadCheckFn>(original);
+            g_jiagu_payload_check_hook_stub = stub;
+            g_jiagu_payload_check_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_post_payload_status_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x123020,
+                0xd10443ffu,
+                reinterpret_cast<void*>(hooked_jiagu_post_payload_status),
+                &original,
+                &stub,
+                "post-payload-status-0x123020",
+                source)) {
+            g_orig_jiagu_post_payload_status = reinterpret_cast<JiaguPostPayloadStatusFn>(original);
+            g_jiagu_post_payload_status_hook_stub = stub;
+            g_jiagu_post_payload_status_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_post_payload_object_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x116c94,
+                0xf81c0ff8u,
+                reinterpret_cast<void*>(hooked_jiagu_post_payload_object),
+                &original,
+                &stub,
+                "post-payload-object-0x116c94",
+                source)) {
+            g_orig_jiagu_post_payload_object = reinterpret_cast<JiaguPostPayloadObjectFn>(original);
+            g_jiagu_post_payload_object_hook_stub = stub;
+            g_jiagu_post_payload_object_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_post_payload_materialize_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x186f64,
+                0xd10583ffu,
+                reinterpret_cast<void*>(hooked_jiagu_post_payload_materialize),
+                &original,
+                &stub,
+                "post-payload-materialize-0x186f64",
+                source)) {
+            g_orig_jiagu_post_payload_materialize = reinterpret_cast<JiaguPostPayloadMaterializeFn>(original);
+            g_jiagu_post_payload_materialize_hook_stub = stub;
+            g_jiagu_post_payload_materialize_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_after_materialize_normalize_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x187900,
+                0xd10343ffu,
+                reinterpret_cast<void*>(hooked_jiagu_after_materialize_normalize),
+                &original,
+                &stub,
+                "after-materialize-normalize-0x187900",
+                source)) {
+            g_orig_jiagu_after_materialize_normalize = reinterpret_cast<JiaguAfterMaterializeNormalizeFn>(original);
+            g_jiagu_after_materialize_normalize_hook_stub = stub;
+            g_jiagu_after_materialize_normalize_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_build_register_vector_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x119fa8,
+                0xd10243ffu,
+                reinterpret_cast<void*>(hooked_jiagu_build_register_vector),
+                &original,
+                &stub,
+                "build-register-vector-0x119fa8",
+                source)) {
+            g_orig_jiagu_build_register_vector = reinterpret_cast<JiaguBuildRegisterVectorFn>(original);
+            g_jiagu_build_register_vector_hook_stub = stub;
+            g_jiagu_build_register_vector_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_token_manager_init_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x179898,
+                0xa9bf7bf3u,
+                reinterpret_cast<void*>(hooked_jiagu_token_manager_init),
+                &original,
+                &stub,
+                "token-manager-init-0x179898",
+                source)) {
+            g_orig_jiagu_token_manager_init = reinterpret_cast<JiaguTokenManagerInitFn>(original);
+            g_jiagu_token_manager_init_hook_stub = stub;
+            g_jiagu_token_manager_init_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+
+    if (!g_jiagu_register_gate_hook_installed.load(std::memory_order_relaxed)) {
+        void* original = nullptr;
+        void* stub = nullptr;
+        if (install_manual_entry_hook_with_first_insn_trampoline(
+                base + 0x17ac6c,
+                0xd10183ffu,
+                reinterpret_cast<void*>(hooked_jiagu_register_gate),
+                &original,
+                &stub,
+                "register-gate-0x17ac6c",
+                source)) {
+            g_orig_jiagu_register_gate = reinterpret_cast<JiaguRegisterGateFn>(original);
+            g_jiagu_register_gate_hook_stub = stub;
+            g_jiagu_register_gate_hook_installed.store(true, std::memory_order_relaxed);
+        }
+    }
+}
+
+static void append_registry_node_summary(std::string& out, uintptr_t node, int index) {
+    uintptr_t left = 0;
+    uintptr_t right = 0;
+    uintptr_t value = 0;
+    read_jiagu_ptr(node, &left);
+    read_jiagu_ptr(node + 0x8, &right);
+    read_jiagu_ptr(node + 0x38, &value);
+
+    char buf[256];
+    snprintf(buf, sizeof(buf), " node%d=%p key=%s value=%p left=%p right=%p",
+             index,
+             (void*)node,
+             read_jiagu_libcpp_string(node + 0x20).c_str(),
+             (void*)value,
+             (void*)left,
+             (void*)right);
+    out += buf;
+}
+
+static std::string build_jiagu_registry_diag(uintptr_t base) {
+    uintptr_t registrySlot = base + 0x2531b0;
+    uintptr_t registry = 0;
+    if (!read_jiagu_ptr(registrySlot, &registry)) {
+        char buf[160];
+        snprintf(buf, sizeof(buf), "registrySlot=%p unreadable", (void*)registrySlot);
+        return buf;
+    }
+
+    std::string out;
+    char header[512];
+    if (registry == 0) {
+        snprintf(header, sizeof(header), "registrySlot=%p registry=null", (void*)registrySlot);
+        out = header;
+    } else {
+        uintptr_t sentinel = 0;
+        uintptr_t root = 0;
+        uintptr_t count = 0;
+        uintptr_t context = 0;
+        read_jiagu_ptr(registry, &sentinel);
+        read_jiagu_ptr(registry + 0x8, &root);
+        read_jiagu_ptr(registry + 0x10, &count);
+        read_jiagu_ptr(registry + 0x18, &context);
+        snprintf(header, sizeof(header),
+                 "registrySlot=%p registry=%p sentinel=%p root=%p count=%zu context=%p",
+                 (void*)registrySlot,
+                 (void*)registry,
+                 (void*)sentinel,
+                 (void*)root,
+                 static_cast<size_t>(count),
+                 (void*)context);
+        out = header;
+
+        struct PendingNode { uintptr_t node; int depth; };
+        std::vector<PendingNode> stack;
+        if (root != 0 && is_readable_proc_range(root, 0x40)) stack.push_back({root, 0});
+        int emitted = 0;
+        while (!stack.empty() && emitted < 6) {
+            PendingNode current = stack.back();
+            stack.pop_back();
+            if (current.node == 0 || current.depth > 8 || !is_readable_proc_range(current.node, 0x40)) {
+                continue;
+            }
+            append_registry_node_summary(out, current.node, emitted);
+            ++emitted;
+
+            uintptr_t left = 0;
+            uintptr_t right = 0;
+            read_jiagu_ptr(current.node, &left);
+            read_jiagu_ptr(current.node + 0x8, &right);
+            if (right != 0) stack.push_back({right, current.depth + 1});
+            if (left != 0) stack.push_back({left, current.depth + 1});
+        }
+    }
+
+    out += " seeds=";
+    for (int i = 0; i < 4; ++i) {
+        uintptr_t entry = base + 0x253150 + static_cast<uintptr_t>(i) * 0x18;
+        uintptr_t keyPtr = 0;
+        uintptr_t valuePtr = 0;
+        read_jiagu_ptr(entry, &keyPtr);
+        read_jiagu_ptr(entry + 0x8, &valuePtr);
+        char seed[220];
+        snprintf(seed, sizeof(seed), "%s%d:{keyPtr=%p key=%s value=%p}",
+                 i == 0 ? "" : ",",
+                 i,
+                 (void*)keyPtr,
+                 read_jiagu_c_string(keyPtr).c_str(),
+                 (void*)valuePtr);
+        out += seed;
+    }
+    return out;
+}
+
+static std::string build_jiagu_token_diag(int token) {
+    if (g_orig_stub_interface11 == nullptr) {
+        return "interface11=missing";
+    }
+
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(g_orig_stub_interface11), &info) == 0 || info.dli_fbase == nullptr) {
+        return "dladdr=failed";
+    }
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(info.dli_fbase);
+    uintptr_t globalSlot = base + 0x253148;
+    uintptr_t manager = 0;
+    if (!read_jiagu_ptr(globalSlot, &manager)) {
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "base=%p globalSlot=%p unreadable", (void*)base, (void*)globalSlot);
+        return buffer;
+    }
+    if (manager == 0) {
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "base=%p globalSlot=%p manager=null", (void*)base, (void*)globalSlot);
+        return buffer;
+    }
+
+    uintptr_t root = 0;
+    uintptr_t treeCount = 0;
+    uintptr_t allBegin = 0;
+    uintptr_t allEnd = 0;
+    uintptr_t allCap = 0;
+    read_jiagu_ptr(manager + 0x20, &root);
+    read_jiagu_ptr(manager + 0x28, &treeCount);
+    read_jiagu_ptr(manager + 0x70, &allBegin);
+    read_jiagu_ptr(manager + 0x78, &allEnd);
+    read_jiagu_ptr(manager + 0x80, &allCap);
+
+    uintptr_t node = root;
+    uintptr_t found = 0;
+    uint32_t foundKey = 0;
+    int steps = 0;
+    while (node != 0 && steps < 128) {
+        uintptr_t left = 0;
+        uintptr_t right = 0;
+        uint32_t key = 0;
+        if (!read_jiagu_u32(node + 0x20, &key)) break;
+        if (static_cast<int32_t>(key) == token) {
+            found = node;
+            foundKey = key;
+            break;
+        }
+        read_jiagu_ptr(node, &left);
+        read_jiagu_ptr(node + 0x8, &right);
+        node = token < static_cast<int32_t>(key) ? left : right;
+        steps++;
+    }
+
+    uintptr_t payload = 0;
+    uintptr_t payloadHead = 0;
+    uintptr_t payloadBegin = 0;
+    uintptr_t payloadEnd = 0;
+    uintptr_t payloadCap = 0;
+    uintptr_t payloadCount = 0;
+    uintptr_t firstEntry = 0;
+    if (found != 0) {
+        read_jiagu_ptr(found + 0x28, &payload);
+    }
+    if (payload != 0) {
+        read_jiagu_ptr(payload, &payloadHead);
+        read_jiagu_ptr(payload + 0x8, &payloadBegin);
+        read_jiagu_ptr(payload + 0x10, &payloadEnd);
+        read_jiagu_ptr(payload + 0x18, &payloadCap);
+        if (payloadEnd >= payloadBegin) payloadCount = (payloadEnd - payloadBegin) / sizeof(uintptr_t);
+        if (payloadBegin != 0) read_jiagu_ptr(payloadBegin, &firstEntry);
+    }
+
+    uintptr_t allCount = 0;
+    if (allEnd >= allBegin) allCount = (allEnd - allBegin) / 16;
+
+    std::string registry = build_jiagu_registry_diag(base);
+    std::string insertHook = build_jiagu_token_insert_hook_diag();
+    std::string fillHook = build_jiagu_fill_loop_hook_diag();
+    char buffer[4096];
+    snprintf(
+        buffer,
+        sizeof(buffer),
+        "base=%p manager=%p root=%p treeCount=%zu allVec=%p/%p/%p allCount=%zu "
+        "token=%d steps=%d node=%p key=%u payload=%p payloadHead=%p payloadVec=%p/%p/%p payloadCount=%zu firstEntry=%p %s %s registry={%s}",
+        (void*)base,
+        (void*)manager,
+        (void*)root,
+        static_cast<size_t>(treeCount),
+        (void*)allBegin,
+        (void*)allEnd,
+        (void*)allCap,
+        static_cast<size_t>(allCount),
+        token,
+        steps,
+        (void*)found,
+        foundKey,
+        (void*)payload,
+        (void*)payloadHead,
+        (void*)payloadBegin,
+        (void*)payloadEnd,
+        (void*)payloadCap,
+        static_cast<size_t>(payloadCount),
+        (void*)firstEntry,
+        insertHook.c_str(),
+        fillHook.c_str(),
+        registry.c_str());
+    return buffer;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeGetJiaguTokenDiag(
+    JNIEnv* env, jobject thiz, jint value)
+{
+    (void)thiz;
+    std::string report = build_jiagu_token_diag(static_cast<int>(value));
+    return env->NewStringUTF(report.c_str());
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeCallOriginalStubInterface11(
+    JNIEnv* env, jobject thiz, jobject classLoader, jstring className, jint value)
+{
+    (void)thiz;
+    if (classLoader == nullptr || className == nullptr) return JNI_FALSE;
+    if (g_orig_stub_interface11 == nullptr) {
+        LOGW("nativeCallOriginalStubInterface11: original interface11 is not captured");
+        return JNI_FALSE;
+    }
+
+    const char* name = env->GetStringUTFChars(className, nullptr);
+    if (name == nullptr) return JNI_FALSE;
+
+    jclass clClass = env->FindClass("java/lang/ClassLoader");
+    if (clClass == nullptr) {
+        env->ReleaseStringUTFChars(className, name);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface11: ClassLoader class not found");
+        return JNI_FALSE;
+    }
+
+    jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    if (loadClass == nullptr) {
+        env->ReleaseStringUTFChars(className, name);
+        env->DeleteLocalRef(clClass);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface11: ClassLoader.loadClass not found");
+        return JNI_FALSE;
+    }
+
+    jstring jName = env->NewStringUTF(name);
+    env->ReleaseStringUTFChars(className, name);
+    jclass targetClass = (jclass)env->CallObjectMethod(classLoader, loadClass, jName);
+    env->DeleteLocalRef(jName);
+    env->DeleteLocalRef(clClass);
+
+    if (targetClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface11: StubApp class not found via guest ClassLoader");
+        return JNI_FALSE;
+    }
+
+    LOGW(
+        "nativeCallOriginalStubInterface11: begin value=%d original=%s",
+        value,
+        describe_native_address((void*)g_orig_stub_interface11).c_str());
+    g_orig_stub_interface11(env, targetClass, value);
+    env->DeleteLocalRef(targetClass);
+
+    if (clear_logged_exception(env, "nativeCallOriginalStubInterface11 original")) {
+        LOGW("nativeCallOriginalStubInterface11: original threw value=%d", value);
+        return JNI_FALSE;
+    }
+
+    LOGW(
+        "nativeCallOriginalStubInterface11: completed value=%d pwdLogin=%s sendPhoneCode=%s qrCodeV2=%s",
+        value,
+        g_orig_ywlogin_pwdLogin != nullptr ? "bound" : "missing",
+        g_orig_ywlogin_sendPhoneCode != nullptr ? "bound" : "missing",
+        g_orig_ywlogin_qrCodeV2 != nullptr ? "bound" : "missing");
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeCallOriginalStubInterface5(
+    JNIEnv* env, jobject thiz, jobject classLoader, jstring className, jobject application)
+{
+    (void)thiz;
+    if (classLoader == nullptr || className == nullptr || application == nullptr) return JNI_FALSE;
+    if (g_orig_stub_interface5 == nullptr) {
+        LOGW("nativeCallOriginalStubInterface5: original interface5 is not captured");
+        return JNI_FALSE;
+    }
+
+    const char* name = env->GetStringUTFChars(className, nullptr);
+    if (name == nullptr) return JNI_FALSE;
+
+    jclass clClass = env->FindClass("java/lang/ClassLoader");
+    if (clClass == nullptr) {
+        env->ReleaseStringUTFChars(className, name);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface5: ClassLoader class not found");
+        return JNI_FALSE;
+    }
+
+    jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    if (loadClass == nullptr) {
+        env->ReleaseStringUTFChars(className, name);
+        env->DeleteLocalRef(clClass);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface5: ClassLoader.loadClass not found");
+        return JNI_FALSE;
+    }
+
+    jstring jName = env->NewStringUTF(name);
+    env->ReleaseStringUTFChars(className, name);
+    jclass targetClass = (jclass)env->CallObjectMethod(classLoader, loadClass, jName);
+    env->DeleteLocalRef(jName);
+    env->DeleteLocalRef(clClass);
+
+    if (targetClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface5: StubApp class not found via guest ClassLoader");
+        return JNI_FALSE;
+    }
+
+    LOGW(
+        "nativeCallOriginalStubInterface5: begin original=%s pwdLogin=%s sendPhoneCode=%s qrCodeV2=%s",
+        describe_native_address((void*)g_orig_stub_interface5).c_str(),
+        g_orig_ywlogin_pwdLogin != nullptr ? "bound" : "missing",
+        g_orig_ywlogin_sendPhoneCode != nullptr ? "bound" : "missing",
+        g_orig_ywlogin_qrCodeV2 != nullptr ? "bound" : "missing");
+    g_orig_stub_interface5(env, targetClass, application);
+    env->DeleteLocalRef(targetClass);
+
+    if (clear_logged_exception(env, "nativeCallOriginalStubInterface5 original")) {
+        LOGW("nativeCallOriginalStubInterface5: original threw");
+        return JNI_FALSE;
+    }
+
+    LOGW(
+        "nativeCallOriginalStubInterface5: completed pwdLogin=%s sendPhoneCode=%s qrCodeV2=%s",
+        g_orig_ywlogin_pwdLogin != nullptr ? "bound" : "missing",
+        g_orig_ywlogin_sendPhoneCode != nullptr ? "bound" : "missing",
+        g_orig_ywlogin_qrCodeV2 != nullptr ? "bound" : "missing");
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeCallOriginalStubInterface20(
+    JNIEnv* env, jobject thiz, jobject classLoader, jstring className)
+{
+    (void)thiz;
+    if (classLoader == nullptr || className == nullptr) return JNI_FALSE;
+    if (g_orig_stub_interface20 == nullptr) {
+        LOGW("nativeCallOriginalStubInterface20: original interface20 is not captured");
+        return JNI_FALSE;
+    }
+    install_jiagu_token_insert_hook_from_stubapp("nativeCallOriginalStubInterface20");
+    install_jiagu_fill_loop_hooks_from_stubapp("nativeCallOriginalStubInterface20");
+
+    const char* name = env->GetStringUTFChars(className, nullptr);
+    if (name == nullptr) return JNI_FALSE;
+
+    jclass clClass = env->FindClass("java/lang/ClassLoader");
+    if (clClass == nullptr) {
+        env->ReleaseStringUTFChars(className, name);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface20: ClassLoader class not found");
+        return JNI_FALSE;
+    }
+
+    jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    if (loadClass == nullptr) {
+        env->ReleaseStringUTFChars(className, name);
+        env->DeleteLocalRef(clClass);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface20: ClassLoader.loadClass not found");
+        return JNI_FALSE;
+    }
+
+    jstring jName = env->NewStringUTF(name);
+    env->ReleaseStringUTFChars(className, name);
+    jclass targetClass = (jclass)env->CallObjectMethod(classLoader, loadClass, jName);
+    env->DeleteLocalRef(jName);
+    env->DeleteLocalRef(clClass);
+
+    if (targetClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeCallOriginalStubInterface20: StubApp class not found via guest ClassLoader");
+        return JNI_FALSE;
+    }
+
+    std::string before = build_jiagu_token_diag(59494);
+    LOGW(
+        "nativeCallOriginalStubInterface20: begin original=%s tokenBefore=%s",
+        describe_native_address((void*)g_orig_stub_interface20).c_str(),
+        before.c_str());
+    jboolean result = g_orig_stub_interface20(env, targetClass);
+    env->DeleteLocalRef(targetClass);
+
+    if (clear_logged_exception(env, "nativeCallOriginalStubInterface20 original")) {
+        LOGW("nativeCallOriginalStubInterface20: original threw tokenAfter=%s", build_jiagu_token_diag(59494).c_str());
+        return JNI_FALSE;
+    }
+
+    LOGW(
+        "nativeCallOriginalStubInterface20: completed result=%d tokenAfter=%s",
+        result ? 1 : 0,
+        build_jiagu_token_diag(59494).c_str());
+    return result ? JNI_TRUE : JNI_FALSE;
 }
 
 // ==================== LoaderFactory Static JNI Methods ====================
@@ -2371,7 +6153,14 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeGotHookLibrary(
     LOGI("nativeGotHookLibrary: hooking GOT for %s", name);
     dl_iterate_phdr(got_hook_library_callback, (void*)name);
     if (strstr(name, "libjiagu_vip.so") != nullptr) {
+        uintptr_t base = find_loaded_library_base(name);
+        if (base != 0) {
+            patch_jiagu_vip_env_check(base, name);
+        } else {
+            LOGW("nativeGotHookLibrary: cannot find base for %s before env-check patch", name);
+        }
         patch_loaded_jiagu_vip_self_kill_callsites();
+        dump_decrypted_jiagu_code();
     }
     env->ReleaseStringUTFChars(libName, name);
 }
@@ -2766,8 +6555,14 @@ struct ProcMapEntry {
     char line[1024];
 };
 
-static ProcMapEntry find_proc_map_entry(uintptr_t address) {
-    ProcMapEntry entry{};
+struct ProcMapRange {
+    uintptr_t start;
+    uintptr_t end;
+    char perms[8];
+    char line[1024];
+};
+
+static FILE* open_proc_self_maps_for_read() {
     FILE* maps = nullptr;
     if (real_fopen != nullptr) {
         maps = real_fopen("/proc/self/maps", "r");
@@ -2775,6 +6570,12 @@ static ProcMapEntry find_proc_map_entry(uintptr_t address) {
     if (maps == nullptr) {
         maps = fopen("/proc/self/maps", "r");
     }
+    return maps;
+}
+
+static ProcMapEntry find_proc_map_entry(uintptr_t address) {
+    ProcMapEntry entry{};
+    FILE* maps = open_proc_self_maps_for_read();
     if (maps == nullptr) {
         LOGW("find_proc_map_entry: cannot open /proc/self/maps errno=%d", errno);
         return entry;
@@ -2807,8 +6608,121 @@ static ProcMapEntry find_proc_map_entry(uintptr_t address) {
     return entry;
 }
 
+static bool patch_jiagu_vip_env_check(uintptr_t base, const char* path) {
+#if defined(__aarch64__)
+    char prop[PROP_VALUE_MAX] = {0};
+    int len = __system_property_get("debug.multiapp.patch_jiagu", prop);
+    if (len <= 0 || strcmp(prop, "1") != 0) {
+        LOGI("patch_jiagu_vip_env_check: disabled prop=%s path=%s", len > 0 ? prop : "", path ? path : "null");
+        return false;
+    }
+
+    constexpr uintptr_t kEnvCheckOffset = 0x25bde4;
+    constexpr uint32_t kMovW0Zero = 0x52800000; // mov w0, #0
+    constexpr uint32_t kRet = 0xd65f03c0;       // ret
+
+    uintptr_t target = base + kEnvCheckOffset;
+    ProcMapEntry entry = find_proc_map_entry(target);
+    if (!entry.found) {
+        LOGW("patch_jiagu_vip_env_check: target map missing base=%p target=%p path=%s",
+             (void*)base, (void*)target, path ? path : "null");
+        return false;
+    }
+
+    LOGW("patch_jiagu_vip_env_check: enabled base=%p target=%p map=%s path=%s",
+         (void*)base, (void*)target, entry.line, path ? path : "null");
+    bool patched_mov = patch_arm64_instruction(target, 0x00000000u, 0x00000000u, kMovW0Zero);
+    bool patched_ret = patch_arm64_instruction(target + sizeof(uint32_t), 0x00000000u, 0x00000000u, kRet);
+    LOGW("patch_jiagu_vip_env_check: patched=%d mov=%d ret=%d target=%p",
+         patched_mov && patched_ret, patched_mov, patched_ret, (void*)target);
+    return patched_mov && patched_ret;
+#else
+    (void)base;
+    (void)path;
+    return false;
+#endif
+}
+
+static std::vector<ProcMapRange> read_proc_map_ranges() {
+    std::vector<ProcMapRange> ranges;
+    FILE* maps = open_proc_self_maps_for_read();
+    if (maps == nullptr) {
+        LOGW("read_proc_map_ranges: cannot open /proc/self/maps errno=%d", errno);
+        return ranges;
+    }
+
+    char line[1024] = {0};
+    while (fgets(line, sizeof(line), maps) != nullptr) {
+        unsigned long start = 0;
+        unsigned long end = 0;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &start, &end, perms) != 3) {
+            continue;
+        }
+        ProcMapRange range{};
+        range.start = static_cast<uintptr_t>(start);
+        range.end = static_cast<uintptr_t>(end);
+        strncpy(range.perms, perms, sizeof(range.perms) - 1);
+        strncpy(range.line, line, sizeof(range.line) - 1);
+        size_t len = strlen(range.line);
+        if (len > 0 && range.line[len - 1] == '\n') {
+            range.line[len - 1] = '\0';
+        }
+        ranges.push_back(range);
+    }
+    fclose(maps);
+    return ranges;
+}
+
 static bool is_executable_proc_map(const ProcMapEntry& entry) {
     return entry.found && strchr(entry.perms, 'x') != nullptr;
+}
+
+static bool is_readable_proc_range(uintptr_t address, size_t length) {
+    if (length == 0) return true;
+    if (address > UINTPTR_MAX - length) return false;
+    ProcMapEntry entry = find_proc_map_entry(address);
+    return entry.found &&
+        strchr(entry.perms, 'r') != nullptr &&
+        address + length <= entry.end;
+}
+
+static bool read_u32x4_if_readable(uintptr_t address, uint32_t out[4]) {
+    if (!is_readable_proc_range(address, sizeof(uint32_t) * 4)) {
+        return false;
+    }
+    memcpy(out, reinterpret_cast<void*>(address), sizeof(uint32_t) * 4);
+    return true;
+}
+
+static int64_t sign_extend_u64(uint64_t value, int bits) {
+    uint64_t signBit = 1ULL << (bits - 1);
+    return static_cast<int64_t>((value ^ signBit) - signBit);
+}
+
+static void log_aarch64_branch_target(const char* label, uintptr_t base, uintptr_t pc, uint32_t insn) {
+    uint32_t op = insn & 0xfc000000u;
+    if (op != 0x94000000u && op != 0x14000000u) {
+        return;
+    }
+    int64_t imm = sign_extend_u64(insn & 0x03ffffffu, 26) << 2;
+    uintptr_t target = static_cast<uintptr_t>(static_cast<intptr_t>(pc) + imm);
+    const char* kind = op == 0x94000000u ? "BL" : "B";
+    if (target >= base) {
+        LOGI("dump_decrypted: %s branch pcOff=0x%lx %s targetOff=0x%lx insn=0x%08x",
+             label ? label : "<unknown>",
+             (unsigned long)(pc - base),
+             kind,
+             (unsigned long)(target - base),
+             insn);
+    } else {
+        LOGI("dump_decrypted: %s branch pc=%p %s target=%p insn=0x%08x",
+             label ? label : "<unknown>",
+             (void*)pc,
+             kind,
+             (void*)target,
+             insn);
+    }
 }
 
 static bool patch_jiagu_self_kill_from_return_address(void* caller) {
@@ -2959,6 +6873,302 @@ static void patch_loaded_jiagu_vip_self_kill_callsites() {
          request.checked, request.patched);
 }
 
+/**
+ * dump_decrypted_jiagu_code: dump 壳解密后的代码区域
+ *
+ * 在壳的 JNI_OnLoad 执行后调用，此时 BSS 区域已被解密。
+ * 将关键地址的指令保存到日志，用于逆向分析。
+ */
+static void dump_decrypted_jiagu_code() {
+    dl_iterate_phdr([](struct dl_phdr_info* info, size_t size, void* data) -> int {
+        if (info->dlpi_name == nullptr || strstr(info->dlpi_name, "libjiagu_vip.so") == nullptr) {
+            return 0;
+        }
+        uintptr_t base = info->dlpi_addr;
+        LOGI("dump_decrypted: libjiagu_vip.so base=%p", (void*)base);
+
+        // 关键函数地址
+        struct { uintptr_t offset; const char* name; } targets[] = {
+            {0x11cb84, "self-kill-callsite"},
+            {0x1116b4, "RegisterNatives-caller"},
+            {0x11fe2c, "interface11"},
+            {0x10d3f4, "interface20"},
+            {0x112820, "interface5"},
+            {0x114bd4, "interface21"},
+            {0x258a38, "JNI_OnLoad"},
+            {0x25861c, "init-function"},
+            {0x2586d4, "main-init"},
+            {0x25bde4, "env-check"},
+            {0x25a5dc, "decrypt-func"},
+            {0x25a7ac, "register-func"},
+        };
+
+        for (int i = 0; i < 12; i++) {
+            uintptr_t addr = base + targets[i].offset;
+            uint32_t insns[4];
+            if (!read_u32x4_if_readable(addr, insns)) {
+                LOGW("dump_decrypted: %s offset=0x%lx addr=%p unreadable",
+                     targets[i].name,
+                     (unsigned long)targets[i].offset,
+                     (void*)addr);
+                continue;
+            }
+            LOGI("dump_decrypted: %s offset=0x%lx insn=[0x%08x, 0x%08x, 0x%08x, 0x%08x]",
+                 targets[i].name, (unsigned long)targets[i].offset,
+                 insns[0], insns[1], insns[2], insns[3]);
+        }
+
+        // dump interface11 函数体（前 512 字节）
+        uintptr_t i11_addr = base + 0x11fe2c;
+        LOGI("dump_decrypted: interface11 body start");
+        for (int off = 0; off < 512; off += 16) {
+            uint32_t p[4];
+            if (!read_u32x4_if_readable(i11_addr + off, p)) {
+                LOGW("dump_decrypted: interface11+0x%02x unreadable", off);
+                break;
+            }
+            LOGI("dump_decrypted: interface11+0x%02x: %08x %08x %08x %08x",
+                 off, p[0], p[1], p[2], p[3]);
+        }
+
+        // dump interface20 函数体（前 256 字节）
+        uintptr_t i20_addr = base + 0x10d3f4;
+        LOGI("dump_decrypted: interface20 body start");
+        for (int off = 0; off < 256; off += 16) {
+            uint32_t p[4];
+            if (!read_u32x4_if_readable(i20_addr + off, p)) {
+                LOGW("dump_decrypted: interface20+0x%02x unreadable", off);
+                break;
+            }
+            LOGI("dump_decrypted: interface20+0x%02x: %08x %08x %08x %08x",
+                 off, p[0], p[1], p[2], p[3]);
+        }
+
+        // dump 环境检查函数（前 256 字节）
+        uintptr_t env_addr = base + 0x25bde4;
+        LOGI("dump_decrypted: env-check body start");
+        for (int off = 0; off < 256; off += 16) {
+            uint32_t p[4];
+            if (!read_u32x4_if_readable(env_addr + off, p)) {
+                LOGW("dump_decrypted: env-check+0x%02x unreadable", off);
+                break;
+            }
+            LOGI("dump_decrypted: env-check+0x%02x: %08x %08x %08x %08x",
+                 off, p[0], p[1], p[2], p[3]);
+            for (int i = 0; i < 4; ++i) {
+                log_aarch64_branch_target("env-check", base, env_addr + off + (uintptr_t)i * 4, p[i]);
+            }
+        }
+
+        // 读取 interface11 的 BR X8 目标地址（GOT 函数指针）
+        // 使用 signal handler 保护读取，避免 SIGSEGV
+        uintptr_t dispatch_ptr_addr = base + 0x1290520;
+        uintptr_t dispatch_target = 0;
+        if (is_readable_proc_range(dispatch_ptr_addr, sizeof(dispatch_target))) {
+            memcpy(&dispatch_target, (void*)dispatch_ptr_addr, sizeof(dispatch_target));
+        } else {
+            LOGW("dump_decrypted: interface11-dispatch-ptr addr=%p unreadable", (void*)dispatch_ptr_addr);
+        }
+        if (dispatch_target != 0 && dispatch_target != 0xFFFFFFFFFFFFFFFFULL) {
+            LOGI("dump_decrypted: interface11-dispatch-ptr addr=%p target=%p",
+                 (void*)dispatch_ptr_addr, (void*)dispatch_target);
+            if (dispatch_target > base && dispatch_target < base + 0x300000) {
+                uintptr_t dispatch_offset = dispatch_target - base;
+                LOGI("dump_decrypted: interface11-dispatch-func offset=0x%lx", (unsigned long)dispatch_offset);
+                for (int off = 0; off < 256; off += 16) {
+                    uint32_t p[4];
+                    if (!read_u32x4_if_readable(dispatch_target + off, p)) {
+                        LOGW("dump_decrypted: dispatch-func+0x%02x unreadable", off);
+                        break;
+                    }
+                    LOGI("dump_decrypted: dispatch-func+0x%02x: %08x %08x %08x %08x",
+                         off, p[0], p[1], p[2], p[3]);
+                }
+            } else {
+                LOGI("dump_decrypted: interface11-dispatch-func target outside libjiagu_vip.so range");
+            }
+        } else {
+            LOGI("dump_decrypted: interface11-dispatch-ptr addr=%p not initialized yet", (void*)dispatch_ptr_addr);
+        }
+
+        // dump RegisterNatives 调用点附近代码（前 128 字节）
+        uintptr_t regnative_addr = base + 0x1116b4;
+        LOGI("dump_decrypted: RegisterNatives-caller body start");
+        for (int off = -32; off < 128; off += 16) {
+            uint32_t p[4];
+            if (!read_u32x4_if_readable(regnative_addr + off, p)) {
+                LOGW("dump_decrypted: RegNative+0x%02x unreadable", off);
+                break;
+            }
+            LOGI("dump_decrypted: RegNative+0x%02x: %08x %08x %08x %08x",
+                 off, p[0], p[1], p[2], p[3]);
+        }
+
+        return 1;
+    }, nullptr);
+}
+
+static bool range_contains_address(const ProcMapRange& range, uintptr_t address) {
+    return address >= range.start && address < range.end;
+}
+
+static bool range_overlaps(const ProcMapRange& range, uintptr_t start, uintptr_t end) {
+    return range.start < end && start < range.end;
+}
+
+static bool same_proc_range(const ProcMapRange& a, const ProcMapRange& b) {
+    return a.start == b.start && a.end == b.end;
+}
+
+static void append_unique_proc_range(std::vector<ProcMapRange>& selected, const ProcMapRange& range) {
+    for (const auto& item : selected) {
+        if (same_proc_range(item, range)) return;
+    }
+    selected.push_back(range);
+}
+
+static bool proc_range_readable(const ProcMapRange& range) {
+    return strchr(range.perms, 'r') != nullptr && range.end > range.start;
+}
+
+static int dump_jiagu_runtime_ranges(const char* dump_dir) {
+    if (dump_dir == nullptr || dump_dir[0] == '\0') return 0;
+    mkdir(dump_dir, 0755);
+
+    uintptr_t base = find_loaded_library_base("libjiagu_vip.so");
+    if (base == 0) {
+        LOGW("dump_jiagu_runtime_ranges: libjiagu_vip.so base not found");
+        return 0;
+    }
+
+    auto ranges = read_proc_map_ranges();
+    if (ranges.empty()) {
+        LOGW("dump_jiagu_runtime_ranges: no maps ranges available");
+        return 0;
+    }
+
+    struct TargetOffset { uintptr_t offset; const char* name; };
+    const TargetOffset targets[] = {
+        {0x10d3f4, "interface20"},
+        {0x1116b4, "RegisterNatives-caller"},
+        {0x112820, "interface5"},
+        {0x114bd4, "interface21"},
+        {0x11cb84, "self-kill-callsite"},
+        {0x11fe2c, "interface11"},
+        {0x1290520, "interface11-dispatch-ptr"},
+        {0x25861c, "init-function"},
+        {0x2586d4, "main-init"},
+        {0x258a38, "JNI_OnLoad"},
+        {0x25a5dc, "decrypt-func"},
+        {0x25a7ac, "register-func"},
+        {0x25bde4, "env-check"},
+    };
+
+    std::vector<ProcMapRange> selected;
+    uintptr_t jiaguWindowStart = base;
+    uintptr_t jiaguWindowEnd = base + 0x1400000;
+    for (const auto& range : ranges) {
+        bool select = false;
+        if (strstr(range.line, "libjiagu_vip.so") != nullptr) {
+            select = true;
+        }
+        if (!select && strstr(range.line, "[anon:.bss]") != nullptr &&
+            range_overlaps(range, jiaguWindowStart, jiaguWindowEnd)) {
+            select = true;
+        }
+        if (!select) {
+            for (const auto& target : targets) {
+                if (range_contains_address(range, base + target.offset)) {
+                    select = true;
+                    break;
+                }
+            }
+        }
+        if (select) append_unique_proc_range(selected, range);
+    }
+
+    char mapsPath[1024];
+    snprintf(mapsPath, sizeof(mapsPath), "%s/jiagu-runtime-maps.txt", dump_dir);
+    FILE* mapsOut = fopen(mapsPath, "wb");
+    if (mapsOut != nullptr) {
+        fprintf(mapsOut, "base=0x%lx\n", static_cast<unsigned long>(base));
+        fprintf(mapsOut, "target_count=%zu\n", sizeof(targets) / sizeof(targets[0]));
+        for (const auto& target : targets) {
+            ProcMapEntry entry = find_proc_map_entry(base + target.offset);
+            fprintf(mapsOut,
+                    "target name=%s offset=0x%lx addr=0x%lx mapped=%d perms=%s line=%s\n",
+                    target.name,
+                    static_cast<unsigned long>(target.offset),
+                    static_cast<unsigned long>(base + target.offset),
+                    entry.found ? 1 : 0,
+                    entry.found ? entry.perms : "<none>",
+                    entry.found ? entry.line : "<none>");
+        }
+        fprintf(mapsOut, "\nselected_ranges=%zu\n", selected.size());
+        for (const auto& range : selected) {
+            long relStart = static_cast<long>(range.start - base);
+            long relEnd = static_cast<long>(range.end - base);
+            fprintf(mapsOut,
+                    "range start=0x%lx end=0x%lx rel=[0x%lx,0x%lx) size=0x%lx perms=%s line=%s\n",
+                    static_cast<unsigned long>(range.start),
+                    static_cast<unsigned long>(range.end),
+                    static_cast<unsigned long>(relStart),
+                    static_cast<unsigned long>(relEnd),
+                    static_cast<unsigned long>(range.end - range.start),
+                    range.perms,
+                    range.line);
+        }
+        fclose(mapsOut);
+    } else {
+        LOGW("dump_jiagu_runtime_ranges: cannot write maps metadata %s errno=%d", mapsPath, errno);
+    }
+
+    int dumped = 0;
+    int index = 0;
+    constexpr size_t maxDumpSize = 128u * 1024u * 1024u;
+    for (const auto& range : selected) {
+        if (!proc_range_readable(range)) {
+            LOGW("dump_jiagu_runtime_ranges: skip unreadable range line=%s", range.line);
+            continue;
+        }
+        size_t size = static_cast<size_t>(range.end - range.start);
+        if (size == 0 || size > maxDumpSize) {
+            LOGW("dump_jiagu_runtime_ranges: skip size=%zu range line=%s", size, range.line);
+            continue;
+        }
+
+        uintptr_t relStart = range.start >= base ? range.start - base : 0;
+        uintptr_t relEnd = range.end >= base ? range.end - base : 0;
+        char outPath[1024];
+        snprintf(outPath,
+                 sizeof(outPath),
+                 "%s/jiagu-runtime-%02d-rel_%08lx-%08lx-%s.bin",
+                 dump_dir,
+                 index++,
+                 static_cast<unsigned long>(relStart),
+                 static_cast<unsigned long>(relEnd),
+                 range.perms);
+        FILE* out = fopen(outPath, "wb");
+        if (out == nullptr) {
+            LOGW("dump_jiagu_runtime_ranges: fopen failed %s errno=%d", outPath, errno);
+            continue;
+        }
+        size_t written = fwrite(reinterpret_cast<void*>(range.start), 1, size, out);
+        fclose(out);
+        if (written != size) {
+            LOGW("dump_jiagu_runtime_ranges: short write %s written=%zu size=%zu errno=%d",
+                 outPath, written, size, errno);
+            continue;
+        }
+        dumped++;
+        LOGI("dump_jiagu_runtime_ranges: dumped %s size=%zu line=%s", outPath, size, range.line);
+    }
+
+    LOGI("dump_jiagu_runtime_ranges: dumped=%d selected=%zu dir=%s",
+         dumped, selected.size(), dump_dir);
+    return dumped;
+}
+
 // 立即 hook GOT（用预解析的偏移量）
 static void got_hook_immediate(const char* path, const GotEntryInfo& info) {
     uintptr_t base_addr = find_loaded_library_base(path);
@@ -3001,6 +7211,52 @@ static void got_hook_immediate(const char* path, const GotEntryInfo& info) {
          (void*)base_addr, info.has_open, info.has_openat, info.has_fopen, info.has_readlink,
          info.has_exit, info.has__exit, info.has_abort, info.has_kill, info.has_tgkill);
     patch_loaded_jiagu_vip_self_kill_callsites();
+
+    // 如果是 libjiagu_vip.so，dump 解密后的代码
+    if (path != nullptr && strstr(path, "libjiagu_vip.so") != nullptr) {
+        patch_jiagu_vip_env_check(base_addr, path);
+        dump_decrypted_jiagu_code();
+    }
+}
+
+/**
+ * 预解析 ELF 并记录 GOT 偏移量，但不调用 dlopen。
+ * 用于在 StubApp.load() 之前预解析壳库，为后续 GOT hook 做准备。
+ * 实际的 GOT patch 在 dlopen 后由 got_hook_immediate 完成。
+ *
+ * @param libPath .so 文件绝对路径
+ * @return 预解析的 GOT 条目数量（0 = 无有效条目或失败）
+ */
+JNIEXPORT jint JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativePreParseAndInstallGotHooks(
+    JNIEnv* env, jclass clazz, jstring libPath)
+{
+    (void)clazz;
+    if (libPath == nullptr) return 0;
+
+    const char* path = env->GetStringUTFChars(libPath, nullptr);
+    if (path == nullptr) return 0;
+
+    // 预解析 ELF GOT
+    GotEntryInfo got_info = pre_parse_elf_got(path);
+    int entryCount = (got_info.has_open ? 1 : 0) + (got_info.has_openat ? 1 : 0) +
+                     (got_info.has_fopen ? 1 : 0) + (got_info.has_readlink ? 1 : 0) +
+                     (got_info.has_exit ? 1 : 0) + (got_info.has__exit ? 1 : 0) +
+                     (got_info.has_abort ? 1 : 0) + (got_info.has_kill ? 1 : 0) +
+                     (got_info.has_tgkill ? 1 : 0);
+    LOGI("nativePreParseAndInstallGotHooks: pre-parsed %s (entries=%d open=%d openat=%d fopen=%d readlink=%d exit=%d _exit=%d abort=%d kill=%d tgkill=%d)",
+         path, entryCount, got_info.has_open, got_info.has_openat, got_info.has_fopen, got_info.has_readlink,
+         got_info.has_exit, got_info.has__exit, got_info.has_abort, got_info.has_kill, got_info.has_tgkill);
+
+    env->ReleaseStringUTFChars(libPath, path);
+
+    if (entryCount == 0) {
+        LOGI("nativePreParseAndInstallGotHooks: no GOT entries found, skip");
+        return 0;
+    }
+
+    LOGI("nativePreParseAndInstallGotHooks: ELF pre-parsed, GOT hooks will be applied after dlopen");
+    return entryCount;
 }
 
 /**
@@ -3233,6 +7489,14 @@ static jclass hooked_FindClass(JNIEnv* env, const char* name) {
     if (name == nullptr) {
         return nullptr;
     }
+    if (!g_jiagu_jni_diag_in_hook) {
+        uintptr_t off = 0;
+        const char* window = nullptr;
+        if (jiagu_jni_diag_caller(__builtin_return_address(0), &off, &window)) {
+            LOGW("JiaguJNI FindClass callerOff=0x%lx window=%s name=%s",
+                 (unsigned long)off, window ? window : "<unknown>", name);
+        }
+    }
 
     // Keep framework/JDK classes on ART's original FindClass path. Loading
     // java.net/android.system exception classes through the guest loader
@@ -3400,8 +7664,15 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallFindClassHook(
 
 // 前向声明：YWLoginManager 和 Fock 的 stub 函数（stub_interface_app 中使用）
 static jobject JNICALL stub_ywlogin_getInstance(JNIEnv* env, jclass clazz);
-static void JNICALL stub_ywlogin_registerParameter(JNIEnv* env, jclass clazz, jobject getter);
+static void JNICALL stub_ywlogin_registerParameter(JNIEnv* env, jobject thiz, jobject getter);
 static void JNICALL stub_ywlogin_resetParameter(JNIEnv* env, jobject thiz, jstring key, jstring value);
+static void JNICALL stub_ywlogin_setDefaultParameters(JNIEnv* env, jobject thiz, jobject application, jobject values);
+static jobject JNICALL stub_ywlogin_getDefaultParameters(JNIEnv* env, jobject thiz);
+static jobject JNICALL stub_ywlogin_getCommonParamaters(JNIEnv* env, jobject thiz);
+static void JNICALL stub_ywlogin_saveParameters(JNIEnv* env, jobject thiz, jobject values);
+static void JNICALL stub_ywlogin_refreshParameters(JNIEnv* env, jobject thiz);
+static jobject JNICALL stub_ywlogin_getSignCallback(JNIEnv* env, jobject thiz);
+static void JNICALL stub_ywlogin_setSignCallback(JNIEnv* env, jobject thiz, jobject callback);
 static void JNICALL stub_ywlogin_pwdLogin(JNIEnv* env, jobject thiz, jobject activity, jstring account, jstring password, jobject callback);
 static void JNICALL stub_ywlogin_sendPhoneCode(JNIEnv* env, jobject thiz, jobject context, jstring phone, jint type, jint scene, jobject callback);
 static void JNICALL stub_ywlogin_qrCodeV2(JNIEnv* env, jobject thiz, jobject callback);
@@ -3638,27 +7909,251 @@ static jboolean JNICALL stub_interface_str(JNIEnv* env, jclass clazz, jstring s)
 
 // YWLoginManager 的 stub native 方法实现
 
-// getInstance() — 创建实例（不调用构造函数，确保不返回 null）
+static jobject copy_content_values(JNIEnv* env, jobject source) {
+    jclass valuesClass = env->FindClass("android/content/ContentValues");
+    if (valuesClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return nullptr;
+    }
+
+    jobject result = nullptr;
+    if (source != nullptr) {
+        jmethodID copyCtor = env->GetMethodID(valuesClass, "<init>", "(Landroid/content/ContentValues;)V");
+        if (copyCtor != nullptr) {
+            result = env->NewObject(valuesClass, copyCtor, source);
+        }
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            result = nullptr;
+        }
+    }
+    if (result == nullptr) {
+        jmethodID ctor = env->GetMethodID(valuesClass, "<init>", "()V");
+        if (ctor != nullptr) {
+            result = env->NewObject(valuesClass, ctor);
+        }
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            result = nullptr;
+        }
+    }
+    env->DeleteLocalRef(valuesClass);
+    return result;
+}
+
+static bool content_values_put_string(JNIEnv* env, jobject values, jstring key, jstring value) {
+    if (values == nullptr || key == nullptr) return false;
+    jclass valuesClass = env->GetObjectClass(values);
+    if (valuesClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    jmethodID put = env->GetMethodID(valuesClass, "put", "(Ljava/lang/String;Ljava/lang/String;)V");
+    env->DeleteLocalRef(valuesClass);
+    if (put == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    env->CallVoidMethod(values, put, key, value);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
+static bool content_values_put_all(JNIEnv* env, jobject target, jobject source) {
+    if (target == nullptr || source == nullptr) return false;
+    jclass valuesClass = env->GetObjectClass(target);
+    if (valuesClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    jmethodID putAll = env->GetMethodID(valuesClass, "putAll", "(Landroid/content/ContentValues;)V");
+    env->DeleteLocalRef(valuesClass);
+    if (putAll == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    env->CallVoidMethod(target, putAll, source);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
+static std::string ywlogin_object_to_string(JNIEnv* env, jobject object) {
+    if (object == nullptr) return "null";
+    jclass objectClass = env->FindClass("java/lang/Object");
+    if (objectClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return "<Object class missing>";
+    }
+    jmethodID toString = env->GetMethodID(objectClass, "toString", "()Ljava/lang/String;");
+    env->DeleteLocalRef(objectClass);
+    if (toString == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return "<toString missing>";
+    }
+    jstring text = (jstring)env->CallObjectMethod(object, toString);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return "<toString threw>";
+    }
+    if (text == nullptr) return "null";
+    const char* chars = env->GetStringUTFChars(text, nullptr);
+    std::string result = chars != nullptr ? chars : "";
+    if (chars != nullptr) env->ReleaseStringUTFChars(text, chars);
+    env->DeleteLocalRef(text);
+    return result;
+}
+
+static std::string content_values_key_summary(JNIEnv* env, jobject values) {
+    if (values == nullptr) return "null";
+    jclass valuesClass = env->GetObjectClass(values);
+    if (valuesClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return "<ContentValues class missing>";
+    }
+    jmethodID keySet = env->GetMethodID(valuesClass, "keySet", "()Ljava/util/Set;");
+    env->DeleteLocalRef(valuesClass);
+    if (keySet == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return "<keySet missing>";
+    }
+    jobject keys = env->CallObjectMethod(values, keySet);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return "<keySet threw>";
+    }
+    std::string result = ywlogin_object_to_string(env, keys);
+    if (keys != nullptr) env->DeleteLocalRef(keys);
+    return result;
+}
+
+static jobject call_ywlogin_parameter_getter(JNIEnv* env, jobject getter) {
+    if (getter == nullptr) return nullptr;
+    jclass getterClass = env->GetObjectClass(getter);
+    if (getterClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return nullptr;
+    }
+    jmethodID getParameter = env->GetMethodID(getterClass, "getParameter", "()Landroid/content/ContentValues;");
+    env->DeleteLocalRef(getterClass);
+    if (getParameter == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("stub_ywlogin_parameter_getter: getParameter method missing");
+        return nullptr;
+    }
+    jobject values = env->CallObjectMethod(getter, getParameter);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("stub_ywlogin_parameter_getter: getParameter threw");
+        return nullptr;
+    }
+    return values;
+}
+
+static void set_ywlogin_instance_field(JNIEnv* env, jobject thiz, const char* name, const char* sig, jobject value) {
+    if (thiz == nullptr || name == nullptr || sig == nullptr) return;
+    jclass cls = env->GetObjectClass(thiz);
+    if (cls == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return;
+    }
+    jfieldID field = env->GetFieldID(cls, name, sig);
+    if (field != nullptr) {
+        env->SetObjectField(thiz, field, value);
+    }
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+    env->DeleteLocalRef(cls);
+}
+
+static void apply_ywlogin_cached_state_to_instance_unlocked(JNIEnv* env, jobject instance) {
+    if (instance == nullptr) return;
+    set_ywlogin_instance_field(env, instance, "mContext", "Landroid/app/Application;", g_ywlogin_application);
+    set_ywlogin_instance_field(env, instance, "mDefaultParameters", "Landroid/content/ContentValues;", g_ywlogin_default_parameters);
+    set_ywlogin_instance_field(
+        env,
+        instance,
+        "parameterGetter",
+        "Lcom/yuewen/ywlogin/login/IParameterGetter;",
+        g_ywlogin_parameter_getter);
+    set_ywlogin_instance_field(
+        env,
+        instance,
+        "mSignCallback",
+        "Lcom/yuewen/ywlogin/login/ParamsSignCallback;",
+        g_ywlogin_sign_callback);
+}
+
+static void apply_ywlogin_cached_state_to_instance(JNIEnv* env, jobject instance) {
+    std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+    apply_ywlogin_cached_state_to_instance_unlocked(env, instance);
+}
+
+static jobject get_ywlogin_manager_local_ref(JNIEnv* env) {
+    std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+    return g_ywlogin_manager_instance != nullptr
+        ? env->NewLocalRef(g_ywlogin_manager_instance)
+        : nullptr;
+}
+
+static void replace_global_ref(JNIEnv* env, jobject* slot, jobject value) {
+    if (*slot != nullptr) {
+        env->DeleteGlobalRef(*slot);
+        *slot = nullptr;
+    }
+    if (value != nullptr) {
+        *slot = env->NewGlobalRef(value);
+    }
+}
+
+// getInstance() — YWLogin SDK expects a process-wide singleton.
 static jobject JNICALL stub_ywlogin_getInstance(JNIEnv* env, jclass clazz) {
-    if (g_guest_classloader == nullptr || g_classloader_loadclass == nullptr) {
-        LOGW("stub_ywlogin_getInstance: no guest ClassLoader");
+    if (clazz == nullptr) {
+        LOGW("stub_ywlogin_getInstance: null clazz");
         return nullptr;
     }
-    jstring className = env->NewStringUTF("com.yuewen.ywlogin.login.YWLoginManager");
-    jclass ywClass = (jclass)env->CallObjectMethod(g_guest_classloader, g_classloader_loadclass, className);
-    env->DeleteLocalRef(className);
-    if (ywClass == nullptr) {
+
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        if (g_ywlogin_manager_instance != nullptr) {
+            jobject local = env->NewLocalRef(g_ywlogin_manager_instance);
+            LOGI("stub_ywlogin_getInstance: returning singleton=%p", local);
+            return local;
+        }
+    }
+
+    jmethodID ctor = env->GetMethodID(clazz, "<init>", "()V");
+    if (ctor == nullptr) {
         if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("stub_ywlogin_getInstance: default constructor not found");
         return nullptr;
     }
-    // AllocObject 分配实例但不调用构造函数 — 确保不返回 null
-    jobject instance = env->AllocObject(ywClass);
-    env->DeleteLocalRef(ywClass);
+    jobject instance = env->NewObject(clazz, ctor);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        LOGW("stub_ywlogin_getInstance: NewObject failed");
+        return nullptr;
+    }
     if (instance) {
-        LOGI("stub_ywlogin_getInstance: allocated instance OK");
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        if (g_ywlogin_manager_instance == nullptr) {
+            g_ywlogin_manager_instance = env->NewGlobalRef(instance);
+            apply_ywlogin_cached_state_to_instance_unlocked(env, instance);
+            LOGI("stub_ywlogin_getInstance: constructed singleton=%p", instance);
+        } else {
+            jobject local = env->NewLocalRef(g_ywlogin_manager_instance);
+            env->DeleteLocalRef(instance);
+            LOGI("stub_ywlogin_getInstance: race returning singleton=%p", local);
+            return local;
+        }
     } else {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        LOGW("stub_ywlogin_getInstance: AllocObject failed");
+        LOGW("stub_ywlogin_getInstance: constructed instance is null");
     }
     return instance;
 }
@@ -3677,11 +8172,253 @@ static void JNICALL stub_ywlogin_resetParameter(JNIEnv* env, jobject thiz, jstri
 }
 
 static void JNICALL stub_ywlogin_setDefaultParameters(JNIEnv* env, jclass clazz, jobject application, jobject values) {
-    (void)env;
     (void)clazz;
-    (void)application;
-    (void)values;
-    LOGI("stub_ywlogin_setDefaultParameters: stub (no-op)");
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        replace_global_ref(env, &g_ywlogin_application, application);
+        replace_global_ref(env, &g_ywlogin_default_parameters, values);
+        apply_ywlogin_cached_state_to_instance_unlocked(env, g_ywlogin_manager_instance);
+    }
+    LOGI("stub_ywlogin_setDefaultParameters: stored application=%p values=%p", application, values);
+}
+
+static jobject JNICALL stub_ywlogin_getDefaultParameters(JNIEnv* env, jobject thiz) {
+    jobject source = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        source = g_ywlogin_default_parameters;
+    }
+    if (source == nullptr && thiz != nullptr) {
+        jclass cls = env->GetObjectClass(thiz);
+        if (cls != nullptr) {
+            jfieldID field = env->GetFieldID(cls, "mDefaultParameters", "Landroid/content/ContentValues;");
+            if (field != nullptr) {
+                source = env->GetObjectField(thiz, field);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                source = nullptr;
+            }
+            env->DeleteLocalRef(cls);
+        }
+    }
+    jobject result = copy_content_values(env, source);
+    LOGI("stub_ywlogin_getDefaultParameters: returning values=%p source=%p", result, source);
+    if (source != nullptr && source != g_ywlogin_default_parameters) {
+        env->DeleteLocalRef(source);
+    }
+    return result;
+}
+
+static void JNICALL stub_ywlogin_registerParameter_tracked(JNIEnv* env, jobject thiz, jobject getter) {
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        replace_global_ref(env, &g_ywlogin_parameter_getter, getter);
+        set_ywlogin_instance_field(
+            env,
+            g_ywlogin_manager_instance,
+            "parameterGetter",
+            "Lcom/yuewen/ywlogin/login/IParameterGetter;",
+            getter);
+    }
+    set_ywlogin_instance_field(
+        env,
+        thiz,
+        "parameterGetter",
+        "Lcom/yuewen/ywlogin/login/IParameterGetter;",
+        getter);
+    LOGI("stub_ywlogin_registerParameter_tracked: stored getter=%p", getter);
+}
+
+static void JNICALL stub_ywlogin_resetParameter_tracked(JNIEnv* env, jobject thiz, jstring key, jstring value) {
+    jobject updated = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        updated = copy_content_values(env, g_ywlogin_default_parameters);
+        if (updated != nullptr && content_values_put_string(env, updated, key, value)) {
+            replace_global_ref(env, &g_ywlogin_default_parameters, updated);
+            set_ywlogin_instance_field(
+                env,
+                g_ywlogin_manager_instance,
+                "mDefaultParameters",
+                "Landroid/content/ContentValues;",
+                g_ywlogin_default_parameters);
+        }
+    }
+    set_ywlogin_instance_field(env, thiz, "mDefaultParameters", "Landroid/content/ContentValues;", updated);
+    std::string keyText = ywlogin_object_to_string(env, key);
+    LOGI(
+        "stub_ywlogin_resetParameter_tracked: key=%s stored=%d keys=%s",
+        keyText.c_str(),
+        updated != nullptr ? 1 : 0,
+        content_values_key_summary(env, updated).c_str());
+    if (updated != nullptr) env->DeleteLocalRef(updated);
+}
+
+static void JNICALL stub_ywlogin_setDefaultParameters_tracked(
+        JNIEnv* env,
+        jobject thiz,
+        jobject application,
+        jobject values) {
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        replace_global_ref(env, &g_ywlogin_application, application);
+        replace_global_ref(env, &g_ywlogin_default_parameters, values);
+        apply_ywlogin_cached_state_to_instance_unlocked(env, g_ywlogin_manager_instance);
+    }
+    set_ywlogin_instance_field(env, thiz, "mContext", "Landroid/app/Application;", application);
+    set_ywlogin_instance_field(env, thiz, "mDefaultParameters", "Landroid/content/ContentValues;", values);
+    LOGI(
+        "stub_ywlogin_setDefaultParameters_tracked: stored application=%p values=%p keys=%s",
+        application,
+        values,
+        content_values_key_summary(env, values).c_str());
+}
+
+static jobject JNICALL stub_ywlogin_getDefaultParameters_tracked(JNIEnv* env, jobject thiz) {
+    jobject source = nullptr;
+    jobject getter = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        if (g_ywlogin_default_parameters != nullptr) {
+            source = env->NewLocalRef(g_ywlogin_default_parameters);
+        }
+        if (g_ywlogin_parameter_getter != nullptr) {
+            getter = env->NewLocalRef(g_ywlogin_parameter_getter);
+        }
+    }
+    if (source == nullptr && thiz != nullptr) {
+        jclass cls = env->GetObjectClass(thiz);
+        if (cls != nullptr) {
+            jfieldID field = env->GetFieldID(cls, "mDefaultParameters", "Landroid/content/ContentValues;");
+            if (field != nullptr) {
+                source = env->GetObjectField(thiz, field);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                source = nullptr;
+            }
+            env->DeleteLocalRef(cls);
+        }
+    }
+    if (getter == nullptr && thiz != nullptr) {
+        jclass cls = env->GetObjectClass(thiz);
+        if (cls != nullptr) {
+            jfieldID field = env->GetFieldID(
+                cls,
+                "parameterGetter",
+                "Lcom/yuewen/ywlogin/login/IParameterGetter;");
+            if (field != nullptr) {
+                getter = env->GetObjectField(thiz, field);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                getter = nullptr;
+            }
+            env->DeleteLocalRef(cls);
+        }
+    }
+    jobject result = copy_content_values(env, source);
+    jobject dynamicValues = call_ywlogin_parameter_getter(env, getter);
+    bool mergedDynamic = content_values_put_all(env, result, dynamicValues);
+    LOGI(
+        "stub_ywlogin_getDefaultParameters_tracked: values=%p source=%p dynamic=%p mergedDynamic=%d keys=%s",
+        result,
+        source,
+        dynamicValues,
+        mergedDynamic ? 1 : 0,
+        content_values_key_summary(env, result).c_str());
+    if (dynamicValues != nullptr) env->DeleteLocalRef(dynamicValues);
+    if (getter != nullptr) env->DeleteLocalRef(getter);
+    if (source != nullptr) env->DeleteLocalRef(source);
+    return result;
+}
+
+static jobject JNICALL stub_ywlogin_getCommonParamaters(JNIEnv* env, jobject thiz) {
+    return stub_ywlogin_getDefaultParameters_tracked(env, thiz);
+}
+
+static void JNICALL stub_ywlogin_saveParameters(JNIEnv* env, jobject thiz, jobject values) {
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        replace_global_ref(env, &g_ywlogin_default_parameters, values);
+        set_ywlogin_instance_field(
+            env,
+            g_ywlogin_manager_instance,
+            "mDefaultParameters",
+            "Landroid/content/ContentValues;",
+            g_ywlogin_default_parameters);
+    }
+    set_ywlogin_instance_field(env, thiz, "mDefaultParameters", "Landroid/content/ContentValues;", values);
+    LOGI("stub_ywlogin_saveParameters: stored values=%p", values);
+}
+
+static void JNICALL stub_ywlogin_refreshParameters(JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+    LOGI("stub_ywlogin_refreshParameters: stub (no-op)");
+}
+
+static jobject JNICALL stub_ywlogin_getSignCallback(JNIEnv* env, jobject thiz) {
+    jobject source = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        source = g_ywlogin_sign_callback;
+        if (source != nullptr) {
+            jobject local = env->NewLocalRef(source);
+            LOGI("stub_ywlogin_getSignCallback: returning stored callback=%p", local);
+            return local;
+        }
+    }
+    if (thiz != nullptr) {
+        jclass cls = env->GetObjectClass(thiz);
+        if (cls != nullptr) {
+            jfieldID field = env->GetFieldID(
+                cls,
+                "mSignCallback",
+                "Lcom/yuewen/ywlogin/login/ParamsSignCallback;");
+            if (field != nullptr) {
+                source = env->GetObjectField(thiz, field);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                source = nullptr;
+            }
+            env->DeleteLocalRef(cls);
+        }
+    }
+    LOGI("stub_ywlogin_getSignCallback: returning instance callback=%p", source);
+    return source;
+}
+
+static void JNICALL stub_ywlogin_setSignCallback(JNIEnv* env, jobject thiz, jobject callback) {
+    {
+        std::lock_guard<std::mutex> lock(g_ywlogin_defaults_mutex);
+        replace_global_ref(env, &g_ywlogin_sign_callback, callback);
+        set_ywlogin_instance_field(
+            env,
+            g_ywlogin_manager_instance,
+            "mSignCallback",
+            "Lcom/yuewen/ywlogin/login/ParamsSignCallback;",
+            callback);
+    }
+    if (thiz != nullptr) {
+        jclass cls = env->GetObjectClass(thiz);
+        if (cls != nullptr) {
+            jfieldID field = env->GetFieldID(
+                cls,
+                "mSignCallback",
+                "Lcom/yuewen/ywlogin/login/ParamsSignCallback;");
+            if (field != nullptr) {
+                env->SetObjectField(thiz, field, callback);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+            env->DeleteLocalRef(cls);
+        }
+    }
+    LOGI("stub_ywlogin_setSignCallback: stored callback=%p", callback);
 }
 
 static void JNICALL stub_ywlogin_fetchSettings(JNIEnv* env, jobject thiz, jobject callback) {
@@ -3715,6 +8452,22 @@ static void notify_ywlogin_error(JNIEnv* env, jobject callback, const char* mess
 }
 
 // 其他可能的 native 方法 stub
+static void throw_ywlogin_missing_native(JNIEnv* env, const char* methodName) {
+    jclass errorClass = env->FindClass("java/lang/UnsatisfiedLinkError");
+    if (errorClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return;
+    }
+    char message[256];
+    snprintf(
+        message,
+        sizeof(message),
+        "No implementation found for com.yuewen.ywlogin.login.YWLoginManager.%s; original native not registered",
+        methodName != nullptr ? methodName : "<unknown>");
+    env->ThrowNew(errorClass, message);
+    env->DeleteLocalRef(errorClass);
+}
+
 static void JNICALL wrapped_ywlogin_pwdLogin(
         JNIEnv* env,
         jobject thiz,
@@ -3727,8 +8480,8 @@ static void JNICALL wrapped_ywlogin_pwdLogin(
         g_orig_ywlogin_pwdLogin(env, thiz, activity, account, password, callback);
         return;
     }
-    notify_ywlogin_error(env, callback, "MultiApp login native unavailable");
-    LOGE("wrapped_ywlogin_pwdLogin: original native not registered; reported callback error");
+    LOGE("wrapped_ywlogin_pwdLogin: original native not registered; throwing for Java fallback");
+    throw_ywlogin_missing_native(env, "pwdLogin");
 }
 
 static void JNICALL wrapped_ywlogin_sendPhoneCode(
@@ -3745,8 +8498,8 @@ static void JNICALL wrapped_ywlogin_sendPhoneCode(
         g_orig_ywlogin_sendPhoneCode(env, thiz, context, phone, type, scene, callback);
         return;
     }
-    notify_ywlogin_error(env, callback, "MultiApp send phone code native unavailable");
-    LOGE("wrapped_ywlogin_sendPhoneCode: original native not registered; reported callback error");
+    LOGE("wrapped_ywlogin_sendPhoneCode: original native not registered; throwing for Java fallback");
+    throw_ywlogin_missing_native(env, "sendPhoneCode");
 }
 
 static void JNICALL wrapped_ywlogin_qrCodeV2(
@@ -3758,8 +8511,8 @@ static void JNICALL wrapped_ywlogin_qrCodeV2(
         g_orig_ywlogin_qrCodeV2(env, thiz, callback);
         return;
     }
-    notify_ywlogin_error(env, callback, "MultiApp QR login native unavailable");
-    LOGE("wrapped_ywlogin_qrCodeV2: original native not registered; reported callback error");
+    LOGE("wrapped_ywlogin_qrCodeV2: original native not registered; throwing for Java fallback");
+    throw_ywlogin_missing_native(env, "qrCodeV2");
 }
 
 static void JNICALL stub_ywlogin_pwdLogin(
@@ -6110,7 +10863,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
     auto ywlogin_action_fallback_enabled = []() -> bool {
         char value[PROP_VALUE_MAX] = {0};
         int len = __system_property_get("debug.multiapp.ywlogin.action_fallback", value);
-        if (len <= 0) return false;
+        if (len <= 0) return true;
+        if (strcmp(value, "0") == 0 || strcasecmp(value, "false") == 0) return false;
         return strcmp(value, "1") == 0 || strcasecmp(value, "true") == 0;
     };
     auto ywlogin_qrcode_fallback_enabled = []() -> bool {
@@ -6127,11 +10881,23 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterBusinessStubs(
         {"com.yuewen.ywlogin.login.YWLoginManager", "getInstance",
          "()Lcom/yuewen/ywlogin/login/YWLoginManager;", (void*)stub_ywlogin_getInstance},
         {"com.yuewen.ywlogin.login.YWLoginManager", "registerParameter",
-         "(Lcom/yuewen/ywlogin/login/IParameterGetter;)V", (void*)stub_ywlogin_registerParameter},
+         "(Lcom/yuewen/ywlogin/login/IParameterGetter;)V", (void*)stub_ywlogin_registerParameter_tracked},
         {"com.yuewen.ywlogin.login.YWLoginManager", "resetParameter",
-         "(Ljava/lang/String;Ljava/lang/String;)V", (void*)stub_ywlogin_resetParameter},
+         "(Ljava/lang/String;Ljava/lang/String;)V", (void*)stub_ywlogin_resetParameter_tracked},
         {"com.yuewen.ywlogin.login.YWLoginManager", "setDefaultParameters",
-         "(Landroid/app/Application;Landroid/content/ContentValues;)V", (void*)stub_ywlogin_setDefaultParameters},
+         "(Landroid/app/Application;Landroid/content/ContentValues;)V", (void*)stub_ywlogin_setDefaultParameters_tracked},
+        {"com.yuewen.ywlogin.login.YWLoginManager", "getDefaultParameters",
+         "()Landroid/content/ContentValues;", (void*)stub_ywlogin_getDefaultParameters_tracked},
+        {"com.yuewen.ywlogin.login.YWLoginManager", "getCommonParamaters",
+         "()Landroid/content/ContentValues;", (void*)stub_ywlogin_getCommonParamaters},
+        {"com.yuewen.ywlogin.login.YWLoginManager", "saveParameters",
+         "(Landroid/content/ContentValues;)V", (void*)stub_ywlogin_saveParameters},
+        {"com.yuewen.ywlogin.login.YWLoginManager", "refreshParameters",
+         "()V", (void*)stub_ywlogin_refreshParameters},
+        {"com.yuewen.ywlogin.login.YWLoginManager", "getSignCallback",
+         "()Lcom/yuewen/ywlogin/login/ParamsSignCallback;", (void*)stub_ywlogin_getSignCallback},
+        {"com.yuewen.ywlogin.login.YWLoginManager", "setSignCallback",
+         "(Lcom/yuewen/ywlogin/login/ParamsSignCallback;)V", (void*)stub_ywlogin_setSignCallback},
         {"com.yuewen.ywlogin.login.YWLoginManager", "fetchSettings",
          "(Lcom/yuewen/ywlogin/callbacks/DefaultYWCallback;)V", (void*)stub_ywlogin_fetchSettings},
         {"com.qq.reader.common.utils.crypto.EasyEncrypt", "getMd5Key",
@@ -6997,17 +11763,28 @@ static int dump_so_callback(struct dl_phdr_info* info, size_t size, void* data) 
     fseek(out, ehdr->e_phoff, SEEK_SET);
     fwrite(phdrs, 1, ehdr->e_phnum * sizeof(ElfW(Phdr)), out);
 
-    // PT_LOAD segments — 跳过 filesz==0 的纯 BSS 段
+    // PT_LOAD segments — 包括 BSS 段（p_filesz==0 但 p_memsz>0）
     for (int i = 0; i < info->dlpi_phnum; i++) {
         if (phdrs[i].p_type != PT_LOAD) continue;
-        if (phdrs[i].p_filesz == 0) continue;
+        if (phdrs[i].p_memsz == 0) continue;
 
         uintptr_t seg_addr = info->dlpi_addr + phdrs[i].p_vaddr;
-        if (seg_addr == 0 || phdrs[i].p_filesz > max_end) continue;
+        if (seg_addr == 0 || phdrs[i].p_memsz > max_end) continue;
 
-        void* seg = reinterpret_cast<void*>(seg_addr);
-        fseek(out, phdrs[i].p_offset, SEEK_SET);
-        fwrite(seg, 1, phdrs[i].p_filesz, out);
+        // 写入文件中有数据的部分
+        if (phdrs[i].p_filesz > 0) {
+            void* seg = reinterpret_cast<void*>(seg_addr);
+            fseek(out, phdrs[i].p_offset, SEEK_SET);
+            fwrite(seg, 1, phdrs[i].p_filesz, out);
+        }
+        // BSS 段：p_filesz < p_memsz，用零填充剩余部分
+        if (phdrs[i].p_memsz > phdrs[i].p_filesz) {
+            size_t bss_size = phdrs[i].p_memsz - phdrs[i].p_filesz;
+            // 写入运行时解密的 BSS 内容（已解密到内存中）
+            void* bss_addr = reinterpret_cast<void*>(seg_addr + phdrs[i].p_filesz);
+            fseek(out, phdrs[i].p_offset + phdrs[i].p_filesz, SEEK_SET);
+            fwrite(bss_addr, 1, bss_size, out);
+        }
     }
 
     fclose(out);
@@ -7048,6 +11825,20 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpLoadedLibraries(
 
     LOGI("dump_so: dumped %d libraries to %s", req.count, dir);
     return req.count;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeDumpJiaguRuntimeRanges(
+    JNIEnv* env, jclass clazz, jstring dumpDir)
+{
+    (void)clazz;
+    if (dumpDir == nullptr) return 0;
+
+    const char* dir = env->GetStringUTFChars(dumpDir, nullptr);
+    if (dir == nullptr) return 0;
+    int count = dump_jiagu_runtime_ranges(dir);
+    env->ReleaseStringUTFChars(dumpDir, dir);
+    return count;
 }
 
 // ==================== LSPlant Integration ====================

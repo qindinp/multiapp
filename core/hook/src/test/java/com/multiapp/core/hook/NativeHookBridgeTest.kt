@@ -706,4 +706,99 @@ class NativeHookBridgeTest {
         // All lines filtered, result should be effectively empty (just newlines)
         assertFalse(filtered.contains("multiapp"))
     }
+
+    // ===== parseRegisterNativesEvidenceReport tests =====
+
+    @Test
+    fun `parse null report returns null`() {
+        assertNull(NativeHookBridge.parseRegisterNativesEvidenceReport(null))
+    }
+
+    @Test
+    fun `parse empty report returns null`() {
+        assertNull(NativeHookBridge.parseRegisterNativesEvidenceReport(""))
+    }
+
+    @Test
+    fun `parse report missing required fields returns null`() {
+        assertNull(NativeHookBridge.parseRegisterNativesEvidenceReport("className=com.stub.StubApp"))
+        assertNull(NativeHookBridge.parseRegisterNativesEvidenceReport("methodCount=10;result=0"))
+    }
+
+    @Test
+    fun `parse basic report returns structured evidence`() {
+        val report = "className=com.stub.StubApp\nmethodCount=10\nresult=0"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertEquals("com.stub.StubApp", evidence?.className)
+        assertEquals(10, evidence?.methodCount)
+        assertEquals(0, evidence?.result)
+    }
+
+    @Test
+    fun `parse report with semicolon separator`() {
+        val report = "className=com.stub.StubApp;methodCount=15;result=0;source=native"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertEquals("com.stub.StubApp", evidence?.className)
+        assertEquals(15, evidence?.methodCount)
+        assertEquals("native", evidence?.source)
+    }
+
+    @Test
+    fun `parse boolean fields with 1_0`() {
+        val report = "className=c\nmethodCount=10\nresult=0\ncallerIsJiagu=1\nallMultiAppMethods=0\nhasInterface11=1\nhasInterface20=1"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertTrue(evidence?.callerIsJiagu == true)
+        assertTrue(evidence?.allMultiAppMethods == false)
+        assertTrue(evidence?.hasInterface11 == true)
+        assertTrue(evidence?.hasInterface20 == true)
+    }
+
+    @Test
+    fun `parse boolean fields with true_false case insensitive`() {
+        val report = "className=c\nmethodCount=10\nresult=0\ncallerIsJiagu=True\nallMultiAppMethods=FALSE"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertTrue(evidence?.callerIsJiagu == true)
+        assertTrue(evidence?.allMultiAppMethods == false)
+    }
+
+    @Test
+    fun `parse report with explicit originalShellPath override`() {
+        val report = "className=c\nmethodCount=10\nresult=0\noriginalShellPath=1"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertTrue(evidence?.originalShellPath == true)
+    }
+
+    @Test
+    fun `parse computes originalShellPath when field absent`() {
+        val report = "className=c\nmethodCount=10\nresult=0\ncallerIsJiagu=1\nhasInterface11=1\nhasInterface20=1"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertTrue(evidence?.originalShellPath == true)
+    }
+
+    @Test
+    fun `parse treats allMultiAppMethods as non original`() {
+        val report = "className=c\nmethodCount=10\nresult=0\ncallerIsJiagu=1\nallMultiAppMethods=1\nhasInterface11=1\nhasInterface20=1"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertFalse(evidence?.originalShellPath == true)
+    }
+
+    @Test
+    fun `parse native unavailable report returns null`() {
+        assertNull(NativeHookBridge.parseRegisterNativesEvidenceReport("native-lib-not-loaded"))
+    }
+
+    @Test
+    fun `parse report with qihoo StubApp class`() {
+        val report = "className=com.qihoo.util.StubApp\nmethodCount=20\nresult=0"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertEquals("com.qihoo.util.StubApp", evidence?.className)
+        assertEquals(20, evidence?.methodCount)
+    }
+
+    @Test
+    fun `parse ignores unknown keys`() {
+        val report = "className=c\nmethodCount=10\nresult=0\nunknownKey=ignored"
+        val evidence = NativeHookBridge.parseRegisterNativesEvidenceReport(report)
+        assertEquals("c", evidence?.className)
+    }
 }

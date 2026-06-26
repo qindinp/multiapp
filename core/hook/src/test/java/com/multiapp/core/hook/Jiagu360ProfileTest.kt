@@ -9,6 +9,8 @@ class Jiagu360ProfileTest {
 
     private val profile = Jiagu360Profile()
 
+    // ===== detect =====
+
     @Test
     fun `detect matches jiagu native lib and stub class`() {
         val result = profile.detect(
@@ -39,13 +41,15 @@ class Jiagu360ProfileTest {
         assertTrue(result.missing.contains("libjiagu*.so"))
     }
 
+    // ===== verify with explicit originalShellPath (backward compat) =====
+
     @Test
     fun `verify succeeds only with loaded lib and original shell register natives`() {
         val result = profile.verify(
             Jiagu360VerifyContext(
                 loadedLibPaths = listOf("/data/data/stub/cache/origin/lib/arm64-v8a/libjiagu_vip.so"),
                 registerNativesEvents = listOf(
-                    RegisterNativesEvidence(
+                    RegisterNativesEvidence.withExplicitOriginalShellPath(
                         className = "com.stub.StubApp",
                         methodCount = 10,
                         result = 0,
@@ -70,7 +74,7 @@ class Jiagu360ProfileTest {
             Jiagu360VerifyContext(
                 loadedLibPaths = listOf("/data/data/stub/cache/origin/lib/arm64-v8a/libjiagu_vip.so"),
                 registerNativesEvents = listOf(
-                    RegisterNativesEvidence(
+                    RegisterNativesEvidence.withExplicitOriginalShellPath(
                         className = "com.stub.StubApp",
                         methodCount = 10,
                         result = 0,
@@ -83,7 +87,7 @@ class Jiagu360ProfileTest {
 
         assertEquals(Jiagu360ProfileStatus.INCOMPLETE, result.status)
         assertFalse(result.verified)
-        assertTrue(result.missing.any { it.contains("original StubApp RegisterNatives") })
+        assertTrue(result.missing.any { it.contains("original shell StubApp RegisterNatives") })
     }
 
     @Test
@@ -92,7 +96,7 @@ class Jiagu360ProfileTest {
             Jiagu360VerifyContext(
                 loadedLibPaths = listOf("/data/data/stub/cache/origin/lib/arm64-v8a/libjiagu_vip.so"),
                 registerNativesEvents = listOf(
-                    RegisterNativesEvidence(
+                    RegisterNativesEvidence.withExplicitOriginalShellPath(
                         className = "com.stub.StubApp",
                         methodCount = 10,
                         result = 0,
@@ -108,5 +112,152 @@ class Jiagu360ProfileTest {
 
         assertEquals(Jiagu360ProfileStatus.INCOMPLETE, result.status)
         assertTrue(result.missing.any { it.contains("interface20") })
+    }
+
+    // ===== verify with computed originalShellPath =====
+
+    @Test
+    fun `verify accepts qihoo StubApp with computed originalShellPath`() {
+        val result = profile.verify(
+            Jiagu360VerifyContext(
+                loadedLibPaths = listOf("/data/data/stub/lib/arm64-v8a/libjiagu_vip.so"),
+                registerNativesEvents = listOf(
+                    RegisterNativesEvidence(
+                        className = "com.qihoo.util.StubApp",
+                        methodCount = 15,
+                        result = 0,
+                        source = "native:RegisterNatives",
+                        callerIsJiagu = true,
+                        hasInterface11 = true,
+                        hasInterface20 = true
+                    )
+                )
+            )
+        )
+
+        assertEquals(Jiagu360ProfileStatus.VERIFIED, result.status)
+        assertTrue(result.verified)
+    }
+
+    @Test
+    fun `verify rejects jiagu caller when interface11 missing`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com.stub.StubApp",
+            methodCount = 15,
+            result = 0,
+            callerIsJiagu = true,
+            hasInterface11 = false,
+            hasInterface20 = true
+        )
+        assertFalse(evidence.originalShellPath)
+    }
+
+    @Test
+    fun `verify rejects jiagu caller when interface20 missing`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com.stub.StubApp",
+            methodCount = 15,
+            result = 0,
+            callerIsJiagu = true,
+            hasInterface11 = true,
+            hasInterface20 = false
+        )
+        assertFalse(evidence.originalShellPath)
+    }
+
+    @Test
+    fun `verify rejects non zero RegisterNatives result`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com.stub.StubApp",
+            methodCount = 15,
+            result = -1,
+            callerIsJiagu = true,
+            hasInterface11 = true,
+            hasInterface20 = true
+        )
+        assertFalse(evidence.originalShellPath)
+    }
+
+    @Test
+    fun `verify rejects small method count`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com.stub.StubApp",
+            methodCount = 5,
+            result = 0,
+            callerIsJiagu = true,
+            hasInterface11 = true,
+            hasInterface20 = true
+        )
+        assertFalse(evidence.originalShellPath)
+    }
+
+    @Test
+    fun `verify rejects all multiapp methods even if method count is enough`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com.stub.StubApp",
+            methodCount = 15,
+            result = 0,
+            callerIsJiagu = true,
+            allMultiAppMethods = true,
+            hasInterface11 = true,
+            hasInterface20 = true
+        )
+        assertFalse(evidence.originalShellPath)
+    }
+
+    @Test
+    fun `originalShellPath true when all conditions met`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com.stub.StubApp",
+            methodCount = 15,
+            result = 0,
+            callerIsJiagu = true,
+            allMultiAppMethods = false,
+            hasInterface11 = true,
+            hasInterface20 = true
+        )
+        assertTrue(evidence.originalShellPath)
+    }
+
+    @Test
+    fun `originalShellPath true when methodCount exactly 10`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com.stub.StubApp",
+            methodCount = 10,
+            result = 0,
+            callerIsJiagu = true,
+            hasInterface11 = true,
+            hasInterface20 = true
+        )
+        assertTrue(evidence.originalShellPath)
+    }
+
+    @Test
+    fun `originalShellPath false when callerIsJiagu is false`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com.stub.StubApp",
+            methodCount = 15,
+            result = 0,
+            callerIsJiagu = false,
+            hasInterface11 = true,
+            hasInterface20 = true
+        )
+        assertFalse(evidence.originalShellPath)
+    }
+
+    @Test
+    fun `defaults all booleans to false`() {
+        val evidence = RegisterNativesEvidence(
+            className = "com/test/Class",
+            methodCount = 5,
+            result = 0
+        )
+        assertFalse(evidence.callerIsJiagu)
+        assertFalse(evidence.allMultiAppMethods)
+        assertFalse(evidence.hasInterface11)
+        assertFalse(evidence.hasInterface20)
+        assertFalse(evidence.jiaguComplete)
+        assertFalse(evidence.originalShellPath)
+        assertEquals("", evidence.source)
     }
 }

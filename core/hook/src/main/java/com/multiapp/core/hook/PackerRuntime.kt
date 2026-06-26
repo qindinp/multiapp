@@ -89,11 +89,13 @@ data class PackerRuntimeContext(
     val originApkPath: String?,
     val originalApkPath: String?,
     val originalPackageName: String?,
+    val stubPackageName: String? = null,
     val cloneProfile: String?,
     val dataDir: String?,
     val stubApkPath: String,
     val bridge: NativeHookBridge,
     val hookEngine: HookEngine,
+    val nativeHookPolicy: NativeHookPolicy = NativeHookPolicy.baseline(),
 )
 
 /**
@@ -108,4 +110,8 @@ data class PackerLoadResult(
     val loadedLibPaths: List<String> = emptyList(),
     /** 加载过程中的诊断信息 */
     val diagnostics: List<String> = emptyList(),
+    /** verifyRegisterNatives 确认壳已注册 StubApp natives（即使我们的 hook 未捕获） */
+    val stubNativesVerified: Boolean = false,
+    /** 结构化 RegisterNatives evidence，用于 profile verify 闭环 */
+    val registerNativesEvidence: List<RegisterNativesEvidence> = emptyList()
 )
