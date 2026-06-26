@@ -2,10 +2,6 @@ package com.multiapp.feature.launcher
 
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.util.Log
-import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -41,26 +37,66 @@ import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceStatus
-import com.multiapp.core.model.CloneProfile
 import com.multiapp.core.model.VirtualApp
+import kotlinx.coroutines.channels.Channel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LauncherScreen() {
-    val viewModel: LauncherViewModel = hiltViewModel()
+fun LauncherScreen(
+    viewModel: LauncherViewModel = hiltViewModel()
+) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     var showAppPicker by remember { mutableStateOf(false) }
-    var showAddSource by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf<InstanceInfo?>(null) }
-    val apkPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        if (uri != null) viewModel.createInstanceFromApkUri(context, uri)
+    val snackbarHostState = remember { SnackbarHostState() }
+    val launchFailureChannel = remember { Channel<String>(Channel.BUFFERED) }
+
+    // Handle launch failure Snackbar
+    LaunchedEffect(Unit) {
+        for (failedInstanceId in launchFailureChannel) {
+            val result = snackbarHostState.showSnackbar(
+                message = "启动失败",
+                actionLabel = "重试",
+                duration = SnackbarDuration.Long
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                try {
+                    val instance = uiState.instances.find { it.instanceId == failedInstanceId }
+                    if (instance != null) {
+                        var intent = context.packageManager.getLaunchIntentForPackage(instance.stubPackageName)
+                        if (intent == null) {
+                            intent = Intent(Intent.ACTION_MAIN).apply {
+                                addCategory(Intent.CATEGORY_LAUNCHER)
+                                setPackage(instance.stubPackageName)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            val resolveInfos = context.packageManager.queryIntentActivities(intent, 0)
+                            if (resolveInfos.isNotEmpty()) {
+                                intent.setClassName(instance.stubPackageName, resolveInfos.first().activityInfo.name)
+                            } else {
+                                intent = null
+                            }
+                        }
+                        if (intent?.component?.className.isNullOrEmpty()) {
+                            snackbarHostState.showSnackbar(
+                                message = "无法启动：找不到入口 Activity",
+                                duration = SnackbarDuration.Short
+                            )
+                        } else {
+                            context.startActivity(intent)
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Ignore retry errors
+                }
+            }
+        }
     }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -99,7 +135,7 @@ fun LauncherScreen() {
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { showAddSource = true },
+                onClick = { showAppPicker = true },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 icon = { Icon(Icons.Default.Add, contentDescription = null) },
@@ -114,7 +150,7 @@ fun LauncherScreen() {
                     error = uiState.error!!,
                     onRetry = { viewModel.loadInstances() }
                 )
-                uiState.instances.isEmpty() && uiState.creationStep == null -> EmptyStatePlaceholder(onAdd = { showAddSource = true })
+                uiState.instances.isEmpty() && uiState.creationStep == null -> EmptyState(onAdd = { showAppPicker = true })
                 else -> AppGrid(
                     instances = uiState.instances,
                     onLaunch = { instance ->
@@ -136,12 +172,12 @@ fun LauncherScreen() {
                                 }
                             }
                             if (intent?.component?.className.isNullOrEmpty()) {
-                                Toast.makeText(context, "无法启动：找不到入口 Activity", Toast.LENGTH_SHORT).show()
+                                launchFailureChannel.trySend(instance.instanceId)
                             } else {
                                 context.startActivity(intent)
                             }
                         } catch (e: Exception) {
-                            Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                            launchFailureChannel.trySend(instance.instanceId)
                         }
                     },
                     onDelete = { showDeleteConfirm = it }
@@ -153,26 +189,6 @@ fun LauncherScreen() {
                 CreationProgressDialog(step = step)
             }
         }
-    }
-
-    if (showAddSource) {
-        AlertDialog(
-            onDismissRequest = { showAddSource = false },
-            title = { Text("添加分身") },
-            text = { Text("选择应用来源。普通用户建议从已安装应用选择；APK 文件适合本地安装包测试。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    showAddSource = false
-                    showAppPicker = true
-                }) { Text("从已安装应用选择") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showAddSource = false
-                    apkPicker.launch(arrayOf("application/vnd.android.package-archive", "application/octet-stream"))
-                }) { Text("从 APK 文件安装") }
-            }
-        )
     }
 
     if (showAppPicker) {
@@ -191,7 +207,11 @@ fun LauncherScreen() {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = null },
             title = { Text("确认删除") },
-            text = { Text("确定要删除 ${instance.stubPackageName} 吗？此操作不可撤销。") },
+            text = {
+                val displayName = instance.appName.ifBlank { instance.originalPackageName.substringAfterLast(".") }
+                    .replaceFirstChar { it.uppercase() }
+                Text("确定要删除分身「${displayName}」吗？此操作不可撤销。")
+            },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.deleteInstance(instance.instanceId)
@@ -395,21 +415,6 @@ private fun AppGridItem(
 
             // Status chip
             InstanceStatusChip(status = instance.status)
-            if (instance.lastLaunchState.isNotBlank()) {
-                Text(
-                    text = instance.lastLaunchState,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (instance.status == InstanceStatus.ERROR) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center
-                )
-            }
 
             // Context menu
             DropdownMenu(
@@ -454,7 +459,7 @@ private fun AppGridItem(
 // LoadingState, ErrorState, EmptyState 已提取到 core/designsystem/CommonComponents.kt
 
 @Composable
-private fun EmptyStatePlaceholder(onAdd: () -> Unit) {
+private fun EmptyState(onAdd: () -> Unit) {
     EmptyState(
         icon = Icons.Default.CloudDownload,
         title = "暂无分身应用",
@@ -483,26 +488,17 @@ private fun AppPickerSheet(
 ) {
     val allApps by viewModel.allApps.collectAsState()
     var searchQuery by remember { mutableStateOf("") }
-    var appFilter by remember { mutableStateOf(AppFilter.THIRD_PARTY) }
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
         viewModel.loadAllApps(context.packageManager)
     }
 
-    val filteredApps = allApps
-        .filter {
-            when (appFilter) {
-                AppFilter.THIRD_PARTY -> !it.isSystemApp
-                AppFilter.SYSTEM -> it.isSystemApp
-                AppFilter.ALL -> true
-            }
-        }
-        .filter {
-            searchQuery.isBlank() ||
-                it.appName.contains(searchQuery, ignoreCase = true) ||
-                it.packageName.contains(searchQuery, ignoreCase = true)
-        }
+    val filteredApps = if (searchQuery.isBlank()) allApps
+    else allApps.filter {
+        it.appName.contains(searchQuery, ignoreCase = true) ||
+            it.packageName.contains(searchQuery, ignoreCase = true)
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(modifier = Modifier.padding(horizontal = 16.dp)) {
@@ -512,29 +508,6 @@ private fun AppPickerSheet(
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.padding(bottom = 16.dp)
             )
-
-            SingleChoiceSegmentedButtonRow(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 12.dp)
-            ) {
-                AppFilter.entries.forEachIndexed { index, filter ->
-                    SegmentedButton(
-                        selected = appFilter == filter,
-                        onClick = { appFilter = filter },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = AppFilter.entries.size),
-                        label = {
-                            Text(
-                                when (filter) {
-                                    AppFilter.THIRD_PARTY -> "第三方"
-                                    AppFilter.SYSTEM -> "系统"
-                                    AppFilter.ALL -> "全部"
-                                }
-                            )
-                        }
-                    )
-                }
-            }
 
             // Search bar
             OutlinedTextField(
@@ -602,14 +575,7 @@ private fun AppPickerSheet(
                     ) {
                         AppPickerItem(
                             app = app,
-                            onClick = {
-                                Log.w("LauncherScreen", "AppPickerItem clicked: ${app.packageName}")
-                                if (app.mainActivity == null) {
-                                    Toast.makeText(context, "该应用没有启动入口，不能创建普通分身", Toast.LENGTH_SHORT).show()
-                                } else {
-                                    onAppSelected(app)
-                                }
-                            }
+                            onClick = { onAppSelected(app) }
                         )
                     }
                 }
@@ -618,12 +584,6 @@ private fun AppPickerSheet(
             Spacer(modifier = Modifier.height(16.dp))
         }
     }
-}
-
-private enum class AppFilter {
-    THIRD_PARTY,
-    SYSTEM,
-    ALL
 }
 
 @Composable
@@ -677,20 +637,6 @@ private fun AppPickerItem(
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            AssistChip(
-                onClick = {},
-                label = { Text(app.riskLabel, style = MaterialTheme.typography.labelSmall) },
-                enabled = false,
-                colors = AssistChipDefaults.assistChipColors(
-                    disabledLabelColor = when {
-                        app.cloneProfile == CloneProfile.QQ_READER_SPECIAL -> MaterialTheme.colorScheme.error
-                        app.mainActivity == null -> MaterialTheme.colorScheme.error
-                        app.isSystemApp -> MaterialTheme.colorScheme.tertiary
-                        else -> MaterialTheme.colorScheme.primary
-                    }
-                )
             )
         }
     }

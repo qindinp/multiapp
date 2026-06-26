@@ -1,5 +1,7 @@
 package com.multiapp.feature.appmanager
 
+import android.content.Context
+import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.multiapp.core.instance.InstanceInfo
@@ -8,6 +10,7 @@ import com.multiapp.core.common.formatBytes
 import com.multiapp.core.common.getDirSize
 import com.google.gson.Gson
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,11 +39,14 @@ sealed interface AppManagerEvent {
     data class ToggleExpand(val instanceId: String) : AppManagerEvent
     data object Refresh : AppManagerEvent
     data class UndoDelete(val instanceId: String, val identityJson: String) : AppManagerEvent
+    data class LaunchInstance(val instanceId: String) : AppManagerEvent
+    data class LaunchFailed(val instanceId: String, val message: String) : AppManagerEvent
 }
 
 @HiltViewModel
 class AppManagerViewModel @Inject constructor(
-    private val instanceManager: InstanceManager
+    private val instanceManager: InstanceManager,
+    @ApplicationContext private val context: Context
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AppManagerUiState())
@@ -63,6 +69,8 @@ class AppManagerViewModel @Inject constructor(
             is AppManagerEvent.ToggleExpand -> toggleExpand(event.instanceId)
             is AppManagerEvent.Refresh -> loadInstances()
             is AppManagerEvent.UndoDelete -> undoDelete(event.instanceId, event.identityJson)
+            is AppManagerEvent.LaunchInstance -> launchInstance(event.instanceId)
+            is AppManagerEvent.LaunchFailed -> {} // Handled by Screen
         }
     }
 
@@ -133,6 +141,39 @@ class AppManagerViewModel @Inject constructor(
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to undo delete")
                 _uiState.update { it.copy(error = e.message) }
+            }
+        }
+    }
+
+    fun launchInstance(instanceId: String) {
+        viewModelScope.launch {
+            try {
+                val instance = instanceManager.instances.value.find { it.instanceId == instanceId }
+                    ?: return@launch
+
+                var intent = context.packageManager.getLaunchIntentForPackage(instance.stubPackageName)
+                if (intent == null) {
+                    intent = Intent(Intent.ACTION_MAIN).apply {
+                        addCategory(Intent.CATEGORY_LAUNCHER)
+                        setPackage(instance.stubPackageName)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    val resolveInfos = context.packageManager.queryIntentActivities(intent, 0)
+                    if (resolveInfos.isNotEmpty()) {
+                        intent.setClassName(instance.stubPackageName, resolveInfos.first().activityInfo.name)
+                    } else {
+                        intent = null
+                    }
+                }
+                if (intent?.component?.className.isNullOrEmpty()) {
+                    _events.send(AppManagerEvent.LaunchFailed(instanceId, "无法启动：找不到入口 Activity"))
+                } else {
+                    context.startActivity(intent)
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Timber.e(e, "Failed to launch instance")
+                _events.send(AppManagerEvent.LaunchFailed(instanceId, e.message ?: "未知错误"))
             }
         }
     }
