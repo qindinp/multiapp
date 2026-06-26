@@ -1,0 +1,108 @@
+package com.multiapp.core.model.instance
+
+import java.io.File
+import java.util.UUID
+
+/**
+ * Default implementation of [InstanceManager].
+ *
+ * Delegates persistence to [InstanceRecordStore] and manages data root
+ * directories under [dataRootBase].
+ *
+ * Thread safety: single-writer (primary process), multi-reader (all processes).
+ *
+ * @param store        Record persistence backend.
+ * @param dataRootBase Base directory for instance data roots.
+ * @param clock        Clock supplier for timestamps (default: system clock).
+ */
+class DefaultInstanceManager(
+    private val store: InstanceRecordStore,
+    private val dataRootBase: File,
+    private val clock: () -> Long = System::currentTimeMillis
+) : InstanceManager {
+
+    override fun createInstance(
+        originPackageName: String,
+        displayName: String,
+        compatibilityMode: CompatibilityMode
+    ): Result<VirtualInstanceRecord> {
+        return runCatching {
+            val instanceId = UUID.randomUUID().toString()
+            val shortId = instanceId.replace("-", "").take(12)
+            val virtualPackageName = "com.multiapp.instance.$shortId"
+
+            val baseDir = File(dataRootBase, instanceId)
+            val dataRoot = InstanceDataRoot.fromBaseDir(instanceId, baseDir)
+
+            // Create directory structure
+            baseDir.mkdirs()
+            dataRoot.dataDir.mkdirs()
+            dataRoot.cacheDir.mkdirs()
+            dataRoot.filesDir.mkdirs()
+            dataRoot.sharedPrefsDir.mkdirs()
+            dataRoot.databaseDir.mkdirs()
+            dataRoot.externalFilesDir?.mkdirs()
+
+            val now = clock()
+
+            val record = VirtualInstanceRecord(
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                virtualPackageName = virtualPackageName,
+                displayName = displayName,
+                dataRoot = baseDir.absolutePath,
+                compatibilityMode = compatibilityMode,
+                createdAtMs = now,
+                updatedAtMs = now,
+                state = InstanceState.READY
+            )
+
+            store.save(record).getOrThrow()
+            record
+        }
+    }
+
+    override fun getInstance(instanceId: String): VirtualInstanceRecord? {
+        return store.load(instanceId)
+    }
+
+    override fun getInstanceByOrigin(originPackageName: String): List<VirtualInstanceRecord> {
+        return store.loadByOrigin(originPackageName)
+    }
+
+    override fun listInstances(): List<VirtualInstanceRecord> {
+        return store.listAll()
+    }
+
+    override fun deleteInstance(instanceId: String): Boolean {
+        val record = store.load(instanceId) ?: return false
+
+        // Clean up data root directory
+        val baseDir = File(record.dataRoot)
+        if (baseDir.exists()) {
+            baseDir.deleteRecursively()
+        }
+
+        return store.delete(instanceId)
+    }
+
+    override fun updateLaunchState(instanceId: String): VirtualInstanceRecord? {
+        val record = store.load(instanceId) ?: return null
+        val now = clock()
+
+        val updated = record.copy(
+            launchCount = record.launchCount + 1,
+            lastLaunchAtMs = now,
+            updatedAtMs = now
+        )
+
+        store.save(updated).getOrThrow()
+        return updated
+    }
+
+    override fun getDataRoot(instanceId: String): InstanceDataRoot? {
+        val record = store.load(instanceId) ?: return null
+        val baseDir = File(record.dataRoot)
+        return InstanceDataRoot.fromBaseDir(instanceId, baseDir)
+    }
+}

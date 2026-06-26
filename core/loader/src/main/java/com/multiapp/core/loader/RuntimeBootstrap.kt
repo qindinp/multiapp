@@ -15,6 +15,29 @@ enum class RuntimeStage(val order: Int) {
     }
 }
 
+enum class StageReversibility {
+    /** Can be fully rolled back to pre-stage state. */
+    REVERSIBLE,
+    /** Cannot be rolled back; failure means abandoning the bootstrap. */
+    IRREVERSIBLE,
+    /** Some artifacts can be cleaned up, but global state may have changed. */
+    PARTIALLY_REVERSIBLE;
+
+    companion object {
+        /** Default reversibility for each [RuntimeStage]. */
+        fun defaultFor(stage: RuntimeStage): StageReversibility = when (stage) {
+            RuntimeStage.CONFIG -> REVERSIBLE
+            RuntimeStage.GUEST_CONTEXT -> REVERSIBLE
+            RuntimeStage.PACKAGE_METADATA -> REVERSIBLE
+            RuntimeStage.ORIGIN_APK -> IRREVERSIBLE
+            RuntimeStage.NATIVE_LIBS -> IRREVERSIBLE
+            RuntimeStage.RESOURCES -> PARTIALLY_REVERSIBLE
+            RuntimeStage.CLASS_LOADER -> IRREVERSIBLE
+            RuntimeStage.APPLICATION -> IRREVERSIBLE
+        }
+    }
+}
+
 enum class BootstrapStatus {
     SUCCESS,
     FAILED,
@@ -112,3 +135,17 @@ data class BootstrapResult(
         )
     }
 }
+
+/** Convert a single [BootstrapResult] to a [StageResultSummary]. */
+fun BootstrapResult.toStageResultSummary(): StageResultSummary = StageResultSummary(
+    stage = stage,
+    status = status,
+    elapsedMs = durationMs,
+    reversibility = StageReversibility.defaultFor(stage),
+    evidenceCount = evidence.size,
+    errorSummary = if (status == BootstrapStatus.FAILED || status == BootstrapStatus.DEGRADED) {
+        message
+    } else {
+        null
+    }
+)

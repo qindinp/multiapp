@@ -674,6 +674,20 @@ class LoaderFactory : AppComponentFactory() {
     private fun initializeInternal(cl: ClassLoader) {
         bootstrapRecorder.reset()
         var currentStage = RuntimeStage.CONFIG
+
+        // ── RuntimeBootstrap session: wraps existing logic as legacy stage body ──
+        val bootstrapContext = RuntimeBootstrapContext(
+            entryClassLoader = cl,
+            processName = currentProcessName(),
+            threadName = Thread.currentThread().name,
+            startedAtMs = System.currentTimeMillis()
+        )
+        val bootstrap = RuntimeBootstrap(
+            plan = RuntimeBootstrapPlan.loaderFactoryCompatible(),
+            evidenceSink = evidenceSink
+        )
+        var session = bootstrap.begin(bootstrapContext)
+
         logSignal("LoaderFactory.initializeInternal entered")
         logD("=== POC LoaderFactory starting ===")
         logD("  Thread: ${Thread.currentThread().name}")
@@ -780,6 +794,7 @@ class LoaderFactory : AppComponentFactory() {
 
             // 1. 获取 ActivityThread
             currentStage = RuntimeStage.GUEST_CONTEXT
+            session = session.enter(RuntimeStage.GUEST_CONTEXT)
             logD("Step 1: Getting ActivityThread...")
             val activityThread = try {
                 Class.forName("android.app.ActivityThread")
@@ -884,6 +899,7 @@ class LoaderFactory : AppComponentFactory() {
 
             // 3. 从 Stub APK assets 读取配置
             currentStage = RuntimeStage.PACKAGE_METADATA
+            session = session.enter(RuntimeStage.PACKAGE_METADATA)
             logD("Step 3: Reading config...")
             val config = readConfig(stubApkPath)
             currentConfig = config
@@ -905,6 +921,7 @@ class LoaderFactory : AppComponentFactory() {
 
             // 4. 解压 origin.apk
             currentStage = RuntimeStage.ORIGIN_APK
+            session = session.enter(RuntimeStage.ORIGIN_APK)
             logD("Step 4: Extracting origin.apk...")
             val originApk = extractOriginApk(stubApkPath, dataDir)
             logD("  Origin APK: ${originApk.absolutePath}, size=${originApk.length()}")
@@ -932,6 +949,7 @@ class LoaderFactory : AppComponentFactory() {
 
             // 5. 安装 nativeLoad hook，确保加固壳的 JNI_OnLoad/RegisterNatives 能完整执行
             currentStage = RuntimeStage.NATIVE_LIBS
+            session = session.enter(RuntimeStage.NATIVE_LIBS)
             logSignal("before native hook install")
             logD("Step 5: Installing nativeLoad hook...")
             // 标记 native 库已加载（libmultiapp-native.so 在 stub APK 的 lib/ 中，
@@ -966,6 +984,7 @@ class LoaderFactory : AppComponentFactory() {
 
             // 6. 替换 ClassLoader
             currentStage = RuntimeStage.CLASS_LOADER
+            session = session.enter(RuntimeStage.CLASS_LOADER)
             logD("Step 6: Swapping ClassLoader...")
             swapClassLoader(activityThread, appInfo, originApk, config, originalApk)
             logSignal("after swapClassLoader")
