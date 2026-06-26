@@ -131,3 +131,51 @@ Runtime note:
 - This is still an evidence layer only. It does not make LSPlant, Xposed,
   native business stubs, method replacement, or no-op patches part of the
   protected-app baseline path.
+
+## 2026-06-26 Route v2 Clarification
+
+Completed:
+
+1. Updated `docs/multiapp-container-lsplant-roadmap.md` with a v2 authoritative
+   route section.
+2. Clarified that the current `Stub clone APK + LoaderFactory` path is a
+   transitional container, not the final architecture.
+3. Set the target route as a user-space virtual install container:
+   - `VirtualPackageRecord` / `VirtualInstanceRecord`
+   - virtual PMS / AMS / Provider / Storage
+   - staged `RuntimeBootstrap`
+   - profile-controlled native diagnostics
+   - optional LSPlant/Xposed runtime
+4. Added hard rules that QQ Reader must default to `CloneProfile.NORMAL` and
+   protected baseline, while `QQ_READER_SPECIAL` remains only a manual
+   legacy/diagnostic comparison path.
+
+QQ Reader baseline evidence:
+
+```text
+.tmp\qqreader-baseline-20260626-174957-summary.txt
+```
+
+Result:
+
+```text
+cloneProfile=NORMAL
+policyMode=BASELINE
+lsPlantEnabled=false
+xposedModulesEnabled=false
+businessNativeStubsEnabled=false
+methodReplacementEnabled=false
+noOpPatchesEnabled=false
+BOOTSTRAP CONFIG..APPLICATION = SUCCESS
+crash=UnsatisfiedLinkError: com.stub.StubApp.interface20()
+```
+
+Engineering interpretation:
+
+- The baseline reached `APPLICATION SUCCESS`, so the next problem is not early
+  container bootstrap.
+- The crash shows the original 360 shell `RegisterNatives` path did not bind
+  `com.stub.StubApp.interface20` in the current container environment.
+- The next phase is `NativeDiagnosticsProfile(register-natives-only)`, not a
+  return to QQ Reader special patching, business stubs, no-op patches, or
+  default LSPlant.

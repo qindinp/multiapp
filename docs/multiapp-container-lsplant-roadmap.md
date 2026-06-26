@@ -1,5 +1,223 @@
 # 自研 MultiApp 容器优先 + 可选 LSPlant 路线计划
 
+> 2026-06-26 v2 更新：本节为当前权威技术路线。后续章节中关于
+> `QQ_READER_SPECIAL`、专项实验、Stub 过渡实现、Native patch、LSPlant
+> 的内容，除非被本节明确保留，否则只作为历史背景和参考，不再作为默认
+> 实施路线。
+
+## 0. v2 当前权威技术路线
+
+### 0.1 一句话结论
+
+MultiApp 的最终路线是 **自研用户态 App 级虚拟安装容器**：
+
+```text
+Virtual Install DB
++ Virtual Instance Model
++ Virtual PMS / AMS / Provider / Storage
++ staged RuntimeBootstrap
++ profile-controlled native diagnostics
++ optional LSPlant/Xposed runtime
+```
+
+当前已经能跑的 `Stub clone APK + LoaderFactory` 不是最终架构，而是
+**Stub-based transitional container**，只承担三件事：
+
+1. 临时启动载体。
+2. 证据采集器。
+3. 与未来完整容器内核的兼容对照组。
+
+不得继续把过渡实现扩展成 QQ 阅读专项 patch 集合，也不得把 LSPlant、Xposed、
+business native stubs、method replacement、no-op patch 作为加固 App baseline
+的默认依赖。
+
+### 0.2 当前现实
+
+当前代码真实运行路线是：
+
+```text
+origin APK
+  -> StubBuilder 生成 clone/stub APK
+  -> 系统安装 stub package
+  -> AppComponentFactory / LoaderFactory 早期接管
+  -> 解压 origin.apk / origin_original.apk
+  -> 修正 LoadedApk / ApplicationInfo / Resources / nativeLibraryDir
+  -> StealthClassLoader 加载 guest dex
+  -> 局部 PMS/Intent/Provider/Storage 补偿
+  -> NativeHookPolicy 控制 baseline / diagnostic / compatibility
+```
+
+这个过渡路线的价值是快速验证和产出证据；问题是它仍然有重打包、stub 包名、
+签名、路径、native namespace、ClassLoader identity 等天然偏差。对普通 App
+可能够用，对 360 加固这类 App 不应作为长期中心路线。
+
+### 0.3 目标架构
+
+目标架构必须拆成下列边界，不能继续堆在 `LoaderFactory.kt`：
+
+```text
+core/model
+  - VirtualPackageRecord
+  - VirtualInstanceRecord
+  - InstallArtifactManifest
+  - CompatibilityMode
+
+core/installer
+  - VirtualInstallService
+  - OriginApkImporter
+  - ArtifactStore
+
+core/instance
+  - InstanceManager
+  - InstanceDataRoot
+  - Virtual user/profile records
+
+core/virtual or core/identity
+  - VirtualPackageManager
+  - VirtualActivityManager
+  - VirtualProviderManager
+  - VirtualStorageManager
+  - VirtualPermissionManager
+
+core/loader
+  - RuntimeBootstrap
+  - BootstrapStage
+  - GuestContextStage
+  - PackageMetadataStage
+  - OriginApkStage
+  - NativeLibrariesStage
+  - ClassLoaderStage
+  - ResourcesStage
+  - VirtualServicesStage
+  - ApplicationStage
+
+core/hook
+  - NativeHookPolicy
+  - NativeDiagnosticsProfile
+  - Jiagu360Profile
+  - optional LSPlant/Xposed runtime
+```
+
+容器目标不是“把某个加固 App 绕过去”，而是让 guest 视角尽量接近真实安装态：
+
+```text
+PackageInfo / ApplicationInfo
+sourceDir / publicSourceDir / nativeLibraryDir / dataDir
+package identity / signature digest / permissions
+provider authority / activity-service-receiver mapping
+storage path / app ops / notification identity
+ClassLoader identity / native library namespace
+JNI_OnLoad / FindClass / RegisterNatives evidence
+```
+
+### 0.4 硬约束
+
+1. `com.qq.reader` 默认必须走 `CloneProfile.NORMAL` + protected baseline，不能自动
+   进入 `QQ_READER_SPECIAL`。
+2. `QQ_READER_SPECIAL` 只允许作为手动启用的 legacy/diagnostic 对照组，不允许作为
+   普通创建入口或 baseline 默认路径。
+3. Protected baseline 必须满足：
+
+```text
+lsPlantEnabled=false
+xposedModulesEnabled=false
+businessNativeStubsEnabled=false
+methodReplacementEnabled=false
+noOpPatchesEnabled=false
+```
+
+4. Native diagnostics 只能观察和记录：`nativeLoad`、`JNI_OnLoad`、`FindClass`、
+   `RegisterNatives`、library path、namespace、class loader。它不是 business stub，
+   不是 no-op patch，也不是 method replacement。
+5. LSPlant/Xposed 是可选扩展层，只能在容器 baseline 和诊断证据足够清楚之后接入；
+   它不能承担 PMS/AMS/Provider/Storage/native namespace 虚拟化职责。
+6. `LoaderFactory.kt` 从现在开始冻结功能增长：不再新增 QQ 阅读业务专项逻辑，新增
+   能力必须进入明确 stage、profile 或 virtual service 模块。
+
+### 0.5 迁移顺序
+
+当前工程顺序调整为：
+
+```text
+Phase A: 冻结 Stub transitional container 的功能增长
+Phase B: VirtualInstall / VirtualInstance 数据模型接入真实创建流程
+Phase C: RuntimeBootstrap stage 化，替换 LoaderFactory 巨型流程
+Phase D: Virtual PMS / AMS / Provider / Storage 边界落地
+Phase E: NativeDiagnosticsProfile，只开诊断，不开 patch
+Phase F: LSPlant/Xposed optional runtime
+Phase G: 兼容矩阵、产品体验和回归测试
+```
+
+近期执行优先级：
+
+1. 把 `VirtualPackageRecord`、`VirtualInstanceRecord`、`InstallArtifactManifest` 从模型
+   推进到 `InstanceManager` / install boundary。
+2. 把 `LoaderFactory.initializeInternal()` 拆成可测试的 `BootstrapStage`。
+3. 建立 `NativeDiagnosticsProfile(register-natives-only)`，用于观察 QQ 阅读 360 壳
+   `com.stub.StubApp.interface20` 为什么未被原壳注册。
+4. 在诊断证据确认前，不允许恢复默认 `QQ_READER_SPECIAL`、business stubs、LSPlant
+   或 no-op patch。
+
+### 0.6 QQ 阅读 baseline 最新证据
+
+真机：`2509FPN0BC`，包：
+`com.qq.reader.clonestub_762c99e31198466f8bad4ed3d82358a0`，时间：
+`2026-06-26 17:48:49`。
+
+证据文件：
+
+```text
+.tmp\qqreader-baseline-20260626-174957-summary.txt
+.tmp\qqreader-baseline-20260626-174957-logcat.txt
+.tmp\qqreader-baseline-20260626-174957-crash.txt
+.tmp\qqreader-baseline-20260626-174957-exit-info.txt
+```
+
+已确认：
+
+```text
+cloneProfile=NORMAL
+policyMode=BASELINE
+lsPlantEnabled=false
+xposedModulesEnabled=false
+businessNativeStubsEnabled=false
+methodReplacementEnabled=false
+noOpPatchesEnabled=false
+```
+
+Bootstrap 已推进到：
+
+```text
+CONFIG SUCCESS
+GUEST_CONTEXT SUCCESS
+PACKAGE_METADATA SUCCESS
+ORIGIN_APK SUCCESS
+NATIVE_LIBS SUCCESS
+CLASS_LOADER SUCCESS
+APPLICATION SUCCESS
+```
+
+当前失败点：
+
+```text
+java.lang.UnsatisfiedLinkError:
+No implementation found for boolean com.stub.StubApp.interface20()
+```
+
+工程判断：这不是“补一个 native stub”的问题，而是 360 壳原始
+`RegisterNatives` 链路没有在当前容器环境里完整完成。下一步必须进入
+`NativeDiagnosticsProfile(register-natives-only)`，观察 `libjiagu_vip.so` 的
+`JNI_OnLoad`、`FindClass`、`RegisterNatives` 目标 class、class loader 和 namespace。
+
+### 0.7 本文档后续内容的阅读规则
+
+后续章节仍保留原始讨论、开源方案取舍、阶段草案和 sprint 草案，但以本 v2 节为准：
+
+- 与 v2 冲突的 QQ 阅读专项默认行为视为废弃。
+- 与 v2 冲突的默认 native patch / business stub / no-op patch 视为废弃。
+- 与 v2 冲突的“LSPlant 作为加固 App 默认依赖”视为废弃。
+- 仍然有效的是：用户态容器优先、hook-free baseline 优先、证据优先、LSPlant 可选。
+
 日期：2026-06-25  
 状态：总方案与实施步骤  
 适用仓库：`C:\Users\Administrator\Desktop\1122\visual app\multiapp`
