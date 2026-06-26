@@ -26,6 +26,12 @@ tmp_apks/
 .mimocode/
 .vscode/
 
+# Local secrets / token refresh outputs
+token_*.json
+*.json.bak
+tools/openai_token_config.json
+tools/__pycache__/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -35,3 +41,13 @@ Thumbs.db
 *~
 .idea/
 *.iml
+
+# QA evidence and artifacts
+__pycache__/
+*.pyc
+screenshot*.png
+evidence/
+
+# Claude Code local state
+.claude/
+.ruff_cache/
