@@ -24,7 +24,9 @@ param(
 
     [string]$StubPackage = "com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8",
 
-    [switch]$PatchFockSign
+    [switch]$PatchFockSign,
+
+    [switch]$PreserveOuterJiagu
 )
 
 Set-StrictMode -Version Latest
@@ -269,14 +271,20 @@ try {
             Where-Object { $_.FullName -match "^lib/[^/]+/libjiagu_vip.*\.so$" } |
             Select-Object -ExpandProperty FullName
     )
-    foreach ($entryName in $outerJiaguEntries) {
-        $entry = $outerZip.GetEntry($entryName)
-        if ($entry) {
-            $entry.Delete()
+    if ($PreserveOuterJiagu) {
+        if ($outerJiaguEntries.Count -gt 0) {
+            Write-Host "Preserved outer jiagu libs: $($outerJiaguEntries -join ', ')"
         }
-    }
-    if ($outerJiaguEntries.Count -gt 0) {
-        Write-Host "Removed outer jiagu libs: $($outerJiaguEntries -join ', ')"
+    } else {
+        foreach ($entryName in $outerJiaguEntries) {
+            $entry = $outerZip.GetEntry($entryName)
+            if ($entry) {
+                $entry.Delete()
+            }
+        }
+        if ($outerJiaguEntries.Count -gt 0) {
+            Write-Host "Removed outer jiagu libs: $($outerJiaguEntries -join ', ')"
+        }
     }
 } finally {
     $outerZip.Dispose()

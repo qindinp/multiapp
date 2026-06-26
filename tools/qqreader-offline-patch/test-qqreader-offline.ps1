@@ -31,6 +31,9 @@
     [ValidateSet("0", "1", "core")]
     [string]$StubAppFallback = "0",
 
+    [ValidateSet("0", "1")]
+    [string]$PatchJiagu = "0",
+
     [switch]$SkipInstall
 )
 
@@ -99,7 +102,7 @@ Invoke-Adb "shell" "am" "force-stop" $Package
 Invoke-Adb "logcat" "-c"
 Invoke-Adb "shell" "setprop" "debug.multiapp.jiagu.explicit_load" "0"
 Invoke-Adb "shell" "setprop" "debug.multiapp.jiagu.prehook_dlopen" "0"
-Invoke-Adb "shell" "setprop" "debug.multiapp.patch_jiagu" "0"
+Invoke-Adb "shell" "setprop" "debug.multiapp.patch_jiagu" $PatchJiagu
 Invoke-Adb "shell" "setprop" "debug.multiapp.online.state_fallback" $OnlineStateFallback
 Invoke-Adb "shell" "setprop" "debug.multiapp.online.run_fallback" $OnlineRunFallback
 Invoke-Adb "shell" "setprop" "debug.multiapp.online.materialize_eqct" $OnlineMaterializeEqct

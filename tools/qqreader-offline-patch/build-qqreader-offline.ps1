@@ -17,7 +17,9 @@ param(
 
     [switch]$PatchFockSign = $true,
 
-    [string]$StubPackage = "com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8"
+    [string]$StubPackage = "com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8",
+
+    [switch]$PreserveOuterJiagu
 )
 
 Set-StrictMode -Version Latest
@@ -121,15 +123,24 @@ if ((Test-Path $OutputApk -PathType Leaf) -and -not $ForceRepack) {
 }
 
 Write-Host "Repack QQ Reader offline clone: $OutputApk"
-if ($SkipVerify -and $PatchFockSign) {
-    & $patchScript -InputCloneApk $InputCloneApk -OutputApk $OutputApk -WorkDir $patchWorkDir -LoaderDex $loaderDex -NativeLibDir $nativeLibDir -StubPackage $StubPackage -SkipVerify -PatchFockSign
-} elseif ($SkipVerify) {
-    & $patchScript -InputCloneApk $InputCloneApk -OutputApk $OutputApk -WorkDir $patchWorkDir -LoaderDex $loaderDex -NativeLibDir $nativeLibDir -StubPackage $StubPackage -SkipVerify
-} elseif ($PatchFockSign) {
-    & $patchScript -InputCloneApk $InputCloneApk -OutputApk $OutputApk -WorkDir $patchWorkDir -LoaderDex $loaderDex -NativeLibDir $nativeLibDir -StubPackage $StubPackage -PatchFockSign
-} else {
-    & $patchScript -InputCloneApk $InputCloneApk -OutputApk $OutputApk -WorkDir $patchWorkDir -LoaderDex $loaderDex -NativeLibDir $nativeLibDir -StubPackage $StubPackage
+$patchArgs = @{
+    InputCloneApk = $InputCloneApk
+    OutputApk = $OutputApk
+    WorkDir = $patchWorkDir
+    LoaderDex = $loaderDex
+    NativeLibDir = $nativeLibDir
+    StubPackage = $StubPackage
 }
+if ($SkipVerify) {
+    $patchArgs.SkipVerify = $true
+}
+if ($PatchFockSign) {
+    $patchArgs.PatchFockSign = $true
+}
+if ($PreserveOuterJiagu) {
+    $patchArgs.PreserveOuterJiagu = $true
+}
+& $patchScript @patchArgs
 if ($LASTEXITCODE -ne 0) {
     throw "Offline repack failed: $LASTEXITCODE"
 }

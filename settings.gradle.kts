@@ -39,6 +39,11 @@ include(":core:installer")
 include(":core:workprofile")
 include(":core:xposed")
 
+// Tool modules
+include(":tools:xposed-api-stub")
+include(":tools:lsposed-rn-capture")
+include(":tools:lsposed-rn-capture-pure")
+
 // Feature modules
 include(":feature:launcher")
 include(":feature:appmanager")
