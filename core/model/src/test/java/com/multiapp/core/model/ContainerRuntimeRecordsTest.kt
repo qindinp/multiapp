@@ -19,6 +19,11 @@ class ContainerRuntimeRecordsTest {
     }
 
     @Test
+    fun `qq reader defaults to hook-free clone profile`() {
+        assertEquals(CloneProfile.NORMAL, CloneProfile.forPackage("com.qq.reader"))
+    }
+
+    @Test
     fun `install manifest tracks origin native libraries`() {
         val manifest = InstallArtifactManifest(
             originPackageName = "com.qq.reader",
@@ -84,7 +89,7 @@ class ContainerRuntimeRecordsTest {
             stubPackageName = "com.multiapp.app.stub.p0",
             userPartitionName = "owner",
             dataRoot = dataRoot,
-            cloneProfile = CloneProfile.QQ_READER_SPECIAL,
+            cloneProfile = CloneProfile.NORMAL,
             compatibilityMode = CompatibilityMode.PROTECTED_BASELINE,
             createdAtMillis = 1000
         )

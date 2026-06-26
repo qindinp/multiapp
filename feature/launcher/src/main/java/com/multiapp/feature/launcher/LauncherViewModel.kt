@@ -76,9 +76,6 @@ class LauncherViewModel @Inject constructor(
             _uiState.update { it.copy(creationStep = "准备中…", error = null) }
 
             try {
-                if (app.cloneProfile == CloneProfile.QQ_READER_SPECIAL) {
-                    throw IllegalArgumentException("QQ 阅读需要使用专项实验路线，不能从普通分身入口创建")
-                }
                 Log.w("LauncherVM", "createInstance called for ${app.packageName}")
                 instanceManager.createInstance(app) { step ->
                     Log.w("LauncherVM", "creation step: $step")
@@ -137,7 +134,8 @@ class LauncherViewModel @Inject constructor(
                             isSystemApp = isSystem,
                             cloneProfile = profile,
                             riskLabel = when {
-                                profile == CloneProfile.QQ_READER_SPECIAL -> "专项实验"
+                                pkg.packageName == "com.qq.reader" -> "Protected baseline"
+                                profile == CloneProfile.QQ_READER_SPECIAL -> "Special experiment"
                                 !hasLauncher -> "无启动入口"
                                 isSystem -> "系统应用"
                                 else -> "普通"
@@ -181,7 +179,7 @@ class LauncherViewModel @Inject constructor(
                     mainActivity = null,
                     isSystemApp = false,
                     cloneProfile = profile,
-                    riskLabel = if (profile == CloneProfile.QQ_READER_SPECIAL) "专项实验" else "APK 文件"
+                    riskLabel = if (packageName == "com.qq.reader") "Protected baseline" else if (profile == CloneProfile.QQ_READER_SPECIAL) "Special experiment" else "APK file"
                 )
                 createInstance(app)
             } catch (e: Throwable) {

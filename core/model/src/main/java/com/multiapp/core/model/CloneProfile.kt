@@ -6,11 +6,6 @@ enum class CloneProfile {
     QQ_READER_SPECIAL;
 
     companion object {
-        fun forPackage(packageName: String): CloneProfile {
-            return when (packageName) {
-                "com.qq.reader" -> QQ_READER_SPECIAL
-                else -> NORMAL
-            }
-        }
+        fun forPackage(packageName: String): CloneProfile = NORMAL
     }
 }

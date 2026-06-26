@@ -604,9 +604,7 @@ private fun AppPickerSheet(
                             app = app,
                             onClick = {
                                 Log.w("LauncherScreen", "AppPickerItem clicked: ${app.packageName}")
-                                if (app.cloneProfile == CloneProfile.QQ_READER_SPECIAL) {
-                                    Toast.makeText(context, "QQ 阅读需要使用专项实验路线", Toast.LENGTH_SHORT).show()
-                                } else if (app.mainActivity == null) {
+                                if (app.mainActivity == null) {
                                     Toast.makeText(context, "该应用没有启动入口，不能创建普通分身", Toast.LENGTH_SHORT).show()
                                 } else {
                                     onAppSelected(app)
