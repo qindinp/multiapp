@@ -12,7 +12,6 @@
     <application
         android:name=".MultiAppApplication"
         android:allowBackup="false"
-        android:extractNativeLibs="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:supportsRtl="true"
@@ -26,6 +25,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- v2 hosted container entry point (internal only) -->
+        <activity
+            android:name=".container.ContainerActivity"
+            android:exported="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 
         <!-- FileProvider for sharing Stub APK with system installer -->
         <provider
