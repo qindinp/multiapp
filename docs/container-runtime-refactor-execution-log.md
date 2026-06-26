@@ -56,3 +56,31 @@ Move from passive records to the first runtime integration slice:
    selection.
 4. Add a `Jiagu360Profile` detect/verify skeleton that records evidence only
    and does not patch business behavior.
+
+## 2026-06-26 Follow-up Slice
+
+Completed:
+
+1. Added `Jiagu360Profile` as a pure evidence profile:
+   - detects `libjiagu*.so`
+   - detects `com.stub.StubApp` / `com.qihoo.util.StubApp`
+   - verifies loaded Jiagu native library evidence
+   - verifies original-shell `RegisterNatives` evidence for
+     `com.stub.StubApp`
+   - rejects MultiApp fallback `RegisterNatives` as success evidence
+   - treats `UnsatisfiedLinkError: com.stub.StubApp.interface20` as
+     incomplete verification
+2. Added `Jiagu360ProfileTest`.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:hook:testDebugUnitTest --tests com.multiapp.core.hook.Jiagu360ProfileTest "-Dkotlin.compiler.execution.strategy=in-process" --console=plain
+.\gradlew.bat :core:hook:testDebugUnitTest "-Dkotlin.compiler.execution.strategy=in-process" --console=plain
+```
+
+Result: `BUILD SUCCESSFUL`
+
+Next target is now the first integration point: feed real runtime/log evidence
+into `Jiagu360Profile` without enabling fallback stubs, LSPlant, Xposed modules,
+method replacement, or no-op patches in protected-app baseline mode.
