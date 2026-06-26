@@ -10,6 +10,9 @@ Use this page as the current documentation entry point.
 - `docs\container-runtime-refactor-execution-log.md`: execution log for the
   `container-runtime-refactor` branch, including completed foundation slices
   and verification commands.
+- `docs\container-runtime-refactor\v2-in-repo-kernel-rewrite-plan.md`: concrete
+  execution plan for the MultiApp v2 in-repo kernel rewrite, including phases,
+  module boundaries, verification matrix, and first implementation tasks.
 - `docs\current-repository-state.md`: current branch state, commit scope,
   active QQ Reader blocker, and verification command.
 - `docs\qqreader-offline-patch.md`: QQ Reader offline clone patch flow and the

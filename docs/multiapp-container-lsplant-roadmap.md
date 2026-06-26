@@ -398,6 +398,20 @@ Plan B 分层：
 Plan B 不包括默认补 `interface20`、默认替换壳方法、默认 no-op patch、默认破坏壳或默认
 启用 LSPlant。兼容壳的方向是让原壳在容器内正常完成自己的初始化，而不是接管壳。
 
+### 0.16 v2 执行形态：仓内内核重写
+
+MultiApp v2 不另起全新仓库，也不继续沿旧 `Stub clone APK + LoaderFactory` 路线小修小补。
+当前执行形态是 **in-repo kernel rewrite**：保留当前仓库、分支、构建系统、设备验证资产
+和历史证据，在 canonical Gradle module 中建设新的 container kernel。
+
+执行文档：
+
+```text
+docs/container-runtime-refactor/v2-in-repo-kernel-rewrite-plan.md
+```
+
+该文档是后续拆分任务、模块落点、阶段退出条件、验证矩阵和第一轮实现任务的执行依据。
+
 日期：2026-06-25  
 状态：总方案与实施步骤  
 适用仓库：`C:\Users\Administrator\Desktop\1122\visual app\multiapp`

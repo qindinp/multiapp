@@ -220,3 +220,28 @@ Correction:
    handling.
 4. Changed Plan B ordering so the first fallback is to continue fixing the
    container kernel, not to prematurely mark a protected App as unsupported.
+
+## 2026-06-26 v2 In-Repo Kernel Rewrite Plan
+
+Completed:
+
+1. Added `docs/container-runtime-refactor/v2-in-repo-kernel-rewrite-plan.md` as
+   the concrete execution plan for the full MultiApp v2 rewrite.
+2. Locked the execution decision as an in-repo kernel rewrite:
+   - keep the current repository, branch, build system, device evidence, and
+     legacy runtime as comparison assets
+   - freeze `Stub clone APK + LoaderFactory` feature growth
+   - build the new container kernel in canonical Gradle modules
+   - gradually move creation, instance identity, virtual services, bootstrap,
+     and diagnostics to v2 boundaries
+3. Added roadmap and docs index links so the rewrite plan becomes the active
+   execution entry point.
+
+Next implementation target:
+
+```text
+VirtualInstallService + InstallRecordStore
+-> InstanceManager + VirtualInstanceRecord persistence
+-> legacy Stub launcher reads instance records
+-> RuntimeBootstrap takes over LoaderFactory outer flow
+```
