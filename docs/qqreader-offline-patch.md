@@ -3771,3 +3771,1046 @@ pidof com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
 - 下一步要继续做真实登录，不能停在 `onError` fallback：
   - 优先继续追真实 native 注册入口，确认为什么主进程 `libjiagu_vip.so` 没有为 `YWLoginManager` 注册动作方法。
   - 备选路线是实现 Java 网络登录链路，但还需要找到真实接口、签名参数、响应结构，以及绕过/替代 native `saveLoginStatus(...)` 的登录态落盘路径。
+
+### 2026-06-18 v203 Java 密码登录链路继续推进
+
+v202 证明直接运行 `YWLoginManager$g0` 会继续撞到缺失 native：
+
+```text
+java.lang.UnsatisfiedLinkError:
+No implementation found for com.yuewen.ywlogin.login.YWLoginManager.getSignCallback()
+```
+
+v203 在业务 native stub 中补齐：
+
+```text
+YWLoginManager.getSignCallback()
+YWLoginManager.setSignCallback(ParamsSignCallback)
+```
+
+同时把 `QqReaderYwLoginJavaDiag.notifyError(...)` 改为主线程派发，避免 worker 线程直接回调 UI。
+
+构建与安装：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :core:hook:assembleDebug
+BUILD SUCCESSFUL
+
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :core:loader:testDebugUnitTest :app:assembleDebug
+BUILD SUCCESSFUL
+
+.tmp\qqreader-c9f8-neutralized-v203-ywlogin-sign-callback-signed.apk
+device=192.168.2.86:43063
+```
+
+启动注册证据：
+
+```text
+nativeRegisterBusinessStubs: com.yuewen.ywlogin.login.YWLoginManager.getSignCallback OK
+nativeRegisterBusinessStubs: com.yuewen.ywlogin.login.YWLoginManager.setSignCallback OK
+nativeRegisterBusinessStubs: registered=15 failed=0
+QqReaderYwLoginJavaDiag: java login diag installed=true results=[true, true, true]
+Stage2 YWLogin native binding report: pwdLogin=missing ptr=0x0 sendPhoneCode=missing ptr=0x0 qrCodeV2=missing ptr=0x0
+```
+
+手动账号密码登录后，v203 已经不再因为 `YWLoginManager.pwdLogin(...)` 或 `getSignCallback()` 缺失而闪退，Java fallback 能跑完整个网络任务：
+
+```text
+QqReaderYwLoginJavaDiag: pwdLogin before ...
+QqReaderYwLoginJavaDiag: pwdLogin native missing; suppressing process crash ...
+QqReaderYwLoginJavaDiag: pwdLogin java fallback scheduled
+QqReaderYwLoginJavaDiag: pwdLogin java task running
+stub_ywlogin_getSignCallback: returning instance callback=0x0
+YWLoginMtaNet: response.isSuccessful() is true
+QqReaderYwLoginJavaDiag: pwdLogin java task returned
+```
+
+但登录还没有成功，界面仍停在登录页，业务层失败日志为：
+
+```text
+YWLoginNewMtaUtil: /sdk/staticlogin - 350
+YWLoginNewMtaUtil: 阅文账号登录失败 - yw_login - 3
+```
+
+结论：
+
+- v203 解决的是登录点击闪退和 `getSignCallback()` native 缺失。
+- 当前阻塞已经从“native 未注册导致进程崩溃”推进到“Java 登录网络任务返回业务失败”。
+- 不能把 v203 视为登录完成；下一步需要抓取脱敏后的响应 `code/message/data.nextAction`，判断是账号密码业务错误、风控/滑块/短信二次验证，还是登录态保存 native 缺失。
+
+### 2026-06-18 v204 响应解析诊断
+
+为避免继续凭 `YWLoginNewMtaUtil` 的聚合码猜测，v204 在 `QqReaderYwLoginJavaDiag` 新增两个 LSPlant 诊断点：
+
+```text
+b.a.a.search.qdaa.search(YWHttpResponse, Handler, YWCallBack, boolean)
+b.a.a.search.qdaa.search(int, String, Handler, YWCallBack)
+```
+
+日志只记录脱敏诊断字段：
+
+```text
+response success/code/businessCode
+originUrl/lastActionUrl 去除 query
+apiCode/message
+data keys
+data.nextAction
+hasYwGuid/hasYwKey/hasTicket/hasToken/hasPhoneKey
+```
+
+明确不打印账号、密码、token、ticket、完整响应体。v204 的目标是确认真实失败分支，再决定下一步：
+
+- `apiCode != 0`：优先处理服务端业务错误或风控路径。
+- `nextAction` 存在：实现对应滑块/短信/验证链路，而不是强行写登录态。
+- `apiCode == 0` 且进入 `saveLoginStatus(...)` 后失败：再补 `saveLoginStatus(JSONObject)` 等登录态 native stub。
+
+### 2026-06-18 v205/v206 手机号 Java 登录链路
+
+v205 在 `QqReaderYwLoginJavaDiag` 中继续扩展手机验证码链路：
+
+```text
+YWLogin.sendPhoneCode(Context, String, int, int, YWCallBack)
+  -> native missing
+  -> YWLoginManager$c Java task fallback
+
+YWLogin.phoneLogin(String, String, String, YWCallBack)
+  -> native missing
+  -> 从 callback.this$0.mSessionKey 取短信 sessionKey
+  -> YWLoginManager$z Java task fallback
+```
+
+静态依据：
+
+```text
+YWLoginManager$c:
+  写入 phone/type/sessionKey/code/sig/needRegister
+  POST Urls.I()
+  成功后 callback.onSendPhoneCode(sessionKey)
+
+YWLoginManager$z:
+  写入 phone/phonecode/sessionKey
+  POST Urls.p()
+  走 qdaa.i(...) 解析并保存登录状态
+
+LoginModel$1.onSendPhoneCode(sessionKey):
+  同步写回 mPhoneKey 和 mSessionKey
+```
+
+v205 构建和打包通过：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :app:assembleDebug
+BUILD SUCCESSFUL
+
+.tmp\qqreader-c9f8-neutralized-v205-ywlogin-phone-java-fallback-signed.apk
+```
+
+v205 启动证据：
+
+```text
+QqReaderYwLoginJavaDiag: java login diag installed=true results=[true, true, true, true, true]
+nativeRegisterBusinessStubs: registered=15 failed=0
+Stage2 YWLogin native binding report: pwdLogin=missing ptr=0x0 sendPhoneCode=missing ptr=0x0 qrCodeV2=missing ptr=0x0
+```
+
+v205 用 ADB 坐标点击“我的”页登录横幅没有触发跳转；直接 `adb shell am start` 非导出 `QRLoginActivity` 被系统拒绝：
+
+```text
+java.lang.SecurityException:
+Permission Denial: starting Intent ... QRLoginActivity ... not exported from uid 10424
+```
+
+因此 v206 新增一个只用于 QQ 阅读专项调试的自动打开入口：
+
+```text
+debug.multiapp.ywlogin.auto_open=1
+```
+
+实现位置：`LoaderFactory.registerActivityContextWrapper(...).onActivityResumed`。当满足以下条件时，使用当前 Activity 在同包进程内启动 `com.qq.reader.login.client.impl.QRLoginActivity`：
+
+```text
+cloneProfile == QQ_READER_SPECIAL 或 originalPkg == com.qq.reader
+debug.multiapp.ywlogin.auto_open=1
+当前 Activity 不是 QRLoginActivity / YWLogin UI
+```
+
+默认不开启，不影响普通启动。v206 构建和打包通过：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :app:assembleDebug
+BUILD SUCCESSFUL
+
+.tmp\qqreader-c9f8-neutralized-v206-ywlogin-auto-open-signed.apk
+```
+
+v206 真机验证：
+
+```text
+device=192.168.2.86:43063
+package=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+pid=4049
+
+QQ Reader auto_open login started from com.qq.reader.activity.launch.DefaultAliasSplashActivity
+topResumedActivity=.../com.qq.reader.login.client.impl.QRLoginActivity
+```
+
+随后已通过 UI tree 进入手机号验证码页：
+
+```text
+resource-id="com.qq.reader:id/ywlogin_phoneInput" text="请输入手机号"
+resource-id="com.qq.reader:id/ywlogin_sendCode" text="获取验证码" enabled="false"
+resource-id="com.qq.reader:id/ywlogin_codeInput" text="请输入短信验证码"
+resource-id="com.qq.reader:id/ywlogin_phoneLoginOrBind" text="登 录" enabled="false"
+```
+
+当前状态：
+
+- v206 解决了“ADB 无法稳定打开登录页”的验证阻塞。
+- `sendPhoneCode/phoneLogin` Java fallback 已实现，但还没有用户输入手机号并触发“获取验证码”的运行证据。
+- 下一步必须在真机上输入手机号并点击“获取验证码”，抓取以下日志判断：
+
+```text
+sendPhoneCode before
+sendPhoneCode native missing
+sendPhoneCode java fallback scheduled/running/returned
+response parser before/after
+login error dispatch
+```
+
+如果验证码发送成功，再输入短信验证码并点击登录，继续抓：
+
+```text
+phoneLogin before
+phoneLogin native missing
+phoneLogin java fallback scheduled/running/returned
+response parser before/after
+saveLoginStatus / AndroidRuntime / FATAL EXCEPTION
+```
+
+### 2026-06-18 v207/v208 阅文账号登录参数链路修复
+
+用户确认主线不是验证码登录，而是“阅文账号登录”；验证码页“获取验证码”控件禁用属于旁支。v207 的真机日志仍然有价值：它证明短信 Java fallback 已经能拦住 native missing，不再让进程崩溃，但公共参数为空：
+
+```text
+sendPhoneCode native missing; suppressing process crash
+sendPhoneCode java fallback params normalized=true ywguid=false ywkey=false
+response parser before ... origin=https://ptlogin.yuewen.com/sdk/sendphonecode ... apiCode=3 message=登录失败，请稍后重试
+```
+
+同一轮密码登录日志也显示 Java fallback 能跑 `YWLoginManager$g0`，但服务端返回：
+
+```text
+origin=https://ptlogin.yuewen.com/sdk/staticlogin
+apiCode=3 message=登录失败，请稍后重试
+hasYwGuid=false hasYwKey=false
+```
+
+静态 dump 复核：
+
+```text
+YWLoginManager$g0.run():
+  manager.getDefaultParameters()
+  put username
+  put password(md5/encoded)
+  POST Urls.s() -> /sdk/staticlogin
+```
+
+因此当前阻塞不是 `LoginActivity/LoginPresenter/LoginModel` UI 层，也不是 LSPlant。阻塞点是 `YWLoginManager.getDefaultParameters()` 返回的公共参数不完整，导致 `/sdk/staticlogin` 和 `/sdk/sendphonecode` 都被服务端以业务码 3 拒绝。
+
+v208 修复点：
+
+```text
+native-hook.cpp:
+  registerParameter(IParameterGetter) 保存原 App 的 parameterGetter
+  setDefaultParameters(Application, ContentValues) 保存 mContext/mDefaultParameters
+  resetParameter(key, value) 写入缓存
+  getDefaultParameters()/getCommonParamaters() 返回缓存并合并 parameterGetter.getParameter()
+  日志只输出 ContentValues key 集合，不输出 token/账号/密码等值
+
+QqReaderYwLoginJavaDiag.kt:
+  pwdLogin Java fallback 增加 ywguid/ywkey 是否存在的脱敏诊断
+```
+
+v208 本地验证：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :core:hook:assembleDebug
+BUILD SUCCESSFUL
+
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :app:assembleDebug
+BUILD SUCCESSFUL
+```
+
+下一轮真机验证重点：
+
+```text
+stub_ywlogin_registerParameter_tracked: stored getter=...
+stub_ywlogin_setDefaultParameters_tracked: ... keys=[...]
+stub_ywlogin_getDefaultParameters_tracked: ... mergedDynamic=1 keys=[..., ywguid, ywkey, ...]
+pwdLogin java fallback params ywguid=true ywkey=true
+response parser before ... /sdk/staticlogin ... apiCode=...
+```
+
+如果 v208 仍然返回 `apiCode=3` 且 `ywguid/ywkey=true`，下一步才进入签名回调 `ParamsSignCallback.signParams(...)` 或服务端风控链路，而不是继续改 UI 点击路径。
+
+### 2026-06-18 v209-v213 阅文登录签名回调与最终请求诊断
+
+v209-v213 继续沿“阅文账号密码登录”主线验证，目标是确认 `/sdk/staticlogin` 失败到底是请求签名缺失，还是更早的真实 native 登录链路未恢复。
+
+本轮关键变化：
+
+```text
+QqReaderYwLoginJavaDiag.kt:
+  YWLogin.init(...) 后检查并注入 ParamsSignCallback 动态代理
+  hook YWLogin.setParamsSignCallback(...) 记录原 App 是否设置回调
+  hook YWHttp.post(String, ContentValues) 记录脱敏入参
+  hook OkHttpClient.newCall(Request) 记录最终 ptlogin 请求是否带关键 header
+  pwdLogin/sendPhoneCode/phoneLogin native missing 时继续 Java task fallback
+```
+
+v212 构建、安装、启动和登录点击验证通过：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :core:hook:assembleDebug :app:assembleDebug
+BUILD SUCCESSFUL
+
+.tmp\qqreader-c9f8-neutralized-v212-ywlogin-head-sign-signed.apk
+```
+
+v212 真机证据：
+
+```text
+ParamsSignCallback 已注入
+signParams(...) 被 OkPostRunnable.post() 调用
+QqReaderSignCompat.sign(...) 通过 FockRT 产出 38 位签名
+请求已补 qrsn/c_version/version_code/ttime/ssign/ssign_version/signature/sign
+```
+
+但服务端仍然返回：
+
+```text
+origin=https://ptlogin.yuewen.com/sdk/staticlogin
+apiCode=3
+message=登录失败，请稍后重试
+```
+
+v213 继续增加 `OkHttpClient.newCall(Request)` 最终请求诊断，并补 `trace_id`。该版本验证了“最终发出的 request header”已经包含当前能补齐的签名字段：
+
+```text
+qrsn=present
+c_version=present
+version_code=present
+ttime=present
+ssign=present
+ssign_version=present
+signature=present
+sign=present
+trace_id=present
+```
+
+v213 证据文件：
+
+```text
+.tmp\qqreader-v213-ui.xml
+.tmp\qqreader-v213-login-click-20260618-181912-logcat.txt
+.tmp\qqreader-v213-login-click-20260618-181912-filtered.txt
+```
+
+结论：
+
+- 当前不是 LSPlant 初始化失败；`QqReaderYwLoginJavaDiag`、`ParamsSignCallback`、`OkHttpClient.newCall(...)` hook 都已生效。
+- 当前不是“最终请求没带签名 header”；v213 已确认最终 `Request` 带有关键签名 header。
+- v175 的成功案例是免费章节正文/标题链路，不是阅文账号登录成功案例，不能直接当作登录修复回滚目标。
+- 登录主阻塞仍是 `YWLoginManager.pwdLogin/sendPhoneCode/qrCodeV2` 的真实 native 实现没有注册；Java fallback 能发请求，但服务端业务返回 `apiCode=3`。
+- `ParamsSignCallback.signParams(...)` 在 `OkPostRunnable.post()` 中发生在 `FormBody.build()` 之后，因此它只能补 header，不能修改已经构造好的 body。
+- 继续只补 header 已经没有收益。下一步应该查真实登录 native 注册入口，尤其确认离线 patch 移除 outer `libjiagu_vip*.so` 是否让 `YWLoginManager` 动作方法永远缺失。
+
+后续实验建议：
+
+```text
+1. 做一个保留 outer libjiagu_vip*.so 的实验包。
+2. 启动后抓 RegisterNatives YWLoginManager 日志。
+3. 如果出现非 libmultiapp-native.so 的 pwdLogin/sendPhoneCode/qrCodeV2 函数指针，
+   优先走 wrapped_ywlogin_* 转发真实 native。
+4. 如果仍然没有真实 native 注册，再继续深挖 Java fallback 的 body 等价性：
+   password 加密、ticket/ywguid/ywkey 生成、fetchSettings/refreshParameters/getLoginData。
+```
+
+### 2026-06-18 v213 端口 37839 现场状态
+
+设备切换到：
+
+```text
+device=192.168.2.86:37839
+```
+
+现场确认：
+
+```text
+package=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+main pid=26151
+pushcore pid=20049
+lastUpdateTime=2026-06-18 18:16:51
+```
+
+`ApplicationExitInfo` 中出现一次主进程 native crash：
+
+```text
+timestamp=2026-06-18 18:17:09.297
+process=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+reason=5 (APP CRASH(NATIVE))
+status=11
+```
+
+但现场进程随后又被拉起并保持存活，当前 UI 停在“阅文账号登录”页，账号/密码输入框已有内容，登录按钮可点击。后续日志和文档必须继续脱敏，不能记录账号、密码、token、ticket 明文。
+
+### 2026-06-18 原版 QQ 阅读登录对比
+
+为避免继续只看分身侧日志，已在同一台设备、同一网络、同一账号输入状态下启动原版 QQ 阅读并抓取登录点击日志：
+
+```text
+device=192.168.2.86:37839
+package=com.qq.reader
+versionName=8.5.1.890
+versionCode=414
+entry=com.qq.reader/.activity.DefaultAliasActivity
+pid=19379
+```
+
+证据文件：
+
+```text
+.tmp\qqreader-original-login-click-20260618-182557-logcat.txt
+.tmp\qqreader-original-login-click-20260618-182557-filtered.txt
+.tmp\qqreader-original-login-click-20260618-182557-wide-filtered.txt
+.tmp\qqreader-original-login-click-20260618-182557-ui.xml
+.tmp\qqreader-original-login-key-extract.txt
+```
+
+原版点击“阅文账号登录”后的关键路径：
+
+```text
+YWLoginMtaNet: response.isSuccessful() is true
+YWLoginNewMtaUtil: /sdk/staticlogin - 247
+YWLoginNewMtaUtil: 账号登录触发风控后进行滑块登录，触发 - yw_login_action_tencentCaptcha - 1
+YWLoginNewMtaUtil: 二次验证-腾讯滑块触发 - tencentCaptcha_verification - 1
+YWLoginNewMtaUtil: 腾讯滑块验证成功 - tencentCaptcha_verification - 2
+YWLoginNewMtaUtil: /sdk/checkcodelogin - 280
+YWLoginNewMtaUtil: 阅文账号登录失败 - yw_login - 3
+YWLoginNewMtaUtil: 账号登录触发风控后进行滑块登录，失败 - yw_login_action_tencentCaptcha - 3
+```
+
+原版没有主进程 Java crash 或 native crash：
+
+```text
+pidof com.qq.reader -> 19379
+dumpsys activity exit-info com.qq.reader:
+  本轮只有 WebView isolated process 被系统回收，以及手动 force-stop 记录；
+  没有 com.qq.reader 主进程 APP CRASH。
+```
+
+和分身 v213 的关键差异：
+
+```text
+分身 v213:
+  pwdLogin native missing
+  Java fallback 调用 YWLoginManager$g0
+  YWHttp.post /sdk/staticlogin body keys=[appid, areaid, auto, autotime, devicetype, ibex, osversion, password, qimei, qimei36, sdkversion, source, ticket, username, version]
+  ywguid=false ywkey=false
+  final Request headers 包含 qrsn/c_version/version_code/ttime/ssign/ssign_version/signature/sign/trace_id
+  response apiCode=3 data=null
+  未进入 tencentCaptcha 分支
+
+原版:
+  /sdk/staticlogin 返回 247
+  进入 tencentCaptcha 二次验证
+  滑块成功后继续 /sdk/checkcodelogin
+```
+
+当前更准确的目标不是“让分身直接登录成功”，而是先让分身请求等价到原版行为：`/sdk/staticlogin -> 247 -> tencentCaptcha`。只要分身仍然直接 `apiCode=3` 且 `data=null`，说明 Java fallback 请求与原版真实登录请求仍不等价。
+
+下一步优先级：
+
+```text
+1. 恢复或捕获真实 YWLoginManager.pwdLogin native 注册。
+   这是最可能让 staticlogin 从 apiCode=3 变成原版 247 的路径。
+
+2. 做保留 outer libjiagu_vip*.so 的实验包，抓：
+   RegisterNatives YWLoginManager: captured pwdLogin original=...
+   RegisterNatives YWLoginManager: captured sendPhoneCode original=...
+   wrapped_ywlogin_pwdLogin: forwarding original=...
+
+3. 如果真实 native 仍无法恢复，再比较 Java fallback body：
+   是否缺少 native 生成的 ywguid/ywkey 或其它 body 字段；
+   是否密码加密/签名前 raw 串与真实 native 不一致；
+   是否需要先跑 fetchSettings/refreshParameters 后再 pwdLogin。
+```
+
+### 2026-06-18 v214 preserve outer jiagu 实验
+
+为验证“离线 patch 删除 outer `libjiagu_vip*.so` 是否导致登录 native 丢失”，新增并构建了保留 outer jiagu 的实验包：
+
+```text
+apk=.tmp\qqreader-c9f8-neutralized-v214-preserve-outer-jiagu-signed.apk
+device=192.168.2.86:37839
+package=com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+lastUpdateTime=2026-06-18 18:37:10
+```
+
+脚本变化：
+
+```text
+tools\qqreader-offline-patch\patch-qqreader-clone.ps1
+  新增 -PreserveOuterJiagu
+
+tools\qqreader-offline-patch\build-qqreader-offline.ps1
+  新增 -PreserveOuterJiagu，并改为 hashtable splatting 调用 patch 脚本
+```
+
+v214 APK 内容同时包含 outer jiagu 与 MultiApp native：
+
+```text
+lib/arm64-v8a/libjiagu_vip.so
+lib/arm64-v8a/libjiagu_vip_x86.so
+lib/armeabi-v7a/libjiagu_vip.so
+lib/armeabi-v7a/libjiagu_vip_x86.so
+lib/arm64-v8a/libmultiapp-native.so
+lib/armeabi-v7a/libmultiapp-native.so
+```
+
+证据文件：
+
+```text
+.tmp\qqreader-v214-preserve-jiagu-start-20260618-183903-logcat.txt
+.tmp\qqreader-v214-preserve-jiagu-start-20260618-183903-filtered.txt
+.tmp\qqreader-v214-preserve-jiagu-start-20260618-183903-ui.xml
+```
+
+关键日志：
+
+```text
+patchJiaguSo: disabled; preserving original libjiagu_vip.so
+PackerRuntime.Jiagu: detect: libjiagu_vip.so found at ...
+nativeloader: Load .../libjiagu_vip.so ... ok
+nativeGotHookLibrary: hooking GOT for libjiagu_vip.so
+got_hook: hooked 7 functions in ... libjiagu_vip.so
+```
+
+但真实登录动作 native 仍未恢复：
+
+```text
+nativeRegisterBusinessStubs: YWLoginManager action fallback disabled; waiting for real SDK RegisterNatives
+Stage2 YWLogin native binding report: pwdLogin=missing ptr=0x0 sendPhoneCode=missing ptr=0x0 qrCodeV2=missing ptr=0x0
+Stage2 YWLogin login actions are not bound; pwdLogin/sendPhoneCode will fail unless debug.multiapp.ywlogin.action_fallback=1
+```
+
+结论：
+
+```text
+保留 outer libjiagu_vip*.so 能让 jiagu 加载并应用 GOT hook，
+但没有让原版 YWLoginManager.pwdLogin/sendPhoneCode/qrCodeV2 注册回来。
+
+因此“删除 outer jiagu”不是登录 native 丢失的唯一原因。
+下一步要定位真正注册登录动作 native 的库或 native 自检条件。
+```
+
+### 2026-06-18 18:42 原版二次登录采样
+
+按同口径重新抓取原版 `com.qq.reader` 登录记录，用户操作同一条“阅文账号登录”链路。日志已脱敏，敏感值不写入文档。
+
+证据文件：
+
+```text
+.tmp\qqreader-original-live-20260618-184254-logcat.txt
+.tmp\qqreader-original-live-20260618-184254-filtered.txt
+.tmp\qqreader-original-live-20260618-184254-ui.xml
+```
+
+关键路径：
+
+```text
+YWLoginNewMtaUtil: 阅文账号登录触达 - yw_login - 1
+YWLoginMtaNet: response.isSuccessful() is true
+YWLoginNewMtaUtil: /sdk/staticlogin - 246
+YWLoginNewMtaUtil: 账号登录触发风控后进行滑块登录，触发 - yw_login_action_tencentCaptcha - 1
+YWLoginNewMtaUtil: 二次验证-腾讯滑块触发 - tencentCaptcha_verification - 1
+YWLoginNewMtaUtil: 腾讯滑块验证成功 - tencentCaptcha_verification - 2
+YWLoginNewMtaUtil: /sdk/checkcodelogin - 318
+YWLoginNewMtaUtil: 阅文账号登录失败 - yw_login - 3
+YWLoginNewMtaUtil: 账号登录触发风控后进行滑块登录，失败 - yw_login_action_tencentCaptcha - 3
+```
+
+对比结论更新：
+
+```text
+原版两次采样都能从 /sdk/staticlogin 进入 tencentCaptcha 风控链路。
+分身 v213/v214 仍然没有真实 pwdLogin native，Java fallback 只能自造 /sdk/staticlogin 请求。
+分身请求虽然补了 qrsn/c_version/version_code/ttime/ssign/ssign_version/signature/sign/trace_id，
+但仍缺少原版 native 登录动作产生的等价状态，表现为 apiCode=3、data=null、没有 tencentCaptcha。
+```
+
+### 2026-06-18 19:12 v215 原版对比与结论
+
+v215 改动目标：让 `YWLoginManager.pwdLogin/sendPhoneCode/qrCodeV2` 在真实 native 指针缺失时主动抛出
+`UnsatisfiedLinkError`，由 Java 侧诊断 hook 捕获并进入已有 Java fallback，避免直接崩溃。同时默认开启
+`debug.multiapp.ywlogin.action_fallback`，显式设置 `0/false` 才关闭。
+
+构建与安装：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :app:assembleDebug
+
+.\tools\qqreader-offline-patch\build-qqreader-offline.ps1 `
+  -VersionTag v215-action-fallback-throw `
+  -InputCloneApk .tmp\qqreader-c9f8-current-base.apk `
+  -OutputApk .tmp\qqreader-c9f8-neutralized-v215-action-fallback-throw-signed.apk `
+  -ForceRepack -SkipVerify -PreserveOuterJiagu
+
+adb install -r -d .tmp\qqreader-c9f8-neutralized-v215-action-fallback-throw-signed.apk
+```
+
+证据文件：
+
+```text
+.tmp\qqreader-original-login-live-20260618-190612-logcat.txt
+.tmp\qqreader-original-login-live-20260618-190612-narrow.txt
+.tmp\qqreader-original-login-live-20260618-190612-ui.redacted.xml
+
+.tmp\qqreader-v215-login-live-20260618-190904-logcat.txt
+.tmp\qqreader-v215-login-live-20260618-190904-narrow.txt
+.tmp\qqreader-v215-login-live-20260618-190904-ui.redacted.xml
+```
+
+原版 `com.qq.reader` 同路径“阅文账号登录”链路：
+
+```text
+YWLoginNewMtaUtil: /sdk/staticlogin - 182
+YWLoginNewMtaUtil: 账号登录触发风控后进行滑块登录，触发 - yw_login_action_tencentCaptcha - 1
+YWLoginNewMtaUtil: 二次验证-腾讯滑块触发 - tencentCaptcha_verification - 1
+YWLoginNewMtaUtil: 腾讯滑块验证成功 - tencentCaptcha_verification - 2
+YWLoginNewMtaUtil: /sdk/checkcodelogin - 253
+YWLoginNewMtaUtil: 账号登录触发风控后进行滑块登录，失败 - yw_login_action_tencentCaptcha - 3
+```
+
+v215 分身同路径链路：
+
+```text
+nativeInitLsplant: LSPlant initialized successfully
+nativeRegisterBusinessStubs: YWLoginManager action fallback enabled by debug.multiapp.ywlogin.action_fallback
+nativeRegisterBusinessStubs: registered=17 failed=0
+PackerRuntime.Jiagu: installStubFallback: QQ Reader StubApp native binding report: interface5=missing ptr=0x0 interface11=missing ptr=0x0 interface20=missing ptr=0x0 interface21=missing ptr=0x0
+stub_interface11 fallback value=59494
+wrapped_ywlogin_pwdLogin: original native not registered; throwing for Java fallback
+pwdLogin native missing; suppressing process crash and notifying callback
+pwdLogin java fallback scheduled
+signParams signed via com.multiapp.core.loader.QqReaderSignCompat.sign rawLen=1193 signLen=38
+YWLoginNewMtaUtil: /sdk/staticlogin - 154
+YWHttp.post after ... apiCode=3 message=登录失败，请稍后重试 data=null nextAction=none
+```
+
+退出状态：
+
+```text
+pidof com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8 => 27220
+本轮登录后进程仍在，crash buffer 无新 FATAL；最近 exit-info 是本轮测试前 force-stop。
+```
+
+当前结论：
+
+```text
+1. v215 证明 LSPlant 初始化不是当前登录失败的阻塞点。
+2. Java fallback 已能注入 ParamsSignCallback，并通过 QqReaderSignCompat 生成 38 位签名。
+3. 即使请求头和 sign/ssign 补齐，分身仍只返回 apiCode=3，没有进入原版的 tencentCaptcha/checkcodelogin。
+4. 关键缺口仍是原版壳侧 StubApp.interface11(59494) 没有真实执行，导致 YWLoginManager.pwdLogin/sendPhoneCode/qrCodeV2 的真实 native 指针为 0x0。
+5. 下一步不应继续堆 Java fallback 参数，而应恢复或复现 interface11(59494) 对 YWLoginManager 登录动作 native 的真实注册路径。
+```
+
+### 2026-06-18 20:09 原版重抓对比
+
+设备与对象：
+
+```text
+device: 192.168.2.86:37839
+original package: com.qq.reader
+clone reference: com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8
+```
+
+证据文件：
+
+```text
+.tmp\qqreader-original-compare-20260618-200948-logcat.txt
+.tmp\qqreader-original-compare-20260618-200948-narrow.redacted.txt
+.tmp\qqreader-original-compare-20260618-200948-keyflow.redacted.txt
+.tmp\qqreader-original-compare-20260618-200948-ui.xml
+.tmp\qqreader-v215-login-live-20260618-190904-keyflow.redacted.txt
+```
+
+原版 `com.qq.reader` 这次再次复现同一条风控链路：
+
+```text
+YWLoginNewMtaUtil: /sdk/staticlogin - 427
+YWLoginNewMtaUtil: 账号登录触发风控后进行滑块登录，触发 - yw_login_action_tencentCaptcha - 1
+YWLoginNewMtaUtil: 二次验证-腾讯滑块触发 - tencentCaptcha_verification - 1
+YWLoginNewMtaUtil: 腾讯滑块验证成功 - tencentCaptcha_verification - 2
+YWLoginNewMtaUtil: /sdk/checkcodelogin - 428
+YWLoginNewMtaUtil: 账号登录触发风控后进行滑块登录，失败 - yw_login_action_tencentCaptcha - 3
+```
+
+和 v215 分身日志计数对比：
+
+```text
+original-20260618-200948:
+  /sdk/staticlogin=1
+  tencentCaptcha=4
+  /sdk/checkcodelogin=1
+  apiCode=3=0
+  FATAL EXCEPTION=0
+  Fatal signal=0
+
+clone-v215-20260618-190904:
+  /sdk/staticlogin=7
+  tencentCaptcha=0
+  /sdk/checkcodelogin=0
+  apiCode=3=3
+  ParamsSignCallback=16
+  QqReaderSignCompat=37
+  pwdLogin original=0x0=2
+  sendPhoneCode original=0x0=2
+  FATAL EXCEPTION=0
+  Fatal signal=0
+```
+
+追加结论：
+
+```text
+1. 原版同机同日重抓确认：阅文账号登录失败前会先进入 tencentCaptcha/checkcodelogin 风控链路。
+2. v215 分身不是缺少 Java 层请求触发，也不是单纯缺少 sign/ssign；它已经能发 /sdk/staticlogin 并补签名，但服务端直接返回 apiCode=3。
+3. 分身缺失的是原版 native 登录动作产生的等价上下文/注册状态；当前最强证据仍指向 YWLoginManager.pwdLogin/sendPhoneCode 的 original native pointer 为 0x0。
+4. 下一步应继续围绕 StubApp.interface11(59494) / YWLoginManager native 注册恢复，而不是继续补 Java fallback 参数。
+```
+
+### 2026-06-18 20:34 v221 主动调用 original interface11(59494) 尝试
+
+目标：在捕获到 original `StubApp.interface11` 后，主动调用一次 `interface11(59494)`，
+触发壳对 `YWLoginManager.pwdLogin/sendPhoneCode/qrCodeV2` 的真实 native 注册。
+
+代码改动：
+
+```text
+core/hook/src/main/java/com/multiapp/core/hook/NativeHookBridge.kt
+  - 新增 callOriginalStubInterface11(classLoader, className, value): Boolean
+  - 新增 private external fun nativeCallOriginalStubInterface11(...)
+
+core/hook/src/main/cpp/native-hook.cpp
+  - 新增 Java_com_multiapp_core_hook_NativeHookBridge_nativeCallOriginalStubInterface11
+  - 复用已有 g_orig_stub_interface11 全局变量，调用前检查是否为 nullptr
+  - 调用前后打印 YWLoginManager pwdLogin/sendPhoneCode/qrCodeV2 绑定状态
+  - 补充 clear_logged_exception 的 forward declaration
+
+core/loader/src/main/java/com/multiapp/core/loader/LoaderFactory.kt
+  - 新增 qqReaderOriginalInterface11Attempted 标志位
+  - 新增 maybeRunQqReaderOriginalInterface11(bridge, classLoader, targetClass, reason)
+  - 在 tryRunQqReaderStubAppAttachedLoad 的 before/after report 后调用
+  - 在 preloadPackerLib 的 StubApp fallback 判断后调用
+```
+
+构建与打包：
+
+```text
+.\gradlew.bat --no-daemon --no-build-cache "-Dkotlin.compiler.execution.strategy=in-process" --console=plain :app:assembleDebug
+BUILD SUCCESSFUL in 2m 35s
+
+.\tools\qqreader-offline-patch\build-qqreader-offline.ps1 `
+  -VersionTag v221-call-original-interface11-59494 `
+  -InputCloneApk .tmp\qqreader-c9f8-current-base.apk `
+  -OutputApk .tmp\qqreader-c9f8-neutralized-v221-call-original-interface11-59494-signed.apk `
+  -ForceRepack -SkipVerify
+```
+
+APK 产出：
+
+```text
+.tmp\qqreader-c9f8-neutralized-v221-call-original-interface11-59494-signed.apk (413920565 bytes)
+不带 -PreserveOuterJiagu，outer jiagu libs 已移除
+```
+
+### v221 默认启动测试（stubapp.fallback=0）
+
+设备：`192.168.2.86:37839`
+
+```text
+adb install -r -d .tmp\qqreader-c9f8-neutralized-v221-call-original-interface11-59494-signed.apk
+setprop debug.multiapp.stubapp.fallback 0
+setprop debug.multiapp.ywlogin.auto_open 1
+setprop debug.multiapp.ywlogin.java_diag 1
+setprop debug.multiapp.ywlogin.action_fallback 1
+```
+
+证据文件：
+
+```text
+.tmp\qqreader-v221-interface11-59494-start-20260618-203647-logcat.txt
+.tmp\qqreader-v221-interface11-59494-start-20260618-203647-filtered.txt
+```
+
+关键日志：
+
+```text
+RegisterNatives: class=com.stub.StubApp count=4  (MultiApp fallback, 不是原壳 count=10)
+RegisterNatives: class=com.stub.StubApp count=10 = 0
+captured original interface11 = 0
+captured original interface20 = 0
+nativeCallOriginalStubInterface11 = 0  (新桥从未执行)
+pwdLogin = missing, sendPhoneCode = missing
+FATAL EXCEPTION = 0, Fatal signal = 0
+PID = 18341 (进程存活)
+```
+
+登录触发：
+
+```text
+wrapped_ywlogin_pwdLogin: original native not registered; throwing for Java fallback
+YWHttp.post after ... apiCode=3 message=登录失败，请稍后重试 data=null nextAction=none
+```
+
+结论：新增的 `nativeCallOriginalStubInterface11` 桥没有机会执行，因为 `g_orig_stub_interface11`
+从未被赋值 — 原壳 `RegisterNatives: class=com.stub.StubApp count=10` 根本没出现。
+
+### v221 explicit_load + prehook_dlopen 诊断测试
+
+为验证能否通过 explicit dlopen + GOT prehook 恢复原壳注册：
+
+```text
+setprop debug.multiapp.jiagu.explicit_load 1
+setprop debug.multiapp.jiagu.prehook_dlopen 1
+```
+
+证据文件：
+
+```text
+.tmp\qqreader-v221-explicit-jiagu-20260618-203956-logcat.txt
+.tmp\qqreader-v221-explicit-jiagu-20260618-203956-filtered.txt
+```
+
+关键日志：
+
+```text
+PackerRuntime.Jiagu: loadPackerLibrary: explicit load enabled for libjiagu_vip.so
+nativeDlopenOnly: pre-parsed .../libjiagu_vip.so (open=1 openat=0 ...)
+nativeDlopenOnly: dlopen OK .../libjiagu_vip.so
+got_hook: found library .../libjiagu_vip.so at 0x74aca3c000
+got_hook: hooked 3 functions in .../libjiagu_vip.so
+
+patch_jiagu_vip_self_kill_callsite:
+  path=.../libjiagu_vip.so base=0x74aca3c000
+  callsite=0x74acb58b84 offset=0x11cb84
+  prev=0x00000000 insn=0x00000000 next=0x00000000
+  no patch applied
+  checked=1 patched=0
+
+nativeLoadLibraryForGuest: FAILED: JNI_ERR returned from JNI_OnLoad in ".../libjiagu_vip.so"
+
+RegisterNatives: class=com.stub.StubApp count=4  (MultiApp fallback)
+RegisterNatives: class=com.stub.StubApp count=10 = 0
+captured original interface11 = 0
+captured original interface20 = 0
+nativeCallOriginalStubInterface11 = 0
+pwdLogin = missing (x2), sendPhoneCode = missing (x2)
+```
+
+与历史成功边界对比（v110/v131）：
+
+```text
+v110/v131 成功时：
+  RegisterNatives: class=com.stub.StubApp count=10 ... libjiagu_vip.so offset=0x1116b4
+  GOT tgkill intercepted: caller=.../libjiagu_vip.so offset=0x11cb88
+  patch_jiagu_self_kill_from_return_address:
+    prev=0x52800120 insn=0x97ffb823 next=0x140000e8
+    patched caller-4 callsite=0x...b84 before=0x97ffb823 after=0xd503201f
+  => JNI_OnLoad 完成，StubApp count=10 注册成功
+
+v221 失败时：
+  patch_jiagu_vip_self_kill_callsite:
+    prev=0x00000000 insn=0x00000000 next=0x00000000
+  => 0x11cb84 处全是零字节，BL 指令不在
+  => JNI_OnLoad 返回 JNI_ERR，壳中断
+  => RegisterNatives count=10 从未出现
+```
+
+差异分析：
+
+```text
+1. v110/v131 在 0x11cb84 处有 0x97ffb823 (BL) + 0x52800120 (MOVN W0,#0)，
+   tgkill GOT hook 拦截后动态 NOP 了 BL 调用。
+2. v221 在同一 offset 0x11cb84 处全为 0x00000000 — 说明 libjiagu_vip.so 的
+   内存布局或 .text 段内容已改变，或 GOT hook 时机不对，壳在 RegisterNatives
+   之前就进入自毁/解密失败路径。
+3. v221 打包脚本 `patchJiaguSo: disabled; preserving original libjiagu_vip.so`，
+   没有对 .so 做文件级 patch。而 `nativeLoadLibraryForGuest` 返回 JNI_ERR
+   说明壳的 JNI_OnLoad 自己判断环境不对后主动返回 -1。
+```
+
+当前阻塞总结：
+
+```text
+1. libjiagu_vip.so 的 JNI_OnLoad 在 clone 环境下返回 JNI_ERR，阻止 StubApp count=10 注册。
+2. 0x11cb84 处指令全为零，现有的 self-kill callsite patch 无法命中有效指令。
+3. 因此 g_orig_stub_interface11/interface20 从未被赋值，新增的主动调用桥无法工作。
+4. 登录仍走 Java fallback -> /sdk/staticlogin -> apiCode=3，无法进入原版 tencentCaptcha 风控链。
+```
+
+下一步建议：
+
+```text
+1. 对比 v131 APK 中的 libjiagu_vip.so 和当前 APK 中的 libjiagu_vip.so 的 ELF 布局：
+   用 objdump/readelf 比较 .text 段、JNI_OnLoad 的 vaddr/size、0x11cb84 处的指令。
+2. 如果 .so 内容一致，问题可能在运行时 ClassLoader/namespace 差异导致壳自检失败。
+3. 如果 .so 内容不同，需要找到当前版本壳的正确 self-kill offset 和 RegisterNatives 入口。
+4. 备选方案：从 v131 成功包中提取已知可用的 libjiagu_vip.so，替换到当前 APK 中测试。
+```
+
+### 2026-06-21 libjiagu_vip.so ELF 分析
+
+从当前 base APK 提取 `lib/arm64-v8a/libjiagu_vip.so`（889192 bytes）：
+
+```text
+.tmp\inspect-jiagu-so\libjiagu_vip-arm64.so
+```
+
+ELF64 PT_LOAD 段布局：
+
+```text
+PT_LOAD[0]: vaddr=0x0      filesz=0x1c910   offset=0x1000   (headers + rodata)
+PT_LOAD[1]: vaddr=0x2d790  filesz=0xae10a   offset=0x1e790  (.text, 到 vaddr 0xdb89a)
+PT_LOAD[2]: vaddr=0x257000 filesz=0x84f8    offset=0xcd000
+PT_LOAD[3]: vaddr=0x26fc20 filesz=0x480     offset=0xd5c20
+PT_LOAD[4]: vaddr=0x2710a0 filesz=0x2f98    offset=0xd60a0
+```
+
+关键虚拟地址映射：
+
+```text
+0x11cb84 (self-kill callsite) -> file offset 0x10db84
+  PT_LOAD[1] filesz 覆盖 vaddr 0x2d790..0xdb89a
+  0x11cb84 > 0xdb89a => 超出文件映射，属于 memsz > filesz 的 BSS/解密区
+  文件中全为 0x00000000
+
+0x1116b4 (v110 RegisterNatives count=10 caller) -> file offset 0x1026b4
+  同样超出 filesz，文件中全为零
+```
+
+结论：
+
+```text
+1. 0x11cb84 和 0x1116b4 都在 ELF 的 BSS/运行时解密区域，文件中全为零。
+2. 壳在 JNI_OnLoad 执行期间自行解密写入这些指令。
+3. v110 成功路径：JNI_OnLoad -> 环境自检通过 -> 解密 -> RegisterNatives count=10
+   -> 解密到 self-kill 区域 -> BL tgkill -> GOT hook 拦截 -> patch BL -> 正常返回。
+4. v221 失败路径：JNI_OnLoad -> 环境自检失败 -> 返回 JNI_ERR
+   -> RegisterNatives count=10 从未执行 -> 0x11cb84 始终为零。
+5. 问题核心不是 self-kill patch，而是壳的环境检测为什么在当前 clone 环境下失败。
+6. proactive patch（dlopen 后、JNI_OnLoad 前修改指令）不可行，
+   因为指令在文件中为零、只在壳解密后才存在。
+```
+
+下一步聚焦：
+
+```text
+1. 对比 v110 和 v221 的 JNI_OnLoad 调用环境差异：
+   ClassLoader namespace、data dir、process name、/proc/self/maps 可见性。
+2. 检查当前 LoaderFactory 中是否有 JNI_OnLoad 前置操作
+   改变了壳依赖的环境状态（FindClass hook、GOT hook 范围、path redirection）。
+3. 如果找到环境差异，尝试在 JNI_OnLoad 前恢复 v110 的等价环境。
+```
+
+## 2026-06-21 v222-v229 壳 JNI_OnLoad 恢复与 YWLogin 注册
+
+### 关键发现：YWLoginManager 注册机制
+
+通过 v175 dump 文件发现 `YWLoginManager.<clinit>` 的字节码：
+
+```
+METHOD <clinit>[]V
+  [0] CONST rA=0 narrow=59494 wide=59494
+  [1] INVOKE_STATIC ref=Lcom/stub/StubApp;->interface11(I)V
+  [2] RETURN_VOID
+```
+
+`YWLoginManager` 类的静态初始化块调用 `StubApp.interface11(59494)`。壳的 native
+代码在该上下文中通过 `RegisterNatives` 注册 `pwdLogin/sendPhoneCode/qrCodeV2`。
+
+壳的 `interface11` 是一个**分类分发器**：接收 token → 查内部加密表 → 调 `RegisterNatives`
+注册对应类的 native 方法。壳不使用 `JNI FindClass`，而是从内部加密元数据获取类/方法信息。
+
+### v222 spoofProcSelf 修复
+
+根因：`JiaguRuntime.prepareFiles()` 从未调用 `spoofProcSelf()`。壳的 `JNI_OnLoad`
+读 `/proc/self/cmdline` 检测进程名，分身环境进程名是 `clonestub_xxx` 而非 `com.qq.reader`。
+
+修复：在 `prepareFiles()` 中添加 `bridge.spoofProcSelf(pid, originalPackageName)`。
+
+v222 验证结果：
+
+```
+✅ /proc/self spoofed to 'com.qq.reader'
+✅ RegisterNatives: class=com.stub.StubApp count=10  ← 壳成功注册
+✅ captured original interface5/11/20/21 全部 bound
+✅ 进程存活，无 FATAL EXCEPTION
+❌ YWLogin 仍 missing（interface11(59494) 执行但未注册）
+```
+
+### v226b-v228 YWLoginManager `<clinit>` 触发
+
+方案 A：通过 `Class.forName("...YWLoginManager", true, guestCl)` 触发 `<clinit>`，
+让壳的 `interface11(59494)` 从正确的调用上下文注册 YWLogin native 方法。
+
+关键时序问题：`installPostLoadHooks` 在 `installStubFallback` **之前**执行。
+`YWLoginManager.<clinit>` 调用 `StubApp.interface11(59494)`，但 `interface11`
+此时还是未注册的 native 方法 → `UnsatisfiedLinkError`。
+
+v227 修复：把 `<clinit>` 触发移到 `installStubFallback` 之后。
+
+v228 结果：
+
+```
+✅ 壳 JNI_OnLoad 成功：RegisterNatives count=10
+✅ <clinit> 触发成功
+✅ 进程存活
+❌ interface11(59494) 仍未注册 YWLogin（壳内部条件不满足）
+```
+
+### v229 最终状态
+
+在触发 `<clinit>` 之前先注册 YWLogin stubs（`registerBusinessStubs`），避免
+`UnsatisfiedLinkError`。壳的 `interface11(59494)` 如果成功会覆盖 stubs。
+
+v229 结果：
+
+```
+✅ 壳 JNI_OnLoad 成功（v228 验证 count=10）
+✅ pwdLogin/sendPhoneCode/qrCodeV2 由 fallback 注册（registered=17 failed=0）
+✅ 登录页打开：LoginActivity + QRLoginActivity
+✅ 用户输入账号密码：account=17***08 passwordLen=10
+✅ Java hook 拦截：pwdLogin native missing; suppressing crash
+✅ ParamsSignCallback 注入成功
+✅ 进程存活，无 FATAL EXCEPTION
+❌ 服务端返回 apiCode=3（Java fallback 请求与 native 不等价）
+```
+
+### 当前阻塞
+
+壳的 `interface11(59494)` 执行了但不注册 YWLogin native 方法。可能原因：
+1. 壳的内部状态检查未通过（需要 `interface5(Application)` 先初始化）
+2. 壳使用 `dl_iterate_phdr` 或其他非 JNI 机制查找类
+3. 壳的加密元数据中 token 59494 映射的注册条件未满足
+
+Java fallback 能发送 `/sdk/staticlogin` 请求，但服务端返回 `apiCode=3` 而非
+原版的 `247`（进入 tencentCaptcha 风控链路）。差距在于请求 body 中 native
+`pwdLogin` 产生的加密/签名字段。
+
+### 下一步
+
+1. **抓包对比**：用 mitmproxy 抓原版和分身的 `/sdk/staticlogin` 请求，找出
+   请求 body 差异
+2. **补齐请求参数**：Java fallback 需要与 native `pwdLogin` 产生完全相同的请求 body
+3. **或绕过壳**：用 LSPlant hook 登录相关 Java 方法，直接实现网络请求
