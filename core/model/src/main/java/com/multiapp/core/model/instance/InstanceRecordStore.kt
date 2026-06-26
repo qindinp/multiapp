@@ -73,17 +73,30 @@ class JsonInstanceRecordStore(private val baseDir: File) : InstanceRecordStore {
         return runCatching {
             val file = fileFor(record.instanceId)
             val tempFile = File(baseDir, "${record.instanceId}.json.tmp")
+            val backupFile = File(baseDir, "${record.instanceId}.json.bak")
 
             val json = gson.toJson(record)
             tempFile.writeText(json, Charsets.UTF_8)
 
-            // Delete existing target before rename (required on Windows)
+            // Two-phase rename for crash safety:
+            // 1. If target exists, rename to .bak (preserves old data on crash)
+            // 2. Rename temp to target
+            // 3. Delete .bak
             if (file.exists()) {
-                file.delete()
+                if (!file.renameTo(backupFile)) {
+                    tempFile.delete()
+                    error("Failed to backup existing file ${file.name}")
+                }
             }
 
             val renamed = tempFile.renameTo(file)
-            if (!renamed) {
+            if (renamed) {
+                backupFile.delete()
+            } else {
+                // Attempt to restore from backup
+                if (backupFile.exists()) {
+                    backupFile.renameTo(file)
+                }
                 tempFile.delete()
                 error("Failed to rename temp file to ${file.name}")
             }
@@ -124,6 +137,9 @@ class JsonInstanceRecordStore(private val baseDir: File) : InstanceRecordStore {
     }
 
     private fun fileFor(instanceId: String): File {
+        require(!instanceId.contains("..") && !instanceId.contains("/") && !instanceId.contains("\\")) {
+            "Invalid instanceId: $instanceId"
+        }
         return File(baseDir, "$instanceId.json")
     }
 }

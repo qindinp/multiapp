@@ -23,6 +23,9 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
     }
 
     override fun save(record: InstallRecord): Result<String> {
+        require(!record.packageName.contains("..") && !record.packageName.contains("/") && !record.packageName.contains("\\")) {
+            "Invalid packageName: ${record.packageName}"
+        }
         return try {
             val updatedRecord = record.copy(updatedAtMs = System.currentTimeMillis())
             val fileName = "${record.packageName}.json"

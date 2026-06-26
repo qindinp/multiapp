@@ -61,16 +61,20 @@ class HostedRuntimeBootstrap(
      */
     fun run(instanceId: String): HostedBootstrapResult {
         val stageResults = mutableListOf<BootstrapResult>()
+        val overallStartMs = clock()
 
         // Stage 1: Load instance record
+        val stage1StartMs = clock()
         val instance = runCatching {
             instanceManager.getInstance(instanceId)
         }.getOrNull()
+        val stage1DurationMs = clock() - stage1StartMs
 
         if (instance == null) {
             val failedResult = BootstrapResult.failed(
                 stage = RuntimeStage.CONFIG,
-                message = "Instance not found: $instanceId"
+                message = "Instance not found: $instanceId",
+                durationMs = stage1DurationMs
             )
             stageResults.add(failedResult)
             return failedHostedResult(instanceId, stageResults)
@@ -83,19 +87,23 @@ class HostedRuntimeBootstrap(
                 evidence = listOf(
                     BootstrapEvidence("instanceId", instanceId),
                     BootstrapEvidence("originPackageName", instance.originPackageName)
-                )
+                ),
+                durationMs = stage1DurationMs
             )
         )
 
         // Stage 2: Load install record
+        val stage2StartMs = clock()
         val installRecord = runCatching {
             installRecordStore.load(instance.originPackageName)
         }.getOrNull()
+        val stage2DurationMs = clock() - stage2StartMs
 
         if (installRecord == null) {
             val failedResult = BootstrapResult.failed(
                 stage = RuntimeStage.PACKAGE_METADATA,
-                message = "Install record not found: ${instance.originPackageName}"
+                message = "Install record not found: ${instance.originPackageName}",
+                durationMs = stage2DurationMs
             )
             stageResults.add(failedResult)
             return failedHostedResult(instanceId, stageResults, originPackageName = instance.originPackageName)
@@ -108,20 +116,24 @@ class HostedRuntimeBootstrap(
                 evidence = listOf(
                     BootstrapEvidence("packageName", installRecord.packageName),
                     BootstrapEvidence("versionName", installRecord.versionName)
-                )
+                ),
+                durationMs = stage2DurationMs
             )
         )
 
         // Stage 3: Resolve origin APK
+        val stage3StartMs = clock()
         val originApkPath = installRecord.originApkPath
         val apkExists = runCatching {
             File(originApkPath).exists()
         }.getOrDefault(false)
+        val stage3DurationMs = clock() - stage3StartMs
 
         if (!apkExists) {
             val failedResult = BootstrapResult.failed(
                 stage = RuntimeStage.ORIGIN_APK,
-                message = "Origin APK not found: $originApkPath"
+                message = "Origin APK not found: $originApkPath",
+                durationMs = stage3DurationMs
             )
             stageResults.add(failedResult)
             return failedHostedResult(
@@ -137,11 +149,13 @@ class HostedRuntimeBootstrap(
                 message = "Origin APK resolved: $originApkPath",
                 evidence = listOf(
                     BootstrapEvidence("originApkPath", originApkPath)
-                )
+                ),
+                durationMs = stage3DurationMs
             )
         )
 
         // Stage 4: Create guest ClassLoader
+        val stage4StartMs = clock()
         val guestClassLoader: ClassLoader
         try {
             guestClassLoader = classLoaderFactory(originApkPath, null)
@@ -149,7 +163,8 @@ class HostedRuntimeBootstrap(
             val failedResult = BootstrapResult.failed(
                 stage = RuntimeStage.CLASS_LOADER,
                 message = "ClassLoader creation failed: ${e.message}",
-                error = e
+                error = e,
+                durationMs = clock() - stage4StartMs
             )
             stageResults.add(failedResult)
             return failedHostedResult(
@@ -159,6 +174,7 @@ class HostedRuntimeBootstrap(
                 installId = installRecord.packageName
             )
         }
+        val stage4DurationMs = clock() - stage4StartMs
 
         stageResults.add(
             BootstrapResult.success(
@@ -166,7 +182,8 @@ class HostedRuntimeBootstrap(
                 message = "Guest ClassLoader created",
                 evidence = listOf(
                     BootstrapEvidence("classLoaderClass", guestClassLoader.javaClass.name)
-                )
+                ),
+                durationMs = stage4DurationMs
             )
         )
 
