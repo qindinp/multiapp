@@ -6,12 +6,10 @@ import android.content.Intent
 import android.os.Bundle
 import android.util.Log
 import com.multiapp.core.loader.HostedRuntimeBootstrap
-import com.multiapp.core.loader.VirtualContextWrapper
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
-import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.File
 
 /**
@@ -21,9 +19,10 @@ import java.io.File
  * which app-instance to host. Does NOT generate stub APKs, does NOT run a
  * full Virtual AMS, and does NOT touch QQ-Reader hooks or LSPlant/Xposed.
  *
- * On launch, bootstraps the hosted runtime via [HostedRuntimeBootstrap],
- * creates a [VirtualContextWrapper] for the guest app, and attempts to
- * instantiate the guest [android.app.Application] class.
+ * On launch, bootstraps the hosted runtime via [HostedRuntimeBootstrap]
+ * which creates a [VirtualContextWrapper][com.multiapp.core.loader.VirtualContextWrapper]
+ * for the guest app and attempts to instantiate the guest
+ * [android.app.Application] class.
  */
 class ContainerActivity : Activity() {
 
@@ -72,8 +71,12 @@ class ContainerActivity : Activity() {
         val installStore = JsonInstallRecordStore(getInstallStoreDir())
         val instanceManager: InstanceManager = DefaultInstanceManager(instanceStore, getDataRootDir())
 
-        // 2. Run bootstrap
-        val bootstrap = HostedRuntimeBootstrap(instanceManager, installStore)
+        // 2. Run bootstrap (Phase 2: includes guest Application creation)
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = instanceManager,
+            installRecordStore = installStore,
+            hostContext = this
+        )
         val result = bootstrap.run(instanceId)
 
         if (!result.success) {
@@ -87,51 +90,14 @@ class ContainerActivity : Activity() {
             return
         }
 
-        // 3. Create VirtualContextWrapper for the guest app
-        val instance = instanceManager.getInstance(instanceId)
-        val guestContext = VirtualContextWrapper(
-            base = this,
-            config = VirtualContextConfig(
-                instanceId = instanceId,
-                originPackageName = result.originPackageName ?: "",
-                virtualPackageName = instance?.virtualPackageName ?: "",
-                dataDir = instance?.dataRoot ?: "",
-                sourceDir = result.originApkPath ?: "",
-                nativeLibraryDir = null,
-                classLoader = guestClassLoader
-            ),
-            guestClassLoader = guestClassLoader
-        )
-
-        // 4. Attempt to load guest Application class
-        val appClassName = resolveApplicationClassName(guestClassLoader, result.originApkPath)
-        if (appClassName != null) {
-            try {
-                val appClass = guestClassLoader.loadClass(appClassName)
-                val app = appClass.getDeclaredConstructor().newInstance() as android.app.Application
-                val attachMethod = android.app.Application::class.java
-                    .getDeclaredMethod("attachBaseContext", android.content.Context::class.java)
-                attachMethod.isAccessible = true
-                attachMethod.invoke(app, guestContext)
-                Log.i(TAG, "Guest Application created: $appClassName")
-            } catch (e: Throwable) {
-                Log.w(TAG, "Guest Application creation failed: ${e.message}")
-            }
+        val guestApp = result.guestApplication
+        if (guestApp != null) {
+            Log.i(TAG, "Guest Application created: ${guestApp.javaClass.name}")
+        } else {
+            Log.w(TAG, "No guest Application created for instanceId=$instanceId")
         }
 
         Log.i(TAG, "Container launch complete: instanceId=$instanceId, success=${result.success}")
-    }
-
-    /**
-     * Resolve the guest Application class name from the APK manifest.
-     *
-     * Returns null if no custom Application class is declared, which means
-     * the default [android.app.Application] will be used.
-     */
-    private fun resolveApplicationClassName(classLoader: ClassLoader, apkPath: String?): String? {
-        // Phase 1: return null -- the guest Application lifecycle is deferred.
-        // Phase 2 will parse the manifest to extract the application class name.
-        return null
     }
 
     /** Directory for [JsonInstanceRecordStore] persistence. */

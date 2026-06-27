@@ -1,7 +1,9 @@
 package com.multiapp.core.loader
 
+import android.app.Application
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.installer.InstallRecordStore
+import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.File
 
 /**
@@ -12,7 +14,7 @@ import java.io.File
  * @property originPackageName The origin app package name (null if instance not found).
  * @property originApkPath    Resolved origin APK path (null if not resolved).
  * @property guestClassLoader ClassLoader for the guest app (null on failure).
- * @property guestApplication Guest Application instance (null in phase 1).
+ * @property guestApplication Guest Application instance (null on failure or if no Application class).
  * @property stageResults     Per-stage results collected during bootstrap.
  * @property summary          Aggregated summary of all stage results.
  * @property success          True if bootstrap completed all stages successfully.
@@ -34,21 +36,25 @@ data class HostedBootstrapResult(
  *
  * Loads the [VirtualInstanceRecord][com.multiapp.core.model.instance.VirtualInstanceRecord]
  * and [InstallRecord][com.multiapp.core.model.installer.InstallRecord], resolves the
- * origin APK, creates a guest ClassLoader, and collects per-stage bootstrap results.
+ * origin APK, creates a guest ClassLoader, and (Phase 2) attempts to instantiate
+ * the guest [Application] class with a [VirtualContextWrapper].
  *
- * Phase 1: Up to guest ClassLoader creation. Phase 2 will integrate with
- * [RuntimeBootstrap] orchestrator for full Application lifecycle.
- *
- * @param instanceManager    Provides access to virtual instance records.
- * @param installRecordStore Provides access to install records.
- * @param classLoaderFactory Factory to create a ClassLoader from APK path and native lib dir.
- * @param clock              Wall-clock supplier for duration measurement.
+ * @param instanceManager            Provides access to virtual instance records.
+ * @param installRecordStore         Provides access to install records.
+ * @param hostContext                Host Android Context (required for Application creation).
+ * @param classLoaderFactory         Factory to create a ClassLoader from APK path and native lib dir.
+ * @param applicationClassNameResolver Resolves the Application class name from (classLoader, apkPath).
+ * @param clock                      Wall-clock supplier for duration measurement.
  */
 class HostedRuntimeBootstrap(
     private val instanceManager: InstanceManager,
     private val installRecordStore: InstallRecordStore,
+    private val hostContext: android.content.Context? = null,
     private val classLoaderFactory: (apkPath: String, nativeLibDir: String?) -> ClassLoader = { apk, _ ->
         dalvik.system.PathClassLoader(apk, ClassLoader.getSystemClassLoader())
+    },
+    private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String? = { cl, path ->
+        resolveApplicationClassNameFromManifest(hostContext, path)
     },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
@@ -187,14 +193,78 @@ class HostedRuntimeBootstrap(
             )
         )
 
-        // Stage 5: Guest Application (skeleton - not yet creating real Application)
-        // TODO: Phase 2 - integrate with RuntimeBootstrap orchestrator
-        stageResults.add(
-            BootstrapResult.skipped(
-                stage = RuntimeStage.APPLICATION,
-                message = "Guest Application creation deferred to phase 2"
+        // Stage 5: Create guest Application
+        val stage5StartMs = clock()
+        val appClassName = applicationClassNameResolver(guestClassLoader, originApkPath)
+        if (appClassName != null) {
+            try {
+                val appClass = guestClassLoader.loadClass(appClassName)
+                val guestApplication = appClass.getDeclaredConstructor().newInstance() as Application
+
+                // Create VirtualContextWrapper for the guest
+                val ctx = hostContext
+                    ?: throw IllegalStateException("hostContext is required for Application creation")
+                val guestContext = VirtualContextWrapper(
+                    base = ctx,
+                    config = VirtualContextConfig(
+                        instanceId = instanceId,
+                        originPackageName = instance.originPackageName,
+                        virtualPackageName = instance.virtualPackageName,
+                        dataDir = instance.dataRoot,
+                        sourceDir = originApkPath,
+                        nativeLibraryDir = null,
+                        classLoader = guestClassLoader
+                    ),
+                    guestClassLoader = guestClassLoader
+                )
+
+                // attachBaseContext (protected method, needs reflection)
+                val attachMethod = Application::class.java
+                    .getDeclaredMethod("attachBaseContext", android.content.Context::class.java)
+                attachMethod.isAccessible = true
+                attachMethod.invoke(guestApplication, guestContext)
+
+                stageResults.add(
+                    BootstrapResult.success(
+                        stage = RuntimeStage.APPLICATION,
+                        message = "Guest Application created: $appClassName",
+                        evidence = listOf(
+                            BootstrapEvidence("applicationClass", appClassName),
+                            BootstrapEvidence("attached", "true")
+                        ),
+                        durationMs = clock() - stage5StartMs
+                    )
+                )
+
+                return HostedBootstrapResult(
+                    instanceId = instanceId,
+                    installId = installRecord.packageName,
+                    originPackageName = instance.originPackageName,
+                    originApkPath = originApkPath,
+                    guestClassLoader = guestClassLoader,
+                    guestApplication = guestApplication,
+                    stageResults = stageResults,
+                    summary = stageResults.toSummary(),
+                    success = true
+                )
+            } catch (e: Throwable) {
+                stageResults.add(
+                    BootstrapResult.failed(
+                        stage = RuntimeStage.APPLICATION,
+                        message = "Guest Application creation failed: ${e.message}",
+                        error = e,
+                        durationMs = clock() - stage5StartMs
+                    )
+                )
+            }
+        } else {
+            stageResults.add(
+                BootstrapResult.skipped(
+                    stage = RuntimeStage.APPLICATION,
+                    message = "No Application class name resolved"
+                )
             )
-        )
+        }
 
         val summary = stageResults.toSummary()
         return HostedBootstrapResult(
@@ -203,11 +273,23 @@ class HostedRuntimeBootstrap(
             originPackageName = instance.originPackageName,
             originApkPath = originApkPath,
             guestClassLoader = guestClassLoader,
-            guestApplication = null, // TODO: Phase 2
+            guestApplication = null,
             stageResults = stageResults,
             summary = summary,
             success = true
         )
+    }
+
+    /**
+     * Resolve the guest Application class name from the APK manifest.
+     *
+     * Uses the injected [applicationClassNameResolver] to determine the
+     * Application class declared in the APK's AndroidManifest.xml.
+     *
+     * @return the fully-qualified class name, or null if no custom Application is declared.
+     */
+    internal fun resolveApplicationClassName(classLoader: ClassLoader, apkPath: String?): String? {
+        return applicationClassNameResolver(classLoader, apkPath)
     }
 
     private fun failedHostedResult(
@@ -229,5 +311,29 @@ class HostedRuntimeBootstrap(
             summary = summary,
             success = false
         )
+    }
+
+    companion object {
+        /**
+         * Resolve Application class name from an APK's manifest using PackageManager.
+         *
+         * Falls back to null (default Application) on any error.
+         */
+        private fun resolveApplicationClassNameFromManifest(
+            context: android.content.Context?,
+            apkPath: String?
+        ): String? {
+            if (context == null || apkPath == null) return null
+            return try {
+                val pm = context.packageManager
+                val info = pm.getPackageArchiveInfo(
+                    apkPath,
+                    android.content.pm.PackageManager.GET_META_DATA
+                )
+                info?.applicationInfo?.className
+            } catch (_: Throwable) {
+                null
+            }
+        }
     }
 }

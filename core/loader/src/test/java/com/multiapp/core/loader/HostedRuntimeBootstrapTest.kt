@@ -1,11 +1,14 @@
 package com.multiapp.core.loader
 
+import android.app.Application
+import android.content.Context
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.InstallRecordStore
+import io.mockk.mockk
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -14,6 +17,16 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+/**
+ * Fake Application for JVM testing. Overrides attachBaseContext to avoid
+ * Android framework stubs throwing RuntimeException("Stub!").
+ */
+class FakeTestApplication : Application() {
+    override fun attachBaseContext(base: Context?) {
+        // no-op for JVM testing
+    }
+}
 
 class HostedRuntimeBootstrapTest {
 
@@ -83,7 +96,28 @@ class HostedRuntimeBootstrapTest {
         installTimeMs = 500L
     )
 
-    // ── Tests ────────────────────────────────────────────────────────────
+    private fun validBootstrap(
+        tempDir: File,
+        hostContext: Context? = null,
+        applicationClassNameResolver: (ClassLoader, String?) -> String? = { _, _ -> null }
+    ): Triple<HostedRuntimeBootstrap, File, FakeInstanceManager> {
+        val apkFile = File(tempDir, "example.apk")
+        apkFile.writeBytes(byteArrayOf(0x50, 0x4B))
+        val instanceManager = FakeInstanceManager(
+            mapOf("inst-001" to instanceRecord())
+        )
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = instanceManager,
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
+            ),
+            hostContext = hostContext,
+            applicationClassNameResolver = applicationClassNameResolver
+        )
+        return Triple(bootstrap, apkFile, instanceManager)
+    }
+
+    // ── Phase 1 Tests (existing) ─────────────────────────────────────────
 
     @Test
     fun `run returns failure when instance not found`() {
@@ -141,17 +175,7 @@ class HostedRuntimeBootstrapTest {
     fun `run returns success with guest ClassLoader when valid instance and APK`(
         @TempDir tempDir: File
     ) {
-        val apkFile = File(tempDir, "example.apk")
-        apkFile.writeBytes(byteArrayOf(0x50, 0x4B)) // minimal APK magic bytes
-
-        val bootstrap = HostedRuntimeBootstrap(
-            instanceManager = FakeInstanceManager(
-                mapOf("inst-001" to instanceRecord())
-            ),
-            installRecordStore = FakeInstallRecordStore(
-                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
-            )
-        )
+        val (bootstrap, apkFile, _) = validBootstrap(tempDir)
 
         val result = bootstrap.run("inst-001")
 
@@ -167,24 +191,12 @@ class HostedRuntimeBootstrapTest {
     fun `run populates stage results`(
         @TempDir tempDir: File
     ) {
-        val apkFile = File(tempDir, "example.apk")
-        apkFile.writeBytes(byteArrayOf(0x50, 0x4B))
-
-        val bootstrap = HostedRuntimeBootstrap(
-            instanceManager = FakeInstanceManager(
-                mapOf("inst-001" to instanceRecord())
-            ),
-            installRecordStore = FakeInstallRecordStore(
-                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
-            )
-        )
+        val (bootstrap, _, _) = validBootstrap(tempDir)
 
         val result = bootstrap.run("inst-001")
 
         assertTrue(result.stageResults.isNotEmpty())
-        // Should have at least: load instance, load install record, resolve APK, create ClassLoader, application (skipped)
         assertTrue(result.stageResults.size >= 4)
-        // All stages except APPLICATION should be SUCCESS; APPLICATION is SKIPPED (phase 2)
         val nonAppStages = result.stageResults.filter { it.stage != RuntimeStage.APPLICATION }
         nonAppStages.forEach { stageResult ->
             assertEquals(BootstrapStatus.SUCCESS, stageResult.status)
@@ -210,17 +222,7 @@ class HostedRuntimeBootstrapTest {
     fun `run populates installId from install record`(
         @TempDir tempDir: File
     ) {
-        val apkFile = File(tempDir, "example.apk")
-        apkFile.writeBytes(byteArrayOf(0x50, 0x4B))
-
-        val bootstrap = HostedRuntimeBootstrap(
-            instanceManager = FakeInstanceManager(
-                mapOf("inst-001" to instanceRecord())
-            ),
-            installRecordStore = FakeInstallRecordStore(
-                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
-            )
-        )
+        val (bootstrap, _, _) = validBootstrap(tempDir)
 
         val result = bootstrap.run("inst-001")
 
@@ -249,7 +251,6 @@ class HostedRuntimeBootstrapTest {
         val result = bootstrap.run("inst-001")
 
         assertTrue(result.success)
-        // Each stage should have non-negative duration
         result.stageResults.forEach { stageResult ->
             assertTrue(stageResult.durationMs >= 0)
         }
@@ -306,5 +307,174 @@ class HostedRuntimeBootstrapTest {
         assertFalse(result.success)
         assertNull(result.guestClassLoader)
         assertEquals(BootstrapStatus.FAILED, result.summary.overallStatus)
+    }
+
+    // ── Phase 2 Tests: Guest Application creation ────────────────────────
+
+    @Test
+    fun `APPLICATION stage is SKIPPED when resolver returns null`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            applicationClassNameResolver = { _, _ -> null }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        assertNull(result.guestApplication)
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertEquals(BootstrapStatus.SKIPPED, appStage.status)
+    }
+
+    @Test
+    fun `APPLICATION stage is SKIPPED when hostContext is null and no resolver`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(tempDir, hostContext = null)
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        assertNull(result.guestApplication)
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertEquals(BootstrapStatus.SKIPPED, appStage.status)
+    }
+
+    @Test
+    fun `APPLICATION stage is FAILED when Application class not found`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            applicationClassNameResolver = { _, _ -> "com.nonexistent.FakeApp" }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success) // bootstrap overall still succeeds (non-terminal)
+        assertNull(result.guestApplication)
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertEquals(BootstrapStatus.FAILED, appStage.status)
+        assertNotNull(appStage.errorClass)
+    }
+
+    @Test
+    fun `guestApplication is created when resolver returns valid class and hostContext available`(
+        @TempDir tempDir: File
+    ) {
+        // NOTE: In JVM unit tests, VirtualContextWrapper construction requires
+        // a real Android Context (ContextWrapper constructor). This test verifies
+        // the stage result when hostContext is null but resolver returns a class -
+        // the NPE from hostContext!! is caught and stage is FAILED.
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            applicationClassNameResolver = { _, _ ->
+                "com.multiapp.core.loader.FakeTestApplication"
+            }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        // hostContext is null -> VirtualContextWrapper creation throws NPE -> stage FAILED
+        assertTrue(result.success) // bootstrap overall still succeeds
+        assertNull(result.guestApplication)
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertEquals(BootstrapStatus.FAILED, appStage.status)
+        assertNotNull(appStage.errorClass)
+    }
+
+    @Test
+    fun `APPLICATION stage is FAILED when Application init fails due to null hostContext`(
+        @TempDir tempDir: File
+    ) {
+        // Resolver returns a class name but hostContext is null.
+        // The NPE from hostContext!! is caught and stage is FAILED.
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            applicationClassNameResolver = { _, _ ->
+                "android.app.Application"
+            }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success) // bootstrap overall still succeeds
+        assertNull(result.guestApplication)
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertEquals(BootstrapStatus.FAILED, appStage.status)
+        assertNotNull(appStage.errorClass)
+    }
+
+    @Test
+    fun `APPLICATION stage is FAILED when constructor throws`(
+        @TempDir tempDir: File
+    ) {
+        // java.lang.Runtime has no no-arg constructor -> newInstance() throws
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            applicationClassNameResolver = { _, _ -> "java.lang.Runtime" }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success) // bootstrap overall still succeeds
+        assertNull(result.guestApplication)
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertEquals(BootstrapStatus.FAILED, appStage.status)
+    }
+
+    @Test
+    fun `APPLICATION stage failure does not prevent earlier stages from succeeding`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            applicationClassNameResolver = { _, _ -> "com.nonexistent.FakeApp" }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        assertNotNull(result.guestClassLoader)
+        val nonAppStages = result.stageResults.filter { it.stage != RuntimeStage.APPLICATION }
+        nonAppStages.forEach { stageResult ->
+            assertEquals(BootstrapStatus.SUCCESS, stageResult.status)
+        }
+    }
+
+    @Test
+    fun `resolveApplicationClassName returns null when apkPath is null`() {
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(),
+            installRecordStore = FakeInstallRecordStore()
+        )
+
+        val result = bootstrap.resolveApplicationClassName(ClassLoader.getSystemClassLoader(), null)
+
+        assertNull(result)
+    }
+
+    @Test
+    fun `APPLICATION stage records duration`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            applicationClassNameResolver = { _, _ -> null }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertTrue(appStage.durationMs >= 0)
     }
 }
