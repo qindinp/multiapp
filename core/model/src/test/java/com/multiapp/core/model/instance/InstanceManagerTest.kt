@@ -1,5 +1,7 @@
 package com.multiapp.core.model.instance
 
+import com.multiapp.core.model.installer.InstallRecord
+import com.multiapp.core.model.installer.JsonInstallRecordStore
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.io.TempDir
@@ -217,5 +219,65 @@ class InstanceManagerTest {
         assertEquals(File(dataRoot.baseDir, "files"), dataRoot.filesDir)
         assertEquals(File(dataRoot.baseDir, "shared_prefs"), dataRoot.sharedPrefsDir)
         assertEquals(File(dataRoot.baseDir, "databases"), dataRoot.databaseDir)
+    }
+
+    // ── R1: InstallRecord validation tests ──────────────────────────────
+
+    @Test
+    fun `createInstance fails when installRecordStore is provided but no InstallRecord exists`() {
+        val installStore = JsonInstallRecordStore(File(tempDir, "installs_validation"))
+        val managerWithValidation = DefaultInstanceManager(
+            store = store,
+            dataRootBase = File(tempDir, "data_validation"),
+            installRecordStore = installStore,
+            clock = { currentTimeMs }
+        )
+
+        val result = managerWithValidation.createInstance("com.example.missing", "Missing App")
+
+        assertTrue(result.isFailure)
+        val error = result.exceptionOrNull()!!
+        assertTrue(error is IllegalArgumentException)
+        assertTrue(error.message!!.contains("InstallRecord not found"))
+        assertTrue(error.message!!.contains("com.example.missing"))
+    }
+
+    @Test
+    fun `createInstance succeeds when installRecordStore is provided and InstallRecord exists`() {
+        val installStore = JsonInstallRecordStore(File(tempDir, "installs_validation2"))
+        // Save an InstallRecord first
+        val installRecord = InstallRecord(
+            packageName = "com.example.validated",
+            originApkPath = "/tmp/test.apk",
+            originApkSha256 = "abc123",
+            originCertSha256 = "def456",
+            versionCode = 1,
+            versionName = "1.0",
+            targetSdk = 35,
+            minSdk = 28,
+            installTimeMs = 1000L
+        )
+        installStore.save(installRecord)
+
+        val managerWithValidation = DefaultInstanceManager(
+            store = store,
+            dataRootBase = File(tempDir, "data_validation2"),
+            installRecordStore = installStore,
+            clock = { currentTimeMs }
+        )
+
+        val result = managerWithValidation.createInstance("com.example.validated", "Validated App")
+
+        assertTrue(result.isSuccess)
+        assertEquals("com.example.validated", result.getOrNull()!!.originPackageName)
+    }
+
+    @Test
+    fun `createInstance succeeds without installRecordStore validation`() {
+        // When installRecordStore is null (default), no validation is performed
+        val result = manager.createInstance("com.example.any", "Any App")
+
+        assertTrue(result.isSuccess)
+        assertEquals("com.example.any", result.getOrNull()!!.originPackageName)
     }
 }

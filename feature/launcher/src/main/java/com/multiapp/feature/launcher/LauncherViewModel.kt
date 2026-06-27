@@ -7,6 +7,7 @@ import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.model.installer.VirtualInstallService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +30,8 @@ data class LauncherUiState(
 
 @HiltViewModel
 class LauncherViewModel @Inject constructor(
-    private val instanceManager: InstanceManager
+    private val instanceManager: InstanceManager,
+    private val virtualInstallService: VirtualInstallService
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LauncherUiState())
@@ -64,6 +66,21 @@ class LauncherViewModel @Inject constructor(
             _uiState.update { it.copy(creationStep = "准备中…", error = null) }
 
             try {
+                // Step 1: Ensure InstallRecord exists for this package
+                _uiState.update { it.copy(creationStep = "导入应用信息…") }
+                val importResult = virtualInstallService.importFromMetadata(
+                    packageName = app.packageName,
+                    originApkPath = app.apkPath,
+                    versionCode = app.versionCode,
+                    versionName = app.versionName,
+                    targetSdk = app.targetSdkVersion,
+                    minSdk = app.minSdkVersion,
+                    applicationClassName = app.applicationClassName,
+                    packageLabel = app.appName
+                )
+                importResult.getOrThrow()
+
+                // Step 2: Create VirtualInstanceRecord (InstanceManager validates InstallRecord exists)
                 _uiState.update { it.copy(creationStep = "创建实例…") }
                 val result = instanceManager.createInstance(
                     originPackageName = app.packageName,
@@ -114,9 +131,13 @@ class LauncherViewModel @Inject constructor(
                             appName = appInfo.loadLabel(packageManager).toString(),
                             icon = appInfo.loadIcon(packageManager),
                             versionName = pkg.versionName ?: "",
+                            versionCode = pkg.longVersionCode,
                             apkPath = appInfo.sourceDir,
                             instanceId = "",
-                            mainActivity = packageManager.getLaunchIntentForPackage(pkg.packageName)?.component?.className
+                            mainActivity = packageManager.getLaunchIntentForPackage(pkg.packageName)?.component?.className,
+                            targetSdkVersion = appInfo.targetSdkVersion,
+                            minSdkVersion = appInfo.minSdkVersion,
+                            applicationClassName = appInfo.className
                         )
                     }
                     .sortedBy { it.appName.lowercase() }
@@ -152,6 +173,8 @@ class LauncherViewModel @Inject constructor(
                 "权限不足" to "请在系统设置中授予 MultiApp 所需权限"
             msg.contains("OutOfMemory") ->
                 "内存不足" to "请关闭其他应用后重试"
+            msg.contains("InstallRecord not found") ->
+                "创建失败" to "应用信息导入失败，请重试"
             else -> "创建失败" to msg.take(100)
         }
     }

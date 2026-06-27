@@ -1,5 +1,6 @@
 package com.multiapp.core.model.instance
 
+import com.multiapp.core.model.installer.InstallRecordStore
 import java.io.File
 import java.util.UUID
 
@@ -11,13 +12,18 @@ import java.util.UUID
  *
  * Thread safety: single-writer (primary process), multi-reader (all processes).
  *
- * @param store        Record persistence backend.
- * @param dataRootBase Base directory for instance data roots.
- * @param clock        Clock supplier for timestamps (default: system clock).
+ * @param store             Record persistence backend.
+ * @param dataRootBase      Base directory for instance data roots.
+ * @param installRecordStore Optional install record store for validation.
+ *                           When provided, [createInstance] verifies that an InstallRecord
+ *                           exists for the origin package before creating the instance.
+ *                           This prevents creating instances that cannot be bootstrapped.
+ * @param clock             Clock supplier for timestamps (default: system clock).
  */
 class DefaultInstanceManager(
     private val store: InstanceRecordStore,
     private val dataRootBase: File,
+    private val installRecordStore: InstallRecordStore? = null,
     private val clock: () -> Long = System::currentTimeMillis
 ) : InstanceManager {
 
@@ -27,6 +33,16 @@ class DefaultInstanceManager(
         compatibilityMode: CompatibilityMode
     ): Result<VirtualInstanceRecord> {
         return runCatching {
+            // Validate that InstallRecord exists if store is provided.
+            // This prevents creating instances that HostedRuntimeBootstrap cannot start.
+            if (installRecordStore != null) {
+                val installRecord = installRecordStore.load(originPackageName)
+                require(installRecord != null) {
+                    "InstallRecord not found for package: $originPackageName. " +
+                        "Call VirtualInstallService.importFromMetadata() before creating an instance."
+                }
+            }
+
             val instanceId = UUID.randomUUID().toString()
             val shortId = instanceId.replace("-", "").take(12)
             val virtualPackageName = "com.multiapp.instance.$shortId"

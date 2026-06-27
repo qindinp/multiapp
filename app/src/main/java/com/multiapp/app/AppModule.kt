@@ -8,6 +8,8 @@ import com.multiapp.core.model.instance.InstanceRecordStore
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.InstallRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
+import com.multiapp.core.model.installer.ProductionVirtualInstallService
+import com.multiapp.core.model.installer.VirtualInstallService
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -42,15 +44,27 @@ object AppModule {
 
     @Provides
     @Singleton
+    fun provideVirtualInstallService(
+        installRecordStore: InstallRecordStore,
+        @ApplicationContext context: Context
+    ): VirtualInstallService {
+        val artifactDir = File(context.filesDir, "artifacts")
+        return ProductionVirtualInstallService(installRecordStore, artifactDir)
+    }
+
+    @Provides
+    @Singleton
     fun provideInstanceManager(
         instanceRecordStore: InstanceRecordStore,
+        installRecordStore: InstallRecordStore,
         @ApplicationContext context: Context
     ): InstanceManager {
         val dataRootBase = File(context.filesDir, "instance_data")
         dataRootBase.mkdirs()
         return DefaultInstanceManager(
             store = instanceRecordStore,
-            dataRootBase = dataRootBase
+            dataRootBase = dataRootBase,
+            installRecordStore = installRecordStore
         )
     }
 }

@@ -10,6 +10,7 @@ import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.InstallRecordStore
+import com.multiapp.core.model.installer.JsonInstallRecordStore
 import io.mockk.mockk
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -653,5 +654,124 @@ class HostedRuntimeBootstrapTest {
         assertFalse(diagnostics.config.recordProcMaps)
         assertFalse(diagnostics.config.recordLinkerMessage)
         assertTrue(diagnostics.config.recordJniOnLoad)
+    }
+
+    // ── R1 E2E Tests: InstallRecord -> Instance -> Bootstrap ─────────────
+
+    @Test
+    fun `e2e - bootstrap reads InstallRecord created by InstalledPackageImporter and reaches ORIGIN_APK stage`(
+        @TempDir tempDir: File
+    ) {
+        // Arrange: Create a fake APK file
+        val apkFile = File(tempDir, "test-origin.apk")
+        apkFile.writeBytes(byteArrayOf(0x50, 0x4B, 0x03, 0x04)) // PK header
+
+        // Act: Import via InstalledPackageImporter (simulates VirtualInstallService flow)
+        val installDir = File(tempDir, "installs")
+        val artifactDir = File(tempDir, "artifacts")
+        val store = JsonInstallRecordStore(installDir)
+        val importer = com.multiapp.core.model.installer.InstalledPackageImporter(store, artifactDir)
+
+        val importResult = importer.importFromMetadata(
+            packageName = "com.example.e2etest",
+            originApkPath = apkFile.absolutePath,
+            versionCode = 100,
+            versionName = "2.0",
+            targetSdk = 34,
+            minSdk = 26,
+            applicationClassName = null,
+            packageLabel = "E2E Test App"
+        )
+        assertTrue(importResult.isSuccess, "Import should succeed")
+
+        // Verify InstallRecord is persisted
+        val loadedRecord = store.load("com.example.e2etest")
+        assertNotNull(loadedRecord, "InstallRecord should be persisted in store")
+        assertEquals("com.example.e2etest", loadedRecord.packageName)
+        assertTrue(File(loadedRecord.originApkPath).exists(), "Artifact APK should exist")
+
+        // Create instance record (simulates InstanceManager.createInstance flow)
+        val instanceId = "e2e-inst-001"
+        val instanceRecord = VirtualInstanceRecord(
+            instanceId = instanceId,
+            originPackageName = "com.example.e2etest",
+            virtualPackageName = "com.multiapp.instance.e2etest",
+            displayName = "E2E Test App",
+            dataRoot = File(tempDir, "instance_data/$instanceId").absolutePath,
+            compatibilityMode = CompatibilityMode.DEFAULT,
+            createdAtMs = System.currentTimeMillis(),
+            updatedAtMs = System.currentTimeMillis(),
+            state = InstanceState.READY
+        )
+
+        val instanceManager = FakeInstanceManager(mapOf(instanceId to instanceRecord))
+
+        // Bootstrap should read the InstallRecord and proceed past PACKAGE_METADATA
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = instanceManager,
+            installRecordStore = store,
+            hostContext = null
+        )
+
+        val result = bootstrap.run(instanceId)
+
+        // Assert: Bootstrap should NOT stop at PACKAGE_METADATA
+        assertTrue(result.success, "Bootstrap should succeed")
+        assertNotNull(result.installId)
+        assertEquals("com.example.e2etest", result.installId)
+
+        // Verify PACKAGE_METADATA stage succeeded
+        val metadataStage = result.stageResults.find { it.stage == RuntimeStage.PACKAGE_METADATA }
+        assertNotNull(metadataStage, "PACKAGE_METADATA stage should exist")
+        assertEquals(BootstrapStatus.SUCCESS, metadataStage.status,
+            "PACKAGE_METADATA should succeed - InstallRecord must be loadable")
+
+        // Verify ORIGIN_APK stage succeeded (artifact APK exists)
+        val originApkStage = result.stageResults.find { it.stage == RuntimeStage.ORIGIN_APK }
+        assertNotNull(originApkStage, "ORIGIN_APK stage should exist")
+        assertEquals(BootstrapStatus.SUCCESS, originApkStage.status,
+            "ORIGIN_APK should succeed - artifact APK should be found")
+
+        // Verify ClassLoader stage succeeded
+        val classLoaderStage = result.stageResults.find { it.stage == RuntimeStage.CLASS_LOADER }
+        assertNotNull(classLoaderStage, "CLASS_LOADER stage should exist")
+        assertEquals(BootstrapStatus.SUCCESS, classLoaderStage.status)
+    }
+
+    @Test
+    fun `e2e - bootstrap fails at PACKAGE_METADATA when InstallRecord not imported`(
+        @TempDir tempDir: File
+    ) {
+        // Arrange: Create instance WITHOUT importing InstallRecord
+        val instanceId = "e2e-inst-missing"
+        val instanceRecord = VirtualInstanceRecord(
+            instanceId = instanceId,
+            originPackageName = "com.example.notimported",
+            virtualPackageName = "com.multiapp.instance.notimported",
+            displayName = "Not Imported App",
+            dataRoot = File(tempDir, "instance_data/$instanceId").absolutePath,
+            compatibilityMode = CompatibilityMode.DEFAULT,
+            createdAtMs = System.currentTimeMillis(),
+            updatedAtMs = System.currentTimeMillis(),
+            state = InstanceState.READY
+        )
+
+        val instanceManager = FakeInstanceManager(mapOf(instanceId to instanceRecord))
+        val emptyStore = JsonInstallRecordStore(File(tempDir, "empty_installs"))
+
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = instanceManager,
+            installRecordStore = emptyStore,
+            hostContext = null
+        )
+
+        val result = bootstrap.run(instanceId)
+
+        // Assert: Bootstrap should fail at PACKAGE_METADATA
+        assertFalse(result.success, "Bootstrap should fail when InstallRecord is missing")
+        val metadataStage = result.stageResults.find { it.stage == RuntimeStage.PACKAGE_METADATA }
+        assertNotNull(metadataStage)
+        assertEquals(BootstrapStatus.FAILED, metadataStage.status,
+            "PACKAGE_METADATA should fail when no InstallRecord exists")
     }
 }
