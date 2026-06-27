@@ -268,3 +268,33 @@ ContainerActivity / hosted container entry
 -> create guest Application or emit precise failed stage
 -> minimal test app launch baseline
 ```
+
+## 2026-06-27 v2 Hosted Container Audit
+
+Completed:
+
+1. Ran multi-role review across architecture, Android runtime/container,
+   testing, and protected-app compatibility.
+2. Added `docs/container-runtime-refactor/v2-hosted-container-audit-remediation-2026-06-27.md`.
+
+Audit conclusion:
+
+```text
+No-Go: v2 direction is correct, but Hosted Container execution cannot be
+marked complete yet.
+```
+
+Main blockers:
+
+1. Creation flow does not reliably import/create `InstallRecord` before
+   creating launchable `VirtualInstanceRecord`.
+2. `ContainerActivity` and `HostedRuntimeBootstrap` do not launch a guest
+   launcher Activity yet.
+3. Guest `Application.onCreate`, resources/assets/theme, virtual
+   PackageManager, and nativeLibraryDir are not closed.
+4. Current tests are mostly JVM contract/synthetic evidence tests; real
+   `ContainerActivity`, minimal APK, dual-instance, and QQ Reader device
+   evidence are still missing.
+5. protected baseline still has native hook / register-natives wrapper risks
+   that must be split into observe-only diagnostics and explicit compatibility
+   capabilities.

@@ -13,6 +13,9 @@ Use this page as the current documentation entry point.
 - `docs\container-runtime-refactor\v2-in-repo-kernel-rewrite-plan.md`: concrete
   execution plan for the MultiApp v2 in-repo kernel rewrite, including phases,
   module boundaries, verification matrix, and first implementation tasks.
+- `docs\container-runtime-refactor\v2-hosted-container-audit-remediation-2026-06-27.md`:
+  multi-role audit and remediation plan for the v2 Hosted Container execution,
+  including P0/P1/P2 findings and R1-R5 fixes.
 - `docs\current-repository-state.md`: current branch state, commit scope,
   active QQ Reader blocker, and verification command.
 - `docs\qqreader-offline-patch.md`: QQ Reader offline clone patch flow and the
