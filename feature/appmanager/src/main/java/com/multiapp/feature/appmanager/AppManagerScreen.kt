@@ -48,7 +48,7 @@ fun AppManagerScreen(
     var showDetailDialog by remember { mutableStateOf<InstanceInfo?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Handle events (undo delete, launch failed)
+    // Handle undo delete events
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
             when (event) {
@@ -60,16 +60,6 @@ fun AppManagerScreen(
                     )
                     if (result == SnackbarResult.ActionPerformed) {
                         viewModel.undoDelete(event.instanceId, event.identityJson)
-                    }
-                }
-                is AppManagerEvent.LaunchFailed -> {
-                    val result = snackbarHostState.showSnackbar(
-                        message = "启动失败",
-                        actionLabel = "重试",
-                        duration = SnackbarDuration.Long
-                    )
-                    if (result == SnackbarResult.ActionPerformed) {
-                        viewModel.launchInstance(event.instanceId)
                     }
                 }
                 else -> {} // 其他事件由 ViewModel 处理
@@ -91,7 +81,7 @@ fun AppManagerScreen(
                         if (uiState.instances.isNotEmpty()) {
                             Spacer(modifier = Modifier.width(10.dp))
                             Surface(
-                                shape = RoundedCornerShape(8.dp),
+                                shape = RoundedCornerShape(14.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer,
                             ) {
                                 Text(
@@ -149,9 +139,6 @@ fun AppManagerScreen(
                                         )
                                     },
                                     onShowDetail = { showDetailDialog = instance },
-                                    onLaunch = {
-                                        viewModel.launchInstance(instance.instanceId)
-                                    },
                                     onDelete = {
                                         viewModel.onEvent(
                                             AppManagerEvent.DeleteInstance(instance.instanceId)
@@ -182,7 +169,6 @@ private fun AppManagerCard(
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
     onShowDetail: () -> Unit,
-    onLaunch: () -> Unit,
     onDelete: () -> Unit
 ) {
     val context = LocalContext.current
@@ -198,7 +184,7 @@ private fun AppManagerCard(
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
         colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.surface
@@ -268,8 +254,7 @@ private fun AppManagerCard(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = instance.appName.ifBlank { instance.originalPackageName.substringAfterLast(".") }
-                            .replaceFirstChar { it.uppercase() },
+                        text = instance.originalPackageName.substringAfterLast("."),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
@@ -297,13 +282,6 @@ private fun AppManagerCard(
                 }
 
                 Row {
-                    IconButton(onClick = onLaunch) {
-                        Icon(
-                            Icons.Default.PlayArrow,
-                            contentDescription = "启动",
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
                     IconButton(onClick = onShowDetail) {
                         Icon(
                             Icons.Default.Info,
@@ -388,8 +366,7 @@ private fun InstanceDetailDialog(
         },
         title = {
             Text(
-                text = instance.appName.ifBlank { instance.originalPackageName.substringAfterLast(".") }
-                    .replaceFirstChar { it.uppercase() },
+                text = instance.originalPackageName.substringAfterLast("."),
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center,

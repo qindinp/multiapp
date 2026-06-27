@@ -2,6 +2,7 @@ package com.multiapp.feature.launcher
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -38,7 +39,6 @@ import com.multiapp.core.designsystem.components.InstanceStatusChip
 import com.multiapp.core.instance.InstanceInfo
 import com.multiapp.core.instance.InstanceStatus
 import com.multiapp.core.model.VirtualApp
-import kotlinx.coroutines.channels.Channel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -49,54 +49,9 @@ fun LauncherScreen(
     val context = LocalContext.current
     var showAppPicker by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf<InstanceInfo?>(null) }
-    val snackbarHostState = remember { SnackbarHostState() }
-    val launchFailureChannel = remember { Channel<String>(Channel.BUFFERED) }
-
-    // Handle launch failure Snackbar
-    LaunchedEffect(Unit) {
-        for (failedInstanceId in launchFailureChannel) {
-            val result = snackbarHostState.showSnackbar(
-                message = "启动失败",
-                actionLabel = "重试",
-                duration = SnackbarDuration.Long
-            )
-            if (result == SnackbarResult.ActionPerformed) {
-                try {
-                    val instance = uiState.instances.find { it.instanceId == failedInstanceId }
-                    if (instance != null) {
-                        var intent = context.packageManager.getLaunchIntentForPackage(instance.stubPackageName)
-                        if (intent == null) {
-                            intent = Intent(Intent.ACTION_MAIN).apply {
-                                addCategory(Intent.CATEGORY_LAUNCHER)
-                                setPackage(instance.stubPackageName)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            val resolveInfos = context.packageManager.queryIntentActivities(intent, 0)
-                            if (resolveInfos.isNotEmpty()) {
-                                intent.setClassName(instance.stubPackageName, resolveInfos.first().activityInfo.name)
-                            } else {
-                                intent = null
-                            }
-                        }
-                        if (intent?.component?.className.isNullOrEmpty()) {
-                            snackbarHostState.showSnackbar(
-                                message = "无法启动：找不到入口 Activity",
-                                duration = SnackbarDuration.Short
-                            )
-                        } else {
-                            context.startActivity(intent)
-                        }
-                    }
-                } catch (_: Exception) {
-                    // Ignore retry errors
-                }
-            }
-        }
-    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -108,7 +63,7 @@ fun LauncherScreen(
                         if (uiState.instances.isNotEmpty()) {
                             Spacer(modifier = Modifier.width(10.dp))
                             Surface(
-                                shape = RoundedCornerShape(8.dp),
+                                shape = RoundedCornerShape(14.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer,
                             ) {
                                 Text(
@@ -172,12 +127,12 @@ fun LauncherScreen(
                                 }
                             }
                             if (intent?.component?.className.isNullOrEmpty()) {
-                                launchFailureChannel.trySend(instance.instanceId)
+                                Toast.makeText(context, "无法启动：找不到入口 Activity", Toast.LENGTH_SHORT).show()
                             } else {
                                 context.startActivity(intent)
                             }
                         } catch (e: Exception) {
-                            launchFailureChannel.trySend(instance.instanceId)
+                            Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
                         }
                     },
                     onDelete = { showDeleteConfirm = it }
@@ -207,11 +162,7 @@ fun LauncherScreen(
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = null },
             title = { Text("确认删除") },
-            text = {
-                val displayName = instance.appName.ifBlank { instance.originalPackageName.substringAfterLast(".") }
-                    .replaceFirstChar { it.uppercase() }
-                Text("确定要删除分身「${displayName}」吗？此操作不可撤销。")
-            },
+            text = { Text("确定要删除 ${instance.stubPackageName} 吗？此操作不可撤销。") },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.deleteInstance(instance.instanceId)
@@ -337,7 +288,7 @@ private fun AppGridItem(
                 onClick = onLaunch,
                 onLongClick = { showMenu = true }
             ),
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
         colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.surface
@@ -404,7 +355,7 @@ private fun AppGridItem(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = instance.appName.ifBlank { instance.originalPackageName.substringAfterLast(".") },
+                text = instance.originalPackageName.substringAfterLast("."),
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -593,7 +544,7 @@ private fun AppPickerItem(
 ) {
     ElevatedCard(
         onClick = onClick,
-        shape = RoundedCornerShape(16.dp),
+        shape = RoundedCornerShape(20.dp),
         elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
         colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.surface

@@ -11,130 +11,143 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 
 // ════════════════════════════════════════════════════════════════
-// MultiApp Brand Colors — Deep Indigo + Electric Violet + Cyan
+// MultiApp Brand Colors — HyperOS Soft Blue-Gray
 // ════════════════════════════════════════════════════════════════
 
-// Primary: Deep Indigo
-private val DeepIndigo = Color(0xFF6366F1)
-private val LightIndigo = Color(0xFF818CF8)
-private val OnIndigo = Color(0xFFFFFFFF)
-private val IndigoContainer = Color(0xFFE0E0FF)
-private val OnIndigoContainer = Color(0xFF1A1A5E)
+// Primary: Soft Blue-Gray
+private val HyperPrimary = Color(0xFF5B6B8A)
+private val HyperOnPrimary = Color(0xFFFFFFFF)
+private val HyperPrimaryContainer = Color(0xFFD8E2F0)
+private val HyperOnPrimaryContainer = Color(0xFF1A2A44)
 
-// Secondary: Electric Violet
-private val ElectricViolet = Color(0xFF8B5CF6)
-private val LightViolet = Color(0xFFA78BFA)
-private val OnViolet = Color(0xFFFFFFFF)
-private val VioletContainer = Color(0xFFEDE5FF)
-private val OnVioletContainer = Color(0xFF2D1A6E)
+// Secondary: Muted Lavender-Gray
+private val HyperSecondary = Color(0xFF7B7D9A)
+private val HyperOnSecondary = Color(0xFFFFFFFF)
+private val HyperSecondaryContainer = Color(0xFFE0E0F0)
+private val HyperOnSecondaryContainer = Color(0xFF2A2A44)
 
-// Tertiary: Cyan Accent
-private val CyanAccent = Color(0xFF06B6D4)
-private val LightCyan = Color(0xFF22D3EE)
-private val OnCyan = Color(0xFFFFFFFF)
-private val CyanContainer = Color(0xFFCCFBFF)
-private val OnCyanContainer = Color(0xFF003D47)
+// Tertiary: Warm Sage
+private val HyperTertiary = Color(0xFF6B8A7B)
+private val HyperOnTertiary = Color(0xFFFFFFFF)
+private val HyperTertiaryContainer = Color(0xFFD4E8DC)
+private val HyperOnTertiaryContainer = Color(0xFF1A3A2A)
 
-// Neutrals
-private val CleanWhiteBg = Color(0xFFFAFBFF)
-private val PureWhiteSurface = Color(0xFFFFFFFF)
-private val SoftLavender = Color(0xFFF1F0FF)
-private val OnSurface = Color(0xFF1A1B2E)
-private val OnSurfaceVariant = Color(0xFF5C5C7A)
-private val OutlineColor = Color(0xFFCCCCE0)
-private val OutlineVariantColor = Color(0xFFE2E2F0)
+// Neutrals — Warm Gray
+private val HyperLightBackground = Color(0xFFF2F2F5)
+private val HyperLightSurface = Color(0xFFF7F7FA)
+private val HyperLightSurfaceVariant = Color(0xFFECECF0)
+private val HyperOnSurface = Color(0xFF1A1B2E)
+private val HyperOnSurfaceVariant = Color(0xFF6B6B80)
+private val HyperOutline = Color(0xFFC8C8D8)
+private val HyperOutlineVariant = Color(0xFFE0E0EA)
 
 // Error
-private val CoralRed = Color(0xFFEF4444)
-private val OnCoralRed = Color(0xFFFFFFFF)
-private val CoralRedContainer = Color(0xFFFEE2E2)
-private val OnCoralRedContainer = Color(0xFF7F1D1D)
+private val HyperError = Color(0xFFD94452)
+private val HyperOnError = Color(0xFFFFFFFF)
+private val HyperErrorContainer = Color(0xFFFCE4E8)
+private val HyperOnErrorContainer = Color(0xFF5C1020)
 
-// Dark theme
-private val DarkBg = Color(0xFF0F0F23)
-private val DarkSurface = Color(0xFF1A1A3E)
-private val DarkSurfaceVariant = Color(0xFF262650)
-private val OnDarkSurface = Color(0xFFE4E4F0)
-private val OnDarkSurfaceVariant = Color(0xFFA0A0C0)
-private val DarkOutline = Color(0xFF3D3D60)
-private val DarkOutlineVariant = Color(0xFF2E2E50)
+// Dark theme — Deep Blue-Gray (not pure black)
+private val HyperDarkPrimary = Color(0xFF8B9DC3)
+private val HyperDarkOnPrimary = Color(0xFF1A1A2E)
+private val HyperDarkPrimaryContainer = Color(0xFF2A3A5C)
+private val HyperDarkOnPrimaryContainer = Color(0xFFD8E2F0)
+private val HyperDarkSecondary = Color(0xFFA0A0C0)
+private val HyperDarkOnSecondary = Color(0xFF1A1A2E)
+private val HyperDarkSecondaryContainer = Color(0xFF3A3A58)
+private val HyperDarkOnSecondaryContainer = Color(0xFFE0E0F0)
+private val HyperDarkTertiary = Color(0xFF8AAA9B)
+private val HyperDarkOnTertiary = Color(0xFF1A2A22)
+private val HyperDarkTertiaryContainer = Color(0xFF2A4A3A)
+private val HyperDarkOnTertiaryContainer = Color(0xFFD4E8DC)
+private val HyperDarkBackground = Color(0xFF1C1C28)
+private val HyperDarkSurface = Color(0xFF252538)
+private val HyperDarkSurfaceVariant = Color(0xFF2E2E44)
+private val HyperOnDarkSurface = Color(0xFFE4E4F0)
+private val HyperOnDarkSurfaceVariant = Color(0xFFA0A0B8)
+private val HyperDarkOutline = Color(0xFF444460)
+private val HyperDarkOutlineVariant = Color(0xFF363650)
+private val HyperDarkError = Color(0xFFFF8A98)
+private val HyperDarkOnError = Color(0xFF3A0010)
+private val HyperDarkErrorContainer = Color(0xFF7A1030)
+private val HyperDarkOnErrorContainer = Color(0xFFFCE4E8)
 
 private val LightColorScheme = lightColorScheme(
-    primary = DeepIndigo,
-    onPrimary = OnIndigo,
-    primaryContainer = IndigoContainer,
-    onPrimaryContainer = OnIndigoContainer,
-    secondary = ElectricViolet,
-    onSecondary = OnViolet,
-    secondaryContainer = VioletContainer,
-    onSecondaryContainer = OnVioletContainer,
-    tertiary = CyanAccent,
-    onTertiary = OnCyan,
-    tertiaryContainer = CyanContainer,
-    onTertiaryContainer = OnCyanContainer,
-    error = CoralRed,
-    onError = OnCoralRed,
-    errorContainer = CoralRedContainer,
-    onErrorContainer = OnCoralRedContainer,
-    background = CleanWhiteBg,
-    onBackground = OnSurface,
-    surface = PureWhiteSurface,
-    onSurface = OnSurface,
-    surfaceVariant = SoftLavender,
-    onSurfaceVariant = OnSurfaceVariant,
-    outline = OutlineColor,
-    outlineVariant = OutlineVariantColor,
+    primary = HyperPrimary,
+    onPrimary = HyperOnPrimary,
+    primaryContainer = HyperPrimaryContainer,
+    onPrimaryContainer = HyperOnPrimaryContainer,
+    secondary = HyperSecondary,
+    onSecondary = HyperOnSecondary,
+    secondaryContainer = HyperSecondaryContainer,
+    onSecondaryContainer = HyperOnSecondaryContainer,
+    tertiary = HyperTertiary,
+    onTertiary = HyperOnTertiary,
+    tertiaryContainer = HyperTertiaryContainer,
+    onTertiaryContainer = HyperOnTertiaryContainer,
+    error = HyperError,
+    onError = HyperOnError,
+    errorContainer = HyperErrorContainer,
+    onErrorContainer = HyperOnErrorContainer,
+    background = HyperLightBackground,
+    onBackground = HyperOnSurface,
+    surface = HyperLightSurface,
+    onSurface = HyperOnSurface,
+    surfaceVariant = HyperLightSurfaceVariant,
+    onSurfaceVariant = HyperOnSurfaceVariant,
+    outline = HyperOutline,
+    outlineVariant = HyperOutlineVariant,
 )
 
 private val DarkColorScheme = darkColorScheme(
-    primary = LightIndigo,
-    onPrimary = Color(0xFF2A2A6E),
-    primaryContainer = Color(0xFF3A3A8E),
-    onPrimaryContainer = IndigoContainer,
-    secondary = LightViolet,
-    onSecondary = Color(0xFF2D1A6E),
-    secondaryContainer = Color(0xFF4A2E8E),
-    onSecondaryContainer = VioletContainer,
-    tertiary = LightCyan,
-    onTertiary = Color(0xFF003D47),
-    tertiaryContainer = Color(0xFF005768),
-    onTertiaryContainer = CyanContainer,
-    error = Color(0xFFFCA5A5),
-    onError = Color(0xFF690005),
-    errorContainer = Color(0xFF93000A),
-    onErrorContainer = Color(0xFFFFDAD6),
-    background = DarkBg,
-    onBackground = OnDarkSurface,
-    surface = DarkSurface,
-    onSurface = OnDarkSurface,
-    surfaceVariant = DarkSurfaceVariant,
-    onSurfaceVariant = OnDarkSurfaceVariant,
-    outline = DarkOutline,
-    outlineVariant = DarkOutlineVariant,
+    primary = HyperDarkPrimary,
+    onPrimary = HyperDarkOnPrimary,
+    primaryContainer = HyperDarkPrimaryContainer,
+    onPrimaryContainer = HyperDarkOnPrimaryContainer,
+    secondary = HyperDarkSecondary,
+    onSecondary = HyperDarkOnSecondary,
+    secondaryContainer = HyperDarkSecondaryContainer,
+    onSecondaryContainer = HyperDarkOnSecondaryContainer,
+    tertiary = HyperDarkTertiary,
+    onTertiary = HyperDarkOnTertiary,
+    tertiaryContainer = HyperDarkTertiaryContainer,
+    onTertiaryContainer = HyperDarkOnTertiaryContainer,
+    error = HyperDarkError,
+    onError = HyperDarkOnError,
+    errorContainer = HyperDarkErrorContainer,
+    onErrorContainer = HyperDarkOnErrorContainer,
+    background = HyperDarkBackground,
+    onBackground = HyperOnDarkSurface,
+    surface = HyperDarkSurface,
+    onSurface = HyperOnDarkSurface,
+    surfaceVariant = HyperDarkSurfaceVariant,
+    onSurfaceVariant = HyperOnDarkSurfaceVariant,
+    outline = HyperDarkOutline,
+    outlineVariant = HyperDarkOutlineVariant,
 )
 
 private val MultiAppTypography = Typography(
-    displayLarge = TextStyle(fontWeight = FontWeight.Bold, fontSize = 32.sp, lineHeight = 40.sp, letterSpacing = (-0.5).sp),
-    headlineLarge = TextStyle(fontWeight = FontWeight.Bold, fontSize = 28.sp, lineHeight = 36.sp),
-    headlineMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 24.sp, lineHeight = 32.sp),
-    titleLarge = TextStyle(fontWeight = FontWeight.Bold, fontSize = 20.sp, lineHeight = 28.sp, letterSpacing = 0.15.sp),
-    titleMedium = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 16.sp, lineHeight = 24.sp, letterSpacing = 0.15.sp),
+    displayLarge = TextStyle(fontWeight = FontWeight.Medium, fontSize = 32.sp, lineHeight = 40.sp, letterSpacing = (-0.5).sp),
+    headlineLarge = TextStyle(fontWeight = FontWeight.Medium, fontSize = 28.sp, lineHeight = 36.sp),
+    headlineMedium = TextStyle(fontWeight = FontWeight.Medium, fontSize = 24.sp, lineHeight = 32.sp),
+    titleLarge = TextStyle(fontWeight = FontWeight.Medium, fontSize = 20.sp, lineHeight = 28.sp, letterSpacing = 0.15.sp),
+    titleMedium = TextStyle(fontWeight = FontWeight.Medium, fontSize = 16.sp, lineHeight = 24.sp, letterSpacing = 0.15.sp),
     titleSmall = TextStyle(fontWeight = FontWeight.Medium, fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.1.sp),
     bodyLarge = TextStyle(fontWeight = FontWeight.Normal, fontSize = 16.sp, lineHeight = 24.sp),
     bodyMedium = TextStyle(fontWeight = FontWeight.Normal, fontSize = 14.sp, lineHeight = 20.sp),
     bodySmall = TextStyle(fontWeight = FontWeight.Normal, fontSize = 12.sp, lineHeight = 16.sp),
-    labelLarge = TextStyle(fontWeight = FontWeight.SemiBold, fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.1.sp),
+    labelLarge = TextStyle(fontWeight = FontWeight.Medium, fontSize = 14.sp, lineHeight = 20.sp, letterSpacing = 0.1.sp),
     labelMedium = TextStyle(fontWeight = FontWeight.Medium, fontSize = 12.sp, lineHeight = 16.sp, letterSpacing = 0.5.sp),
     labelSmall = TextStyle(fontWeight = FontWeight.Medium, fontSize = 10.sp, lineHeight = 14.sp, letterSpacing = 0.5.sp),
 )
 
 /**
- * MultiApp Material 3 Theme — Deep Indigo + Electric Violet + Cyan
+ * MultiApp Material 3 Theme — HyperOS Soft Blue-Gray
  */
 @Composable
 fun MultiAppTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = false,
+    dynamicColor: Boolean = true,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {

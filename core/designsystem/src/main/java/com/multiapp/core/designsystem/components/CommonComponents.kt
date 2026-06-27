@@ -193,7 +193,7 @@ fun SettingsSection(
         }
         ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(20.dp),
             elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
             colors = CardDefaults.elevatedCardColors(
                 containerColor = MaterialTheme.colorScheme.surface
@@ -222,7 +222,7 @@ fun InstanceStatusChip(
         InstanceStatus.ERROR -> Triple("错误", MaterialTheme.colorScheme.error, MaterialTheme.colorScheme.errorContainer)
     }
     Surface(
-        shape = RoundedCornerShape(6.dp),
+        shape = RoundedCornerShape(50),
         color = bgColor,
         modifier = modifier
     ) {
