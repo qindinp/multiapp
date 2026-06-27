@@ -2,6 +2,8 @@ package com.multiapp.core.loader
 
 import android.app.Application
 import android.content.Context
+import com.multiapp.core.hook.Interface20Verdict
+import com.multiapp.core.hook.NativeDiagnosticsEvidence
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
@@ -14,6 +16,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -476,5 +479,179 @@ class HostedRuntimeBootstrapTest {
         val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
         assertNotNull(appStage)
         assertTrue(appStage.durationMs >= 0)
+    }
+
+    // ── Phase 3 Tests: NativeDiagnosticsProfile integration ────────────
+
+    @Test
+    fun `result includes diagnostics when bootstrap succeeds`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(tempDir)
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        assertNotNull(result.diagnostics)
+        // No native evidence in JVM test -> verdict should not be ORIGINAL_SHELL_REGISTERED
+        assertNotEquals(Interface20Verdict.ORIGINAL_SHELL_REGISTERED, result.diagnostics!!.verdict)
+    }
+
+    @Test
+    fun `result includes diagnostics when instance not found`() {
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(emptyMap()),
+            installRecordStore = FakeInstallRecordStore()
+        )
+
+        val result = bootstrap.run("nonexistent-id")
+
+        assertFalse(result.success)
+        assertNotNull(result.diagnostics)
+    }
+
+    @Test
+    fun `result includes diagnostics when install record not found`() {
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(
+                mapOf("inst-001" to instanceRecord())
+            ),
+            installRecordStore = FakeInstallRecordStore(emptyMap())
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertFalse(result.success)
+        assertNotNull(result.diagnostics)
+    }
+
+    @Test
+    fun `result includes diagnostics when origin APK does not exist`() {
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(
+                mapOf("inst-001" to instanceRecord())
+            ),
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = "/nonexistent/path.apk"))
+            )
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertFalse(result.success)
+        assertNotNull(result.diagnostics)
+    }
+
+    @Test
+    fun `result includes diagnostics when ClassLoader factory throws`(
+        @TempDir tempDir: File
+    ) {
+        val apkFile = File(tempDir, "example.apk")
+        apkFile.writeBytes(byteArrayOf(0x50, 0x4B))
+
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(
+                mapOf("inst-001" to instanceRecord())
+            ),
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
+            ),
+            classLoaderFactory = { _, _ -> throw RuntimeException("dex load failed") }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertFalse(result.success)
+        assertNotNull(result.diagnostics)
+    }
+
+    @Test
+    fun `diagnostics includes classloader_created evidence on success`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(tempDir)
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val diagnostics = result.diagnostics!!
+        val classLoaderEvidence = diagnostics.evidence.find { it.key == "classloader_created" }
+        assertNotNull(classLoaderEvidence)
+        assertEquals("true", classLoaderEvidence.value)
+        assertEquals("HostedRuntimeBootstrap", classLoaderEvidence.source)
+    }
+
+    @Test
+    fun `diagnostics includes application_created evidence on success`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(tempDir)
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val diagnostics = result.diagnostics!!
+        val appEvidence = diagnostics.evidence.find { it.key == "application_created" }
+        assertNotNull(appEvidence)
+        // APPLICATION stage is SKIPPED when resolver returns null -> "false"
+        assertEquals("false", appEvidence.value)
+    }
+
+    @Test
+    fun `diagnostics includes origin_apk_path evidence when APK resolved`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, apkFile, _) = validBootstrap(tempDir)
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val diagnostics = result.diagnostics!!
+        val apkEvidence = diagnostics.evidence.find { it.key == "origin_apk_path" }
+        assertNotNull(apkEvidence)
+        assertEquals(apkFile.absolutePath, apkEvidence.value)
+    }
+
+    @Test
+    fun `diagnostics verdict is JNI_ONLOAD_NOT_EXECUTED when no native evidence`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(tempDir)
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val diagnostics = result.diagnostics!!
+        // No jni_onload_executed evidence in bootstrap context
+        assertEquals(Interface20Verdict.JNI_ONLOAD_NOT_EXECUTED, diagnostics.verdict)
+    }
+
+    @Test
+    fun `diagnostics evidence is empty when instance not found`() {
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(emptyMap()),
+            installRecordStore = FakeInstallRecordStore()
+        )
+
+        val result = bootstrap.run("nonexistent-id")
+
+        assertNotNull(result.diagnostics)
+        assertTrue(result.diagnostics!!.evidence.isEmpty())
+    }
+
+    @Test
+    fun `diagnostics uses default NativeDiagnosticsConfig`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(tempDir)
+
+        val result = bootstrap.run("inst-001")
+
+        val diagnostics = result.diagnostics!!
+        // Default config: root-requiring flags are false
+        assertFalse(diagnostics.config.recordNativeNamespace)
+        assertFalse(diagnostics.config.recordProcMaps)
+        assertFalse(diagnostics.config.recordLinkerMessage)
+        assertTrue(diagnostics.config.recordJniOnLoad)
     }
 }

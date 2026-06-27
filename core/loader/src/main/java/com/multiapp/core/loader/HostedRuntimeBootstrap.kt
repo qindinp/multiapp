@@ -1,6 +1,10 @@
 package com.multiapp.core.loader
 
 import android.app.Application
+import com.multiapp.core.hook.NativeDiagnosticsConfig
+import com.multiapp.core.hook.NativeDiagnosticsEvidence
+import com.multiapp.core.hook.NativeDiagnosticsProfile
+import com.multiapp.core.hook.NativeDiagnosticsResult
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.installer.InstallRecordStore
 import com.multiapp.core.model.virtual.VirtualContextConfig
@@ -28,7 +32,8 @@ data class HostedBootstrapResult(
     val guestApplication: android.app.Application?,
     val stageResults: List<BootstrapResult>,
     val summary: BootstrapSummary,
-    val success: Boolean
+    val success: Boolean,
+    val diagnostics: NativeDiagnosticsResult? = null
 )
 
 /**
@@ -245,7 +250,8 @@ class HostedRuntimeBootstrap(
                     guestApplication = guestApplication,
                     stageResults = stageResults,
                     summary = stageResults.toSummary(),
-                    success = true
+                    success = true,
+                    diagnostics = runDiagnosticsAnalysis(stageResults, originApkPath)
                 )
             } catch (e: Throwable) {
                 stageResults.add(
@@ -276,7 +282,8 @@ class HostedRuntimeBootstrap(
             guestApplication = null,
             stageResults = stageResults,
             summary = summary,
-            success = true
+            success = true,
+            diagnostics = runDiagnosticsAnalysis(stageResults, originApkPath)
         )
     }
 
@@ -300,6 +307,7 @@ class HostedRuntimeBootstrap(
         installId: String? = null
     ): HostedBootstrapResult {
         val summary = stageResults.toSummary()
+        val diagnostics = runDiagnosticsAnalysis(stageResults, originApkPath)
         return HostedBootstrapResult(
             instanceId = instanceId,
             installId = installId,
@@ -309,8 +317,80 @@ class HostedRuntimeBootstrap(
             guestApplication = null,
             stageResults = stageResults,
             summary = summary,
-            success = false
+            success = false,
+            diagnostics = diagnostics
         )
+    }
+
+    /**
+     * Build diagnostics evidence from stage results and run NativeDiagnosticsProfile analysis.
+     */
+    private fun runDiagnosticsAnalysis(
+        stageResults: List<BootstrapResult>,
+        originApkPath: String?
+    ): NativeDiagnosticsResult {
+        val evidence = buildDiagnosticsEvidence(stageResults, originApkPath)
+        val config = NativeDiagnosticsConfig()
+        return NativeDiagnosticsProfile.analyze(config, evidence)
+    }
+
+    /**
+     * Extract [NativeDiagnosticsEvidence] from bootstrap stage results.
+     *
+     * Maps stage outcomes to evidence keys understood by [NativeDiagnosticsProfile]:
+     * - `classloader_created` -- whether the ClassLoader stage succeeded
+     * - `application_created` -- whether the Application stage succeeded
+     * - `interface20_error` -- error message if Application failure mentions "interface20"
+     * - `origin_apk_path` -- resolved APK path for downstream native analysis
+     */
+    private fun buildDiagnosticsEvidence(
+        stageResults: List<BootstrapResult>,
+        originApkPath: String?
+    ): List<NativeDiagnosticsEvidence> {
+        val evidence = mutableListOf<NativeDiagnosticsEvidence>()
+
+        val classLoaderStage = stageResults.firstOrNull { it.stage == RuntimeStage.CLASS_LOADER }
+        if (classLoaderStage != null) {
+            evidence.add(
+                NativeDiagnosticsEvidence(
+                    key = "classloader_created",
+                    value = classLoaderStage.isSuccessful.toString(),
+                    source = "HostedRuntimeBootstrap"
+                )
+            )
+        }
+
+        val applicationStage = stageResults.firstOrNull { it.stage == RuntimeStage.APPLICATION }
+        if (applicationStage != null) {
+            evidence.add(
+                NativeDiagnosticsEvidence(
+                    key = "application_created",
+                    value = applicationStage.isSuccessful.toString(),
+                    source = "HostedRuntimeBootstrap"
+                )
+            )
+            if (applicationStage.errorMessage?.contains("interface20", ignoreCase = true) == true) {
+                evidence.add(
+                    NativeDiagnosticsEvidence(
+                        key = "interface20_error",
+                        value = applicationStage.errorMessage,
+                        source = "HostedRuntimeBootstrap"
+                    )
+                )
+            }
+        }
+
+        if (originApkPath != null) {
+            evidence.add(
+                NativeDiagnosticsEvidence(
+                    key = "origin_apk_path",
+                    value = originApkPath,
+                    source = "HostedRuntimeBootstrap"
+                )
+            )
+        }
+
+        return evidence
     }
 
     companion object {
