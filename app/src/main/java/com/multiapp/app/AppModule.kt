@@ -1,16 +1,19 @@
 package com.multiapp.app
 
 import android.content.Context
-import androidx.room.Room
 import com.multiapp.core.hook.HookEngine
-import com.multiapp.core.instance.InstanceDatabase
-import com.multiapp.core.installer.StubInstaller
-import com.multiapp.core.stub.StubBuilder
+import com.multiapp.core.model.instance.DefaultInstanceManager
+import com.multiapp.core.model.instance.InstanceManager
+import com.multiapp.core.model.instance.InstanceRecordStore
+import com.multiapp.core.model.instance.JsonInstanceRecordStore
+import com.multiapp.core.model.installer.InstallRecordStore
+import com.multiapp.core.model.installer.JsonInstallRecordStore
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import java.io.File
 import javax.inject.Singleton
 
 @Module
@@ -23,24 +26,31 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideStubBuilder(@ApplicationContext context: Context): StubBuilder {
-        return StubBuilder(context = context)
+    fun provideInstanceRecordStore(@ApplicationContext context: Context): InstanceRecordStore {
+        val baseDir = File(context.filesDir, "instances")
+        baseDir.mkdirs()
+        return JsonInstanceRecordStore(baseDir)
     }
 
     @Provides
     @Singleton
-    fun provideStubInstaller(@ApplicationContext context: Context): StubInstaller {
-        return StubInstaller(context)
+    fun provideInstallRecordStore(@ApplicationContext context: Context): InstallRecordStore {
+        val baseDir = File(context.filesDir, "installs")
+        baseDir.mkdirs()
+        return JsonInstallRecordStore(baseDir)
     }
 
     @Provides
     @Singleton
-    fun provideInstanceDatabase(@ApplicationContext context: Context): InstanceDatabase {
-        return Room.databaseBuilder(
-            context,
-            InstanceDatabase::class.java,
-            "multiapp_instances.db"
-        ).addMigrations(InstanceDatabase.MIGRATION_1_2, InstanceDatabase.MIGRATION_2_3)
-         .build()
+    fun provideInstanceManager(
+        instanceRecordStore: InstanceRecordStore,
+        @ApplicationContext context: Context
+    ): InstanceManager {
+        val dataRootBase = File(context.filesDir, "instance_data")
+        dataRootBase.mkdirs()
+        return DefaultInstanceManager(
+            store = instanceRecordStore,
+            dataRootBase = dataRootBase
+        )
     }
 }

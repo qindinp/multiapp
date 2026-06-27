@@ -36,8 +36,8 @@ import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
-import com.multiapp.core.instance.InstanceInfo
-import com.multiapp.core.instance.InstanceStatus
+import com.multiapp.core.model.instance.InstanceState
+import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.VirtualApp
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -48,7 +48,7 @@ fun LauncherScreen(
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     var showAppPicker by remember { mutableStateOf(false) }
-    var showDeleteConfirm by remember { mutableStateOf<InstanceInfo?>(null) }
+    var showDeleteConfirm by remember { mutableStateOf<VirtualInstanceRecord?>(null) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -110,27 +110,15 @@ fun LauncherScreen(
                     instances = uiState.instances,
                     onLaunch = { instance ->
                         try {
-                            // 优先用 getLaunchIntentForPackage
-                            var intent = context.packageManager.getLaunchIntentForPackage(instance.stubPackageName)
-                            if (intent == null) {
-                                // fallback: 直接构造 intent 启动 launcher activity
-                                intent = Intent(Intent.ACTION_MAIN).apply {
-                                    addCategory(Intent.CATEGORY_LAUNCHER)
-                                    setPackage(instance.stubPackageName)
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                val resolveInfos = context.packageManager.queryIntentActivities(intent, 0)
-                                if (resolveInfos.isNotEmpty()) {
-                                    intent.setClassName(instance.stubPackageName, resolveInfos.first().activityInfo.name)
-                                } else {
-                                    intent = null
-                                }
+                            val intent = Intent().apply {
+                                component = android.content.ComponentName(
+                                    "com.multiapp.app",
+                                    "com.multiapp.app.container.ContainerActivity"
+                                )
+                                putExtra("multiapp.instanceId", instance.instanceId)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             }
-                            if (intent?.component?.className.isNullOrEmpty()) {
-                                Toast.makeText(context, "无法启动：找不到入口 Activity", Toast.LENGTH_SHORT).show()
-                            } else {
-                                context.startActivity(intent)
-                            }
+                            context.startActivity(intent)
                         } catch (e: Exception) {
                             Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
                         }
@@ -162,7 +150,7 @@ fun LauncherScreen(
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = null },
             title = { Text("确认删除") },
-            text = { Text("确定要删除 ${instance.stubPackageName} 吗？此操作不可撤销。") },
+            text = { Text("确定要删除 ${instance.displayName} 吗？此操作不可撤销。") },
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.deleteInstance(instance.instanceId)
@@ -225,9 +213,9 @@ private fun CreationProgressDialog(step: String) {
 
 @Composable
 private fun AppGrid(
-    instances: List<InstanceInfo>,
-    onLaunch: (InstanceInfo) -> Unit,
-    onDelete: (InstanceInfo) -> Unit
+    instances: List<VirtualInstanceRecord>,
+    onLaunch: (VirtualInstanceRecord) -> Unit,
+    onDelete: (VirtualInstanceRecord) -> Unit
 ) {
     LazyVerticalGrid(
         columns = GridCells.Adaptive(minSize = 96.dp),
@@ -261,23 +249,19 @@ private fun AppGrid(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AppGridItem(
-    instance: InstanceInfo,
+    instance: VirtualInstanceRecord,
     onLaunch: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    // Load app icon — try stub package first, fall back to original package
-    val appIcon = remember(instance.stubPackageName, instance.originalPackageName) {
+    // Load app icon from origin package
+    val appIcon = remember(instance.originPackageName) {
         try {
-            context.packageManager.getApplicationIcon(instance.stubPackageName)
+            context.packageManager.getApplicationIcon(instance.originPackageName)
         } catch (_: Exception) {
-            try {
-                context.packageManager.getApplicationIcon(instance.originalPackageName)
-            } catch (_: Exception) {
-                null
-            }
+            null
         }
     }
 
@@ -317,20 +301,20 @@ private fun AppGridItem(
                     val bitmap = remember(appIcon) { appIcon.toBitmap(128, 128) }
                     Image(
                         bitmap = bitmap.asImageBitmap(),
-                        contentDescription = instance.originalPackageName,
+                        contentDescription = instance.displayName,
                         modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp))
                     )
                 } else {
                     Icon(
                         imageVector = Icons.Default.PhoneAndroid,
-                        contentDescription = instance.originalPackageName,
+                        contentDescription = instance.displayName,
                         modifier = Modifier.size(32.dp),
                         tint = MaterialTheme.colorScheme.primary
                     )
                 }
 
                 // Running indicator
-                if (instance.status == InstanceStatus.RUNNING) {
+                if (instance.state == InstanceState.RUNNING) {
                     val infiniteTransition = rememberInfiniteTransition(label = "pulse")
                     val pulseAlpha by infiniteTransition.animateFloat(
                         initialValue = 0.5f,
@@ -355,7 +339,7 @@ private fun AppGridItem(
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = instance.originalPackageName.substringAfterLast("."),
+                text = instance.displayName.ifBlank { instance.originPackageName.substringAfterLast(".") },
                 style = MaterialTheme.typography.labelSmall,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -365,7 +349,7 @@ private fun AppGridItem(
             )
 
             // Status chip
-            InstanceStatusChip(status = instance.status)
+            InstanceStatusChip(label = instance.state.name)
 
             // Context menu
             DropdownMenu(

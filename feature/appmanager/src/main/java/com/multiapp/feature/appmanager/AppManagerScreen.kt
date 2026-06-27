@@ -1,6 +1,5 @@
 package com.multiapp.feature.appmanager
 
-import android.content.pm.PackageManager
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Image
@@ -8,10 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -21,23 +18,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
-import com.multiapp.core.instance.InstanceInfo
-import com.multiapp.core.instance.InstanceStatus
-import java.text.SimpleDateFormat
-import java.util.*
+import com.multiapp.core.model.instance.InstanceState
+import com.multiapp.core.model.instance.VirtualInstanceRecord
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -45,24 +37,24 @@ fun AppManagerScreen(
     viewModel: AppManagerViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    var showDetailDialog by remember { mutableStateOf<InstanceInfo?>(null) }
+    var showDetailDialog by remember { mutableStateOf<VirtualInstanceRecord?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Handle undo delete events
     LaunchedEffect(Unit) {
         viewModel.events.collect { event ->
             when (event) {
-                is AppManagerEvent.UndoDelete -> {
-                    val result = snackbarHostState.showSnackbar(
-                        message = "已删除 ${event.instanceId.substringAfterLast("_").take(8)}…",
-                        actionLabel = "撤销",
+                is AppManagerEvent.LaunchFailed -> {
+                    snackbarHostState.showSnackbar(
+                        message = "启动失败: ${event.message}",
+                        actionLabel = "重试",
                         duration = SnackbarDuration.Short
-                    )
-                    if (result == SnackbarResult.ActionPerformed) {
-                        viewModel.undoDelete(event.instanceId, event.identityJson)
+                    ).let { result ->
+                        if (result == SnackbarResult.ActionPerformed) {
+                            viewModel.launchInstance(event.instanceId)
+                        }
                     }
                 }
-                else -> {} // 其他事件由 ViewModel 处理
+                else -> {}
             }
         }
     }
@@ -131,7 +123,6 @@ fun AppManagerScreen(
                             ) {
                                 AppManagerCard(
                                     instance = instance,
-                                    dataSize = uiState.dataSizeMap[instance.instanceId] ?: "—",
                                     isExpanded = uiState.expandedInstanceId == instance.instanceId,
                                     onToggleExpand = {
                                         viewModel.onEvent(
@@ -139,6 +130,9 @@ fun AppManagerScreen(
                                         )
                                     },
                                     onShowDetail = { showDetailDialog = instance },
+                                    onLaunch = {
+                                        viewModel.launchInstance(instance.instanceId)
+                                    },
                                     onDelete = {
                                         viewModel.onEvent(
                                             AppManagerEvent.DeleteInstance(instance.instanceId)
@@ -153,7 +147,6 @@ fun AppManagerScreen(
         }
     }
 
-    // Detail dialog (P1-3)
     showDetailDialog?.let { instance ->
         InstanceDetailDialog(
             instance = instance,
@@ -164,19 +157,18 @@ fun AppManagerScreen(
 
 @Composable
 private fun AppManagerCard(
-    instance: InstanceInfo,
-    dataSize: String,
+    instance: VirtualInstanceRecord,
     isExpanded: Boolean,
     onToggleExpand: () -> Unit,
     onShowDetail: () -> Unit,
+    onLaunch: () -> Unit,
     onDelete: () -> Unit
 ) {
     val context = LocalContext.current
 
-    // Load original app icon
-    val appIcon = remember(instance.originalPackageName) {
+    val appIcon = remember(instance.originPackageName) {
         try {
-            context.packageManager.getApplicationIcon(instance.originalPackageName)
+            context.packageManager.getApplicationIcon(instance.originPackageName)
         } catch (_: Exception) {
             null
         }
@@ -196,7 +188,6 @@ private fun AppManagerCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Icon with gradient background
                 Box(
                     modifier = Modifier
                         .size(48.dp)
@@ -227,8 +218,7 @@ private fun AppManagerCard(
                         )
                     }
 
-                    // Running indicator
-                    if (instance.status == InstanceStatus.RUNNING) {
+                    if (instance.state == InstanceState.RUNNING) {
                         val infiniteTransition = rememberInfiniteTransition(label = "pulse")
                         val pulseAlpha by infiniteTransition.animateFloat(
                             initialValue = 0.5f,
@@ -254,7 +244,8 @@ private fun AppManagerCard(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = instance.originalPackageName.substringAfterLast("."),
+                        text = instance.displayName.ifBlank { instance.originPackageName.substringAfterLast(".") }
+                            .replaceFirstChar { it.uppercase() },
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
@@ -262,26 +253,30 @@ private fun AppManagerCard(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = instance.originalPackageName,
+                        text = instance.originPackageName,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(4.dp))
-                    // Identity summary + data size
                     Text(
-                        text = "${instance.identity.buildModel} · ${instance.identity.buildManufacturer} · $dataSize",
+                        text = instance.virtualPackageName,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    InstanceStatusChip(status = instance.status)
                 }
 
                 Row {
+                    IconButton(onClick = onLaunch) {
+                        Icon(
+                            Icons.Default.PlayArrow,
+                            contentDescription = "启动",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     IconButton(onClick = onShowDetail) {
                         Icon(
                             Icons.Default.Info,
@@ -316,29 +311,22 @@ private fun AppManagerCard(
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                     Spacer(modifier = Modifier.height(12.dp))
                     DetailRow(Icons.Default.Tag, "实例 ID", instance.instanceId)
-                    DetailRow(Icons.Default.FolderOpen, "原始包名", instance.originalPackageName)
-                    DetailRow(Icons.Default.Folder, "Stub 包名", instance.stubPackageName)
-                    DetailRow(Icons.Default.Phone, "IMEI", instance.identity.imei)
-                    DetailRow(Icons.Default.Key, "Android ID", instance.identity.androidId)
-                    DetailRow(Icons.Default.PhoneAndroid, "设备型号", instance.identity.buildModel)
-                    DetailRow(Icons.Default.Business, "制造商", instance.identity.buildManufacturer)
-                    DetailRow(Icons.Default.BrandingWatermark, "品牌", instance.identity.buildBrand)
+                    DetailRow(Icons.Default.FolderOpen, "原始包名", instance.originPackageName)
+                    DetailRow(Icons.Default.Folder, "虚拟包名", instance.virtualPackageName)
+                    DetailRow(Icons.Default.Storage, "数据目录", instance.dataRoot)
+                    DetailRow(Icons.Default.Shield, "兼容模式", instance.compatibilityMode.name)
+                    DetailRow(Icons.Default.Security, "基线策略", instance.protectedBaselinePolicy)
                 }
             }
         }
     }
 }
 
-/**
- * P1-3: Instance detail dialog showing device identity, timestamps, stub package, status.
- */
 @Composable
 private fun InstanceDetailDialog(
-    instance: InstanceInfo,
+    instance: VirtualInstanceRecord,
     onDismiss: () -> Unit
 ) {
-    val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()) }
-
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
@@ -366,57 +354,28 @@ private fun InstanceDetailDialog(
         },
         title = {
             Text(
-                text = instance.originalPackageName.substringAfterLast("."),
+                text = instance.displayName.ifBlank { instance.originPackageName.substringAfterLast(".") }
+                    .replaceFirstChar { it.uppercase() },
                 style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
+                fontWeight = FontWeight.Bold
             )
         },
         text = {
             Column(
-                modifier = Modifier
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                // Status
-                DetailDialogSection("状态") {
-                    DetailDialogRow(Icons.Default.Circle, "当前状态", when (instance.status) {
-                        InstanceStatus.CREATING -> "创建中"
-                        InstanceStatus.READY -> "就绪"
-                        InstanceStatus.RUNNING -> "运行中"
-                        InstanceStatus.ERROR -> "错误"
-                    })
-                }
-
-                // Package info
-                DetailDialogSection("包信息") {
+                DetailDialogSection("实例信息") {
                     DetailDialogRow(Icons.Default.Tag, "实例 ID", instance.instanceId)
-                    DetailDialogRow(Icons.Default.FolderOpen, "原始包名", instance.originalPackageName)
-                    DetailDialogRow(Icons.Default.Folder, "Stub 包名", instance.stubPackageName)
+                    DetailDialogRow(Icons.Default.FolderOpen, "原始包名", instance.originPackageName)
+                    DetailDialogRow(Icons.Default.Folder, "虚拟包名", instance.virtualPackageName)
+                    DetailDialogRow(Icons.Default.Person, "显示名", instance.displayName)
                 }
-
-                // Device identity
-                DetailDialogSection("设备身份") {
-                    DetailDialogRow(Icons.Default.Phone, "IMEI", instance.identity.imei)
-                    DetailDialogRow(Icons.Default.Key, "Android ID", instance.identity.androidId)
-                    DetailDialogRow(Icons.Default.Wifi, "MAC 地址", instance.identity.macAddress)
-                    DetailDialogRow(Icons.Default.Tag, "序列号", instance.identity.serial)
-                    DetailDialogRow(Icons.Default.PhoneAndroid, "设备型号", instance.identity.buildModel)
-                    DetailDialogRow(Icons.Default.Business, "制造商", instance.identity.buildManufacturer)
-                    DetailDialogRow(Icons.Default.BrandingWatermark, "品牌", instance.identity.buildBrand)
-                    DetailDialogRow(Icons.Default.Memory, "设备代号", instance.identity.buildDevice)
-                    DetailDialogRow(Icons.Default.Android, "Android 版本", instance.identity.versionRelease)
-                    DetailDialogRow(Icons.Default.Code, "SDK 版本", instance.identity.sdkInt.toString())
+                DetailDialogSection("存储") {
+                    DetailDialogRow(Icons.Default.Storage, "数据目录", instance.dataRoot)
                 }
-
-                // Timestamps
-                DetailDialogSection("时间") {
-                    DetailDialogRow(
-                        Icons.Default.Schedule,
-                        "创建时间",
-                        dateFormat.format(Date(instance.createdAt))
-                    )
+                DetailDialogSection("策略") {
+                    DetailDialogRow(Icons.Default.Shield, "兼容模式", instance.compatibilityMode.name)
+                    DetailDialogRow(Icons.Default.Security, "基线策略", instance.protectedBaselinePolicy)
                 }
             }
         },
@@ -449,11 +408,9 @@ private fun DetailDialogSection(
 }
 
 @Composable
-private fun DetailDialogRow(icon: ImageVector, label: String, value: String) {
+private fun DetailDialogRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, value: String) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
@@ -479,14 +436,10 @@ private fun DetailDialogRow(icon: ImageVector, label: String, value: String) {
     }
 }
 
-// InstanceStatusChip 已提取到 core/designsystem/CommonComponents.kt
-
 @Composable
-private fun DetailRow(icon: ImageVector, label: String, value: String) {
+private fun DetailRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, value: String) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
@@ -509,8 +462,6 @@ private fun DetailRow(icon: ImageVector, label: String, value: String) {
         )
     }
 }
-
-// LoadingState, ErrorState, EmptyState 已提取到 core/designsystem/CommonComponents.kt
 
 @Composable
 private fun EmptyState() {

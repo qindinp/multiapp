@@ -20,7 +20,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.multiapp.core.instance.InstanceStatus
 
 /**
  * 通用加载状态
@@ -212,14 +211,16 @@ fun SettingsSection(
  */
 @Composable
 fun InstanceStatusChip(
-    status: InstanceStatus,
+    label: String,
     modifier: Modifier = Modifier
 ) {
-    val (label, color, bgColor) = when (status) {
-        InstanceStatus.CREATING -> Triple("创建中", MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.tertiaryContainer)
-        InstanceStatus.READY -> Triple("就绪", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
-        InstanceStatus.RUNNING -> Triple("运行中", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
-        InstanceStatus.ERROR -> Triple("错误", MaterialTheme.colorScheme.error, MaterialTheme.colorScheme.errorContainer)
+    val (chipLabel, color, bgColor) = when (label) {
+        "CREATING" -> Triple("创建中", MaterialTheme.colorScheme.tertiary, MaterialTheme.colorScheme.tertiaryContainer)
+        "READY" -> Triple("就绪", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
+        "RUNNING" -> Triple("运行中", MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.primaryContainer)
+        "STOPPED" -> Triple("已停止", MaterialTheme.colorScheme.onSurfaceVariant, MaterialTheme.colorScheme.surfaceVariant)
+        "ERROR" -> Triple("错误", MaterialTheme.colorScheme.error, MaterialTheme.colorScheme.errorContainer)
+        else -> Triple(label, MaterialTheme.colorScheme.onSurfaceVariant, MaterialTheme.colorScheme.surfaceVariant)
     }
     Surface(
         shape = RoundedCornerShape(50),
@@ -227,7 +228,7 @@ fun InstanceStatusChip(
         modifier = modifier
     ) {
         Text(
-            text = label,
+            text = chipLabel,
             style = MaterialTheme.typography.labelSmall,
             color = color,
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
