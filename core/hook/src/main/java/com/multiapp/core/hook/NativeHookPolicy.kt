@@ -22,12 +22,17 @@ data class NativeHookPolicy(
     val lsPlantMethodHooks: Boolean = false,
     val xposedModules: Boolean = false,
     val businessNativeStubs: Boolean = false,
+    val businessNativeWrappers: Boolean = false,
+    val nativeBaseHooks: Boolean = false,
     val methodReplacement: Boolean = false,
     val noOpPatches: Boolean = false
 ) {
     init {
         require(!businessNativeStubs) {
             "Protected app policy must not enable business native stubs"
+        }
+        require(!businessNativeWrappers) {
+            "Protected app policy must not enable business native wrappers"
         }
         require(mode != NativeHookPolicyMode.BASELINE || isStrictBaseline()) {
             "Baseline policy must be hook-free and diagnostic-free"
@@ -44,15 +49,19 @@ data class NativeHookPolicy(
             apkOpenRedirect ||
             selfKillInterception ||
             businessNativeStubs ||
+            businessNativeWrappers ||
+            nativeBaseHooks ||
             lsPlantMethodHooks ||
             xposedModules ||
             methodReplacement ||
             noOpPatches
 
     fun isHookFree(): Boolean =
-        !lsPlantMethodHooks &&
+            !lsPlantMethodHooks &&
             !xposedModules &&
             !businessNativeStubs &&
+            !businessNativeWrappers &&
+            !nativeBaseHooks &&
             !methodReplacement &&
             !noOpPatches
 
@@ -73,9 +82,12 @@ data class NativeHookPolicy(
             NativeHookCapability.REGISTER_NATIVES_LOGGING -> registerNativesLogger
             NativeHookCapability.CLASS_LOAD_LOGGING -> findClassLogger
             NativeHookCapability.DIAGNOSTIC_LOGGING -> registerNativesLogger || findClassLogger
+            NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY -> registerNativesLogger
+            NativeHookCapability.NATIVE_BASE_HOOKS -> nativeBaseHooks
             NativeHookCapability.LSPLANT_METHOD_HOOKS -> lsPlantMethodHooks
             NativeHookCapability.XPOSED_MODULES -> xposedModules
             NativeHookCapability.BUSINESS_NATIVE_STUBS -> businessNativeStubs
+            NativeHookCapability.BUSINESS_NATIVE_WRAPPERS -> businessNativeWrappers
             NativeHookCapability.METHOD_REPLACEMENT -> methodReplacement
             NativeHookCapability.NO_OP_PATCHES -> noOpPatches
         }
@@ -128,15 +140,20 @@ data class NativeHookPolicy(
             pathVirtualization =
                 NativeHookCapability.PATH_VIRTUALIZATION in enabledCapabilities,
             registerNativesLogger =
-                NativeHookCapability.REGISTER_NATIVES_LOGGING in enabledCapabilities,
+                NativeHookCapability.REGISTER_NATIVES_LOGGING in enabledCapabilities ||
+                    NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY in enabledCapabilities,
             findClassLogger =
                 NativeHookCapability.CLASS_LOAD_LOGGING in enabledCapabilities,
+            nativeBaseHooks =
+                NativeHookCapability.NATIVE_BASE_HOOKS in enabledCapabilities,
             lsPlantMethodHooks =
                 NativeHookCapability.LSPLANT_METHOD_HOOKS in enabledCapabilities,
             xposedModules =
                 NativeHookCapability.XPOSED_MODULES in enabledCapabilities,
             businessNativeStubs =
                 NativeHookCapability.BUSINESS_NATIVE_STUBS in enabledCapabilities,
+            businessNativeWrappers =
+                NativeHookCapability.BUSINESS_NATIVE_WRAPPERS in enabledCapabilities,
             methodReplacement =
                 NativeHookCapability.METHOD_REPLACEMENT in enabledCapabilities,
             noOpPatches =
@@ -152,9 +169,12 @@ enum class NativeHookCapability {
     DIAGNOSTIC_LOGGING,
     CLASS_LOAD_LOGGING,
     REGISTER_NATIVES_LOGGING,
+    REGISTER_NATIVES_OBSERVE_ONLY,
+    NATIVE_BASE_HOOKS,
     LSPLANT_METHOD_HOOKS,
     XPOSED_MODULES,
     BUSINESS_NATIVE_STUBS,
+    BUSINESS_NATIVE_WRAPPERS,
     METHOD_REPLACEMENT,
     NO_OP_PATCHES
 }

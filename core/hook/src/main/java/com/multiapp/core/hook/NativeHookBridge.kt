@@ -169,16 +169,55 @@ class NativeHookBridge {
     }
 
     fun installRegisterNativesLogger(): Boolean {
+        return installRegisterNativesLoggerInternal(enableBusinessWrappers = false)
+    }
+
+    private fun installRegisterNativesLoggerInternal(enableBusinessWrappers: Boolean): Boolean {
         if (!nativeLibLoaded) {
             android.util.Log.w(TAG, "RegisterNatives logger not available: native lib not loaded")
             return false
         }
         return try {
+            nativeSetRegisterNativesBusinessWrappersEnabled(enableBusinessWrappers)
             val result = nativeInstallRegisterNativesLogger()
-            android.util.Log.i(TAG, "RegisterNatives logger installed=$result")
+            android.util.Log.i(
+                TAG,
+                "RegisterNatives logger installed=$result businessWrappers=$enableBusinessWrappers"
+            )
             result
         } catch (e: Throwable) {
             android.util.Log.w(TAG, "RegisterNatives logger install failed: ${e.message}", e)
+            false
+        }
+    }
+
+    fun installRegisterNativesObserveOnly(policy: NativeHookPolicy): Boolean {
+        val observeDecision = NativeHookPolicyGate.evaluate(
+            policy = policy,
+            capability = NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY,
+            component = "NativeHookBridge.installRegisterNativesObserveOnly"
+        )
+        val wrappersDecision = NativeHookPolicyGate.evaluate(
+            policy = policy,
+            capability = NativeHookCapability.BUSINESS_NATIVE_WRAPPERS,
+            component = "NativeHookBridge.installRegisterNativesObserveOnly.businessNativeWrappers"
+        )
+        if (!observeDecision.allowed) {
+            Timber.tag(TAG).i("RegisterNatives observe-only skipped by policy: %s", observeDecision.evidence)
+            return false
+        }
+        return try {
+            if (nativeLibLoaded) {
+                nativeSetRegisterNativesBusinessWrappersEnabled(wrappersDecision.allowed)
+            }
+            if (wrappersDecision.allowed) {
+                Timber.tag(TAG).w("RegisterNatives business wrappers enabled by policy: %s", wrappersDecision.evidence)
+            } else {
+                Timber.tag(TAG).i("RegisterNatives business wrappers disabled by policy: %s", wrappersDecision.evidence)
+            }
+            installRegisterNativesLoggerInternal(enableBusinessWrappers = wrappersDecision.allowed)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "installRegisterNativesObserveOnly failed")
             false
         }
     }
@@ -881,6 +920,24 @@ class NativeHookBridge {
         return nativeHooksAvailable
     }
 
+    fun initNativeHooks(
+        policy: NativeHookPolicy,
+        context: android.content.Context? = null,
+        hostDataDir: String? = null,
+        component: String = "NativeHookBridge.initNativeHooks"
+    ): Boolean {
+        val decision = NativeHookPolicyGate.evaluate(
+            policy = policy,
+            capability = NativeHookCapability.NATIVE_BASE_HOOKS,
+            component = component
+        )
+        if (!decision.allowed) {
+            Timber.tag(TAG).i("Native base hooks skipped by policy: %s", decision.evidence)
+            return false
+        }
+        return initNativeHooks(context, hostDataDir)
+    }
+
     private fun buildFakeProcStatus(pid: Int, packageName: String): ByteArray {
         val name = packageName.take(15)
         return "Name:\t$name\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t$pid\nPid:\t$pid\nPPid:\t${pid - 1}\nTracerPid:\t0\n".toByteArray()
@@ -912,6 +969,7 @@ class NativeHookBridge {
     private external fun nativeIsInitialized(): Boolean
     private external fun nativeInstallRuntimeLoadHook(fallbackCallerClasses: Array<String>): Boolean
     private external fun nativeInstallRegisterNativesLogger(): Boolean
+    private external fun nativeSetRegisterNativesBusinessWrappersEnabled(enabled: Boolean)
     private external fun nativeInstallJiaguJniDiagHooks(): Boolean
     private external fun nativeGetYwLoginBindingReport(): String
     private external fun nativeGetStubAppBindingReport(): String

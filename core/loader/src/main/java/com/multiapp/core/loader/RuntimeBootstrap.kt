@@ -8,7 +8,8 @@ enum class RuntimeStage(val order: Int) {
     RESOURCES(40),
     CLASS_LOADER(50),
     GUEST_CONTEXT(60),
-    APPLICATION(70);
+    APPLICATION(70),
+    LAUNCHER_ACTIVITY(80);
 
     companion object {
         fun ordered(): List<RuntimeStage> = values().sortedBy { it.order }
@@ -34,6 +35,7 @@ enum class StageReversibility {
             RuntimeStage.RESOURCES -> PARTIALLY_REVERSIBLE
             RuntimeStage.CLASS_LOADER -> IRREVERSIBLE
             RuntimeStage.APPLICATION -> IRREVERSIBLE
+            RuntimeStage.LAUNCHER_ACTIVITY -> IRREVERSIBLE
         }
     }
 }

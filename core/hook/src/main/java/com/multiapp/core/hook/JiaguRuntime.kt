@@ -47,7 +47,22 @@ class JiaguRuntime : PackerRuntime {
         }
 
         // ShadowHook 初始化（必须在 dlopen 之前）
-        val hooksOk = bridge.initNativeHooks()
+        val nativeBaseDecision = NativeHookPolicyGate.evaluate(
+            policy = context.nativeHookPolicy,
+            capability = NativeHookCapability.NATIVE_BASE_HOOKS,
+            component = "JiaguRuntime.prepareFiles.initNativeHooks"
+        )
+        if (!nativeBaseDecision.allowed) {
+            Log.i(TAG, "prepareFiles: native base hooks policy gate ${nativeBaseDecision.status} ${nativeBaseDecision.evidence}")
+        }
+        val hooksOk = if (nativeBaseDecision.allowed) {
+            bridge.initNativeHooks(
+                policy = context.nativeHookPolicy,
+                component = "JiaguRuntime.prepareFiles.initNativeHooks"
+            )
+        } else {
+            false
+        }
         Log.d(TAG, "prepareFiles: native hooks initialized: $hooksOk")
         val stubPkg = context.stubPackageName
         if (!stubPkg.isNullOrEmpty() && !originalPkg.isNullOrEmpty()) {

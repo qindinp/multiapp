@@ -11,13 +11,31 @@ data class ResolvedPackage(
     val targetSdk: Int,
     val minSdk: Int,
     val applicationClassName: String? = null,
+    val processName: String? = null,
+    val taskAffinity: String? = null,
+    val themeId: Int = 0,
+    val metaData: Map<String, String> = emptyMap(),
     val launcherActivityName: String? = null,
     val activities: List<ResolvedComponent> = emptyList(),
     val services: List<ResolvedComponent> = emptyList(),
     val receivers: List<ResolvedComponent> = emptyList(),
     val providers: List<ResolvedComponent> = emptyList(),
     val permissions: List<String> = emptyList(),
-    val nativeLibDir: String? = null
+    val nativeLibDir: String? = null,
+    val applicationLabel: String? = null
+)
+
+/**
+ * Structured intent-filter metadata used by the hosted container resolver.
+ *
+ * Only the subset needed by the in-process VPMS model is represented here:
+ * action, category, and data scheme. MIME type, authority, host, path, and
+ * permission matching remain intentionally out of scope.
+ */
+data class ResolvedIntentFilter(
+    val actions: List<String> = emptyList(),
+    val categories: List<String> = emptyList(),
+    val dataSchemes: List<String> = emptyList()
 )
 
 /**
@@ -26,7 +44,17 @@ data class ResolvedPackage(
 data class ResolvedComponent(
     val name: String,
     val exported: Boolean = false,
-    val intentFilters: List<String> = emptyList()
+    val intentFilters: List<String> = emptyList(),
+    val resolvedIntentFilters: List<ResolvedIntentFilter> = emptyList(),
+    val authorities: List<String> = emptyList(),
+    val launchMode: String? = null,
+    val processName: String? = null,
+    val taskAffinity: String? = null,
+    val themeId: Int = 0,
+    val screenOrientation: String? = null,
+    val configChanges: String? = null,
+    val permission: String? = null,
+    val metaData: Map<String, String> = emptyMap()
 )
 
 /**

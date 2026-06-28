@@ -786,8 +786,21 @@ class LoaderFactory : AppComponentFactory() {
             // 安装 open/fopen/readlink 等 libc hook，过滤 /proc/self/maps 中的 multiapp/shadowhook
             logD("Step 0.5: NativeHookBridge early init...")
             try {
-                val hooksOk = NativeHookBridge.getInstance().initNativeHooks()
-                logD("  NativeHookBridge.initNativeHooks: $hooksOk")
+                val nativeBaseDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+                    nativeHookPolicy,
+                    com.multiapp.core.hook.NativeHookCapability.NATIVE_BASE_HOOKS,
+                    "LoaderFactory.initializeInternal.earlyInitNativeHooks"
+                )
+                logPolicyDecision(nativeBaseDecision)
+                if (nativeBaseDecision.allowed) {
+                    val hooksOk = NativeHookBridge.getInstance().initNativeHooks(
+                        policy = nativeHookPolicy,
+                        component = "LoaderFactory.initializeInternal.earlyInitNativeHooks"
+                    )
+                    logD("  NativeHookBridge.initNativeHooks: $hooksOk")
+                } else {
+                    logD("  NativeHookBridge.initNativeHooks skipped by policy")
+                }
             } catch (e: Throwable) {
                 logW("  NativeHookBridge.initNativeHooks failed: ${e.javaClass.simpleName}: ${e.message}")
             }
@@ -876,7 +889,10 @@ class LoaderFactory : AppComponentFactory() {
                     NativeBaseHooksStage(),
                     PackageIdentityHooksStage()
                 )
-                val pipelineExtras = mutableMapOf<String, Any?>("stubApkPath" to stubApkPath)
+                val pipelineExtras = mutableMapOf<String, Any?>(
+                    "stubApkPath" to stubApkPath,
+                    "nativeHookPolicy" to nativeHookPolicy
+                )
                 val pipelineContext = HookStageContext(
                     hookEngine = com.multiapp.core.hook.HookEngine.getInstance(),
                     nativeBridge = NativeHookBridge.getInstance(),
@@ -962,7 +978,7 @@ class LoaderFactory : AppComponentFactory() {
             )
             val registerLoggerDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
                 nativeHookPolicy,
-                com.multiapp.core.hook.NativeHookCapability.REGISTER_NATIVES_LOGGING,
+                com.multiapp.core.hook.NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY,
                 "LoaderFactory.installNativeLoadHookIfAvailable.registerNativesLogger"
             )
             logPolicyDecision(nativeLoadHookDecision)
@@ -1040,7 +1056,8 @@ class LoaderFactory : AppComponentFactory() {
                 logSignal("Runtime.nativeLoad hook skipped by policy")
             }
             if (registerLoggerAllowed) {
-                val registerLoggerInstalled = NativeHookBridge.getInstance().installRegisterNativesLogger()
+                val registerLoggerInstalled = NativeHookBridge.getInstance()
+                    .installRegisterNativesObserveOnly(nativeHookPolicy)
                 logD("  RegisterNatives logger installed=$registerLoggerInstalled")
                 logSignal("RegisterNatives logger installed=$registerLoggerInstalled")
             } else {
@@ -2406,7 +2423,20 @@ class LoaderFactory : AppComponentFactory() {
         // 必须在 dlopen 之前！壳的 JNI_OnLoad 会读 /proc/self/maps 检测 hook 框架。
         // initNativeHooks 安装 open/fopen/readlink 等 libc hook，过滤 maps 中的 multiapp/shadowhook。
         logD("  preloadPackerLib: initializing native hooks (ShadowHook)")
-        val hooksOk = bridge.initNativeHooks()
+        val nativeBaseDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+            nativeHookPolicy,
+            com.multiapp.core.hook.NativeHookCapability.NATIVE_BASE_HOOKS,
+            "LoaderFactory.preloadPackerLib.initNativeHooks"
+        )
+        logPolicyDecision(nativeBaseDecision)
+        val hooksOk = if (nativeBaseDecision.allowed) {
+            bridge.initNativeHooks(
+                policy = nativeHookPolicy,
+                component = "LoaderFactory.preloadPackerLib.initNativeHooks"
+            )
+        } else {
+            false
+        }
         logD("  preloadPackerLib: native hooks initialized: $hooksOk")
         currentConfig?.let { config ->
             bridge.setJiaguPackageSpoof(config.stubPkg, config.originalPkg)
@@ -2561,12 +2591,22 @@ class LoaderFactory : AppComponentFactory() {
                 }
 
                 // ★ 批量注册所有已知 native 类的缺失方法（先注册通用 stub）
-                logD("  preloadPackerLib: registering all missing native methods")
-                try {
-                    val allRegistered = bridge.registerAllMissingNativeMethods(guestCl)
-                    logD("  preloadPackerLib: all missing native methods registered: $allRegistered")
-                } catch (e: Throwable) {
-                    logW("  preloadPackerLib: registerAllMissingNativeMethods exception: ${e.message}")
+                val businessNativeDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+                    nativeHookPolicy,
+                    com.multiapp.core.hook.NativeHookCapability.BUSINESS_NATIVE_STUBS,
+                    "LoaderFactory.preloadPackerLib.businessNativeStubs"
+                )
+                logPolicyDecision(businessNativeDecision)
+                if (businessNativeDecision.allowed) {
+                    logD("  preloadPackerLib: registering all missing native methods")
+                    try {
+                        val allRegistered = bridge.registerAllMissingNativeMethods(guestCl)
+                        logD("  preloadPackerLib: all missing native methods registered: $allRegistered")
+                    } catch (e: Throwable) {
+                        logW("  preloadPackerLib: registerAllMissingNativeMethods exception: ${e.message}")
+                    }
+                } else {
+                    logD("  preloadPackerLib: registerAllMissingNativeMethods skipped by policy")
                 }
 
                 // ★ 再注册关键业务 stub（覆盖批量注册中的 null 返回 stub）
@@ -2576,7 +2616,9 @@ class LoaderFactory : AppComponentFactory() {
                         !currentProcessName().contains(":") &&
                         bridge.getStubAppBindingReport().contains("interface11=bound")
                 } ?: false
-                if (deferQqReaderBusinessStubs) {
+                if (!businessNativeDecision.allowed) {
+                    logD("  preloadPackerLib: business native stubs skipped by policy")
+                } else if (deferQqReaderBusinessStubs) {
                     logW("  preloadPackerLib: QQ Reader defers business native stubs until original YWLogin <clinit> attempt")
                 } else {
                     logD("  preloadPackerLib: registering business native stubs (after StubApp.load)")
@@ -2588,18 +2630,33 @@ class LoaderFactory : AppComponentFactory() {
                     }
                 }
 
-                logD("  preloadPackerLib: registering qrencrypt native stubs")
-                try {
-                    val qrencryptRegistered = bridge.registerQrencryptStubs(guestCl)
-                    logD("  preloadPackerLib: qrencrypt stubs registered: $qrencryptRegistered")
-                } catch (e: Throwable) {
-                    logW("  preloadPackerLib: registerQrencryptStubs exception: ${e.message}")
+                if (businessNativeDecision.allowed) {
+                    logD("  preloadPackerLib: registering qrencrypt native stubs")
+                    try {
+                        val qrencryptRegistered = bridge.registerQrencryptStubs(guestCl)
+                        logD("  preloadPackerLib: qrencrypt stubs registered: $qrencryptRegistered")
+                    } catch (e: Throwable) {
+                        logW("  preloadPackerLib: registerQrencryptStubs exception: ${e.message}")
+                    }
+                } else {
+                    logD("  preloadPackerLib: qrencrypt native stubs skipped by policy")
                 }
 
                 // ── 初始化 LSPlant 并 hook 有问题的 SDK 初始化 ──
                 val hookEngine = com.multiapp.core.hook.HookEngine.getInstance()
-                val lsplantOk = hookEngine.initLsplant(guestCl)
-                logD("  preloadPackerLib: LSPlant initialized: $lsplantOk")
+                var lsplantOk = false
+                val lsplantDecision = com.multiapp.core.hook.NativeHookPolicyGate.evaluate(
+                    nativeHookPolicy,
+                    com.multiapp.core.hook.NativeHookCapability.LSPLANT_METHOD_HOOKS,
+                    "LoaderFactory.preloadPackerLib.initLsplant"
+                )
+                logPolicyDecision(lsplantDecision)
+                if (lsplantDecision.allowed) {
+                    lsplantOk = hookEngine.initLsplant(guestCl)
+                    logD("  preloadPackerLib: LSPlant initialized: $lsplantOk")
+                } else {
+                    logD("  preloadPackerLib: LSPlant init skipped by policy")
+                }
 
                 // AntiDetectionEngine 初始化 — 反检测引擎接入启动流程
                 val skipJavaPackerBypass = currentConfig?.let { cfg -> isQqReaderProfile(cfg) } ?: false

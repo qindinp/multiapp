@@ -19,7 +19,8 @@ class RuntimeBootstrapPlanTest {
             RuntimeStage.NATIVE_LIBS,
             RuntimeStage.RESOURCES,
             RuntimeStage.CLASS_LOADER,
-            RuntimeStage.APPLICATION
+            RuntimeStage.APPLICATION,
+            RuntimeStage.LAUNCHER_ACTIVITY
         )
         assertEquals(expectedOrder, plan.stages)
     }
@@ -70,13 +71,14 @@ class RuntimeBootstrapPlanTest {
     }
 
     @Test
-    fun `loaderFactoryCompatible optional stages are RESOURCES through APPLICATION`() {
+    fun `loaderFactoryCompatible optional stages are RESOURCES through LAUNCHER_ACTIVITY`() {
         val plan = RuntimeBootstrapPlan.loaderFactoryCompatible(createdAtMs = 1000L)
 
         val expectedOptional = listOf(
             RuntimeStage.RESOURCES,
             RuntimeStage.CLASS_LOADER,
-            RuntimeStage.APPLICATION
+            RuntimeStage.APPLICATION,
+            RuntimeStage.LAUNCHER_ACTIVITY
         )
         assertEquals(expectedOptional, plan.optionalStages)
     }

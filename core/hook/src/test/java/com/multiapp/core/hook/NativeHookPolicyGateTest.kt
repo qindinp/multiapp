@@ -14,6 +14,8 @@ class NativeHookPolicyGateTest {
             NativeHookCapability.LSPLANT_METHOD_HOOKS,
             NativeHookCapability.XPOSED_MODULES,
             NativeHookCapability.BUSINESS_NATIVE_STUBS,
+            NativeHookCapability.BUSINESS_NATIVE_WRAPPERS,
+            NativeHookCapability.NATIVE_BASE_HOOKS,
             NativeHookCapability.METHOD_REPLACEMENT,
             NativeHookCapability.NO_OP_PATCHES
         )
@@ -42,6 +44,8 @@ class NativeHookPolicyGateTest {
         assertEquals("false", evidence["lsPlantEnabled"])
         assertEquals("false", evidence["xposedModulesEnabled"])
         assertEquals("false", evidence["businessNativeStubsEnabled"])
+        assertEquals("false", evidence["businessNativeWrappersEnabled"])
+        assertEquals("false", evidence["nativeBaseHooksEnabled"])
         assertEquals("false", evidence["methodReplacementEnabled"])
         assertEquals("false", evidence["noOpPatchesEnabled"])
         assertEquals("true", evidence["containerIdentityVirtualizationEnabled"])
@@ -56,6 +60,8 @@ class NativeHookPolicyGateTest {
             components = mapOf(
                 NativeHookCapability.XPOSED_MODULES to "LoaderFactory.loadXposedModules",
                 NativeHookCapability.BUSINESS_NATIVE_STUBS to "LoaderFactory.onlineChapterFullFallbackStubs",
+                NativeHookCapability.BUSINESS_NATIVE_WRAPPERS to "NativeHookBridge.installRegisterNativesObserveOnly.businessNativeWrappers",
+                NativeHookCapability.NATIVE_BASE_HOOKS to "NativeBaseHooksStage.initNativeHooks",
                 NativeHookCapability.METHOD_REPLACEMENT to "LoaderFactory.installAppSpecificPostLoadHooks.methodReplacement",
                 NativeHookCapability.NO_OP_PATCHES to "LoaderFactory.installAppSpecificPostLoadHooks.noOpPatches"
             )
@@ -67,7 +73,7 @@ class NativeHookPolicyGateTest {
         )
         val registerLoggerDecision = NativeHookPolicyGate.evaluate(
             NativeHookPolicy.baseline(),
-            NativeHookCapability.REGISTER_NATIVES_LOGGING,
+            NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY,
             "LoaderFactory.installNativeLoadHookIfAvailable.registerNativesLogger"
         )
         val attachedStubFallbackDecision = NativeHookPolicyGate.evaluate(
@@ -81,7 +87,7 @@ class NativeHookPolicyGateTest {
             "LoaderFactory.maybeRunQqReaderOriginalInterface11.businessNativeStubs"
         )
 
-        assertEquals(4, decisions.size)
+        assertEquals(6, decisions.size)
         decisions.forEach { decision ->
             assertFalse(decision.allowed)
             assertEquals("SKIPPED", decision.status)
@@ -105,6 +111,14 @@ class NativeHookPolicyGateTest {
         assertEquals(
             "LoaderFactory.installAppSpecificPostLoadHooks.noOpPatches",
             decisions.first { it.evidence["capability"] == "NO_OP_PATCHES" }.evidence["component"]
+        )
+        assertEquals(
+            "NativeHookBridge.installRegisterNativesObserveOnly.businessNativeWrappers",
+            decisions.first { it.evidence["capability"] == "BUSINESS_NATIVE_WRAPPERS" }.evidence["component"]
+        )
+        assertEquals(
+            "NativeBaseHooksStage.initNativeHooks",
+            decisions.first { it.evidence["capability"] == "NATIVE_BASE_HOOKS" }.evidence["component"]
         )
         assertFalse(attachedStubFallbackDecision.allowed)
         assertEquals("SKIPPED", attachedStubFallbackDecision.status)

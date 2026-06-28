@@ -54,12 +54,13 @@ data class RuntimeBootstrapPlan(
                 RuntimeStage.NATIVE_LIBS,
                 RuntimeStage.RESOURCES,
                 RuntimeStage.CLASS_LOADER,
-                RuntimeStage.APPLICATION
+                RuntimeStage.APPLICATION,
+                RuntimeStage.LAUNCHER_ACTIVITY
             )
             return RuntimeBootstrapPlan(
                 stages = stages,
                 requiredStages = stages.subList(0, 5),
-                optionalStages = stages.subList(5, 8),
+                optionalStages = stages.subList(5, 9),
                 profileName = "loader-factory-compatible",
                 diagnosticTags = listOf("loader-factory", "v1"),
                 createdAtMs = createdAtMs

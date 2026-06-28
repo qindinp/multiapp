@@ -1,0 +1,74 @@
+package com.multiapp.core.loader
+
+import android.content.Context
+import android.content.pm.ApplicationInfo
+import android.content.res.AssetManager
+import android.content.res.Resources
+import com.multiapp.core.model.virtual.VirtualContextConfig
+
+/**
+ * Builds the guest resource view for hosted container runtime.
+ *
+ * VirtualApp/BlackBox-style runtimes keep guest APK resources separate from
+ * the host package. This manager centralizes that responsibility for v2 so
+ * Context, Activity injection, and the future LoadedApk bridge do not each
+ * invent their own resource loading path.
+ */
+class VirtualResourcesManager(
+    private val hostContext: Context
+) {
+    fun create(config: VirtualContextConfig): VirtualResourceBundle {
+        val appInfo = createApplicationInfo(config)
+        val packageManagerResources = runCatching {
+            hostContext.packageManager.getResourcesForApplication(appInfo)
+        }.getOrNull()
+        if (packageManagerResources != null) {
+            return VirtualResourceBundle(appInfo, packageManagerResources, ResourceSource.PACKAGE_MANAGER)
+        }
+
+        val archiveResources = runCatching { createArchiveResources(config.sourceDir) }.getOrNull()
+        if (archiveResources != null) {
+            return VirtualResourceBundle(appInfo, archiveResources, ResourceSource.ASSET_MANAGER)
+        }
+
+        return VirtualResourceBundle(appInfo, hostContext.resources, ResourceSource.HOST_FALLBACK)
+    }
+
+    internal fun createApplicationInfo(config: VirtualContextConfig): ApplicationInfo {
+        return config.packageSnapshot?.let { VirtualPackageInfoFactory.applicationInfo(it) }
+            ?: ApplicationInfo(hostContext.applicationInfo).apply {
+                packageName = config.originPackageName
+                className = null
+                name = null
+                sourceDir = config.sourceDir
+                publicSourceDir = config.sourceDir
+                dataDir = config.dataDir
+                nativeLibraryDir = config.nativeLibraryDir
+                nonLocalizedLabel = config.applicationLabel ?: config.originPackageName
+                enabled = true
+            }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun createArchiveResources(sourceDir: String): Resources? {
+        val hostResources = hostContext.resources
+        val assetManager = AssetManager::class.java.getDeclaredConstructor().newInstance()
+        val addAssetPath = AssetManager::class.java.getDeclaredMethod("addAssetPath", String::class.java)
+            .apply { isAccessible = true }
+        val cookie = addAssetPath.invoke(assetManager, sourceDir) as? Int ?: 0
+        if (cookie == 0) return null
+        return Resources(assetManager, hostResources.displayMetrics, hostResources.configuration)
+    }
+}
+
+data class VirtualResourceBundle(
+    val applicationInfo: ApplicationInfo,
+    val resources: Resources,
+    val source: ResourceSource
+)
+
+enum class ResourceSource {
+    PACKAGE_MANAGER,
+    ASSET_MANAGER,
+    HOST_FALLBACK
+}

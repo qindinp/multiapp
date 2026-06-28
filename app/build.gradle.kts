@@ -54,6 +54,10 @@ android {
             pickFirsts += "lib/*/libshadowhook.so"
             pickFirsts += "lib/*/liblsplant.so"
         }
+        resources {
+            excludes += "META-INF/LICENSE.md"
+            excludes += "META-INF/LICENSE-notice.md"
+        }
     }
 }
 

@@ -1,8 +1,17 @@
 package com.multiapp.app.container
 
+import com.multiapp.core.loader.BootstrapResult
+import com.multiapp.core.loader.HostedBootstrapResult
+import com.multiapp.core.loader.RuntimeStage
+import com.multiapp.core.loader.toSummary
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.DisplayName
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 
 /**
  * Pure JVM tests for [ContainerActivity].
@@ -27,6 +36,12 @@ class ContainerActivityTest {
     }
 
     @Test
+    @DisplayName("EXTRA_ENABLE_PROVIDER_HOOK constant has correct value")
+    fun extraEnableProviderHookConstant() {
+        assertEquals("multiapp.profile.providerHookEnabled", ContainerActivity.EXTRA_ENABLE_PROVIDER_HOOK)
+    }
+
+    @Test
     @DisplayName("EXTRA_INSTANCE_ID key matches expected intent contract")
     fun extraInstanceIdKeyMatchesContract() {
         // Ensures the constant string used in Manifest extras matches what the
@@ -42,4 +57,108 @@ class ContainerActivityTest {
         val expectedKey = "multiapp.installOrigin"
         assertEquals(expectedKey, ContainerActivity.EXTRA_INSTALL_ORIGIN)
     }
+
+    @Test
+    @DisplayName("EXTRA_ENABLE_PROVIDER_HOOK key matches expected intent contract")
+    fun extraEnableProviderHookKeyMatchesContract() {
+        val expectedKey = "multiapp.profile.providerHookEnabled"
+        assertEquals(expectedKey, ContainerActivity.EXTRA_ENABLE_PROVIDER_HOOK)
+    }
+
+    @Test
+    @DisplayName("Container finishes when bootstrap fails")
+    fun shouldFinishWhenBootstrapFails() {
+        val failedStage = BootstrapResult.failed(
+            stage = RuntimeStage.APPLICATION,
+            message = "Application stage failed"
+        )
+        val result = bootstrapResult(
+            success = false,
+            guestClassLoader = null,
+            stageResults = listOf(failedStage)
+        )
+
+        assertTrue(ContainerActivity.shouldFinishAfterBootstrap(result))
+    }
+
+    @Test
+    @DisplayName("Container finishes when bootstrap has no class loader")
+    fun shouldFinishWhenGuestClassLoaderMissing() {
+        val result = bootstrapResult(
+            success = true,
+            guestClassLoader = null
+        )
+
+        assertTrue(ContainerActivity.shouldFinishAfterBootstrap(result))
+    }
+
+    @Test
+    @DisplayName("Container continues when bootstrap succeeds with class loader")
+    fun shouldContinueWhenBootstrapHasClassLoader() {
+        val result = bootstrapResult(
+            success = true,
+            guestClassLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        assertFalse(ContainerActivity.shouldFinishAfterBootstrap(result))
+    }
+
+    @Test
+    @DisplayName("Virtual context config carries nativeLibraryDir when lib dir exists")
+    fun buildVirtualContextConfigCarriesNativeLibraryDir(@TempDir tempDir: File) {
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        val libDir = File(dataRoot, "lib").apply { mkdirs() }
+
+        val config = ContainerActivity.buildVirtualContextConfig(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.abc123",
+            originApkPath = File(tempDir, "base.apk").absolutePath,
+            dataRoot = dataRoot.absolutePath,
+            fallbackDataRoot = File(tempDir, "fallback"),
+            guestClassLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        assertEquals(dataRoot.absolutePath, config.dataDir)
+        assertEquals(libDir.absolutePath, config.nativeLibraryDir)
+    }
+
+    @Test
+    @DisplayName("Virtual context config leaves nativeLibraryDir null when lib dir is absent")
+    fun buildVirtualContextConfigAllowsMissingNativeLibraryDir(@TempDir tempDir: File) {
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+
+        val config = ContainerActivity.buildVirtualContextConfig(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.abc123",
+            originApkPath = File(tempDir, "base.apk").absolutePath,
+            dataRoot = dataRoot.absolutePath,
+            fallbackDataRoot = File(tempDir, "fallback"),
+            guestClassLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        assertNull(config.nativeLibraryDir)
+    }
+
+    private fun bootstrapResult(
+        success: Boolean,
+        guestClassLoader: ClassLoader?,
+        stageResults: List<BootstrapResult> = emptyList()
+    ) = HostedBootstrapResult(
+        instanceId = "inst-001",
+        installId = "com.example.app",
+        originPackageName = "com.example.app",
+        virtualPackageName = "com.multiapp.instance.abc123",
+        originApkPath = "/tmp/base.apk",
+        dataRoot = "/tmp/inst-001",
+        guestClassLoader = guestClassLoader,
+        guestApplication = null,
+        installRecord = null,
+        launcherActivityClassName = null,
+        stageResults = stageResults,
+        summary = stageResults.toSummary(),
+        success = success,
+        diagnostics = null
+    )
 }

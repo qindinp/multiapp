@@ -5,11 +5,17 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
+import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.HostedRuntimeBootstrap
+import com.multiapp.core.loader.VirtualActivityManager
+import com.multiapp.core.loader.VirtualProcessRuntime
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
+import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.VirtualContextConfig
+import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
 
 /**
@@ -23,6 +29,10 @@ import java.io.File
  * which creates a [VirtualContextWrapper][com.multiapp.core.loader.VirtualContextWrapper]
  * for the guest app and attempts to instantiate the guest
  * [android.app.Application] class.
+ *
+ * After successful bootstrap, resolves the guest launcher Activity and maps it
+ * to a real host ProxyActivity slot. This starts the move toward
+ * ProxyActivity + Instrumentation/ActivityThread virtualization.
  */
 class ContainerActivity : Activity() {
 
@@ -36,6 +46,15 @@ class ContainerActivity : Activity() {
         const val EXTRA_INSTALL_ORIGIN = "multiapp.installOrigin"
 
         /**
+         * Experimental Provider authority hook profile switch.
+         *
+         * Default launches must leave this false so protected-app and normal
+         * baseline runs stay hook-free. Debug/diagnostic callers may enable it
+         * to validate the VirtualApp/DroidPlugin-style Provider rewrite path.
+         */
+        const val EXTRA_ENABLE_PROVIDER_HOOK = "multiapp.profile.providerHookEnabled"
+
+        /**
          * Build a launch [Intent] for [ContainerActivity].
          *
          * @param context  used to create the explicit intent
@@ -45,13 +64,66 @@ class ContainerActivity : Activity() {
         fun createIntent(
             context: Context,
             instanceId: String,
-            installOrigin: String? = null
+            installOrigin: String? = null,
+            providerHookEnabled: Boolean = false
         ): Intent {
             return Intent(context, ContainerActivity::class.java)
                 .putExtra(EXTRA_INSTANCE_ID, instanceId)
                 .putExtra(EXTRA_INSTALL_ORIGIN, installOrigin)
+                .putExtra(EXTRA_ENABLE_PROVIDER_HOOK, providerHookEnabled)
+        }
+
+        internal fun shouldFinishAfterBootstrap(result: HostedBootstrapResult): Boolean =
+            !result.success || result.guestClassLoader == null
+
+        internal fun buildVirtualContextConfig(
+            instanceId: String,
+            originPackageName: String,
+            virtualPackageName: String,
+            originApkPath: String,
+            dataRoot: String?,
+            fallbackDataRoot: File,
+            guestClassLoader: ClassLoader,
+            applicationLabel: String? = null,
+            packageSnapshot: VirtualPackageSnapshot? = null
+        ): VirtualContextConfig {
+            val resolvedDataRoot = dataRoot ?: fallbackDataRoot.absolutePath
+            return VirtualContextConfig(
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                virtualPackageName = virtualPackageName,
+                dataDir = resolvedDataRoot,
+                sourceDir = originApkPath,
+                nativeLibraryDir = resolveNativeLibraryDir(resolvedDataRoot),
+                classLoader = guestClassLoader,
+                applicationLabel = packageSnapshot?.applicationLabel ?: applicationLabel,
+                packageSnapshot = packageSnapshot
+            )
+        }
+
+        internal fun resolveNativeLibraryDir(dataRoot: String?): String? {
+            if (dataRoot.isNullOrBlank()) return null
+            return ContainerRuntimePaths.nativeLibraryDirOrNull(dataRoot)
         }
     }
+
+    private val proxyActivityClassNames = listOf(
+        "com.multiapp.app.container.ProxyActivity0",
+        "com.multiapp.app.container.ProxyActivity1",
+        "com.multiapp.app.container.ProxyActivitySingleTop0",
+        "com.multiapp.app.container.ProxyActivitySingleTop1",
+        "com.multiapp.app.container.ProxyActivitySingleTask0",
+        "com.multiapp.app.container.ProxyActivitySingleTask1"
+    )
+
+    private val proxyLaunchModeByClassName = mapOf(
+        "com.multiapp.app.container.ProxyActivity0" to null,
+        "com.multiapp.app.container.ProxyActivity1" to null,
+        "com.multiapp.app.container.ProxyActivitySingleTop0" to "singleTop",
+        "com.multiapp.app.container.ProxyActivitySingleTop1" to "singleTop",
+        "com.multiapp.app.container.ProxyActivitySingleTask0" to "singleTask",
+        "com.multiapp.app.container.ProxyActivitySingleTask1" to "singleTask"
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -64,29 +136,45 @@ class ContainerActivity : Activity() {
         }
 
         val installOrigin = intent.getStringExtra(EXTRA_INSTALL_ORIGIN)
-        Log.i(TAG, "Container launch started: instanceId=$instanceId, installOrigin=$installOrigin")
+        val providerHookEnabled = intent.getBooleanExtra(EXTRA_ENABLE_PROVIDER_HOOK, false)
+        Log.i(
+            TAG,
+            "Container launch started: instanceId=$instanceId, " +
+                "installOrigin=$installOrigin, providerHookEnabled=$providerHookEnabled"
+        )
 
         // 1. Create persistence dependencies
         val instanceStore = JsonInstanceRecordStore(getInstanceStoreDir())
         val installStore = JsonInstallRecordStore(getInstallStoreDir())
-        val instanceManager: InstanceManager = DefaultInstanceManager(instanceStore, getDataRootDir())
+        val instanceManager: InstanceManager = DefaultInstanceManager(
+            store = instanceStore,
+            dataRootBase = getDataRootDir(),
+            installRecordStore = installStore
+        )
 
         // 2. Run bootstrap (Phase 2: includes guest Application creation)
         val bootstrap = HostedRuntimeBootstrap(
             instanceManager = instanceManager,
             installRecordStore = installStore,
-            hostContext = this
+            hostContext = this,
+            providerHookInstallEnabled = providerHookEnabled
         )
-        val result = bootstrap.run(instanceId)
+        val result = VirtualProcessRuntime.global.bindApplication(instanceId) {
+            bootstrap.run(instanceId)
+        }
 
         if (!result.success) {
             Log.e(TAG, "Bootstrap failed for instanceId=$instanceId: ${result.summary.failureReason}")
+            writeLaunchEvidence(instanceId, "FAIL", "BOOTSTRAP", result.summary.failureReason ?: "unknown")
+            finish()
             return
         }
 
         val guestClassLoader = result.guestClassLoader
         if (guestClassLoader == null) {
             Log.e(TAG, "Bootstrap succeeded but guestClassLoader is null for instanceId=$instanceId")
+            writeLaunchEvidence(instanceId, "FAIL", "CLASS_LOADER", "guestClassLoader is null")
+            finish()
             return
         }
 
@@ -97,18 +185,92 @@ class ContainerActivity : Activity() {
             Log.w(TAG, "No guest Application created for instanceId=$instanceId")
         }
 
+        // 3. Launch a real ProxyActivity slot. Instrumentation substitution is the next phase.
+        val launcherClassName = result.launcherActivityClassName
+        if (launcherClassName != null) {
+            val proxyLaunchResult = launchProxyActivity(
+                instanceId = instanceId,
+                originPackageName = result.originPackageName ?: result.virtualPackageName ?: "",
+                guestActivityClassName = launcherClassName
+            )
+            if (proxyLaunchResult.isFailure) {
+                writeLaunchEvidence(
+                    instanceId,
+                    "FAIL",
+                    "ACTIVITY_PROXY",
+                    proxyLaunchResult.exceptionOrNull()?.message ?: "proxy launch failed"
+                )
+                finish()
+                return
+            }
+            val proxyRecord = proxyLaunchResult.getOrThrow()
+            writeLaunchEvidence(
+                instanceId,
+                "PROXY_LAUNCHED",
+                "ACTIVITY_PROXY",
+                "${proxyRecord.proxyActivityClassName}|${proxyRecord.guestActivityClassName}"
+            )
+            finish()
+            return
+        } else {
+            Log.w(TAG, "No launcher Activity to launch for instanceId=$instanceId")
+            writeLaunchEvidence(instanceId, "FAIL", "LAUNCHER_ACTIVITY", "no launcher Activity")
+            finish()
+            return
+        }
+
         Log.i(TAG, "Container launch complete: instanceId=$instanceId, success=${result.success}")
+        writeLaunchEvidence(instanceId, "SUCCESS", "COMPLETE", result.launcherActivityClassName ?: "")
+    }
+
+    private fun launchProxyActivity(
+        instanceId: String,
+        originPackageName: String,
+        guestActivityClassName: String
+    ): Result<com.multiapp.core.model.virtual.VirtualActivityRecord> {
+        Log.i(TAG, "Launching proxy Activity for guest: $guestActivityClassName")
+        val manager = VirtualActivityManager(
+            context = this,
+            proxyActivityRegistry = ProxyActivityRegistry(proxyActivityClassNames, proxyLaunchModeByClassName)
+        )
+        return manager.launchGuestLauncher(
+            instanceId = instanceId,
+            originPackageName = originPackageName,
+            guestActivityClassName = guestActivityClassName
+        )
     }
 
     /** Directory for [JsonInstanceRecordStore] persistence. */
     private fun getInstanceStoreDir(): File =
-        File(filesDir, "instances").apply { mkdirs() }
+        ContainerRuntimePaths.instanceStoreDir(this)
 
     /** Directory for [JsonInstallRecordStore] persistence. */
     private fun getInstallStoreDir(): File =
-        File(filesDir, "installs").apply { mkdirs() }
+        ContainerRuntimePaths.installStoreDir(this)
 
     /** Base directory for instance data roots. */
     private fun getDataRootDir(): File =
-        File(filesDir, "data").apply { mkdirs() }
+        ContainerRuntimePaths.instanceDataRootBase(this)
+
+    private fun writeLaunchEvidence(
+        instanceId: String,
+        status: String,
+        stage: String,
+        detail: String
+    ) {
+        runCatching {
+            ContainerRuntimeEvidenceWriter.write(
+                context = this,
+                instanceId = instanceId,
+                component = "launch",
+                fields = linkedMapOf(
+                    "status" to status,
+                    "stage" to stage,
+                    "detail" to detail
+                )
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write launch evidence for instanceId=$instanceId", error)
+        }
+    }
 }

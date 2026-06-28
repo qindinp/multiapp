@@ -19,7 +19,8 @@ class RuntimeBootstrapTest {
                 RuntimeStage.RESOURCES,
                 RuntimeStage.CLASS_LOADER,
                 RuntimeStage.GUEST_CONTEXT,
-                RuntimeStage.APPLICATION
+                RuntimeStage.APPLICATION,
+                RuntimeStage.LAUNCHER_ACTIVITY
             ),
             RuntimeStage.ordered()
         )
@@ -29,6 +30,7 @@ class RuntimeBootstrapTest {
         assertEquals(orders.toSet().size, orders.size)
         assertTrue(RuntimeStage.NATIVE_LIBS.order < RuntimeStage.CLASS_LOADER.order)
         assertTrue(RuntimeStage.CLASS_LOADER.order < RuntimeStage.APPLICATION.order)
+        assertTrue(RuntimeStage.APPLICATION.order < RuntimeStage.LAUNCHER_ACTIVITY.order)
     }
 
     @Test

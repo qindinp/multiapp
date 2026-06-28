@@ -44,6 +44,8 @@ object NativeHookPolicyGate {
         "lsPlantEnabled" to policy.lsPlantMethodHooks.toString(),
         "xposedModulesEnabled" to policy.xposedModules.toString(),
         "businessNativeStubsEnabled" to policy.businessNativeStubs.toString(),
+        "businessNativeWrappersEnabled" to policy.businessNativeWrappers.toString(),
+        "nativeBaseHooksEnabled" to policy.nativeBaseHooks.toString(),
         "methodReplacementEnabled" to policy.methodReplacement.toString(),
         "noOpPatchesEnabled" to policy.noOpPatches.toString(),
         "containerIdentityVirtualizationEnabled" to policy.containerIdentityVirtualization.toString(),

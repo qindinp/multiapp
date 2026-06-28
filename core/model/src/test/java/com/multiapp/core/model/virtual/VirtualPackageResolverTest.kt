@@ -16,6 +16,15 @@ class VirtualPackageResolverTest {
         assertEquals("com.example.MainActivity", component.name)
         assertFalse(component.exported)
         assertTrue(component.intentFilters.isEmpty())
+        assertTrue(component.resolvedIntentFilters.isEmpty())
+        assertNull(component.launchMode)
+        assertNull(component.processName)
+        assertNull(component.taskAffinity)
+        assertEquals(0, component.themeId)
+        assertNull(component.screenOrientation)
+        assertNull(component.configChanges)
+        assertNull(component.permission)
+        assertTrue(component.metaData.isEmpty())
     }
 
     @Test
@@ -23,13 +32,37 @@ class VirtualPackageResolverTest {
         val component = ResolvedComponent(
             name = "com.example.MainActivity",
             exported = true,
-            intentFilters = listOf("android.intent.action.MAIN", "android.intent.category.LAUNCHER")
+            intentFilters = listOf("android.intent.action.MAIN", "android.intent.category.LAUNCHER"),
+            resolvedIntentFilters = listOf(
+                ResolvedIntentFilter(
+                    actions = listOf("android.intent.action.MAIN"),
+                    categories = listOf("android.intent.category.LAUNCHER"),
+                    dataSchemes = listOf("http")
+                )
+            ),
+            launchMode = "singleTop",
+            processName = ":remote",
+            taskAffinity = "com.example.task",
+            themeId = 0x7f010001,
+            screenOrientation = "portrait",
+            configChanges = "orientation|screenSize",
+            permission = "com.example.permission.START",
+            metaData = mapOf("feature" to "enabled")
         )
 
         assertEquals("com.example.MainActivity", component.name)
         assertTrue(component.exported)
         assertEquals(2, component.intentFilters.size)
         assertEquals("android.intent.action.MAIN", component.intentFilters[0])
+        assertEquals("http", component.resolvedIntentFilters.single().dataSchemes.single())
+        assertEquals("singleTop", component.launchMode)
+        assertEquals(":remote", component.processName)
+        assertEquals("com.example.task", component.taskAffinity)
+        assertEquals(0x7f010001, component.themeId)
+        assertEquals("portrait", component.screenOrientation)
+        assertEquals("orientation|screenSize", component.configChanges)
+        assertEquals("com.example.permission.START", component.permission)
+        assertEquals("enabled", component.metaData["feature"])
     }
 
     @Test
@@ -75,6 +108,10 @@ class VirtualPackageResolverTest {
         assertEquals(34, pkg.targetSdk)
         assertEquals(21, pkg.minSdk)
         assertNull(pkg.applicationClassName)
+        assertNull(pkg.processName)
+        assertNull(pkg.taskAffinity)
+        assertEquals(0, pkg.themeId)
+        assertTrue(pkg.metaData.isEmpty())
         assertNull(pkg.launcherActivityName)
         assertTrue(pkg.activities.isEmpty())
         assertTrue(pkg.services.isEmpty())
@@ -111,6 +148,10 @@ class VirtualPackageResolverTest {
             targetSdk = 34,
             minSdk = 21,
             applicationClassName = "com.example.MyApplication",
+            processName = "com.example.app:remote",
+            taskAffinity = "com.example.task",
+            themeId = 0x7f010002,
+            metaData = mapOf("appMeta" to "value"),
             launcherActivityName = "com.example.MainActivity",
             activities = activities,
             services = services,
@@ -122,6 +163,10 @@ class VirtualPackageResolverTest {
 
         assertEquals("com.example.app", pkg.packageName)
         assertEquals("com.example.MyApplication", pkg.applicationClassName)
+        assertEquals("com.example.app:remote", pkg.processName)
+        assertEquals("com.example.task", pkg.taskAffinity)
+        assertEquals(0x7f010002, pkg.themeId)
+        assertEquals("value", pkg.metaData["appMeta"])
         assertEquals("com.example.MainActivity", pkg.launcherActivityName)
         assertEquals(2, pkg.activities.size)
         assertEquals(1, pkg.services.size)

@@ -74,6 +74,7 @@
 // ==================== Global State ====================
 
 static std::atomic_bool g_initialized{false};
+static std::atomic_bool g_register_natives_business_wrappers_enabled{false};
 static bool g_hooks_installed = false;
 static std::shared_mutex g_mutex;
 static std::atomic_bool g_suppress_self_sigkill{false};
@@ -2654,42 +2655,50 @@ static jint hooked_RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMet
              hasInterface11 ? 1 : 0,
              hasInterface20 ? 1 : 0);
     }
+    bool businessWrappersEnabled = g_register_natives_business_wrappers_enabled.load(std::memory_order_relaxed);
     if (className == "com.yuewen.ywlogin.login.YWLoginManager" &&
         methods != nullptr && nMethods > 0) {
-        patchedMethods.assign(methods, methods + nMethods);
-        for (jint i = 0; i < nMethods; i++) {
-            const char* name = patchedMethods[i].name ? patchedMethods[i].name : "";
-            const char* sig = patchedMethods[i].signature ? patchedMethods[i].signature : "";
-            void* fnPtr = patchedMethods[i].fnPtr;
-            if (strcmp(name, "pwdLogin") == 0 &&
-                strcmp(sig, "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Lcom/yuewen/ywlogin/login/YWCallBack;)V") == 0) {
-                if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
-                    g_orig_ywlogin_pwdLogin = (YwPwdLoginFn)fnPtr;
-                    LOGW("RegisterNatives YWLoginManager: captured pwdLogin original=%s", describe_native_address(fnPtr).c_str());
+        if (businessWrappersEnabled) {
+            patchedMethods.assign(methods, methods + nMethods);
+            for (jint i = 0; i < nMethods; i++) {
+                const char* name = patchedMethods[i].name ? patchedMethods[i].name : "";
+                const char* sig = patchedMethods[i].signature ? patchedMethods[i].signature : "";
+                void* fnPtr = patchedMethods[i].fnPtr;
+                if (strcmp(name, "pwdLogin") == 0 &&
+                    strcmp(sig, "(Landroid/app/Activity;Ljava/lang/String;Ljava/lang/String;Lcom/yuewen/ywlogin/login/YWCallBack;)V") == 0) {
+                    if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
+                        g_orig_ywlogin_pwdLogin = (YwPwdLoginFn)fnPtr;
+                        LOGW("RegisterNatives YWLoginManager: captured pwdLogin original=%s", describe_native_address(fnPtr).c_str());
+                    }
+                    patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_pwdLogin;
+                    LOGW("RegisterNatives YWLoginManager: wrapped pwdLogin original=%p", (void*)g_orig_ywlogin_pwdLogin);
+                } else if (strcmp(name, "sendPhoneCode") == 0 &&
+                    strcmp(sig, "(Landroid/content/Context;Ljava/lang/String;IILcom/yuewen/ywlogin/login/YWCallBack;)V") == 0) {
+                    if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
+                        g_orig_ywlogin_sendPhoneCode = (YwSendPhoneCodeFn)fnPtr;
+                        LOGW("RegisterNatives YWLoginManager: captured sendPhoneCode original=%s", describe_native_address(fnPtr).c_str());
+                    }
+                    patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_sendPhoneCode;
+                    LOGW("RegisterNatives YWLoginManager: wrapped sendPhoneCode original=%p", (void*)g_orig_ywlogin_sendPhoneCode);
+                } else if (strcmp(name, "qrCodeV2") == 0 &&
+                    strcmp(sig, "(Lcom/yuewen/ywlogin/callbacks/DefaultYWCallback;)V") == 0) {
+                    if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
+                        g_orig_ywlogin_qrCodeV2 = (YwQrCodeV2Fn)fnPtr;
+                        LOGW("RegisterNatives YWLoginManager: captured qrCodeV2 original=%s", describe_native_address(fnPtr).c_str());
+                    }
+                    patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_qrCodeV2;
+                    LOGW("RegisterNatives YWLoginManager: wrapped qrCodeV2 original=%p", (void*)g_orig_ywlogin_qrCodeV2);
                 }
-                patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_pwdLogin;
-                LOGW("RegisterNatives YWLoginManager: wrapped pwdLogin original=%p", (void*)g_orig_ywlogin_pwdLogin);
-            } else if (strcmp(name, "sendPhoneCode") == 0 &&
-                strcmp(sig, "(Landroid/content/Context;Ljava/lang/String;IILcom/yuewen/ywlogin/login/YWCallBack;)V") == 0) {
-                if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
-                    g_orig_ywlogin_sendPhoneCode = (YwSendPhoneCodeFn)fnPtr;
-                    LOGW("RegisterNatives YWLoginManager: captured sendPhoneCode original=%s", describe_native_address(fnPtr).c_str());
-                }
-                patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_sendPhoneCode;
-                LOGW("RegisterNatives YWLoginManager: wrapped sendPhoneCode original=%p", (void*)g_orig_ywlogin_sendPhoneCode);
-            } else if (strcmp(name, "qrCodeV2") == 0 &&
-                strcmp(sig, "(Lcom/yuewen/ywlogin/callbacks/DefaultYWCallback;)V") == 0) {
-                if (fnPtr != nullptr && !is_multiapp_native_fn(fnPtr)) {
-                    g_orig_ywlogin_qrCodeV2 = (YwQrCodeV2Fn)fnPtr;
-                    LOGW("RegisterNatives YWLoginManager: captured qrCodeV2 original=%s", describe_native_address(fnPtr).c_str());
-                }
-                patchedMethods[i].fnPtr = (void*)wrapped_ywlogin_qrCodeV2;
-                LOGW("RegisterNatives YWLoginManager: wrapped qrCodeV2 original=%p", (void*)g_orig_ywlogin_qrCodeV2);
             }
+            methodsToRegister = patchedMethods.data();
+        } else {
+            LOGI("RegisterNatives YWLoginManager: observe-only; fnPtr left unchanged");
         }
-        methodsToRegister = patchedMethods.data();
     }
     if (className == "com.yuewen.fock.Fock" && methods != nullptr && nMethods > 0) {
+        if (!businessWrappersEnabled) {
+            LOGI("RegisterNatives Fock: observe-only; fnPtr left unchanged");
+        } else {
         patchedMethods.assign(methods, methods + nMethods);
         for (jint i = 0; i < nMethods; i++) {
             const char* name = patchedMethods[i].name ? patchedMethods[i].name : "";
@@ -2713,6 +2722,7 @@ static jint hooked_RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMet
             }
         }
         methodsToRegister = patchedMethods.data();
+        }
     }
 
     if (methods != nullptr && nMethods > 0) {
@@ -3165,6 +3175,16 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInstallRegisterNativesLogger(
 {
     (void)thiz;
     return installRegisterNativesLogger(env) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeSetRegisterNativesBusinessWrappersEnabled(
+    JNIEnv* env, jobject thiz, jboolean enabled)
+{
+    (void)env;
+    (void)thiz;
+    g_register_natives_business_wrappers_enabled.store(enabled == JNI_TRUE, std::memory_order_relaxed);
+    LOGI("RegisterNatives business wrappers enabled=%d", enabled == JNI_TRUE ? 1 : 0);
 }
 
 JNIEXPORT jboolean JNICALL

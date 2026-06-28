@@ -20,7 +20,11 @@ data class VirtualContextConfig(
     /** Directory containing extracted native libraries (null if none) */
     val nativeLibraryDir: String?,
     /** ClassLoader configured with the guest APK's DEX files */
-    val classLoader: ClassLoader
+    val classLoader: ClassLoader,
+    /** Human-readable label resolved from the origin APK manifest, if available. */
+    val applicationLabel: String? = null,
+    /** Runtime package snapshot used by virtual PMS/AMS query layers. */
+    val packageSnapshot: VirtualPackageSnapshot? = null
 )
 
 /**

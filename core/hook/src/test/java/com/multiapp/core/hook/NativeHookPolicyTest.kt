@@ -21,9 +21,12 @@ class NativeHookPolicyTest {
         assertFalse(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_STUBS))
         assertFalse(policy.isEnabled(NativeHookCapability.METHOD_REPLACEMENT))
         assertFalse(policy.isEnabled(NativeHookCapability.NO_OP_PATCHES))
+        assertFalse(policy.isEnabled(NativeHookCapability.NATIVE_BASE_HOOKS))
         assertFalse(policy.isEnabled(NativeHookCapability.DIAGNOSTIC_LOGGING))
         assertFalse(policy.isEnabled(NativeHookCapability.CLASS_LOAD_LOGGING))
         assertFalse(policy.isEnabled(NativeHookCapability.REGISTER_NATIVES_LOGGING))
+        assertFalse(policy.isEnabled(NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY))
+        assertFalse(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_WRAPPERS))
     }
 
     @Test
@@ -37,10 +40,13 @@ class NativeHookPolicyTest {
         assertTrue(policy.isEnabled(NativeHookCapability.DIAGNOSTIC_LOGGING))
         assertTrue(policy.isEnabled(NativeHookCapability.CLASS_LOAD_LOGGING))
         assertTrue(policy.isEnabled(NativeHookCapability.REGISTER_NATIVES_LOGGING))
+        assertTrue(policy.isEnabled(NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY))
 
         assertFalse(policy.isEnabled(NativeHookCapability.LSPLANT_METHOD_HOOKS))
         assertFalse(policy.isEnabled(NativeHookCapability.XPOSED_MODULES))
         assertFalse(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_STUBS))
+        assertFalse(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_WRAPPERS))
+        assertFalse(policy.isEnabled(NativeHookCapability.NATIVE_BASE_HOOKS))
         assertFalse(policy.isEnabled(NativeHookCapability.METHOD_REPLACEMENT))
         assertFalse(policy.isEnabled(NativeHookCapability.NO_OP_PATCHES))
     }
@@ -53,9 +59,12 @@ class NativeHookPolicyTest {
             NativeHookCapability.BUSINESS_NATIVE_STUBS,
             NativeHookCapability.METHOD_REPLACEMENT,
             NativeHookCapability.NO_OP_PATCHES,
+            NativeHookCapability.NATIVE_BASE_HOOKS,
             NativeHookCapability.DIAGNOSTIC_LOGGING,
             NativeHookCapability.CLASS_LOAD_LOGGING,
-            NativeHookCapability.REGISTER_NATIVES_LOGGING
+            NativeHookCapability.REGISTER_NATIVES_LOGGING,
+            NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY,
+            NativeHookCapability.BUSINESS_NATIVE_WRAPPERS
         )
 
         forbidden.forEach { capability ->
@@ -74,6 +83,8 @@ class NativeHookPolicyTest {
             NativeHookCapability.LSPLANT_METHOD_HOOKS,
             NativeHookCapability.XPOSED_MODULES,
             NativeHookCapability.BUSINESS_NATIVE_STUBS,
+            NativeHookCapability.BUSINESS_NATIVE_WRAPPERS,
+            NativeHookCapability.NATIVE_BASE_HOOKS,
             NativeHookCapability.METHOD_REPLACEMENT,
             NativeHookCapability.NO_OP_PATCHES
         )

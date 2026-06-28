@@ -7,6 +7,10 @@
 审核范围：v2 直接最终态路线，即 `VirtualInstall / VirtualInstance` 作为唯一事实源，
 v2 新实例从 MultiApp hosted container 启动，不再生成独立 Stub APK。
 
+关联整改文件：
+
+- `docs/container-runtime-refactor/v2-open-source-alignment-remediation-2026-06-27.md`：对照 VirtualApp / BlackBox / DroidPlugin / SPatch 的公开路线，按系统架构组、Android Runtime 组、测试验证组拆解后续整改任务。
+
 ## 1. 最终审核结论
 
 当前不能判定为 “v2 Hosted Container 已完成”。更准确的状态是：
@@ -22,6 +26,63 @@ v2 新实例从 MultiApp hosted container 启动，不再生成独立 Stub APK�
 ```
 
 因此本轮审核结论为：**No-Go，需要整改后再声明 Step 4-7 完成**。
+
+### 1.1 2026-06-27 真机补充结论：P0-2 路线必须改判
+
+设备：`Xiaomi 2509FPN0BC / Android 16 / HyperOS V816`
+
+真实 MultiApp 入口验证已经证明，当前 v2 链路可以推进到：
+
+```text
+MultiApp 内启动 ContainerActivity
+-> 读取 VirtualInstanceRecord
+-> 读取 InstallRecord
+-> 加载只读 origin APK artifact
+-> 创建 guest ClassLoader
+-> 创建并调用 guest Application.onCreate()
+-> 解析 guest launcher Activity: com.test.minimal.MainActivity
+```
+
+但在 `DefaultVirtualActivityController` 的手工 Activity 承载阶段失败：
+
+```text
+evidenceDir=.tmp/manual-hosted-launch-20260627-155354
+status=FAIL
+stage=LAUNCHER_ACTIVITY
+detail=guest launch failed
+
+Caused by:
+NullPointerException: ActivityInfo.parentActivityName on null mActivityInfo
+```
+
+临时补 `mActivityInfo` 后，失败继续前进到：
+
+```text
+evidenceDir=.tmp/manual-hosted-launch-20260627-160101
+status=FAIL
+stage=LAUNCHER_ACTIVITY
+detail=No activity
+
+IllegalStateException: No activity
+  at android.app.FragmentManagerImpl.moveToState
+  at android.app.Activity.onCreate
+  at com.test.minimal.MainActivity.onCreate
+```
+
+这证明 **`ClassLoader.loadClass() -> Activity.newInstance() -> attachBaseContext() -> onCreate()`
+不是可继续作为最终态的技术路线**。Android Activity 不能作为普通 Java 对象承载；系统正常
+`ActivityThread.performLaunchActivity()` 会注入 `ActivityInfo`、`Instrumentation`、`IBinder token`、
+`ActivityThread`、`PhoneWindow`、`WindowManager`、`LoadedApk`、`Resources`、`FragmentController host`、
+`Configuration`、`Intent` 等运行时状态。逐个反射补字段会形成无底洞，并且 Android 版本兼容性不可控。
+
+因此，P0-2 的整改方向从“生产级 `VirtualActivityController` 手工承载 Activity”改判为：
+
+```text
+Proxy Activity + Instrumentation/ActivityThread/AMS/PMS 虚拟化
+```
+
+`DefaultVirtualActivityController` 后续只能作为 diagnostic/negative evidence 工具保留，不能作为 v2
+最终运行时内核。
 
 ## 2. 多角色审核输入
 
@@ -78,10 +139,12 @@ Launcher/AppManager 创建的新实例在 filesDir/installs 下存在对应 Inst
 HostedRuntimeBootstrap 能读取 install record 并进入 ORIGIN_APK stage。
 ```
 
-### P0-2：Hosted Container 没有启动 guest launcher Activity
+### P0-2：Hosted Container 没有通过系统生命周期启动 guest launcher Activity
 
-问题：`ContainerActivity` 只执行 `bootstrap.run(instanceId)`，成功后记录 `guestApplication` 和
-`guestClassLoader`，没有解析 launcher Activity，也没有调用 `VirtualActivityController`。
+问题：早期 `ContainerActivity` 只执行 `bootstrap.run(instanceId)`，成功后记录 `guestApplication` 和
+`guestClassLoader`，没有解析 launcher Activity。后续增加的 `DefaultVirtualActivityController` 虽然能
+解析 launcher 并尝试反射 `onCreate()`，但真机证明手工承载 Activity 不成立：它绕过了
+`ActivityThread.performLaunchActivity()` 和系统 `attach()`，导致 Activity 内部状态不完整。
 
 证据：
 
@@ -104,25 +167,41 @@ test-fixtures/minimal-app/src/main/java/com/test/minimal/MainActivity.java:17
 
 整改：
 
-1. 实现生产级 `VirtualActivityController`，至少支持 single launcher Activity MVP。
-2. 从 `InstallRecord.activities` 或 `VirtualPackageResolver` 解析 launcher Activity。
-3. Hosted bootstrap 成功后执行：
+1. 废弃“生产级手工 `VirtualActivityController`”作为最终路线；它只能保留为 diagnostic/negative
+   evidence，证明哪些系统字段缺失。
+2. 新增 `ProxyActivity` / `ProxyActivityRegistry`。所有 guest Activity 启动都先映射到宿主
+   Manifest 中真实声明的 Proxy Activity，由系统正常创建宿主 Activity 记录、Window、token 和生命周期。
+3. 新增 `VirtualActivityManager` 保存：
 
 ```text
-resolve launcher activity
--> create/attach guest Activity or proxy host lifecycle
--> call onCreate
--> show minimal test app first screen
+instanceId
+originPackageName
+guestActivityClassName
+proxyActivityClassName
+launchIntent
+task/process slot
 ```
 
-4. 不能只 `Class.forName().newInstance()`，需要处理 Activity base context、Window、token、
-   Application、theme、lifecycle。
+4. 新增 `VirtualInstrumentation` / `ActivityThreadCompat`：
+
+```text
+hook Instrumentation.execStartActivity / newActivity / callActivityOnCreate
+hook ActivityThread.mInstrumentation
+hook ActivityThread.mPackages / LoadedApk / ClassLoader / Resources
+```
+
+5. 新增 `VirtualPackageManager` / `VirtualLoadedApk` / `VirtualResourcesManager`，保证 guest Activity
+   在系统生命周期中看到 guest package、resources、classloader、applicationInfo、nativeLibraryDir。
+6. `ContainerActivity` 只负责根据 `instanceId` 调度 `VirtualActivityManager.launchGuestLauncher()`，
+   不再直接 `newInstance()` guest Activity。
 
 验收：
 
 ```text
-MultiApp 内启动 minimal test app instance 后，minimal MainActivity 可见。
-失败时输出 ACTIVITY stage failed，而不是空白页或 bootstrap success。
+MultiApp 内启动 minimal test app instance 后，系统实际 resume 的是 ProxyActivity，
+但 guest MainActivity 代码在系统 Activity 生命周期中执行并显示首屏。
+失败时输出明确 ACTIVITY_PROXY / INSTRUMENTATION / LOADED_APK stage failed，
+而不是空白页或 bootstrap success。
 ```
 
 ### P0-3：guest `Application.onCreate()` 没有调用，且失败仍可能被判成功
@@ -457,3 +536,337 @@ QQ 阅读 register-natives-only 真机 evidence
 | Step 7 QQ 阅读 register-natives-only diagnostics | 未完成，缺真实 native evidence，且 diagnostics hook 有业务 wrapper 污染风险 |
 
 最终裁决：**v2 方向正确，但执行结果不能标记完成；必须按 R1-R5 整改后再进入 QQ 阅读兼容结论。**
+
+## 9. 2026-06-27 负责人复审版：开源方案对标与团队分工整改
+
+本节覆盖前文较早状态判断。后续真机 evidence 已经证明，v2 hosted container 不再停留在
+`Application` 尝试阶段，而是已经跑通：
+
+```text
+ContainerActivity
+-> ProxyActivity0/1
+-> VirtualInstrumentation.newActivity()
+-> guest ClassLoader 创建 guest Activity
+-> HostedActivityContextInjector 注入 guest Context/Application/DataDir
+-> com.test.minimal.MainActivity.onCreate() 可见首屏
+-> prefs/files/database 双实例私有目录隔离
+```
+
+但三角色复审结论一致：当前仍不能称为 VirtualApp / BlackBox 级用户态容器。当前更准确状态是：
+
+```text
+已完成：hosted Activity prototype + Context/storage baseline
+未完成：Virtual PMS / AMS / Provider / LoadedApk / native IO redirect / complete Activity stack
+```
+
+### 9.1 开源方案对标结论
+
+本项目定位仍是开源学习与兼容壳研究，不能直接照搬第三方项目代码作为长期基线，但必须借鉴成熟方案的分层。
+
+| 参考方案 | 可借鉴点 | 对 MultiApp 的结论 |
+| --- | --- | --- |
+| VirtualApp / VirtualXposed 系 | `VActivityManager`、`VPackageManager`、stub/proxy Activity、虚拟安装态、IO redirect、ActivityThread/LoadedApk 接入 | 普通 APK 主线必须向“虚拟系统服务层”收敛，不能继续只补 `ContextWrapper` |
+| BlackBox 系 | `BPackageManagerService`、component resolver、package settings、intent resolution、持久化虚拟安装模型 | 需要建立 `VirtualPackageRegistry / VirtualPackageSnapshot`，作为 PMS/AMS/Provider 的唯一事实源 |
+| DroidPlugin | AMS/PMS hook、四大组件代理、插件被 host/其他插件视为已安装 | 说明免安装容器的核心不是启动一个 Activity，而是让 framework 查询和组件调度都认为 guest 已安装 |
+| SPatch / LSPatch 类 | stub APK 工程化、manifest 保真重写、loader dex、profile 化 hook | 适合作为 protected-app 兼容/诊断线，不应污染普通 APK hosted runtime 默认路径 |
+
+公开资料对应到工程要求：
+
+```text
+VirtualApp/BlackBox: 虚拟 PM/AM/service registry 是核心，不是可选增强。
+DroidPlugin: 四大组件无需在 host manifest 中逐个注册，依赖 proxy + framework hook。
+Android PackageManager: getPackageInfo / getApplicationInfo / resolveActivity / resolveContentProvider 等查询是 App 判断安装态和组件可用性的基础面。
+```
+
+因此，继续只做 `VirtualContextWrapper.getApplicationInfo()`、`getPackageName()`、`filesDir` 这类局部补丁，会形成“看起来能跑 demo，复杂 App 立即露出 host/system 身份”的错误路线。
+
+### 9.2 三角色团队复审结论
+
+#### Framework / AMS 角色
+
+结论：当前 Activity 代理还是 prototype。
+
+已做到：
+
+```text
+MultiAppApplication 安装 VirtualInstrumentation
+ProxyActivity0/1 被系统正常创建
+VirtualInstrumentation.newActivity() 替换为 guest Activity
+callActivityOnCreate() 前注入 Context/Application/Resources
+```
+
+关键差距：
+
+```text
+没有 execStartActivity 系列拦截
+没有 IActivityManager / IActivityTaskManager 代理
+没有完整 ActivityRecord / task / launchMode / result / PendingIntent 模型
+没有 LoadedApk / ActivityThread.mPackages / ResourcesManager 成体系接入
+ContainerActivity 与 VirtualInstrumentation 存在重复 bootstrap / Application 重建风险
+```
+
+整改方向：
+
+```text
+VirtualInstrumentation -> 增加 startActivity remap 能力
+VirtualActivityManager -> 升级为 ActivityRecord/task/proxy slot 管理器
+HostedRuntimeBootstrap -> 变成 per virtual process bindApplication 模型
+新增 LoadedApkBridge -> 负责 ActivityThread/LoadedApk/ResourcesManager 一致性
+```
+
+#### PMS / PackageManager 角色
+
+结论：当前不是 Virtual PMS，只是 manifest resolver + 局部 Context identity。
+
+已做到：
+
+```text
+ManifestVirtualPackageResolver 可解析 package/application/launcher/components/permissions/label
+VirtualContextWrapper 覆盖 getApplicationInfo / sourceDir / dataDir / label fallback
+```
+
+关键差距：
+
+```text
+没有 VirtualPackageRegistry
+没有 PackageInfo/ApplicationInfo/ActivityInfo/ServiceInfo/ProviderInfo 快照
+没有 getPackageManager() wrapper
+没有 API 33+ PackageInfoFlags / ApplicationInfoFlags overload
+没有 queryIntentActivities / resolveActivity / resolveContentProvider / checkPermission
+Provider authorities / meta-data / process / launchMode / theme 等已解析信息未进入统一包模型
+```
+
+整改方向：
+
+```text
+VirtualPackageSnapshot = InstallRecord + VirtualInstanceRecord + ResolvedPackage + source/data/native/signature
+VirtualPackageRegistry 按 instanceId 缓存 snapshot
+VirtualPackageManagerWrapper 覆盖 guest self package 查询，host/system 查询 delegate
+VirtualContextWrapper.getPackageManager() 返回 wrapper
+```
+
+#### Runtime / Storage / Protected-App 角色
+
+结论：普通 APK baseline 可继续推进，但加固应用仍是 profile 化专项 PoC，不是通用兼容层。
+
+已做到：
+
+```text
+Context API 级 files/shared_prefs/database/external_files 分实例隔离
+minimal App 双实例真机目录已分离
+QQ 阅读专项资料和 native diagnostics 已沉淀在 profile/docs/tools 中
+```
+
+关键差距：
+
+```text
+Storage isolation 仅覆盖 Context API，不覆盖 Java 绝对路径和 native open/openat
+Hosted runtime 默认没有 per-instance native IO policy
+PathClassLoader 默认 nativeLibraryDir/split/sourceDir 模型不足
+Provider/ContentResolver/MediaStore/DownloadManager/SAF 未虚拟化
+QQ 阅读等加固应用需要恢复壳期望环境，不是 patch 到不崩
+```
+
+整改方向：
+
+```text
+普通 APK: hosted virtualization 主线，补 package/storage/activity/provider/service/broadcast
+Protected App: profile 化兼容线，SPatch/stub/native diagnostics 作为可选实验能力
+QQ Reader hook / no-op / callsite patch 不得进入普通 runtime 默认路径
+```
+
+### 9.3 修正后的主线架构
+
+```text
+MultiApp UI
+  -> VirtualInstallService
+  -> VirtualInstanceManager
+  -> GuestRuntimeBuilder
+       -> VirtualPackageRegistry / Snapshot
+       -> Guest ClassLoader / nativeLibraryDir / split paths
+       -> Resources / AssetManager
+       -> LoadedApkBridge / ActivityThread state
+       -> VirtualPackageManagerWrapper
+       -> VirtualActivityManager / proxy slot pool
+       -> VirtualProviderManager / ContentResolver routing
+       -> VirtualStoragePolicy / Java + native IO redirect
+  -> ProxyActivity / VirtualInstrumentation
+```
+
+Legacy / protected app 线：
+
+```text
+SPatch/LSPatch/stub profile
+  -> manifest rewrite / loader dex / origin apk payload
+  -> native diagnostics profile
+  -> optional LSPlant/Xposed hooks
+  -> app-specific compatibility profile, disabled by default
+```
+
+### 9.4 立即执行顺序（替代旧 R1-R5）
+
+#### E1：VirtualPackageSnapshot / Registry
+
+产出文件建议：
+
+```text
+core/model/.../virtual/VirtualPackageSnapshot.kt
+core/loader/.../VirtualPackageRegistry.kt
+core/loader/.../VirtualPackageSnapshotFactory.kt
+```
+
+验收：同一个 `instanceId` 能生成稳定 snapshot，包含：
+
+```text
+PackageInfo
+ApplicationInfo
+launcher ActivityInfo
+providers authorities
+sourceDir/publicSourceDir/dataDir/nativeLibraryDir
+originPackageName + virtualPackageName identity policy
+```
+
+#### E2：VirtualPackageManagerWrapper 接入 Context
+
+产出文件建议：
+
+```text
+core/loader/.../VirtualPackageManagerWrapper.kt
+core/loader/.../VirtualPackageInfoFactory.kt
+```
+
+首批必须覆盖：
+
+```text
+getPackageInfo(String, int)
+getPackageInfo(String, PackageInfoFlags)
+getApplicationInfo(String, int)
+getApplicationInfo(String, ApplicationInfoFlags)
+getActivityInfo(ComponentName, int / ComponentInfoFlags)
+queryIntentActivities(Intent, int / ResolveInfoFlags)
+resolveActivity(Intent, int / ResolveInfoFlags)
+resolveContentProvider(String, int / ComponentInfoFlags)
+getInstalledPackages / getInstalledApplications 至少返回 self + delegate system
+```
+
+验收：minimal App 在 `Application.onCreate()` 和 `Activity.onCreate()` 内查询 self package，均不回落 host。
+
+#### E3：Activity start remap 与 proxy slot 池
+
+产出文件建议：
+
+```text
+core/loader/.../VirtualActivityManager.kt 扩展
+core/loader/.../VirtualIntentResolver.kt
+core/loader/.../ProxyActivityAllocator.kt
+app AndroidManifest proxy slot matrix
+```
+
+验收：minimal fixture 增加 `SecondActivity`，guest 内部 `startActivity()` 能进入第二个 guest Activity，task/result 基线成立。
+
+#### E4：Provider 最小闭环
+
+产出文件建议：
+
+```text
+core/loader/.../VirtualProviderManager.kt
+core/loader/.../ContentResolverProxy.kt
+```
+
+验收：minimal fixture 增加 `ContentProvider`，guest 内部 query/insert/update/delete 能走 virtual authority，双实例 provider 数据隔离。
+
+#### E5：Storage / native IO policy
+
+产出文件建议：
+
+```text
+core/loader/.../VirtualStoragePolicy.kt
+core/hook 或 native runtime 中的 per-instance IO redirect 接入 hosted path
+```
+
+验收：Java direct `File("/data/data/<origin>")`、native `open()`、Context API 三类路径均落到 instance root 或给出明确不可支持证据。
+
+#### E6：Protected App profile 线
+
+产出文件建议：
+
+```text
+profiles/com.qq.reader.json
+tools/qqreader-baseline/*
+core/hook profile gate
+```
+
+验收：QQ 阅读 baseline 只收集 register-natives/self-kill/native-load evidence；不默认启用 no-op / business wrapper / LSPlant。
+
+### 9.5 当前负责人裁决
+
+1. 普通 APK 产品主线：继续走 hosted user-space virtualization，但必须补虚拟服务层。
+2. `ContextWrapper` 局部补丁只作为短期 baseline，不再作为架构完成标准。
+3. QQ 阅读/加固应用目标仍保留，但不得用专项 hook 污染普通 APK baseline。
+4. 下一步代码实现从 E1/E2 开始：先做 `VirtualPackageSnapshot + VirtualPackageManagerWrapper`，再做 Activity remap。
+5. 只有当普通 APK 完成 PMS/AMS/Provider/Storage 最小闭环后，才进入 QQ 阅读兼容结论阶段。
+
+### 9.6 E1/E2 执行记录
+
+本轮已按 9.4 的 E1/E2 先落第一层 in-process VPMS baseline：
+
+```text
+core/model/.../virtual/VirtualPackageSnapshot.kt
+core/loader/.../VirtualPackageRegistry.kt
+core/loader/.../VirtualPackageSnapshotFactory.kt
+core/loader/.../VirtualPackageInfoFactory.kt
+core/loader/.../VirtualPackageManagerWrapper.kt
+VirtualContextConfig.packageSnapshot
+HostedBootstrapResult.packageSnapshot
+VirtualContextWrapper.getPackageManager()
+```
+
+已完成的最小能力：
+
+```text
+InstallRecord + VirtualInstanceRecord + ResolvedPackage -> VirtualPackageSnapshot
+snapshot -> PackageInfo / ApplicationInfo / ActivityInfo / ProviderInfo / ResolveInfo
+guest self package getPackageInfo/getApplicationInfo/resolveActivity/resolveContentProvider
+originPackageName 与 virtualPackageName 均可命中同一 snapshot
+host/system package 查询继续 delegate 到 host PackageManager
+```
+
+验证记录：
+
+```text
+core:loader:compileDebugKotlin -> BUILD SUCCESSFUL
+core:loader:testDebugUnitTest  -> BUILD SUCCESSFUL
+app:compileDebugKotlin         -> BUILD SUCCESSFUL
+test-fixtures:minimal-app:assembleDebug -> BUILD SUCCESSFUL
+```
+
+负责人判定：E1/E2 已具备最小闭环，可以进入真机 evidence；但它仍是 in-process VPMS baseline，不是完整 VPMS service。下一阶段继续 E3 Activity start remap 与 E4 Provider lifecycle，不得把当前结果标记为完整容器完成。
+
+### 9.7 E3 Activity resolver 前置执行记录
+
+本轮已落 Activity start remap 的前置层：
+
+```text
+VirtualIntentResolver
+VirtualActivityLaunchRequest
+VirtualActivityManager.allocateGuestActivity(request)
+VirtualActivityManager.launchGuestActivity(request)
+test-fixtures/minimal-app SecondActivity
+```
+
+该层负责把 guest intent 解析成稳定的 proxy allocation 输入：
+
+```text
+explicit origin/virtual package component -> guest Activity class
+MAIN/LAUNCHER -> snapshot.launcherActivityName
+guest Activity request -> VirtualActivityRecord / proxy Activity slot
+```
+
+验证记录：
+
+```text
+core:loader:testDebugUnitTest -> BUILD SUCCESSFUL
+test-fixtures:minimal-app:assembleDebug -> BUILD SUCCESSFUL
+```
+
+负责人判定：E3 只完成 resolver/record 前置，不代表 `startActivity()` 已被接管。下一步必须在 `VirtualInstrumentation` 或 AMS/ATM hook 层拦截 guest `startActivity`，调用 `VirtualIntentResolver` 后改写为 proxy Intent，才能验收 guest 内部 `SecondActivity` 生命周期。

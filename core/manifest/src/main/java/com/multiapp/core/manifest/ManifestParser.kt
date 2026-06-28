@@ -39,7 +39,8 @@ class ManifestParser @Inject constructor(
         // 0 表示未声明。由 StubBuilder 在构建期通过 getPackageArchiveInfo 填充。
         val applicationThemeId: Int = 0,
         // ContentProvider 的 <meta-data> 子元素，key = provider name
-        val providerMetaData: Map<String, List<MetaDataInfo>> = emptyMap()
+        val providerMetaData: Map<String, List<MetaDataInfo>> = emptyMap(),
+        val applicationLabel: String? = null
     )
 
     data class ComponentInfo(
@@ -324,6 +325,9 @@ class ManifestParser @Inject constructor(
         // 提取 Application class name
         val appInfo = info.applicationInfo
         val applicationClass = (appInfo?.className ?: "").takeIf { it.isNotEmpty() }
+        val applicationLabel = appInfo?.let { infoForLabel ->
+            runCatching { infoForLabel.loadLabel(pm)?.toString() }.getOrNull()
+        }?.takeIf { it.isNotBlank() }
 
         // minSdk / targetSdk
         val minSdk = appInfo?.minSdkVersion ?: 28
@@ -332,6 +336,7 @@ class ManifestParser @Inject constructor(
         return ParsedManifest(
             packageName = info.packageName,
             applicationClass = applicationClass,
+            applicationLabel = applicationLabel,
             activities = activities,
             services = services,
             receivers = receivers,
@@ -440,6 +445,10 @@ class ManifestParser @Inject constructor(
             ?.getAttributeNS(ANDROID_NS, "theme")
             ?.takeIf { it.isNotEmpty() }
 
+        val applicationLabel = applicationEl
+            ?.getAttributeNS(ANDROID_NS, "label")
+            ?.takeIf { it.isNotBlank() && !it.startsWith("@") }
+
         val permissions = extractPermissions(manifestEl)
         val activities = extractComponents(applicationEl, "activity") +
             extractComponents(applicationEl, "activity-alias")
@@ -457,6 +466,7 @@ class ManifestParser @Inject constructor(
         return ParsedManifest(
             packageName = packageName,
             applicationClass = applicationClass,
+            applicationLabel = applicationLabel,
             activities = activities,
             services = services,
             receivers = receivers,

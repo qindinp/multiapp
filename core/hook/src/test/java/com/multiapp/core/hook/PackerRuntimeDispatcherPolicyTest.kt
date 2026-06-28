@@ -46,6 +46,7 @@ class PackerRuntimeDispatcherPolicyTest {
         assertTrue(diagnostics.contains("capability=LSPLANT_METHOD_HOOKS"), diagnostics)
         assertTrue(diagnostics.contains("capability=XPOSED_MODULES"), diagnostics)
         assertTrue(diagnostics.contains("capability=BUSINESS_NATIVE_STUBS"), diagnostics)
+        assertTrue(diagnostics.contains("capability=BUSINESS_NATIVE_WRAPPERS"), diagnostics)
         assertTrue(diagnostics.contains("capability=METHOD_REPLACEMENT"), diagnostics)
         assertTrue(diagnostics.contains("capability=NO_OP_PATCHES"), diagnostics)
         assertTrue(diagnostics.contains("component=PackerRuntimeDispatcher.installStubFallback"), diagnostics)

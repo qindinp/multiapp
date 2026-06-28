@@ -3,6 +3,9 @@ package com.multiapp.core.loader.stages
 import com.multiapp.core.hook.HookStage
 import com.multiapp.core.hook.HookStageContext
 import com.multiapp.core.hook.HookStageResult
+import com.multiapp.core.hook.NativeHookCapability
+import com.multiapp.core.hook.NativeHookPolicy
+import com.multiapp.core.hook.NativeHookPolicyGate
 import timber.log.Timber
 
 /**
@@ -23,7 +26,25 @@ class NativeBaseHooksStage : HookStage {
 
     override fun execute(context: HookStageContext): HookStageResult {
         return try {
-            val hooksOk = context.nativeBridge.initNativeHooks()
+            val policy = context.extras["nativeHookPolicy"] as? NativeHookPolicy
+                ?: NativeHookPolicy.baseline()
+            val decision = NativeHookPolicyGate.evaluate(
+                policy = policy,
+                capability = NativeHookCapability.NATIVE_BASE_HOOKS,
+                component = "NativeBaseHooksStage.initNativeHooks"
+            )
+            if (!decision.allowed) {
+                Timber.tag(TAG).i("NativeBaseHooks skipped by policy: %s", decision.evidence)
+                return HookStageResult.degraded(
+                    "NativeBaseHooks skipped by policy",
+                    details = decision.evidence
+                )
+            }
+
+            val hooksOk = context.nativeBridge.initNativeHooks(
+                policy = policy,
+                component = "NativeBaseHooksStage.initNativeHooks"
+            )
             Timber.tag(TAG).i("NativeHookBridge.initNativeHooks: %s", hooksOk)
 
             if (hooksOk) {

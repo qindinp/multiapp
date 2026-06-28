@@ -1,6 +1,7 @@
 package com.multiapp.core.model.installer
 
 import com.multiapp.core.model.InstallArtifactManifest
+import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.VirtualPackageRecord
 
 data class ImportResult(
@@ -38,6 +39,26 @@ interface VirtualInstallService {
         applicationClassName: String? = null,
         packageLabel: String? = null
     ): Result<ImportResult>
+
+    /**
+     * Ensure the origin app has an InstallRecord before instance creation.
+     *
+     * UI creation paths already hold a [VirtualApp] with PackageManager metadata.
+     * Keeping the mapping here prevents callers from creating an instance without
+     * first importing the install record required by HostedRuntimeBootstrap.
+     */
+    fun ensureInstallRecord(app: VirtualApp): Result<ImportResult> {
+        return importFromMetadata(
+            packageName = app.packageName,
+            originApkPath = app.apkPath,
+            versionCode = app.versionCode,
+            versionName = app.versionName,
+            targetSdk = app.targetSdkVersion,
+            minSdk = app.minSdkVersion,
+            applicationClassName = app.applicationClassName,
+            packageLabel = app.appName
+        )
+    }
 
     fun getInstallRecord(packageName: String): InstallRecord?
     fun listInstallRecords(): List<InstallRecord>

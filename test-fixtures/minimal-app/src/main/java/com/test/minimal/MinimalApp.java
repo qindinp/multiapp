@@ -3,10 +3,7 @@ package com.test.minimal;
 import android.app.Application;
 import android.util.Log;
 
-/**
- * 最小测试 Application — 无加固、无签名校验、无外部依赖。
- * 用来验证 Stub + LoaderFactory 的 ClassLoader 替换是否能跑通。
- */
+/** Minimal Application for hosted-container acceptance testing. */
 public class MinimalApp extends Application {
 
     private static final String TAG = "MinimalApp";
@@ -14,7 +11,7 @@ public class MinimalApp extends Application {
     @Override
     public void onCreate() {
         super.onCreate();
-        Log.d(TAG, "=== MinimalApp.onCreate() 成功执行! ===");
+        Log.d(TAG, "=== MinimalApp.onCreate(): OK ===");
         Log.d(TAG, "  packageName=" + getPackageName());
         Log.d(TAG, "  dataDir=" + getDataDir());
         Log.d(TAG, "  classLoader=" + getClassLoader().getClass().getName());

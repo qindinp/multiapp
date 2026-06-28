@@ -1,5 +1,7 @@
 package com.multiapp.core.manifest
 
+import android.content.Context
+import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
@@ -11,7 +13,7 @@ class ManifestParserTest {
 
     @BeforeEach
     fun setUp() {
-        parser = ManifestParser()
+        parser = ManifestParser(mockk<Context>(relaxed = true))
     }
 
     // -- 辅助 XML 模板 --
@@ -157,6 +159,12 @@ class ManifestParserTest {
         fun `解析完整 manifest 提取 application class`() {
             val result = parser.parseFromXml(fullManifestXml())
             assertEquals(".MyApplication", result.applicationClass)
+        }
+
+        @Test
+        fun `解析完整 manifest 提取 application label`() {
+            val result = parser.parseFromXml(fullManifestXml())
+            assertEquals("TestApp", result.applicationLabel)
         }
 
         @Test

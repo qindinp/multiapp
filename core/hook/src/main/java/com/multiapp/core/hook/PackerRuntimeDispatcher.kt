@@ -171,6 +171,7 @@ class PackerRuntimeDispatcher {
                 NativeHookCapability.LSPLANT_METHOD_HOOKS to "PackerRuntimeDispatcher.installPostLoadHooks",
                 NativeHookCapability.XPOSED_MODULES to "PackerRuntimeDispatcher.installPostLoadHooks",
                 NativeHookCapability.BUSINESS_NATIVE_STUBS to "PackerRuntimeDispatcher.installStubFallback",
+                NativeHookCapability.BUSINESS_NATIVE_WRAPPERS to "PackerRuntimeDispatcher.registerNativesBusinessWrappers",
                 NativeHookCapability.METHOD_REPLACEMENT to "PackerRuntimeDispatcher.installPostLoadHooks",
                 NativeHookCapability.NO_OP_PATCHES to "PackerRuntimeDispatcher.installPostLoadHooks"
             )

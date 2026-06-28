@@ -44,6 +44,8 @@ class ProtectedAppBaselineModeTest {
         assertTrue(policy.registerNativesLogger)
         assertTrue(policy.findClassLogger)
         assertFalse(policy.businessNativeStubs)
+        assertFalse(policy.businessNativeWrappers)
+        assertFalse(policy.nativeBaseHooks)
         assertFalse(policy.isInvasive())
         assertFalse(policy.isHookFreeBaselineCompatible())
     }
@@ -54,6 +56,7 @@ class ProtectedAppBaselineModeTest {
 
         assertTrue(policy.isInvasive())
         assertFalse(policy.businessNativeStubs)
+        assertFalse(policy.businessNativeWrappers)
         assertFalse(policy.isHookFreeBaselineCompatible())
     }
 }

@@ -1,6 +1,7 @@
 package com.multiapp.app
 
 import android.content.Context
+import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.InstanceManager
@@ -15,7 +16,6 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
-import java.io.File
 import javax.inject.Singleton
 
 @Module
@@ -29,17 +29,13 @@ object AppModule {
     @Provides
     @Singleton
     fun provideInstanceRecordStore(@ApplicationContext context: Context): InstanceRecordStore {
-        val baseDir = File(context.filesDir, "instances")
-        baseDir.mkdirs()
-        return JsonInstanceRecordStore(baseDir)
+        return JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(context))
     }
 
     @Provides
     @Singleton
     fun provideInstallRecordStore(@ApplicationContext context: Context): InstallRecordStore {
-        val baseDir = File(context.filesDir, "installs")
-        baseDir.mkdirs()
-        return JsonInstallRecordStore(baseDir)
+        return JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(context))
     }
 
     @Provides
@@ -48,8 +44,10 @@ object AppModule {
         installRecordStore: InstallRecordStore,
         @ApplicationContext context: Context
     ): VirtualInstallService {
-        val artifactDir = File(context.filesDir, "artifacts")
-        return ProductionVirtualInstallService(installRecordStore, artifactDir)
+        return ProductionVirtualInstallService(
+            installRecordStore,
+            ContainerRuntimePaths.artifactDir(context)
+        )
     }
 
     @Provides
@@ -59,11 +57,9 @@ object AppModule {
         installRecordStore: InstallRecordStore,
         @ApplicationContext context: Context
     ): InstanceManager {
-        val dataRootBase = File(context.filesDir, "instance_data")
-        dataRootBase.mkdirs()
         return DefaultInstanceManager(
             store = instanceRecordStore,
-            dataRootBase = dataRootBase,
+            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(context),
             installRecordStore = installRecordStore
         )
     }

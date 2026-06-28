@@ -56,7 +56,7 @@ class InstalledPackageImporter(
             val originApkSha256 = computeSha256(originFile)
 
             val destFile = File(artifactDir, "$packageName-origin.apk")
-            originFile.copyTo(destFile, overwrite = true)
+            copyAsReadOnlyArtifact(originFile, destFile)
 
             val now = System.currentTimeMillis()
             val record = InstallRecord(
@@ -109,6 +109,26 @@ class InstalledPackageImporter(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun copyAsReadOnlyArtifact(originFile: File, destFile: File) {
+        if (!artifactDir.exists() && !artifactDir.mkdirs()) {
+            throw IllegalStateException("Unable to create artifact dir: ${artifactDir.absolutePath}")
+        }
+
+        if (destFile.exists()) {
+            destFile.setWritable(true, false)
+            if (!destFile.delete()) {
+                throw IllegalStateException("Unable to delete stale artifact: ${destFile.absolutePath}")
+            }
+        }
+
+        originFile.copyTo(destFile, overwrite = false)
+        destFile.setReadable(true, false)
+        destFile.setWritable(false, false)
+        if (destFile.canWrite()) {
+            destFile.setReadOnly()
+        }
     }
 
     private fun buildManifest(record: InstallRecord): InstallArtifactManifest {

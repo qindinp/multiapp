@@ -17,5 +17,23 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".SecondActivity"
+            android:exported="false"
+            android:label="MinimalSecond" />
+
+        <service
+            android:name=".ProbeService"
+            android:exported="false" />
+
+        <receiver
+            android:name=".ProbeReceiver"
+            android:exported="false" />
+
+        <provider
+            android:name=".ProbeProvider"
+            android:authorities="com.test.minimal.probe"
+            android:exported="false" />
+
     </application>
 </manifest>

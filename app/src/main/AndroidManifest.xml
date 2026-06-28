@@ -34,6 +34,55 @@
             android:screenOrientation="unspecified"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 
+        <!-- v2 proxy Activity slots. Guest Activity launches are mapped here first. -->
+        <activity
+            android:name=".container.ProxyActivity0"
+            android:exported="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity1"
+            android:exported="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop0"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop1"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask0"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask1"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+
+        <!-- v2 hosted Service proxy slot. Guest Service lifecycle is not fully virtualized yet. -->
+        <service
+            android:name=".container.StubService"
+            android:exported="false" />
+
+        <!-- v2 hosted provider proxy slot. Guest providers are not dispatched yet. -->
+        <provider
+            android:name=".container.StubContentProvider"
+            android:authorities="${applicationId}.multiapp.provider.stub"
+            android:exported="false" />
+
         <!-- FileProvider for sharing Stub APK with system installer -->
         <provider
             android:name="androidx.core.content.FileProvider"

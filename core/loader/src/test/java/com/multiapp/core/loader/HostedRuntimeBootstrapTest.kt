@@ -2,15 +2,21 @@ package com.multiapp.core.loader
 
 import android.app.Application
 import android.content.Context
+import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.hook.Interface20Verdict
 import com.multiapp.core.hook.NativeDiagnosticsEvidence
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
+import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.InstallRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
+import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedPackage
+import com.multiapp.core.model.virtual.VirtualPackageResolver
+import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -29,6 +35,28 @@ import kotlin.test.assertTrue
 class FakeTestApplication : Application() {
     override fun attachBaseContext(base: Context?) {
         // no-op for JVM testing
+    }
+}
+
+/**
+ * Fake Application that tracks whether onCreate() was called.
+ * Used to verify that HostedRuntimeBootstrap invokes guestApplication.onCreate().
+ */
+class FakeTestApplicationWithOnCreate : Application() {
+    override fun attachBaseContext(base: Context?) {
+        // no-op for JVM testing
+    }
+
+    override fun onCreate() {
+        // Do NOT call super.onCreate() — Android stub would throw on JVM
+        onCreateCalled = true
+    }
+
+    companion object {
+        var onCreateCalled: Boolean = false
+        fun reset() {
+            onCreateCalled = false
+        }
     }
 }
 
@@ -201,8 +229,13 @@ class HostedRuntimeBootstrapTest {
 
         assertTrue(result.stageResults.isNotEmpty())
         assertTrue(result.stageResults.size >= 4)
-        val nonAppStages = result.stageResults.filter { it.stage != RuntimeStage.APPLICATION }
-        nonAppStages.forEach { stageResult ->
+        val requiredStages = setOf(
+            RuntimeStage.CONFIG,
+            RuntimeStage.PACKAGE_METADATA,
+            RuntimeStage.ORIGIN_APK,
+            RuntimeStage.CLASS_LOADER
+        )
+        result.stageResults.filter { it.stage in requiredStages }.forEach { stageResult ->
             assertEquals(BootstrapStatus.SUCCESS, stageResult.status)
         }
         val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
@@ -359,7 +392,7 @@ class HostedRuntimeBootstrapTest {
 
         val result = bootstrap.run("inst-001")
 
-        assertTrue(result.success) // bootstrap overall still succeeds (non-terminal)
+        assertFalse(result.success) // P0-3: Application stage failure -> overall failure
         assertNull(result.guestApplication)
         val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
         assertNotNull(appStage)
@@ -385,7 +418,7 @@ class HostedRuntimeBootstrapTest {
         val result = bootstrap.run("inst-001")
 
         // hostContext is null -> VirtualContextWrapper creation throws NPE -> stage FAILED
-        assertTrue(result.success) // bootstrap overall still succeeds
+        assertFalse(result.success) // P0-3: Application stage failure -> overall failure
         assertNull(result.guestApplication)
         val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
         assertNotNull(appStage)
@@ -408,7 +441,7 @@ class HostedRuntimeBootstrapTest {
 
         val result = bootstrap.run("inst-001")
 
-        assertTrue(result.success) // bootstrap overall still succeeds
+        assertFalse(result.success) // P0-3: Application stage failure -> overall failure
         assertNull(result.guestApplication)
         val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
         assertNotNull(appStage)
@@ -428,7 +461,7 @@ class HostedRuntimeBootstrapTest {
 
         val result = bootstrap.run("inst-001")
 
-        assertTrue(result.success) // bootstrap overall still succeeds
+        assertFalse(result.success) // P0-3: Application stage failure -> overall failure
         assertNull(result.guestApplication)
         val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
         assertNotNull(appStage)
@@ -446,12 +479,239 @@ class HostedRuntimeBootstrapTest {
 
         val result = bootstrap.run("inst-001")
 
-        assertTrue(result.success)
+        assertFalse(result.success) // P0-3: Application stage failure -> overall failure
         assertNotNull(result.guestClassLoader)
-        val nonAppStages = result.stageResults.filter { it.stage != RuntimeStage.APPLICATION }
-        nonAppStages.forEach { stageResult ->
+        val requiredStages = setOf(
+            RuntimeStage.CONFIG,
+            RuntimeStage.PACKAGE_METADATA,
+            RuntimeStage.ORIGIN_APK,
+            RuntimeStage.CLASS_LOADER
+        )
+        result.stageResults.filter { it.stage in requiredStages }.forEach { stageResult ->
             assertEquals(BootstrapStatus.SUCCESS, stageResult.status)
         }
+    }
+
+    @Test
+    fun `APPLICATION stage failure causes overall bootstrap to fail`(
+        @TempDir tempDir: File
+    ) {
+        // com.nonexistent.FakeApp -> ClassNotFoundException -> stage FAILED
+        // Per P0-3 requirement: Application stage failure must cause success=false
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            applicationClassNameResolver = { _, _ -> "com.nonexistent.FakeApp" }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertFalse(result.success, "Bootstrap must fail when APPLICATION stage fails")
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertEquals(BootstrapStatus.FAILED, appStage.status)
+        assertEquals(BootstrapStatus.FAILED, result.summary.overallStatus)
+    }
+
+    @Test
+    fun `launcher Activity resolver prefers manifest package resolver over InstallRecord fallback`(
+        @TempDir tempDir: File
+    ) {
+        val apkFile = File(tempDir, "example.apk").apply { writeBytes(byteArrayOf(0x50, 0x4B)) }
+        val installRecord = installRecord(originApkPath = apkFile.absolutePath).copy(
+            activities = listOf(ComponentInfo(name = "java.lang.Integer", exported = true))
+        )
+        val packageResolver = object : VirtualPackageResolver {
+            override fun resolve(apkPath: String): ResolvedPackage? {
+                assertEquals(apkFile.absolutePath, apkPath)
+                return ResolvedPackage(
+                    packageName = "com.example.app",
+                    versionCode = 1,
+                    versionName = "1.0",
+                    targetSdk = 35,
+                    minSdk = 28,
+                    launcherActivityName = "java.lang.String",
+                    applicationLabel = "Example Label"
+                )
+            }
+        }
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(mapOf("inst-001" to instanceRecord())),
+            installRecordStore = FakeInstallRecordStore(mapOf("com.example.app" to installRecord)),
+            classLoaderFactory = { _, _ -> ClassLoader.getSystemClassLoader() },
+            applicationClassNameResolver = { _, _ -> null },
+            packageResolver = packageResolver
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        assertEquals("java.lang.String", result.launcherActivityClassName)
+        assertEquals("Example Label", result.applicationLabel)
+        val launcherStage = result.stageResults.first { it.stage == RuntimeStage.LAUNCHER_ACTIVITY }
+        assertEquals(BootstrapStatus.SUCCESS, launcherStage.status)
+        assertEquals(
+            "VirtualPackageResolver",
+            launcherStage.evidence.first { it.key == "resolver" }.value
+        )
+    }
+    @Test
+    fun `nativeLibraryDir is passed to classLoaderFactory when instance lib dir exists`(
+        @TempDir tempDir: File
+    ) {
+        val apkFile = File(tempDir, "example.apk").apply { writeBytes(byteArrayOf(0x50, 0x4B)) }
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        val libDir = File(dataRoot, "lib").apply { mkdirs() }
+        var capturedNativeLibraryDir: String? = "not-called"
+        val instanceManager = FakeInstanceManager(
+            mapOf("inst-001" to instanceRecord().copy(dataRoot = dataRoot.absolutePath))
+        )
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = instanceManager,
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
+            ),
+            classLoaderFactory = { _, nativeLibraryDir ->
+                capturedNativeLibraryDir = nativeLibraryDir
+                ClassLoader.getSystemClassLoader()
+            },
+            applicationClassNameResolver = { _, _ -> null }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        assertEquals(libDir.absolutePath, capturedNativeLibraryDir)
+        val classLoaderStage = result.stageResults.find { it.stage == RuntimeStage.CLASS_LOADER }
+        assertNotNull(classLoaderStage)
+        assertEquals(
+            libDir.absolutePath,
+            classLoaderStage.evidence.find { it.key == "nativeLibraryDir" }?.value
+        )
+    }
+
+    @Test
+    fun `bootstrap records provider routing evidence when manifest declares providers`(
+        @TempDir tempDir: File
+    ) {
+        val apkFile = File(tempDir, "example.apk").apply { writeBytes(byteArrayOf(0x50, 0x4B)) }
+        val mockContext: Context = mockk(relaxed = true)
+        every { mockContext.packageName } returns "com.multiapp.app"
+        val packageResolver = object : VirtualPackageResolver {
+            override fun resolve(apkPath: String): ResolvedPackage? {
+                assertEquals(apkFile.absolutePath, apkPath)
+                return ResolvedPackage(
+                    packageName = "com.example.app",
+                    versionCode = 1,
+                    versionName = "1.0",
+                    targetSdk = 35,
+                    minSdk = 28,
+                    providers = listOf(
+                        ResolvedComponent(
+                            name = "com.example.app.ProbeProvider",
+                            exported = false,
+                            authorities = listOf("com.example.app.probe")
+                        )
+                    )
+                )
+            }
+        }
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(mapOf("inst-001" to instanceRecord())),
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
+            ),
+            hostContext = mockContext,
+            classLoaderFactory = { _, _ -> ClassLoader.getSystemClassLoader() },
+            applicationClassNameResolver = { _, _ -> null },
+            packageResolver = packageResolver
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val classLoaderStage = result.stageResults.first { it.stage == RuntimeStage.CLASS_LOADER }
+        val evidence = classLoaderStage.evidence.associate { it.key to it.value }
+        assertEquals("true", evidence["providerRoutingEnabled"])
+        assertEquals("AUTHORITY_MAP_READY", evidence["providerRoutingReason"])
+        assertEquals("CONTENT_RESOLVER_PASS_THROUGH_HOOK", evidence["providerRoutingPrimary"])
+        assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingFallback"])
+        assertEquals("1", evidence["providerAuthorityMapSize"])
+        assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
+        assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
+    }
+
+    @Test
+    fun `bootstrap installs provider hook when profile enables provider hook install`(
+        @TempDir tempDir: File
+    ) {
+        val apkFile = File(tempDir, "example.apk").apply { writeBytes(byteArrayOf(0x50, 0x4B)) }
+        val mockContext: Context = mockk(relaxed = true)
+        every { mockContext.packageName } returns "com.multiapp.app"
+        val hookEngine = mockk<HookEngine>(relaxed = true)
+        val packageResolver = object : VirtualPackageResolver {
+            override fun resolve(apkPath: String): ResolvedPackage? = ResolvedPackage(
+                packageName = "com.example.app",
+                versionCode = 1,
+                versionName = "1.0",
+                targetSdk = 35,
+                minSdk = 28,
+                providers = listOf(
+                    ResolvedComponent(
+                        name = "com.example.app.ProbeProvider",
+                        exported = false,
+                        authorities = listOf("com.example.app.probe")
+                    )
+                )
+            )
+        }
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(mapOf("inst-001" to instanceRecord())),
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
+            ),
+            hostContext = mockContext,
+            classLoaderFactory = { _, _ -> ClassLoader.getSystemClassLoader() },
+            applicationClassNameResolver = { _, _ -> null },
+            packageResolver = packageResolver,
+            providerHookInstallEnabled = true,
+            providerHookInstaller = VirtualProviderHookInstaller(hookEngineProvider = { hookEngine })
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val classLoaderStage = result.stageResults.first { it.stage == RuntimeStage.CLASS_LOADER }
+        val evidence = classLoaderStage.evidence.associate { it.key to it.value }
+        assertEquals("INSTALLED", evidence["providerHookInstallStatus"])
+        assertEquals("1", evidence["providerHookInstallAuthorityMapSize"])
+        assertEquals("AUTHORITY_MAP_READY", evidence["providerHookInstallReason"])
+    }
+
+    @Test
+    fun `guestApplication onCreate is called after attachBaseContext succeeds`(
+        @TempDir tempDir: File
+    ) {
+        FakeTestApplicationWithOnCreate.reset()
+        val mockContext: Context = mockk(relaxed = true)
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            hostContext = mockContext,
+            applicationClassNameResolver = { _, _ ->
+                "com.multiapp.core.loader.FakeTestApplicationWithOnCreate"
+            }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success, "Bootstrap should succeed when Application.onCreate() works")
+        assertNotNull(result.guestApplication)
+        assertTrue(
+            FakeTestApplicationWithOnCreate.onCreateCalled,
+            "Application.onCreate() must be called after attachBaseContext"
+        )
+        val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
+        assertNotNull(appStage)
+        assertEquals(BootstrapStatus.SUCCESS, appStage.status)
     }
 
     @Test

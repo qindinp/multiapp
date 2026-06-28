@@ -68,16 +68,7 @@ class LauncherViewModel @Inject constructor(
             try {
                 // Step 1: Ensure InstallRecord exists for this package
                 _uiState.update { it.copy(creationStep = "导入应用信息…") }
-                val importResult = virtualInstallService.importFromMetadata(
-                    packageName = app.packageName,
-                    originApkPath = app.apkPath,
-                    versionCode = app.versionCode,
-                    versionName = app.versionName,
-                    targetSdk = app.targetSdkVersion,
-                    minSdk = app.minSdkVersion,
-                    applicationClassName = app.applicationClassName,
-                    packageLabel = app.appName
-                )
+                val importResult = virtualInstallService.ensureInstallRecord(app)
                 importResult.getOrThrow()
 
                 // Step 2: Create VirtualInstanceRecord (InstanceManager validates InstallRecord exists)

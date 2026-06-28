@@ -6,6 +6,12 @@ import android.net.Uri
 import com.multiapp.core.hook.HookEngine
 import timber.log.Timber
 
+data class ProviderAuthorityHookConfig(
+    val instanceId: String,
+    val originalPackageName: String,
+    val authorityMap: Map<String, String>
+)
+
 /**
  * ContentProvider authority hook.
  *
@@ -29,7 +35,23 @@ class ContentProviderHook : HookPoint {
             config.instanceId,
             config.authorityMap.keys.joinToString()
         )
-        applyInternal(config)
+        apply(
+            ProviderAuthorityHookConfig(
+                instanceId = config.instanceId,
+                originalPackageName = config.originalPackageName,
+                authorityMap = config.authorityMap
+            ),
+            hookEngine
+        )
+    }
+
+    fun apply(config: ProviderAuthorityHookConfig, hookEngine: HookEngine) {
+        Timber.d(
+            "ContentProviderHook: apply provider authorities for instance=%s, authorityMap=%s",
+            config.instanceId,
+            config.authorityMap.keys.joinToString()
+        )
+        applyInternal(config.instanceId, config.authorityMap, hookEngine)
     }
 
     companion object {
@@ -41,12 +63,18 @@ class ContentProviderHook : HookPoint {
                 "ContentProviderHook: companion apply called for instance=%s",
                 config.instanceId
             )
-            applyInternal(config)
+            ContentProviderHook().apply(config, HookEngine.getInstance())
         }
 
-        private fun applyInternal(config: IdentityConfig) {
-            val hookEngine = HookEngine.getInstance()
-            val authorityMap = config.authorityMap
+        fun apply(config: ProviderAuthorityHookConfig) {
+            ContentProviderHook().apply(config, HookEngine.getInstance())
+        }
+
+        private fun applyInternal(
+            instanceId: String,
+            authorityMap: Map<String, String>,
+            hookEngine: HookEngine
+        ) {
 
             hookContentResolverQuery(hookEngine, authorityMap)
             hookContentResolverInsert(hookEngine, authorityMap)
@@ -57,7 +85,7 @@ class ContentProviderHook : HookPoint {
 
             Timber.tag(TAG).i(
                 "ContentProviderHook installed for instance=%s, %d authority mappings",
-                config.instanceId, authorityMap.size
+                instanceId, authorityMap.size
             )
         }
 
@@ -81,10 +109,10 @@ class ContentProviderHook : HookPoint {
                     Array<String>::class.java,
                     String::class.java
                 )
-                hookEngine.hookMethod(
+                val installed = hookEngine.hookMethodPassThrough(
                     method = method,
                     beforeCallback = { _, args ->
-                        val uri = args.firstOrNull() as? Uri ?: return@hookMethod null
+                        val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
                         val rewrittenUri = rewriteUriAuthority(uri, authorityMap)
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("query() URI rewrite: %s -> %s", uri, rewrittenUri)
@@ -96,7 +124,7 @@ class ContentProviderHook : HookPoint {
                         }
                     }
                 )
-                Timber.tag(TAG).d("Hooked ContentResolver.query()")
+                Timber.tag(TAG).d("Hooked ContentResolver.query() passThrough=%s", installed)
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to hook ContentResolver.query()")
             }
@@ -115,10 +143,10 @@ class ContentProviderHook : HookPoint {
                     Uri::class.java,
                     android.content.ContentValues::class.java
                 )
-                hookEngine.hookMethod(
+                val installed = hookEngine.hookMethodPassThrough(
                     method = method,
                     beforeCallback = { _, args ->
-                        val uri = args.firstOrNull() as? Uri ?: return@hookMethod null
+                        val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
                         val rewrittenUri = rewriteUriAuthority(uri, authorityMap)
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("insert() URI rewrite: %s -> %s", uri, rewrittenUri)
@@ -130,7 +158,7 @@ class ContentProviderHook : HookPoint {
                         }
                     }
                 )
-                Timber.tag(TAG).d("Hooked ContentResolver.insert()")
+                Timber.tag(TAG).d("Hooked ContentResolver.insert() passThrough=%s", installed)
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to hook ContentResolver.insert()")
             }
@@ -151,10 +179,10 @@ class ContentProviderHook : HookPoint {
                     String::class.java,
                     Array<String>::class.java
                 )
-                hookEngine.hookMethod(
+                val installed = hookEngine.hookMethodPassThrough(
                     method = method,
                     beforeCallback = { _, args ->
-                        val uri = args.firstOrNull() as? Uri ?: return@hookMethod null
+                        val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
                         val rewrittenUri = rewriteUriAuthority(uri, authorityMap)
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("update() URI rewrite: %s -> %s", uri, rewrittenUri)
@@ -166,7 +194,7 @@ class ContentProviderHook : HookPoint {
                         }
                     }
                 )
-                Timber.tag(TAG).d("Hooked ContentResolver.update()")
+                Timber.tag(TAG).d("Hooked ContentResolver.update() passThrough=%s", installed)
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to hook ContentResolver.update()")
             }
@@ -186,10 +214,10 @@ class ContentProviderHook : HookPoint {
                     String::class.java,
                     Array<String>::class.java
                 )
-                hookEngine.hookMethod(
+                val installed = hookEngine.hookMethodPassThrough(
                     method = method,
                     beforeCallback = { _, args ->
-                        val uri = args.firstOrNull() as? Uri ?: return@hookMethod null
+                        val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
                         val rewrittenUri = rewriteUriAuthority(uri, authorityMap)
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("delete() URI rewrite: %s -> %s", uri, rewrittenUri)
@@ -201,7 +229,7 @@ class ContentProviderHook : HookPoint {
                         }
                     }
                 )
-                Timber.tag(TAG).d("Hooked ContentResolver.delete()")
+                Timber.tag(TAG).d("Hooked ContentResolver.delete() passThrough=%s", installed)
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to hook ContentResolver.delete()")
             }
@@ -225,10 +253,10 @@ class ContentProviderHook : HookPoint {
                     String::class.java,
                     android.os.Bundle::class.java
                 )
-                hookEngine.hookMethod(
+                val installed = hookEngine.hookMethodPassThrough(
                     method = method,
                     beforeCallback = { _, args ->
-                        val uri = args.firstOrNull() as? Uri ?: return@hookMethod null
+                        val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
                         val rewrittenUri = rewriteUriAuthority(uri, authorityMap)
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("call() URI rewrite: %s -> %s", uri, rewrittenUri)
@@ -240,7 +268,7 @@ class ContentProviderHook : HookPoint {
                         }
                     }
                 )
-                Timber.tag(TAG).d("Hooked ContentResolver.call()")
+                Timber.tag(TAG).d("Hooked ContentResolver.call() passThrough=%s", installed)
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to hook ContentResolver.call()")
             }
@@ -261,11 +289,11 @@ class ContentProviderHook : HookPoint {
                     "acquireProvider",
                     String::class.java
                 )
-                hookEngine.hookMethod(
+                val installed = hookEngine.hookMethodPassThrough(
                     method = method,
                     beforeCallback = { _, args ->
                         val authority = args.firstOrNull() as? String
-                            ?: return@hookMethod null
+                            ?: return@hookMethodPassThrough null
                         val rewritten = authorityMap[authority]
                         if (rewritten != null) {
                             Timber.tag(TAG).d(
@@ -278,7 +306,7 @@ class ContentProviderHook : HookPoint {
                         }
                     }
                 )
-                Timber.tag(TAG).d("Hooked ContentResolver.acquireProvider(String)")
+                Timber.tag(TAG).d("Hooked ContentResolver.acquireProvider(String) passThrough=%s", installed)
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to hook ContentResolver.acquireProvider()")
             }
@@ -289,10 +317,10 @@ class ContentProviderHook : HookPoint {
                     "acquireProvider",
                     Uri::class.java
                 )
-                hookEngine.hookMethod(
+                val installed = hookEngine.hookMethodPassThrough(
                     method = method,
                     beforeCallback = { _, args ->
-                        val uri = args.firstOrNull() as? Uri ?: return@hookMethod null
+                        val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
                         val rewrittenUri = rewriteUriAuthority(uri, authorityMap)
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d(
@@ -305,7 +333,7 @@ class ContentProviderHook : HookPoint {
                         }
                     }
                 )
-                Timber.tag(TAG).d("Hooked ContentResolver.acquireProvider(Uri)")
+                Timber.tag(TAG).d("Hooked ContentResolver.acquireProvider(Uri) passThrough=%s", installed)
             } catch (e: Exception) {
                 Timber.tag(TAG).e(e, "Failed to hook ContentResolver.acquireProvider(Uri)")
             }

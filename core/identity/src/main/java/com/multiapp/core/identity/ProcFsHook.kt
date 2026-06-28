@@ -201,5 +201,9 @@ class ProcFsHook : HookPoint {
 
             return line
         }
+
+        /** Test/diagnostic predicate for the maps filtering rule. */
+        private fun shouldFilterLine(line: String, stubPkg: String): Boolean =
+            filterMapsLine(line, stubPkg) == null
     }
 }

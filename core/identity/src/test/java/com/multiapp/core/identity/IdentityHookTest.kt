@@ -4,6 +4,7 @@ import com.multiapp.core.model.IdentityConfig
 import com.multiapp.core.hook.HookEngine
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Nested
@@ -12,6 +13,7 @@ import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 @DisplayName("Identity Hook Integration Tests")
@@ -780,6 +782,31 @@ class IdentityHookTest {
                 testConfig.authorityMap["${TEST_ORIGINAL_PKG}.fileprovider"]
             )
         }
+
+        @Test
+        fun `apply installs provider hooks through pass-through HookEngine API`() {
+            ContentProviderHook().apply(testConfig, mockHookEngine)
+
+            verify(atLeast = 1) {
+                mockHookEngine.hookMethodPassThrough(any(), any(), any())
+            }
+        }
+
+        @Test
+        fun `provider authority config installs hooks without full identity config`() {
+            ContentProviderHook().apply(
+                ProviderAuthorityHookConfig(
+                    instanceId = TEST_INSTANCE_ID,
+                    originalPackageName = TEST_ORIGINAL_PKG,
+                    authorityMap = testConfig.authorityMap
+                ),
+                mockHookEngine
+            )
+
+            verify(atLeast = 1) {
+                mockHookEngine.hookMethodPassThrough(any(), any(), any())
+            }
+        }
     }
 
     // endregion
@@ -1031,13 +1058,13 @@ class IdentityHookTest {
          * Invoke the private generateFakeImsi method via reflection.
          */
         private fun invokeGenerateFakeImsi(instanceId: String): String? {
-            val hook = DeviceIdentityHook()
-            val method = DeviceIdentityHook::class.java.getDeclaredMethod(
+            val companion = companionOf(DeviceIdentityHook::class.java) ?: return null
+            val method = companion::class.java.getDeclaredMethod(
                 "generateFakeImsi",
                 String::class.java
             )
             method.isAccessible = true
-            return method.invoke(hook, instanceId) as? String
+            return method.invoke(companion, instanceId) as? String
         }
     }
 
@@ -1089,7 +1116,8 @@ class IdentityHookTest {
         fun `interceptPackageInfo skips when queried package does not match original`() {
             // 壳查询的包名不是 originalPkg 时，不拦截
             val pkgInfo = android.content.pm.PackageInfo()
-            pkgInfo.signatures = arrayOf(android.content.pm.Signature(byteArrayOf(0x01)))
+            val signature = android.content.pm.Signature(byteArrayOf(0x01))
+            pkgInfo.signatures = arrayOf(signature)
 
             val result = invokeInterceptPackageInfo(
                 result = pkgInfo,
@@ -1100,13 +1128,14 @@ class IdentityHookTest {
             assertNotNull(result)
             val resultPkgInfo = result as android.content.pm.PackageInfo
             assertEquals(1, resultPkgInfo.signatures?.size)
-            assertEquals(0x01.toByte(), resultPkgInfo.signatures?.first()?.toByteArray()?.first())
+            assertSame(signature, resultPkgInfo.signatures?.first())
         }
 
         @Test
         fun `interceptPackageInfo skips when args are empty`() {
             val pkgInfo = android.content.pm.PackageInfo()
-            pkgInfo.signatures = arrayOf(android.content.pm.Signature(byteArrayOf(0x02)))
+            val signature = android.content.pm.Signature(byteArrayOf(0x02))
+            pkgInfo.signatures = arrayOf(signature)
 
             val result = invokeInterceptPackageInfo(
                 result = pkgInfo,
@@ -1115,7 +1144,7 @@ class IdentityHookTest {
             )
             // args 为空时 queriedPkg 为 null，直接返回
             val resultPkgInfo = result as android.content.pm.PackageInfo
-            assertEquals(0x02.toByte(), resultPkgInfo.signatures?.first()?.toByteArray()?.first())
+            assertSame(signature, resultPkgInfo.signatures?.first())
         }
 
         @Test
@@ -1133,7 +1162,7 @@ class IdentityHookTest {
                 )
                 // 递归保护激活时不应替换签名
                 val resultPkgInfo = result as android.content.pm.PackageInfo
-                assertEquals(0x03.toByte(), resultPkgInfo.signatures?.first()?.toByteArray()?.first())
+                assertSame(pkgInfo.signatures?.first(), resultPkgInfo.signatures?.first())
             } finally {
                 setRecursionGuard(false)
             }
@@ -1151,7 +1180,7 @@ class IdentityHookTest {
                 try {
                     // 其他线程的递归保护应为 false
                     val guardValue = getRecursionGuardValue()
-                    otherThreadResult.set(guardValue == false)
+                    otherThreadResult.set(guardValue != true)
                 } finally {
                     latch.countDown()
                 }
@@ -1185,16 +1214,8 @@ class IdentityHookTest {
             args: Array<Any?>,
             originalPkg: String
         ): Any? {
-            val companionClass = Class.forName(
-                "com.multiapp.core.identity.SignatureBypass\$Companion"
-            )
-            val companionField = SignatureBypass::class.java.declaredFields
-                .firstOrNull { it.name == "Companion" }
-                ?: return null
-            companionField.isAccessible = true
-            val companion = companionField.get(null) ?: return null
-
-            val method = companionClass.declaredMethods
+            val companion = companionOf(SignatureBypass::class.java) ?: return null
+            val method = companion::class.java.declaredMethods
                 .firstOrNull { it.name == "interceptPackageInfo" }
                 ?: return null
             method.isAccessible = true
@@ -1222,6 +1243,7 @@ class IdentityHookTest {
             val threadLocal = field.get(null) as ThreadLocal<Boolean>
             return threadLocal.get()
         }
+
     }
 
     // endregion
@@ -1361,4 +1383,10 @@ class IdentityHookTest {
     }
 
     // endregion
+
+    private fun companionOf(owner: Class<*>): Any? {
+        val field = owner.declaredFields.firstOrNull { it.name == "Companion" } ?: return null
+        field.isAccessible = true
+        return field.get(null)
+    }
 }
