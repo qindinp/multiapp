@@ -1081,3 +1081,67 @@ files/instance_data/d9a5168a-630d-4278-b7ae-46dc4618f725/databases/probe.db
 ```
 
 负责人判定：Step 6 普通 App 双实例 baseline 已有真机手动证据证明两个 hosted instance 的 `virtualPackageName` 与 `dataRoot` 分离，Activity / Provider / Service / Broadcast / Storage 文件均可在两个实例下跑通。自动化脚本仍受设备安装策略影响，后续应保留手动 evidence 流程，同时把 `connectedDebugAndroidTest` 安装权限问题作为设备环境项处理。
+
+### 9.11 Step 7 hosted QQ 阅读诊断管线落地
+
+根据 v2 路线，Step 7 不是直接修 QQ 阅读，也不是启用专项兼容 patch，而是先建立 `register-natives-only diagnostics` 证据链，输出 `interface20` 根因矩阵 verdict。
+
+本轮新增 hosted v2 手动采证工具：
+
+```text
+tools/qqreader-baseline/run-hosted-diagnostics-capture.ps1
+tools/qqreader-baseline/README.md
+```
+
+使用方式：
+
+```powershell
+.\tools\qqreader-baseline\run-hosted-diagnostics-capture.ps1 -Device 192.168.2.122:33811
+.\tools\qqreader-baseline\run-hosted-diagnostics-capture.ps1 -Device 192.168.2.122:33811 -InstanceId <instance-id>
+```
+
+采集内容：
+
+```text
+devices.txt
+host-package.txt
+origin-package.txt
+logcat.txt
+crash.txt
+exit-info.txt
+process.txt
+hosted-launch-evidence.txt
+instances.txt
+storage-files.txt
+summary.txt
+```
+
+summary 输出字段：
+
+```text
+mode=hosted-register-natives-only-diagnostics
+lsplantEnabled=false
+xposedEnabled=false
+businessNativeStubsEnabled=false
+businessNativeWrappersEnabled=false
+noOpPatchesEnabled=false
+nativeLoadVerdict=<PASS|FAIL|UNKNOWN>
+registerNativesVerdict=<PASS|UNKNOWN>
+findClassVerdict=<PASS|UNKNOWN>
+selfKillVerdict=<OBSERVED|UNKNOWN>
+fatalVerdict=<OBSERVED|UNKNOWN>
+interface20Verdict=<ORIGINAL_SHELL_REGISTERED|FALLBACK_REGISTERED|JNI_ONLOAD_NOT_EXECUTED|REGISTER_NATIVES_NOT_EXECUTED|REGISTER_NATIVES_WRONG_CLASS|INSUFFICIENT_EVIDENCE>
+interface20VerdictReason=<reason>
+```
+
+边界声明：
+
+```text
+不安装或启用 LSPlant/Xposed
+不启用 business native stubs / wrappers
+不启用 no-op patches
+不修改壳、不脱壳、不破坏壳
+不把 QQ 阅读专项 patch 写回默认路径
+```
+
+负责人判定：Step 7 的采证管线已落地，可以进入 QQ 阅读 hosted instance 手动启动后的 evidence 捕获。当前尚未获得 QQ 阅读真机 verdict，因此不能声明 QQ 阅读兼容完成；下一步是用该工具抓取 QQ 阅读启动失败或成功的证据，并根据 `interface20Verdict` 指向具体容器/native 缺口。
