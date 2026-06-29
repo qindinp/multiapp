@@ -958,3 +958,67 @@ manual hosted launch logcat window -> captured, no app crash in target evidence
 ```
 
 负责人判定：普通 APK `MinimalTest` 的 Activity / Provider / Service / Broadcast / Context storage baseline 已在单实例真机链路跑通。该结论只覆盖普通 APK hosted baseline，不等价于 QQ 阅读/加固应用兼容完成；下一步应补双实例自动化 baseline 与更稳定的 evidence capture，再进入 protected diagnostics。
+
+### 9.9 双实例自动化 baseline 落地记录
+
+本轮把 `MinimalTest` hosted baseline 从单实例验证推进到双实例自动化验证框架。目标是证明同一个 origin APK 在 v2 hosted container 中可以创建两个独立实例，并且 evidence 能按 `instanceId` 分组判定。
+
+代码产出：
+
+```text
+app/src/androidTest/java/com/multiapp/app/HostedContainerMinimalBaselineTest.kt
+tools/hosted-container-baseline/run-minimal-hosted-baseline.ps1
+```
+
+instrumentation 行为调整：
+
+```text
+测试开始清理旧 MinimalTest instances 和旧 hosted evidence
+重新导入 com.test.minimal InstallRecord
+创建两个 VirtualInstanceRecord: MinimalTest baseline A / B
+断言 instanceId / virtualPackageName / dataRoot 均不同
+依次通过 ContainerActivity 启动两个 hosted instance
+测试结束保留本轮 instance dataRoot，供脚本采集 storage 文件证据
+```
+
+baseline 脚本新增判定：
+
+```text
+dualInstanceVerdict
+dualInstanceVerdictReason
+dualInstanceCount
+dualInstanceDataRootDifferent
+dualInstanceVirtualPackageNameDifferent
+dualInstanceSummary
+```
+
+每个实例独立检查：
+
+```text
+Activity:  .activity-instrumentation.properties + .activity-context.properties
+Provider:  .provider-proxy.properties
+Service:   .service-proxy.properties
+Broadcast: .broadcast.properties
+Storage:   dataDir/files/probe.txt + shared_prefs/probe.xml + databases/probe.db
+```
+
+通过条件：
+
+```text
+dualInstanceCount >= 2
+dualInstanceDataRootDifferent=true
+dualInstanceVirtualPackageNameDifferent=true
+每个实例 activity/provider/service/broadcast/storageFiles verdict 均为 PASS
+```
+
+本地验证记录：
+
+```text
+PowerShell parse OK
+app:testDebugUnitTest                  -> BUILD SUCCESSFUL
+app:compileDebugAndroidTestKotlin      -> BUILD SUCCESSFUL
+test-fixtures:minimal-app:assembleDebug -> BUILD SUCCESSFUL
+app:assembleDebug                      -> BUILD SUCCESSFUL
+```
+
+负责人判定：双实例 baseline 的自动化采证和判定框架已落地，但本节尚未包含真机 `dualInstanceVerdict=PASS` 证据。下一步必须在在线设备执行 `tools/hosted-container-baseline/run-minimal-hosted-baseline.ps1`，将 summary 中的双实例字段作为 Step 6 验收依据。

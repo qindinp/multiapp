@@ -17,7 +17,6 @@ import com.multiapp.core.model.installer.JsonInstallRecordStore
 import com.multiapp.core.model.installer.ProductionVirtualInstallService
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -39,29 +38,26 @@ class HostedContainerMinimalBaselineTest {
     private val targetContext = instrumentation.targetContext
     private val packageManager = instrumentation.context.packageManager
     private val minimalPackageName = "com.test.minimal"
-    private var createdInstanceId: String? = null
-
     @Before
     fun cleanPreviousBaselineState() {
         hiltRule.inject()
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
         installStore.delete(minimalPackageName)
-    }
-
-    @After
-    fun cleanupCreatedInstance() {
-        val instanceId = createdInstanceId ?: return
-        val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
         val instanceManager = DefaultInstanceManager(
             store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
             dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
             installRecordStore = installStore
         )
-        instanceManager.deleteInstance(instanceId)
+        instanceManager.getInstanceByOrigin(minimalPackageName).forEach { instance ->
+            instanceManager.deleteInstance(instance.instanceId)
+        }
+        ContainerRuntimePaths.hostedLaunchEvidenceDir(targetContext)
+            .listFiles()
+            ?.forEach { file -> file.deleteRecursively() }
     }
 
     @Test
-    fun hostedContainerLaunchesInstalledMinimalApk() {
+    fun hostedContainerLaunchesTwoInstalledMinimalApkInstances() {
         val packageInfo = findInstalledMinimalPackage()
         assumeTrue("com.test.minimal must be installed by baseline script", packageInfo != null)
         packageInfo!!
@@ -103,20 +99,57 @@ class HostedContainerMinimalBaselineTest {
             dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
             installRecordStore = installStore
         )
-        val instance = instanceManager.createInstance(
-            originPackageName = minimalPackageName,
-            displayName = "MinimalTest baseline",
-            compatibilityMode = CompatibilityMode.DEFAULT
-        ).getOrThrow()
-        createdInstanceId = instance.instanceId
-
-        ActivityScenario.launch<ContainerActivity>(
-            ContainerActivity.createIntent(targetContext, instance.instanceId, "androidTest:minimal-baseline")
-        ).use { scenario ->
-            scenario.onActivity { activity ->
-                assertEquals(ContainerActivity::class.java.name, activity.javaClass.name)
+        val instances = listOf("A", "B").map { label ->
+            instanceManager.createInstance(
+                originPackageName = minimalPackageName,
+                displayName = "MinimalTest baseline $label",
+                compatibilityMode = CompatibilityMode.DEFAULT
+            ).getOrThrow().also { instance ->
+                assertTrue(File(instance.dataRoot).isDirectory)
             }
         }
+        assertEquals(2, instances.map { it.instanceId }.distinct().size)
+        assertEquals(2, instances.map { it.virtualPackageName }.distinct().size)
+        assertEquals(2, instances.map { it.dataRoot }.distinct().size)
+
+        instances.forEachIndexed { index, instance ->
+            ActivityScenario.launch<ContainerActivity>(
+                ContainerActivity.createIntent(
+                    targetContext,
+                    instance.instanceId,
+                    "androidTest:minimal-baseline-${index + 1}"
+                )
+            ).use { scenario ->
+                scenario.onActivity { activity ->
+                    assertEquals(ContainerActivity::class.java.name, activity.javaClass.name)
+                }
+            }
+            instrumentation.waitForIdleSync()
+            waitForRuntimeEvidence(instance.instanceId)
+        }
+    }
+
+    private fun waitForRuntimeEvidence(instanceId: String) {
+        val requiredComponents = listOf(
+            "launch",
+            "activity-instrumentation",
+            "activity-context",
+            "provider-proxy",
+            "service-proxy",
+            "broadcast"
+        )
+        val deadline = System.currentTimeMillis() + 8_000L
+        while (System.currentTimeMillis() < deadline) {
+            val missing = requiredComponents.filterNot { component ->
+                ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component).isFile
+            }
+            if (missing.isEmpty()) return
+            Thread.sleep(100L)
+        }
+        val missing = requiredComponents.filterNot { component ->
+            ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component).isFile
+        }
+        assertTrue("missing hosted runtime evidence for $instanceId: $missing", missing.isEmpty())
     }
 
     private fun findInstalledMinimalPackage(): PackageInfo? = findInstalledPackage(minimalPackageName)

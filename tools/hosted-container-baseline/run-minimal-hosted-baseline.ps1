@@ -141,18 +141,54 @@ function Get-HostedEvidenceSectionBySuffix {
     return $null
 }
 
-function Get-HostedActivityVerdict {
-    param([string]$EvidencePath)
+function Get-HostedEvidenceSectionByInstanceSuffix {
+    param(
+        [hashtable]$Sections,
+        [string]$InstanceId,
+        [string]$Suffix
+    )
 
-    $sections = Read-HostedEvidenceSections -Path $EvidencePath
-    $instrumentation = Get-HostedEvidenceSectionBySuffix -Sections $sections -Suffix ".activity-instrumentation.properties"
-    $context = Get-HostedEvidenceSectionBySuffix -Sections $sections -Suffix ".activity-context.properties"
-    $remap = Get-HostedEvidenceSectionBySuffix -Sections $sections -Suffix ".activity-remap.properties"
+    $key = "$InstanceId$Suffix"
+    if ($Sections.ContainsKey($key)) {
+        return $Sections[$key]
+    }
+    return $null
+}
+
+function Get-HostedEvidenceInstanceIds {
+    param([hashtable]$Sections)
+
+    $ids = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($key in $Sections.Keys) {
+        if ($key -match '^(?<id>.+?)\.(launch|activity-instrumentation|activity-context|activity-remap|provider-proxy|service-proxy|broadcast|proxy-activity)\.properties$') {
+            [void]$ids.Add($Matches['id'])
+        }
+    }
+    return @($ids | Sort-Object)
+}
+
+function Get-HostedActivityVerdictFromSections {
+    param(
+        [hashtable]$Sections,
+        [string]$InstanceId = ""
+    )
+
+    if ($InstanceId.Trim().Length -gt 0) {
+        $instrumentation = Get-HostedEvidenceSectionByInstanceSuffix -Sections $Sections -InstanceId $InstanceId -Suffix ".activity-instrumentation.properties"
+        $context = Get-HostedEvidenceSectionByInstanceSuffix -Sections $Sections -InstanceId $InstanceId -Suffix ".activity-context.properties"
+        $remap = Get-HostedEvidenceSectionByInstanceSuffix -Sections $Sections -InstanceId $InstanceId -Suffix ".activity-remap.properties"
+    } else {
+        $instrumentation = Get-HostedEvidenceSectionBySuffix -Sections $Sections -Suffix ".activity-instrumentation.properties"
+        $context = Get-HostedEvidenceSectionBySuffix -Sections $Sections -Suffix ".activity-context.properties"
+        $remap = Get-HostedEvidenceSectionBySuffix -Sections $Sections -Suffix ".activity-remap.properties"
+    }
 
     $instrumentationStatus = if ($instrumentation) { $instrumentation["status"] } else { "MISSING" }
     $contextStatus = if ($context) { $context["status"] } else { "MISSING" }
     $contextInjected = if ($context) { $context["contextInjected"] } else { "" }
     $remapStatus = if ($remap) { $remap["status"] } else { "MISSING" }
+    $virtualPackageName = if ($context) { $context["packageName"] } else { "" }
+    $dataDir = if ($context) { $context["dataDir"] } else { "" }
 
     $substituted = $instrumentationStatus -eq "GUEST_ACTIVITY_SUBSTITUTED"
     $contextReady = $contextStatus -eq "GUEST_ACTIVITY_CONTEXT_INJECTED" -and $contextInjected -eq "true"
@@ -174,7 +210,16 @@ function Get-HostedActivityVerdict {
         ContextStatus = $contextStatus
         ContextInjected = $contextInjected
         RemapStatus = $remapStatus
+        VirtualPackageName = $virtualPackageName
+        DataDir = $dataDir
     }
+}
+
+function Get-HostedActivityVerdict {
+    param([string]$EvidencePath)
+
+    $sections = Read-HostedEvidenceSections -Path $EvidencePath
+    return Get-HostedActivityVerdictFromSections -Sections $sections
 }
 
 function Get-HostedComponentVerdict {
@@ -187,6 +232,37 @@ function Get-HostedComponentVerdict {
 
     $sections = Read-HostedEvidenceSections -Path $EvidencePath
     $section = Get-HostedEvidenceSectionBySuffix -Sections $sections -Suffix $Suffix
+    if (-not $section) {
+        return [pscustomobject]@{
+            Verdict = "UNKNOWN"
+            Reason = $MissingReason
+            Status = "MISSING"
+            Detail = ""
+        }
+    }
+
+    $status = $section["status"]
+    $detail = if ($section.ContainsKey("detail")) { $section["detail"] } else { "" }
+    $verdict = if ($PassStatuses -contains $status) { "PASS" } else { "FAIL" }
+    $reason = if ($verdict -eq "PASS") { "status=$status" } else { "unexpected status=$status" }
+    return [pscustomobject]@{
+        Verdict = $verdict
+        Reason = $reason
+        Status = $status
+        Detail = $detail
+    }
+}
+
+function Get-HostedComponentVerdictFromSections {
+    param(
+        [hashtable]$Sections,
+        [string]$InstanceId,
+        [string]$Suffix,
+        [string[]]$PassStatuses,
+        [string]$MissingReason
+    )
+
+    $section = Get-HostedEvidenceSectionByInstanceSuffix -Sections $Sections -InstanceId $InstanceId -Suffix $Suffix
     if (-not $section) {
         return [pscustomobject]@{
             Verdict = "UNKNOWN"
@@ -253,6 +329,43 @@ function Test-HostedAppFileExists {
     return $LASTEXITCODE -eq 0
 }
 
+function Get-StorageFileVerdictFromDataDir {
+    param([string]$DataDir)
+
+    if ($DataDir.Trim().Length -eq 0) {
+        return [pscustomobject]@{
+            Verdict = "UNKNOWN"
+            Reason = "activity context dataDir missing"
+            DataDir = ""
+            ProbeFileExists = $false
+            SharedPrefsExists = $false
+            DatabaseExists = $false
+        }
+    }
+
+    $probeFile = "$DataDir/files/probe.txt"
+    $sharedPrefs = "$DataDir/shared_prefs/probe.xml"
+    $database = "$DataDir/databases/probe.db"
+    $probeFileExists = Test-HostedAppFileExists -Path $probeFile
+    $sharedPrefsExists = Test-HostedAppFileExists -Path $sharedPrefs
+    $databaseExists = Test-HostedAppFileExists -Path $database
+    $pass = $probeFileExists -and $sharedPrefsExists -and $databaseExists
+    $reason = if ($pass) {
+        "probe/shared_prefs/database files exist under dataDir"
+    } else {
+        "missing files under dataDir: probeFile=$probeFileExists sharedPrefs=$sharedPrefsExists database=$databaseExists"
+    }
+
+    return [pscustomobject]@{
+        Verdict = if ($pass) { "PASS" } else { "FAIL" }
+        Reason = $reason
+        DataDir = $DataDir
+        ProbeFileExists = $probeFileExists
+        SharedPrefsExists = $sharedPrefsExists
+        DatabaseExists = $databaseExists
+    }
+}
+
 function Get-StorageFileVerdictFromDevice {
     param([string]$EvidencePath)
 
@@ -270,26 +383,74 @@ function Get-StorageFileVerdictFromDevice {
         }
     }
 
-    $probeFile = "$dataDir/files/probe.txt"
-    $sharedPrefs = "$dataDir/shared_prefs/probe.xml"
-    $database = "$dataDir/databases/probe.db"
-    $probeFileExists = Test-HostedAppFileExists -Path $probeFile
-    $sharedPrefsExists = Test-HostedAppFileExists -Path $sharedPrefs
-    $databaseExists = Test-HostedAppFileExists -Path $database
-    $pass = $probeFileExists -and $sharedPrefsExists -and $databaseExists
-    $reason = if ($pass) {
-        "probe/shared_prefs/database files exist under dataDir"
-    } else {
-        "missing files under dataDir: probeFile=$probeFileExists sharedPrefs=$sharedPrefsExists database=$databaseExists"
+    return Get-StorageFileVerdictFromDataDir -DataDir $dataDir
+}
+
+function Get-DualInstanceHostedVerdict {
+    param([string]$EvidencePath)
+
+    $sections = Read-HostedEvidenceSections -Path $EvidencePath
+    $instanceIds = Get-HostedEvidenceInstanceIds -Sections $sections
+    $records = @()
+    foreach ($instanceId in $instanceIds) {
+        $activity = Get-HostedActivityVerdictFromSections -Sections $sections -InstanceId $instanceId
+        $provider = Get-HostedComponentVerdictFromSections -Sections $sections -InstanceId $instanceId -Suffix ".provider-proxy.properties" -PassStatuses @("PROVIDER_CREATED", "PROVIDER_CACHED") -MissingReason "provider evidence not exercised"
+        $service = Get-HostedComponentVerdictFromSections -Sections $sections -InstanceId $instanceId -Suffix ".service-proxy.properties" -PassStatuses @("STARTED") -MissingReason "service evidence not exercised"
+        $broadcast = Get-HostedComponentVerdictFromSections -Sections $sections -InstanceId $instanceId -Suffix ".broadcast.properties" -PassStatuses @("Delivered") -MissingReason "broadcast evidence not exercised"
+        $storage = Get-StorageFileVerdictFromDataDir -DataDir $activity.DataDir
+        $records += [pscustomobject]@{
+            InstanceId = $instanceId
+            VirtualPackageName = $activity.VirtualPackageName
+            DataDir = $activity.DataDir
+            ActivityVerdict = $activity.Verdict
+            ProviderVerdict = $provider.Verdict
+            ServiceVerdict = $service.Verdict
+            BroadcastVerdict = $broadcast.Verdict
+            StorageFilesVerdict = $storage.Verdict
+            ProbeFileExists = $storage.ProbeFileExists
+            SharedPrefsExists = $storage.SharedPrefsExists
+            DatabaseExists = $storage.DatabaseExists
+        }
     }
+
+    $validRecords = @($records | Where-Object { $_.ActivityVerdict -eq "PASS" })
+    $dataRoots = @($validRecords | ForEach-Object { $_.DataDir } | Where-Object { $_.Trim().Length -gt 0 } | Sort-Object -Unique)
+    $virtualPackages = @($validRecords | ForEach-Object { $_.VirtualPackageName } | Where-Object { $_.Trim().Length -gt 0 } | Sort-Object -Unique)
+    $componentFailures = @($records | Where-Object {
+        $_.ActivityVerdict -ne "PASS" -or
+        $_.ProviderVerdict -ne "PASS" -or
+        $_.ServiceVerdict -ne "PASS" -or
+        $_.BroadcastVerdict -ne "PASS" -or
+        $_.StorageFilesVerdict -ne "PASS"
+    })
+    $instanceCountPass = $records.Count -ge 2
+    $dataRootDifferent = $dataRoots.Count -ge 2
+    $virtualPackageDifferent = $virtualPackages.Count -ge 2
+    $pass = $instanceCountPass -and $dataRootDifferent -and $virtualPackageDifferent -and $componentFailures.Count -eq 0
+
+    $reason = if ($pass) {
+        "two hosted instances passed component and storage isolation checks"
+    } elseif (-not $instanceCountPass) {
+        "less than two hosted instances found: count=$($records.Count)"
+    } elseif (-not $dataRootDifferent) {
+        "hosted instances do not have distinct dataRoot values"
+    } elseif (-not $virtualPackageDifferent) {
+        "hosted instances do not have distinct virtualPackageName values"
+    } else {
+        "one or more per-instance component/storage verdicts failed"
+    }
+
+    $recordSummary = @($records | ForEach-Object {
+        "$($_.InstanceId):pkg=$($_.VirtualPackageName),dataDir=$($_.DataDir),activity=$($_.ActivityVerdict),provider=$($_.ProviderVerdict),service=$($_.ServiceVerdict),broadcast=$($_.BroadcastVerdict),storageFiles=$($_.StorageFilesVerdict)"
+    }) -join " | "
 
     return [pscustomobject]@{
         Verdict = if ($pass) { "PASS" } else { "FAIL" }
         Reason = $reason
-        DataDir = $dataDir
-        ProbeFileExists = $probeFileExists
-        SharedPrefsExists = $sharedPrefsExists
-        DatabaseExists = $databaseExists
+        InstanceCount = $records.Count
+        DataRootDifferent = $dataRootDifferent
+        VirtualPackageNameDifferent = $virtualPackageDifferent
+        Summary = $recordSummary
     }
 }
 
@@ -309,6 +470,7 @@ function Resolve-AdbPath {
     if ($env:LOCALAPPDATA) {
         $candidates += (Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe")
     }
+    $candidates += "C:\adb\platform-tools\adb.exe"
     $candidates += "C:\Users\Administrator\.openclaw\workspace\apk_analysis\platform-tools\adb.exe"
 
     foreach ($candidate in $candidates) {
@@ -371,6 +533,12 @@ $script:storageDataDir = ""
 $script:storageProbeFileExists = "false"
 $script:storageSharedPrefsExists = "false"
 $script:storageDatabaseExists = "false"
+$script:dualInstanceVerdict = "UNKNOWN"
+$script:dualInstanceVerdictReason = ""
+$script:dualInstanceCount = 0
+$script:dualInstanceDataRootDifferent = "false"
+$script:dualInstanceVirtualPackageNameDifferent = "false"
+$script:dualInstanceSummary = ""
 
 try {
     if ($Serial -match "^[^:]+:\d+$") {
@@ -516,6 +684,19 @@ try {
         }
     }
 
+    Run-Step "Validate dual hosted instance isolation" {
+        $dual = Get-DualInstanceHostedVerdict -EvidencePath $runtimeEvidence
+        $script:dualInstanceVerdict = $dual.Verdict
+        $script:dualInstanceVerdictReason = $dual.Reason
+        $script:dualInstanceCount = $dual.InstanceCount
+        $script:dualInstanceDataRootDifferent = $dual.DataRootDifferent.ToString().ToLowerInvariant()
+        $script:dualInstanceVirtualPackageNameDifferent = $dual.VirtualPackageNameDifferent.ToString().ToLowerInvariant()
+        $script:dualInstanceSummary = $dual.Summary
+        if ($script:dualInstanceVerdict -ne "PASS") {
+            throw "Dual hosted instance isolation failed. reason=$script:dualInstanceVerdictReason summary=$script:dualInstanceSummary"
+        }
+    }
+
     @(
         "status=PASS",
         "timestamp=$timestamp",
@@ -552,6 +733,12 @@ try {
         "storageProbeFileExists=$script:storageProbeFileExists",
         "storageSharedPrefsExists=$script:storageSharedPrefsExists",
         "storageDatabaseExists=$script:storageDatabaseExists",
+        "dualInstanceVerdict=$script:dualInstanceVerdict",
+        "dualInstanceVerdictReason=$script:dualInstanceVerdictReason",
+        "dualInstanceCount=$script:dualInstanceCount",
+        "dualInstanceDataRootDifferent=$script:dualInstanceDataRootDifferent",
+        "dualInstanceVirtualPackageNameDifferent=$script:dualInstanceVirtualPackageNameDifferent",
+        "dualInstanceSummary=$script:dualInstanceSummary",
         "testClass=com.multiapp.app.HostedContainerMinimalBaselineTest"
     ) | Set-Content -Path $summary -Encoding UTF8
 
@@ -596,6 +783,15 @@ try {
         $script:storageProbeFileExists = $storageFiles.ProbeFileExists.ToString().ToLowerInvariant()
         $script:storageSharedPrefsExists = $storageFiles.SharedPrefsExists.ToString().ToLowerInvariant()
         $script:storageDatabaseExists = $storageFiles.DatabaseExists.ToString().ToLowerInvariant()
+    } catch {}
+    try {
+        $dual = Get-DualInstanceHostedVerdict -EvidencePath $runtimeEvidence
+        $script:dualInstanceVerdict = $dual.Verdict
+        $script:dualInstanceVerdictReason = $dual.Reason
+        $script:dualInstanceCount = $dual.InstanceCount
+        $script:dualInstanceDataRootDifferent = $dual.DataRootDifferent.ToString().ToLowerInvariant()
+        $script:dualInstanceVirtualPackageNameDifferent = $dual.VirtualPackageNameDifferent.ToString().ToLowerInvariant()
+        $script:dualInstanceSummary = $dual.Summary
     } catch {}
     try {
         if (Test-Path -LiteralPath (Join-Path $repo "app\build\outputs\androidTest-results\connected\debug")) {
@@ -644,6 +840,12 @@ try {
         "storageProbeFileExists=$script:storageProbeFileExists",
         "storageSharedPrefsExists=$script:storageSharedPrefsExists",
         "storageDatabaseExists=$script:storageDatabaseExists",
+        "dualInstanceVerdict=$script:dualInstanceVerdict",
+        "dualInstanceVerdictReason=$script:dualInstanceVerdictReason",
+        "dualInstanceCount=$script:dualInstanceCount",
+        "dualInstanceDataRootDifferent=$script:dualInstanceDataRootDifferent",
+        "dualInstanceVirtualPackageNameDifferent=$script:dualInstanceVirtualPackageNameDifferent",
+        "dualInstanceSummary=$script:dualInstanceSummary",
         "testClass=com.multiapp.app.HostedContainerMinimalBaselineTest"
     ) | Set-Content -Path $summary -Encoding UTF8
 
