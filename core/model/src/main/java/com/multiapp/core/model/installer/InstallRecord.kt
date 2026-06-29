@@ -9,6 +9,18 @@ data class ComponentInfo(
     }
 }
 
+data class InstallMetadata(
+    val permissions: List<String> = emptyList(),
+    val activities: List<ComponentInfo> = emptyList(),
+    val services: List<ComponentInfo> = emptyList(),
+    val receivers: List<ComponentInfo> = emptyList(),
+    val providers: List<ComponentInfo> = emptyList()
+)
+
+fun interface InstallMetadataResolver {
+    fun resolve(packageName: String, originApkPath: String): InstallMetadata
+}
+
 data class InstallRecord(
     val schemaVersion: Int = 1,
     val packageName: String,

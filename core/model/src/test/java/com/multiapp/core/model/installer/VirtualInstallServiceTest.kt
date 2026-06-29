@@ -62,4 +62,91 @@ class VirtualInstallServiceTest {
         }
         assertNotEquals(originApk.absolutePath, record.originApkPath)
     }
+
+    @Test
+    fun `importFromMetadata persists resolved component metadata`() {
+        val originApk = File(tempDir, "origin.apk").apply { writeText("fake apk") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "installs"))
+        val service = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = File(tempDir, "artifacts"),
+            metadataResolver = InstallMetadataResolver { _, _ ->
+                InstallMetadata(
+                    permissions = listOf("android.permission.INTERNET"),
+                    activities = listOf(ComponentInfo("com.example.MainActivity", exported = true)),
+                    services = listOf(ComponentInfo("com.example.SyncService")),
+                    receivers = listOf(ComponentInfo("com.example.BootReceiver")),
+                    providers = listOf(ComponentInfo("com.example.ProbeProvider"))
+                )
+            }
+        )
+
+        val result = service.importFromMetadata(
+            packageName = "com.example.app",
+            originApkPath = originApk.absolutePath,
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 36,
+            minSdk = 28,
+            applicationClassName = "com.example.App",
+            packageLabel = "Example"
+        )
+
+        assertTrue(result.isSuccess)
+        val record = installStore.load("com.example.app")!!
+        assertEquals(listOf("android.permission.INTERNET"), record.permissions)
+        assertEquals(listOf(ComponentInfo("com.example.MainActivity", exported = true)), record.activities)
+        assertEquals(listOf(ComponentInfo("com.example.SyncService")), record.services)
+        assertEquals(listOf(ComponentInfo("com.example.BootReceiver")), record.receivers)
+        assertEquals(listOf(ComponentInfo("com.example.ProbeProvider")), record.providers)
+    }
+
+    @Test
+    fun `importFromMetadata refreshes existing record when component metadata was missing`() {
+        val originApk = File(tempDir, "origin.apk").apply { writeText("fake apk") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "installs"))
+        val initialService = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = File(tempDir, "artifacts")
+        )
+        assertTrue(
+            initialService.importFromMetadata(
+                packageName = "com.example.app",
+                originApkPath = originApk.absolutePath,
+                versionCode = 1L,
+                versionName = "1.0",
+                targetSdk = 36,
+                minSdk = 28,
+                applicationClassName = "com.example.App",
+                packageLabel = "Example"
+            ).isSuccess
+        )
+        assertEquals(emptyList(), installStore.load("com.example.app")!!.activities)
+
+        val refreshingService = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = File(tempDir, "artifacts"),
+            metadataResolver = InstallMetadataResolver { _, _ ->
+                InstallMetadata(
+                    activities = listOf(ComponentInfo("com.example.MainActivity", exported = true))
+                )
+            }
+        )
+        val refreshed = refreshingService.importFromMetadata(
+            packageName = "com.example.app",
+            originApkPath = originApk.absolutePath,
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 36,
+            minSdk = 28,
+            applicationClassName = "com.example.App",
+            packageLabel = "Example"
+        )
+
+        assertTrue(refreshed.isSuccess)
+        assertEquals(
+            listOf(ComponentInfo("com.example.MainActivity", exported = true)),
+            installStore.load("com.example.app")!!.activities
+        )
+    }
 }

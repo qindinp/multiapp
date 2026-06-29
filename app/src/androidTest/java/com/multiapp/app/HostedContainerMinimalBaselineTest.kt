@@ -10,6 +10,9 @@ import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
+import com.multiapp.core.model.installer.ComponentInfo
+import com.multiapp.core.model.installer.InstallMetadata
+import com.multiapp.core.model.installer.InstallMetadataResolver
 import com.multiapp.core.model.installer.JsonInstallRecordStore
 import com.multiapp.core.model.installer.ProductionVirtualInstallService
 import dagger.hilt.android.testing.HiltAndroidRule
@@ -70,7 +73,17 @@ class HostedContainerMinimalBaselineTest {
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
         val installService = ProductionVirtualInstallService(
             installRecordStore = installStore,
-            artifactDir = ContainerRuntimePaths.artifactDir(targetContext)
+            artifactDir = ContainerRuntimePaths.artifactDir(targetContext),
+            metadataResolver = InstallMetadataResolver { packageName, _ ->
+                val info = findInstalledPackage(packageName) ?: return@InstallMetadataResolver InstallMetadata()
+                InstallMetadata(
+                    permissions = info.requestedPermissions?.toList().orEmpty(),
+                    activities = info.activities.toComponentInfos(),
+                    services = info.services.toComponentInfos(),
+                    receivers = info.receivers.toComponentInfos(),
+                    providers = info.providers.toComponentInfos()
+                )
+            }
         )
         val importResult = installService.importFromMetadata(
             packageName = minimalPackageName,
@@ -106,18 +119,34 @@ class HostedContainerMinimalBaselineTest {
         }
     }
 
-    private fun findInstalledMinimalPackage(): PackageInfo? {
+    private fun findInstalledMinimalPackage(): PackageInfo? = findInstalledPackage(minimalPackageName)
+
+    private fun findInstalledPackage(packageName: String): PackageInfo? {
         return runCatching {
+            val flags = android.content.pm.PackageManager.GET_ACTIVITIES or
+                android.content.pm.PackageManager.GET_SERVICES or
+                android.content.pm.PackageManager.GET_RECEIVERS or
+                android.content.pm.PackageManager.GET_PROVIDERS or
+                android.content.pm.PackageManager.GET_PERMISSIONS or
+                android.content.pm.PackageManager.GET_META_DATA
             if (Build.VERSION.SDK_INT >= 33) {
                 packageManager.getPackageInfo(
-                    minimalPackageName,
-                    android.content.pm.PackageManager.PackageInfoFlags.of(0)
+                    packageName,
+                    android.content.pm.PackageManager.PackageInfoFlags.of(flags.toLong())
                 )
             } else {
                 @Suppress("DEPRECATION")
-                packageManager.getPackageInfo(minimalPackageName, 0)
+                packageManager.getPackageInfo(packageName, flags)
             }
         }.getOrNull()
+    }
+
+    private fun Array<out android.content.pm.ComponentInfo>?.toComponentInfos(): List<ComponentInfo> {
+        return this?.mapNotNull { component ->
+            component.name?.takeIf { it.isNotBlank() }?.let { name ->
+                ComponentInfo(name = name, exported = component.exported)
+            }
+        }.orEmpty()
     }
 
     private fun PackageInfo.longVersionCodeCompat(): Long {

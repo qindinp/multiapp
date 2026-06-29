@@ -235,16 +235,48 @@ object DefaultServiceAttacher : ServiceAttacher {
         val activityThreadClass = Class.forName("android.app.ActivityThread")
         val activityThread = activityThreadClass.getDeclaredMethod("currentActivityThread").invoke(null)
             ?: throw UnsupportedOperationException("RuntimeNotBound: missing ActivityThread")
-        val activityManagerClass = Class.forName("android.app.IActivityManager")
-        val attach = Service::class.java.getDeclaredMethod(
-            "attach",
+        val attach = findAttachMethod(activityThreadClass).apply { isAccessible = true }
+        attach.invoke(service, context, activityThread, className, null, application, null)
+    }
+
+    internal fun findAttachMethod(activityThreadClass: Class<*>): java.lang.reflect.Method {
+        val candidates = mutableListOf<Array<Class<*>>>()
+        candidates += arrayOf(
             Context::class.java,
             activityThreadClass,
             String::class.java,
             IBinder::class.java,
             Application::class.java,
-            activityManagerClass
-        ).apply { isAccessible = true }
-        attach.invoke(service, context, activityThread, className, null, application, null)
+            Object::class.java
+        )
+        runCatching { Class.forName("android.app.IActivityManager") }.getOrNull()?.let { activityManagerClass ->
+            candidates += arrayOf(
+                Context::class.java,
+                activityThreadClass,
+                String::class.java,
+                IBinder::class.java,
+                Application::class.java,
+                activityManagerClass
+            )
+        }
+
+        for (parameterTypes in candidates) {
+            runCatching { return Service::class.java.getDeclaredMethod("attach", *parameterTypes) }
+        }
+
+        return Service::class.java.declaredMethods.firstOrNull { method ->
+            method.name == "attach" &&
+                method.parameterTypes.size == 6 &&
+                method.parameterTypes[0].isAssignableFrom(Context::class.java) &&
+                method.parameterTypes[1].isAssignableFrom(activityThreadClass) &&
+                method.parameterTypes[2].isAssignableFrom(String::class.java) &&
+                method.parameterTypes[3].isAssignableFrom(IBinder::class.java) &&
+                method.parameterTypes[4].isAssignableFrom(Application::class.java)
+        } ?: throw NoSuchMethodException(
+            "android.app.Service.attach compatible signature not found; candidates=" +
+                candidates.joinToString { parameterTypes ->
+                    parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name }
+                }
+        )
     }
 }

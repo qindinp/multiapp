@@ -2,6 +2,7 @@ package com.multiapp.feature.launcher
 
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.animation.*
 import androidx.compose.animation.core.*
@@ -110,6 +111,11 @@ fun LauncherScreen(
                     instances = uiState.instances,
                     onLaunch = { instance ->
                         try {
+                            Log.i(
+                                "LauncherScreen",
+                                "Launching hosted instance: instanceId=${instance.instanceId}, " +
+                                    "originPackage=${instance.originPackageName}"
+                            )
                             val intent = Intent().apply {
                                 component = android.content.ComponentName(
                                     "com.multiapp.app",
@@ -120,6 +126,7 @@ fun LauncherScreen(
                             }
                             context.startActivity(intent)
                         } catch (e: Exception) {
+                            Log.e("LauncherScreen", "Hosted launch failed: ${instance.instanceId}", e)
                             Toast.makeText(context, "启动失败: ${e.message}", Toast.LENGTH_SHORT).show()
                         }
                     },

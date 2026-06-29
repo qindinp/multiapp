@@ -91,6 +91,27 @@ class VirtualInstrumentation(
         requestCode: Int
     ): ActivityResult? = execStartActivity(who, contextThread, token, target, intent, requestCode, null)
 
+    @Suppress("unused")
+    fun execStartActivity(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder,
+        target: String?,
+        intent: Intent,
+        requestCode: Int,
+        options: Bundle?
+    ): ActivityResult? {
+        return invokeBaseExecStartActivity(
+            who = who,
+            contextThread = contextThread,
+            token = token,
+            target = target,
+            intent = intent,
+            requestCode = requestCode,
+            options = options
+        )
+    }
+
     internal fun remapStartActivityIntent(
         target: Activity?,
         who: Context,
@@ -355,42 +376,82 @@ class VirtualInstrumentation(
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
-        val method = findExecStartActivityMethod(options != null)
+        val method = findExecStartActivityMethod(Activity::class.java, preferOptionsSignature = true)
         method.isAccessible = true
-        return if (options != null) {
+        return invokeExecStartActivityMethod(method, who, contextThread, token, target, intent, requestCode, options)
+    }
+
+    private fun invokeBaseExecStartActivity(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder,
+        target: String?,
+        intent: Intent,
+        requestCode: Int,
+        options: Bundle?
+    ): ActivityResult? {
+        val method = findExecStartActivityMethod(String::class.java, preferOptionsSignature = true)
+        method.isAccessible = true
+        return invokeExecStartActivityMethod(method, who, contextThread, token, target, intent, requestCode, options)
+    }
+
+    private fun invokeExecStartActivityMethod(
+        method: java.lang.reflect.Method,
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder,
+        target: Any?,
+        intent: Intent,
+        requestCode: Int,
+        options: Bundle?
+    ): ActivityResult? {
+        return if (method.parameterTypes.size == 7) {
             method.invoke(base, who, contextThread, token, target, intent, requestCode, options) as? ActivityResult
         } else {
             method.invoke(base, who, contextThread, token, target, intent, requestCode) as? ActivityResult
         }
     }
 
-    private fun findExecStartActivityMethod(withOptions: Boolean): java.lang.reflect.Method {
-        val parameterTypes = if (withOptions) {
+    private fun findExecStartActivityMethod(
+        targetType: Class<*>,
+        preferOptionsSignature: Boolean
+    ): java.lang.reflect.Method {
+        val withOptions = arrayOf(
             arrayOf(
                 Context::class.java,
                 IBinder::class.java,
                 IBinder::class.java,
-                Activity::class.java,
+                targetType,
                 Intent::class.java,
                 Integer.TYPE,
                 Bundle::class.java
             )
-        } else {
+        )
+        val withoutOptions = arrayOf(
             arrayOf(
                 Context::class.java,
                 IBinder::class.java,
                 IBinder::class.java,
-                Activity::class.java,
+                targetType,
                 Intent::class.java,
                 Integer.TYPE
             )
-        }
+        )
+        val candidates = if (preferOptionsSignature) withOptions + withoutOptions else withoutOptions + withOptions
         var clazz: Class<*>? = base.javaClass
         while (clazz != null) {
-            runCatching { return clazz.getDeclaredMethod("execStartActivity", *parameterTypes) }
+            for (parameterTypes in candidates) {
+                runCatching { return clazz.getDeclaredMethod("execStartActivity", *parameterTypes) }
+            }
             clazz = clazz.superclass
         }
-        return Instrumentation::class.java.getDeclaredMethod("execStartActivity", *parameterTypes)
+        for (parameterTypes in candidates) {
+            runCatching { return Instrumentation::class.java.getDeclaredMethod("execStartActivity", *parameterTypes) }
+        }
+        throw NoSuchMethodException(
+            "android.app.Instrumentation.execStartActivity target=${targetType.name} " +
+                "candidates=${candidates.joinToString { it.joinToString(prefix = "(", postfix = ")") { type -> type.name } }}"
+        )
     }
 
     private fun writeSubstitutionEvidence(

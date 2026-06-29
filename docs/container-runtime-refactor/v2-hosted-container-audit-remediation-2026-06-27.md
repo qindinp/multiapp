@@ -870,3 +870,91 @@ test-fixtures:minimal-app:assembleDebug -> BUILD SUCCESSFUL
 ```
 
 负责人判定：E3 只完成 resolver/record 前置，不代表 `startActivity()` 已被接管。下一步必须在 `VirtualInstrumentation` 或 AMS/ATM hook 层拦截 guest `startActivity`，调用 `VirtualIntentResolver` 后改写为 proxy Intent，才能验收 guest 内部 `SecondActivity` 生命周期。
+
+### 9.8 Android 16 / HyperOS 真机阻塞修复记录
+
+本轮在小米设备 `2509FPN0BC`、Android 16 / HyperOS 上验证 `MinimalTest` hosted baseline，确认并修复三个阻塞点：
+
+```text
+device=192.168.2.122:33811
+originPackageName=com.test.minimal
+instanceId=d479cfac-2ecb-43f2-9132-38ffdf84e473
+hostPackageName=com.multiapp.app
+```
+
+已修复问题：
+
+```text
+1. InstallRecord components 为空
+   原因：生产导入链路只持久化 APK 路径和 digest，未保存 activities/services/receivers/providers/permissions。
+   修复：VirtualInstallService 接入 InstallMetadataResolver，从 PackageManager 读取真实组件元数据并刷新旧空记录。
+
+2. guest startActivity 在 Android 16 上失败
+   错误：NoSuchMethodException android.app.Instrumentation.execStartActivity(Context, IBinder, IBinder, Activity, Intent, int)
+   修复：VirtualInstrumentation 优先使用带 Bundle 的 7 参数签名，并补齐 String target 变体。
+
+3. guest Service.attach 在 Android 16 上失败
+   错误：NoSuchMethodException android.app.Service.attach(..., IActivityManager)
+   修复：Service attacher 优先匹配 Object activityManager 签名，再回退 IActivityManager 和稳定参数扫描。
+```
+
+真机 evidence：
+
+```properties
+# files/hosted_launch_evidence/d479cfac-2ecb-43f2-9132-38ffdf84e473.launch.properties
+status=PROXY_LAUNCHED
+stage=ACTIVITY_PROXY
+detail=com.multiapp.app.container.ProxyActivity0|com.test.minimal.MainActivity
+
+# files/hosted_launch_evidence/d479cfac-2ecb-43f2-9132-38ffdf84e473.activity-instrumentation.properties
+status=GUEST_ACTIVITY_SUBSTITUTED
+stage=ACTIVITY_INSTRUMENTATION
+proxyActivityClassName=com.multiapp.app.container.ProxyActivity0
+guestActivityClassName=com.test.minimal.SecondActivity
+
+# files/hosted_launch_evidence/d479cfac-2ecb-43f2-9132-38ffdf84e473.activity-context.properties
+status=GUEST_ACTIVITY_CONTEXT_INJECTED
+stage=ACTIVITY_CONTEXT
+contextInjected=true
+applicationInjected=true
+packageName=com.multiapp.instance.d479cfac2ecb
+applicationClassName=com.test.minimal.MinimalApp
+dataDir=/data/user/0/com.multiapp.app/files/instance_data/d479cfac-2ecb-43f2-9132-38ffdf84e473
+
+# files/hosted_launch_evidence/d479cfac-2ecb-43f2-9132-38ffdf84e473.provider-proxy.properties
+status=PROVIDER_CREATED
+stage=PROVIDER_PROXY
+providerClassName=com.test.minimal.ProbeProvider
+evidenceSuccess=true
+detail=PROVIDER_READY:created:com.test.minimal.ProbeProvider
+
+# files/hosted_launch_evidence/d479cfac-2ecb-43f2-9132-38ffdf84e473.service-proxy.properties
+status=STARTED
+stage=SERVICE_RUNTIME
+guestServiceClassName=com.test.minimal.ProbeService
+lifecycle=CREATED_AND_STARTED
+lifecycleSuccess=true
+startCommandResult=2
+errorClassName=
+errorMessage=
+
+# files/hosted_launch_evidence/d479cfac-2ecb-43f2-9132-38ffdf84e473.broadcast.properties
+status=Delivered
+stage=BROADCAST_RUNTIME
+receiverClassName=com.test.minimal.ProbeReceiver
+action=com.test.minimal.ACTION_PROBE_BROADCAST
+result=Delivered
+```
+
+验证记录：
+
+```text
+core:model:testDebugUnitTest       -> BUILD SUCCESSFUL
+core:loader:testDebugUnitTest      -> BUILD SUCCESSFUL
+feature:launcher:testDebugUnitTest -> BUILD SUCCESSFUL
+app:testDebugUnitTest              -> BUILD SUCCESSFUL
+app:assembleDebug                  -> BUILD SUCCESSFUL
+manual hosted launch logcat window -> captured, no app crash in target evidence
+```
+
+负责人判定：普通 APK `MinimalTest` 的 Activity / Provider / Service / Broadcast / Context storage baseline 已在单实例真机链路跑通。该结论只覆盖普通 APK hosted baseline，不等价于 QQ 阅读/加固应用兼容完成；下一步应补双实例自动化 baseline 与更稳定的 evidence capture，再进入 protected diagnostics。

@@ -17,7 +17,8 @@ import java.util.concurrent.CancellationException
  */
 class ProductionVirtualInstallService(
     private val installRecordStore: InstallRecordStore,
-    private val artifactDir: File
+    private val artifactDir: File,
+    private val metadataResolver: InstallMetadataResolver? = null
 ) : VirtualInstallService {
 
     private val importer = InstalledPackageImporter(installRecordStore, artifactDir)
@@ -47,9 +48,13 @@ class ProductionVirtualInstallService(
         packageLabel: String?
     ): Result<ImportResult> {
         return try {
-            // Idempotent: if InstallRecord already exists, return success
             val existing = installRecordStore.load(packageName)
-            if (existing != null) {
+            val resolvedMetadata = resolveInstallMetadata(packageName, originApkPath)
+
+            // Idempotent for complete records. Older v2 records may have been created
+            // before component import existed; refresh those so hosted launch can find
+            // the guest launcher Activity.
+            if (existing != null && !existing.needsMetadataRefresh(resolvedMetadata)) {
                 return Result.success(ImportResult(
                     packageRecord = buildPackageRecord(existing),
                     manifest = buildManifest(existing),
@@ -65,13 +70,33 @@ class ProductionVirtualInstallService(
                 targetSdk = targetSdk,
                 minSdk = minSdk,
                 applicationClassName = applicationClassName,
-                packageLabel = packageLabel
+                packageLabel = packageLabel,
+                permissions = resolvedMetadata.permissions,
+                activities = resolvedMetadata.activities,
+                services = resolvedMetadata.services,
+                receivers = resolvedMetadata.receivers,
+                providers = resolvedMetadata.providers
             )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    private fun resolveInstallMetadata(packageName: String, originApkPath: String): InstallMetadata {
+        return runCatching {
+            metadataResolver?.resolve(packageName, originApkPath)
+        }.getOrNull() ?: InstallMetadata()
+    }
+
+    private fun InstallRecord.needsMetadataRefresh(metadata: InstallMetadata): Boolean {
+        if (metadata == InstallMetadata()) return false
+        return activities.isEmpty() && metadata.activities.isNotEmpty() ||
+            services.isEmpty() && metadata.services.isNotEmpty() ||
+            receivers.isEmpty() && metadata.receivers.isNotEmpty() ||
+            providers.isEmpty() && metadata.providers.isNotEmpty() ||
+            permissions.isEmpty() && metadata.permissions.isNotEmpty()
     }
 
     override fun getInstallRecord(packageName: String): InstallRecord? {
