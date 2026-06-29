@@ -1022,3 +1022,62 @@ app:assembleDebug                      -> BUILD SUCCESSFUL
 ```
 
 负责人判定：双实例 baseline 的自动化采证和判定框架已落地，但本节尚未包含真机 `dualInstanceVerdict=PASS` 证据。下一步必须在在线设备执行 `tools/hosted-container-baseline/run-minimal-hosted-baseline.ps1`，将 summary 中的双实例字段作为 Step 6 验收依据。
+
+### 9.10 手动双实例真机验收记录
+
+由于 HyperOS 设备对 `connectedDebugAndroidTest` 的 test APK 安装存在 `INSTALL_FAILED_USER_RESTRICTED` 限制，本轮改为手动从 MultiApp UI 启动两个 `MinimalTest` hosted instance，随后用 15 秒 logcat 窗口和 `run-as com.multiapp.app` 采集 evidence。
+
+设备和证据目录：
+
+```text
+device=192.168.2.122:33811
+model=2509FPN0BC
+Android=16 / HyperOS
+manualEvidenceDir=.tmp/manual-hosted-dual-20260629-101551
+originPackageName=com.test.minimal
+hostPackageName=com.multiapp.app
+```
+
+实例记录：
+
+```text
+instanceA=d46aab5f-42d8-4214-8bb0-1bfa57c5890d
+virtualPackageNameA=com.multiapp.instance.d46aab5f42d8
+dataRootA=/data/user/0/com.multiapp.app/files/instance_data/d46aab5f-42d8-4214-8bb0-1bfa57c5890d
+
+instanceB=d9a5168a-630d-4278-b7ae-46dc4618f725
+virtualPackageNameB=com.multiapp.instance.d9a5168a630d
+dataRootB=/data/user/0/com.multiapp.app/files/instance_data/d9a5168a-630d-4278-b7ae-46dc4618f725
+```
+
+双实例 evidence：
+
+```text
+instanceA.activity-context        -> status=GUEST_ACTIVITY_CONTEXT_INJECTED, packageName=com.multiapp.instance.d46aab5f42d8
+instanceA.activity-instrumentation -> status=GUEST_ACTIVITY_SUBSTITUTED
+instanceA.activity-remap          -> status=GUEST_ACTIVITY_REMAP
+instanceA.provider-proxy          -> status=PROVIDER_CACHED
+instanceA.service-proxy           -> status=STARTED, lifecycleSuccess=true, errorClassName=
+instanceA.broadcast               -> status=Delivered
+
+instanceB.activity-context        -> status=GUEST_ACTIVITY_CONTEXT_INJECTED, packageName=com.multiapp.instance.d9a5168a630d
+instanceB.activity-instrumentation -> status=GUEST_ACTIVITY_SUBSTITUTED
+instanceB.activity-remap          -> status=GUEST_ACTIVITY_REMAP
+instanceB.provider-proxy          -> status=PROVIDER_CACHED
+instanceB.service-proxy           -> status=STARTED, lifecycleSuccess=true, errorClassName=
+instanceB.broadcast               -> status=Delivered
+```
+
+storage 文件证据：
+
+```text
+files/instance_data/d46aab5f-42d8-4214-8bb0-1bfa57c5890d/files/probe.txt
+files/instance_data/d46aab5f-42d8-4214-8bb0-1bfa57c5890d/shared_prefs/probe.xml
+files/instance_data/d46aab5f-42d8-4214-8bb0-1bfa57c5890d/databases/probe.db
+
+files/instance_data/d9a5168a-630d-4278-b7ae-46dc4618f725/files/probe.txt
+files/instance_data/d9a5168a-630d-4278-b7ae-46dc4618f725/shared_prefs/probe.xml
+files/instance_data/d9a5168a-630d-4278-b7ae-46dc4618f725/databases/probe.db
+```
+
+负责人判定：Step 6 普通 App 双实例 baseline 已有真机手动证据证明两个 hosted instance 的 `virtualPackageName` 与 `dataRoot` 分离，Activity / Provider / Service / Broadcast / Storage 文件均可在两个实例下跑通。自动化脚本仍受设备安装策略影响，后续应保留手动 evidence 流程，同时把 `connectedDebugAndroidTest` 安装权限问题作为设备环境项处理。

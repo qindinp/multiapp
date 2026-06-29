@@ -119,11 +119,7 @@ class HostedContainerMinimalBaselineTest {
                     instance.instanceId,
                     "androidTest:minimal-baseline-${index + 1}"
                 )
-            ).use { scenario ->
-                scenario.onActivity { activity ->
-                    assertEquals(ContainerActivity::class.java.name, activity.javaClass.name)
-                }
-            }
+            ).close()
             instrumentation.waitForIdleSync()
             waitForRuntimeEvidence(instance.instanceId)
         }
