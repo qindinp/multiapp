@@ -384,6 +384,20 @@ object ActivityThemeCompat {
         originResources: Resources
     ) {
         try {
+            if (isAppCompatActivity(activity)) {
+                // AppCompatActivity validates AppCompat theme attrs in onPostCreate.
+                // Keep the host proxy AppCompat theme and only swap resources; applying
+                // an origin APK theme here can strip the AppCompat attrs and crash.
+                (wrappedContext as? GuestContextWrapper)?.setTheme(0)
+                replaceFieldIfPresent(activity, "mResources", originResources)
+                Log.d(
+                    TAG,
+                    "Preserved host AppCompat Activity theme: ${activity.javaClass.name}, " +
+                        "originTheme=0x${Integer.toHexString(themeId)}"
+                )
+                return
+            }
+
             (wrappedContext as? GuestContextWrapper)?.setTheme(themeId)
 
             val theme = originResources.newTheme()

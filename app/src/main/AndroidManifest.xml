@@ -32,6 +32,7 @@
             android:exported="false"
             android:launchMode="standard"
             android:screenOrientation="unspecified"
+            android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 
         <!-- v2 proxy Activity slots. Guest Activity launches are mapped here first. -->
@@ -40,44 +41,50 @@
             android:exported="false"
             android:launchMode="standard"
             android:screenOrientation="unspecified"
+            android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivity1"
             android:exported="false"
             android:launchMode="standard"
             android:screenOrientation="unspecified"
+            android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivitySingleTop0"
             android:exported="false"
             android:launchMode="singleTop"
             android:screenOrientation="unspecified"
+            android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivitySingleTop1"
             android:exported="false"
             android:launchMode="singleTop"
             android:screenOrientation="unspecified"
+            android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivitySingleTask0"
             android:exported="false"
             android:launchMode="singleTask"
             android:screenOrientation="unspecified"
+            android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivitySingleTask1"
             android:exported="false"
             android:launchMode="singleTask"
             android:screenOrientation="unspecified"
+            android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 
-        <!-- v2 hosted Service proxy slot. Guest Service lifecycle is not fully virtualized yet. -->
+        <!-- v2 hosted Service proxy slot. Guest Service dispatch is partial/evidence-gated. -->
         <service
             android:name=".container.StubService"
             android:exported="false" />
 
-        <!-- v2 hosted provider proxy slot. Guest providers are not dispatched yet. -->
+        <!-- v2 hosted Provider proxy slot. Guest Provider dispatch is partial/evidence-gated. -->
         <provider
             android:name=".container.StubContentProvider"
             android:authorities="${applicationId}.multiapp.provider.stub"

@@ -108,6 +108,7 @@ dependencies {
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.compose.animation)
     implementation(libs.activity.compose)
+    implementation(libs.appcompat)
     debugImplementation(libs.compose.ui.tooling)
 
     // DI + Nav + Lifecycle

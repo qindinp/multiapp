@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import android.app.Application
 import android.app.Instrumentation
+import android.content.pm.ApplicationInfo
 import java.lang.ref.WeakReference
 
 object ActivityThreadCompat {
@@ -57,6 +58,43 @@ object ActivityThreadCompat {
         val map = packageMap(fieldName, activityThread) ?: return false
         map[packageName] = WeakReference(loadedApk)
         return true
+    }
+
+    fun getPackageInfoNoCheck(
+        applicationInfo: ApplicationInfo,
+        activityThread: Any = currentActivityThread()
+    ): Any {
+        val method = findMethodInHierarchy(activityThread.javaClass, "getPackageInfoNoCheck") { method ->
+            val types = method.parameterTypes
+            types.size == 2 && ApplicationInfo::class.java.isAssignableFrom(types[0])
+        } ?: throw NoSuchMethodException("ActivityThread.getPackageInfoNoCheck(ApplicationInfo, CompatibilityInfo)")
+        method.isAccessible = true
+        val compatibilityInfo = defaultCompatibilityInfo(method.parameterTypes[1])
+        return method.invoke(activityThread, applicationInfo, compatibilityInfo)
+            ?: throw IllegalStateException("ActivityThread.getPackageInfoNoCheck returned null")
+    }
+
+    private fun defaultCompatibilityInfo(type: Class<*>): Any? {
+        return runCatching {
+            val field = type.getDeclaredField("DEFAULT_COMPATIBILITY_INFO")
+            field.isAccessible = true
+            field.get(null)
+        }.getOrNull()
+    }
+
+    private fun findMethodInHierarchy(
+        type: Class<*>,
+        name: String,
+        predicate: (java.lang.reflect.Method) -> Boolean
+    ): java.lang.reflect.Method? {
+        var current: Class<*>? = type
+        while (current != null) {
+            for (method in current.declaredMethods) {
+                if (method.name == name && predicate(method)) return method
+            }
+            current = current.superclass
+        }
+        return null
     }
 
     private fun findFieldInHierarchy(type: Class<*>, name: String): java.lang.reflect.Field? {

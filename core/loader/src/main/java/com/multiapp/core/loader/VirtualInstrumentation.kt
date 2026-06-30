@@ -316,7 +316,9 @@ class VirtualInstrumentation(
             installRecordStore = installRecordStore,
             hostContext = hostApplication
         )
-        val result = bootstrap.run(instanceId)
+        val result = VirtualProcessRuntime.global.bindApplication(instanceId) {
+            bootstrap.run(instanceId)
+        }
         require(result.success) {
             "Hosted bootstrap failed: " + (result.summary.failureReason ?: "unknown")
         }
@@ -559,19 +561,10 @@ class VirtualInstrumentation(
         runCatching {
             val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }
             File(evidenceDir, HostedActivityEvidenceFiles.context(instanceId)).writeText(
-                listOf(
-                    "status=GUEST_ACTIVITY_CONTEXT_INJECTED",
-                    "stage=ACTIVITY_CONTEXT",
-                    "guestActivityClassName=$guestActivityClassName",
-                    "contextInjected=${injection.contextInjected}",
-                    "applicationInjected=${injection.applicationInjected}",
-                    "packageName=${injection.packageName}",
-                    "applicationClassName=${injection.applicationClassName.orEmpty()}",
-                    "loadedApkPatchedFields=${injection.loadedApkPatchedFields.joinToString(",")}",
-                    "loadedApkInstalledAliasCount=${injection.loadedApkInstalledAliasCount}",
-                    "loadedApkSkippedReason=${injection.loadedApkSkippedReason.orEmpty()}",
-                    "dataDir=${injection.dataDir}"
-                ).joinToString("\n")
+                HostedActivityContextEvidenceFormatter.format(
+                    guestActivityClassName = guestActivityClassName,
+                    injection = injection
+                )
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write Activity context evidence for instanceId=$instanceId", error)

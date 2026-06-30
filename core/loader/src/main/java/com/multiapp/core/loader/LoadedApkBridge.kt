@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import android.content.pm.ApplicationInfo
 import android.content.res.Resources
+import java.io.File
 
 /**
  * Minimal reflection bridge for objects that behave like Android LoadedApk.
@@ -24,20 +25,55 @@ object LoadedApkBridge {
 
     fun patch(target: Any, state: LoadedApkRuntimeState): LoadedApkPatchResult {
         val patched = mutableListOf<String>()
-        val skipped = mutableListOf<String>()
+        val skipped = mutableListOf<LoadedApkSkippedField>()
+        val appInfo = state.applicationInfo
+        val sourceDir = appInfo.sourceDir
+        val publicSourceDir = appInfo.publicSourceDir ?: appInfo.sourceDir
+        val nativeLibraryDir = appInfo.nativeLibraryDir
+        val dataDir = appInfo.dataDir
+        val credentialProtectedDataDir = readStringField(appInfo, "credentialProtectedDataDir") ?: dataDir
+        val deviceProtectedDataDir = readStringField(appInfo, "deviceProtectedDataDir") ?: dataDir
 
-        patchField(target, "mApplicationInfo", state.applicationInfo, patched, skipped)
+        patchField(target, "mApplicationInfo", appInfo, patched, skipped)
         patchField(target, "mResources", state.resources, patched, skipped)
         patchField(target, "mClassLoader", state.classLoader, patched, skipped)
+        patchField(target, "mBaseClassLoader", state.classLoader, patched, skipped)
         patchField(target, "mPackageName", state.packageName, patched, skipped)
-        patchField(target, "mAppDir", state.applicationInfo.sourceDir, patched, skipped)
-        patchField(target, "mResDir", state.applicationInfo.publicSourceDir, patched, skipped)
+        patchField(target, "mAppDir", sourceDir, patched, skipped)
+        patchField(target, "mResDir", publicSourceDir, patched, skipped)
+        patchField(target, "mLibDir", nativeLibraryDir, patched, skipped)
+        patchPathField(target, "mDataDir", dataDir, patched, skipped)
+        patchPathField(target, "mDataDirFile", dataDir, patched, skipped)
+        patchPathField(target, "mCredentialProtectedDataDirFile", credentialProtectedDataDir, patched, skipped)
+        patchPathField(target, "mDeviceProtectedDataDirFile", deviceProtectedDataDir, patched, skipped)
 
         return LoadedApkPatchResult(
             targetClassName = target.javaClass.name,
             patchedFields = patched,
-            skippedFields = skipped
+            skippedFields = skipped.map { it.fieldName },
+            skippedFieldReasons = skipped.map { it.reasonEntry }
         )
+    }
+
+    private fun patchPathField(
+        target: Any,
+        fieldName: String,
+        path: String?,
+        patched: MutableList<String>,
+        skipped: MutableList<LoadedApkSkippedField>
+    ) {
+        val field = findFieldInHierarchy(target.javaClass, fieldName)
+        if (field == null) {
+            skipped += LoadedApkSkippedField(fieldName, "FIELD_NOT_FOUND")
+            return
+        }
+        val value = when {
+            path == null -> null
+            field.type == File::class.java -> File(path)
+            field.type == String::class.java || field.type.isAssignableFrom(String::class.java) -> path
+            else -> path
+        }
+        setField(target, field, fieldName, value, patched, skipped)
     }
 
     private fun patchField(
@@ -45,18 +81,41 @@ object LoadedApkBridge {
         fieldName: String,
         value: Any?,
         patched: MutableList<String>,
-        skipped: MutableList<String>
+        skipped: MutableList<LoadedApkSkippedField>
     ) {
         val field = findFieldInHierarchy(target.javaClass, fieldName)
         if (field == null) {
-            skipped += fieldName
+            skipped += LoadedApkSkippedField(fieldName, "FIELD_NOT_FOUND")
+            return
+        }
+        setField(target, field, fieldName, value, patched, skipped)
+    }
+
+    private fun setField(
+        target: Any,
+        field: java.lang.reflect.Field,
+        fieldName: String,
+        value: Any?,
+        patched: MutableList<String>,
+        skipped: MutableList<LoadedApkSkippedField>
+    ) {
+        if (value == null && field.type.isPrimitive) {
+            skipped += LoadedApkSkippedField(fieldName, "NULL_FOR_PRIMITIVE:${field.type.name}")
+            return
+        }
+        if (value != null && field.type.isPrimitive) {
+            skipped += LoadedApkSkippedField(fieldName, "TYPE_MISMATCH:${field.type.name}<-${value.javaClass.name}")
+            return
+        }
+        if (value != null && !field.type.isPrimitive && !field.type.isAssignableFrom(value.javaClass)) {
+            skipped += LoadedApkSkippedField(fieldName, "TYPE_MISMATCH:${field.type.name}<-${value.javaClass.name}")
             return
         }
         runCatching {
             field.set(target, value)
             patched += fieldName
         }.onFailure {
-            skipped += fieldName
+            skipped += LoadedApkSkippedField(fieldName, "SET_FAILED:${it.javaClass.simpleName}")
         }
     }
 
@@ -64,6 +123,9 @@ object LoadedApkBridge {
         val field = findFieldInHierarchy(target.javaClass, fieldName) ?: return null
         return runCatching { field.get(target) }.getOrNull()
     }
+
+    private fun readStringField(target: Any, fieldName: String): String? =
+        readField(target, fieldName) as? String
 
     private fun findFieldInHierarchy(type: Class<*>, name: String): java.lang.reflect.Field? {
         var current: Class<*>? = type
@@ -93,10 +155,18 @@ data class LoadedApkRuntimeState(
     val classLoader: ClassLoader
 )
 
+data class LoadedApkSkippedField(
+    val fieldName: String,
+    val reason: String
+) {
+    val reasonEntry: String get() = "$fieldName:$reason"
+}
+
 data class LoadedApkPatchResult(
     val targetClassName: String,
     val patchedFields: List<String>,
-    val skippedFields: List<String>
+    val skippedFields: List<String>,
+    val skippedFieldReasons: List<String> = skippedFields.map { "$it:UNSPECIFIED" }
 ) {
     val patchedCount: Int get() = patchedFields.size
 }
