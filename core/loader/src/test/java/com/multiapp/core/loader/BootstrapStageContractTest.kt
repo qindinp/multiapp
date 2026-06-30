@@ -32,6 +32,24 @@ class BootstrapStageContractTest {
     }
 
     @Test
+    fun `failed BootstrapResult can remain non terminal for continuation stages`() {
+        val context = BootstrapStageInput(instanceId = "inst-001")
+        val output = BootstrapStageOutput(
+            context = context,
+            result = BootstrapResult.failed(
+                stage = RuntimeStage.APPLICATION,
+                message = "Guest Application creation failed: test"
+            ),
+            terminalFailure = false
+        )
+
+        assertFalse(output.isTerminalFailure)
+        assertSame(context, output.context)
+        assertEquals(RuntimeStage.APPLICATION, output.result.stage)
+        assertEquals(BootstrapStatus.FAILED, output.result.status)
+    }
+
+    @Test
     fun `successful BootstrapResult keeps stage output non terminal`() {
         val output = BootstrapStageOutput(
             context = BootstrapStageInput(
@@ -63,7 +81,8 @@ class BootstrapStageContractTest {
             installRecord = installRecord,
             originApkPath = installRecord.originApkPath,
             nativeLibraryDir = "/data/instances/inst-001/lib",
-            guestClassLoader = classLoader
+            guestClassLoader = classLoader,
+            launcherActivityClassName = "com.example.app.MainActivity"
         )
 
         assertEquals("inst-001", context.instanceId)
@@ -72,6 +91,7 @@ class BootstrapStageContractTest {
         assertEquals("/artifact/com.example.app.apk", context.originApkPath)
         assertEquals("/data/instances/inst-001/lib", context.nativeLibraryDir)
         assertSame(classLoader, context.guestClassLoader)
+        assertEquals("com.example.app.MainActivity", context.launcherActivityClassName)
     }
 
     @Test

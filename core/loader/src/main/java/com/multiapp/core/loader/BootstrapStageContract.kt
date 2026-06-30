@@ -22,7 +22,8 @@ data class BootstrapStageInput(
     val packageSnapshot: VirtualPackageSnapshot? = null,
     val providerRoutingPlan: VirtualProviderRoutingPlan? = null,
     val guestClassLoader: ClassLoader? = null,
-    val guestApplication: Application? = null
+    val guestApplication: Application? = null,
+    val launcherActivityClassName: String? = null
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
@@ -34,8 +35,9 @@ data class BootstrapStageInput(
  */
 data class BootstrapStageOutput(
     val context: BootstrapStageInput,
-    val result: BootstrapResult
+    val result: BootstrapResult,
+    val terminalFailure: Boolean = result.isTerminalFailure
 ) {
     val isTerminalFailure: Boolean
-        get() = result.isTerminalFailure
+        get() = terminalFailure
 }

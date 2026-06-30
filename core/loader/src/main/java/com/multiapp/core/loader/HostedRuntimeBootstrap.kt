@@ -196,21 +196,15 @@ class HostedRuntimeBootstrap(
                 installId = installRecord.packageName
             )
         }
-        val providerRoutingEvidence = providerRoutingOutput.result.evidence
-
-        // Stage 4: Create guest ClassLoader
-        val stage4StartMs = clock()
-        val guestClassLoader: ClassLoader
-        try {
-            guestClassLoader = classLoaderFactory(originApkPath, nativeLibraryDir)
-        } catch (e: Throwable) {
-            val failedResult = BootstrapResult.failed(
-                stage = RuntimeStage.CLASS_LOADER,
-                message = "ClassLoader creation failed: ${e.message}",
-                error = e,
-                durationMs = clock() - stage4StartMs
-            )
-            stageResults.add(failedResult)
+        val classLoaderOutput = ClassLoaderStage(
+            classLoaderFactory = classLoaderFactory,
+            clock = clock
+        ).execute(
+            input = providerRoutingOutput.context,
+            additionalEvidence = providerRoutingOutput.result.evidence
+        )
+        stageResults.add(classLoaderOutput.result)
+        if (classLoaderOutput.isTerminalFailure) {
             return failedHostedResult(
                 instanceId, stageResults,
                 originPackageName = instance.originPackageName,
@@ -218,124 +212,27 @@ class HostedRuntimeBootstrap(
                 installId = installRecord.packageName
             )
         }
-        val stage4DurationMs = clock() - stage4StartMs
-
-        stageResults.add(
-            BootstrapResult.success(
-                stage = RuntimeStage.CLASS_LOADER,
-                message = "Guest ClassLoader created",
-                evidence = listOf(
-                    BootstrapEvidence("classLoaderClass", guestClassLoader.javaClass.name),
-                    BootstrapEvidence("nativeLibraryDir", nativeLibraryDir ?: "")
-                ) + providerRoutingEvidence,
-                durationMs = stage4DurationMs
-            )
-        )
-
-        // Stage 5: Create guest Application
-        val stage5StartMs = clock()
-        val appClassName = applicationClassNameResolver(guestClassLoader, originApkPath)
-        if (appClassName != null) {
-            try {
-                val appClass = guestClassLoader.loadClass(appClassName)
-                val guestApplication = appClass.getDeclaredConstructor().newInstance() as Application
-
-                // Create VirtualContextWrapper for the guest
-                val ctx = hostContext
-                    ?: throw IllegalStateException("hostContext is required for Application creation")
-                val guestContext = VirtualContextWrapper(
-                    base = ctx,
-                    config = VirtualContextConfig(
-                        instanceId = instanceId,
-                        originPackageName = instance.originPackageName,
-                        virtualPackageName = instance.virtualPackageName,
-                        dataDir = instance.dataRoot,
-                        sourceDir = originApkPath,
-                        nativeLibraryDir = nativeLibraryDir,
-                        classLoader = guestClassLoader,
-                        applicationLabel = packageSnapshot.applicationLabel,
-                        packageSnapshot = packageSnapshot
-                    ),
-                    guestClassLoader = guestClassLoader
-                )
-
-                // attachBaseContext (protected method, needs reflection). Resolve from the
-                // concrete class first so test Applications can override the framework stub.
-                val attachMethod = findAttachBaseContextMethod(guestApplication.javaClass)
-                attachMethod.isAccessible = true
-                attachMethod.invoke(guestApplication, guestContext)
-
-                // P0-3 fix: call Application.onCreate() — guest lifecycle must be
-                // fully initialized; previously only attachBaseContext was called.
-                guestApplication.onCreate()
-
-                stageResults.add(
-                    BootstrapResult.success(
-                        stage = RuntimeStage.APPLICATION,
-                        message = "Guest Application created: $appClassName",
-                        evidence = listOf(
-                            BootstrapEvidence("applicationClass", appClassName),
-                            BootstrapEvidence("attached", "true"),
-                            BootstrapEvidence("onCreate", "true")
-                        ),
-                        durationMs = clock() - stage5StartMs
-                    )
-                )
-
-                // Stage 6: Resolve launcher Activity
-                val launcherClassName = resolveLauncherActivityStage(
-                    installRecord, guestClassLoader, instanceId,
-                    instance, originApkPath, guestApplication, stageResults, resolvedPackage
-                )
-
-                return HostedBootstrapResult(
-                    instanceId = instanceId,
-                    installId = installRecord.packageName,
-                    originPackageName = instance.originPackageName,
-                    virtualPackageName = instance.virtualPackageName,
-                    applicationLabel = resolvedPackage?.applicationLabel,
-                    originApkPath = originApkPath,
-                    dataRoot = instance.dataRoot,
-                    guestClassLoader = guestClassLoader,
-                    guestApplication = guestApplication,
-                    installRecord = installRecord,
-                    packageSnapshot = packageSnapshot,
-                    launcherActivityClassName = launcherClassName,
-                    stageResults = stageResults,
-                    summary = stageResults.toSummary(),
-                    success = true,
-                    diagnostics = runDiagnosticsAnalysis(stageResults, originApkPath)
-                )
-            } catch (e: Throwable) {
-                stageResults.add(
-                    BootstrapResult.failed(
-                        stage = RuntimeStage.APPLICATION,
-                        message = "Guest Application creation failed: ${e.message}",
-                        error = e,
-                        durationMs = clock() - stage5StartMs
-                    )
-                )
-            }
-        } else {
-            stageResults.add(
-                BootstrapResult.skipped(
-                    stage = RuntimeStage.APPLICATION,
-                    message = "No Application class name resolved"
-                )
-            )
+        val guestClassLoader = requireNotNull(classLoaderOutput.context.guestClassLoader) {
+            "ClassLoader stage must provide guest ClassLoader after success"
         }
 
-        // P0-3 fix: Application stage failure must cause overall failure.
-        // Previously this path always returned success=true, silently swallowing failures.
+        val applicationOutput = ApplicationStage(
+            hostContext = hostContext,
+            applicationClassNameResolver = applicationClassNameResolver,
+            clock = clock
+        ).execute(classLoaderOutput.context)
+        stageResults.add(applicationOutput.result)
+
+        val launcherActivityOutput = LauncherActivityStage(
+            packageResolver = packageResolver,
+            launcherActivityResolver = launcherActivityResolver,
+            clock = clock
+        ).execute(applicationOutput.context)
+        stageResults.add(launcherActivityOutput.result)
+
         val hasApplicationFailure = stageResults.any {
             it.stage == RuntimeStage.APPLICATION && it.status == BootstrapStatus.FAILED
         }
-
-        // Stage 6: Resolve launcher Activity (even if Application stage failed/skipped)
-        val launcherClassName = resolveLauncherActivityStage(
-            installRecord, guestClassLoader, instanceId,
-            instance, originApkPath, null, stageResults, resolvedPackage
-        )
         val summary = stageResults.toSummary()
 
         return HostedBootstrapResult(
@@ -347,10 +244,10 @@ class HostedRuntimeBootstrap(
             originApkPath = originApkPath,
             dataRoot = instance.dataRoot,
             guestClassLoader = guestClassLoader,
-            guestApplication = null,
+            guestApplication = applicationOutput.context.guestApplication,
             installRecord = installRecord,
             packageSnapshot = packageSnapshot,
-            launcherActivityClassName = launcherClassName,
+            launcherActivityClassName = launcherActivityOutput.context.launcherActivityClassName,
             stageResults = stageResults,
             summary = summary,
             success = !hasApplicationFailure,
@@ -380,107 +277,6 @@ class HostedRuntimeBootstrap(
         packageResolver?.resolve(originApkPath)
     }.getOrNull()
 
-    private fun findAttachBaseContextMethod(startClass: Class<*>): java.lang.reflect.Method {
-        var clazz: Class<*>? = startClass
-        while (clazz != null) {
-            try {
-                return clazz.getDeclaredMethod(
-                    "attachBaseContext",
-                    android.content.Context::class.java
-                )
-            } catch (_: NoSuchMethodException) {
-                clazz = clazz.superclass
-            }
-        }
-        throw NoSuchMethodException("attachBaseContext(Context) not found in Application hierarchy")
-    }
-
-    /**
-     * Stage 6: Resolve the launcher Activity class name from the InstallRecord.
-     *
-     * Adds a LAUNCHER_ACTIVITY stage result and returns the resolved class name (or null).
-     * This is non-terminal: failure only adds a FAILED stage but does not abort the run.
-     */
-    private fun resolveLauncherActivityStage(
-        installRecord: InstallRecord,
-        guestClassLoader: ClassLoader,
-        instanceId: String,
-        instance: com.multiapp.core.model.instance.VirtualInstanceRecord,
-        originApkPath: String,
-        guestApplication: Application?,
-        stageResults: MutableList<BootstrapResult>,
-        resolvedPackage: ResolvedPackage? = null
-    ): String? {
-        val stage6StartMs = clock()
-        val launcherResolution = resolveLauncherActivity(installRecord, originApkPath, resolvedPackage)
-        val launcherClassName = launcherResolution.className
-
-        if (launcherClassName != null) {
-            val loadable = runCatching {
-                guestClassLoader.loadClass(launcherClassName)
-            }.isSuccess
-
-            if (loadable) {
-                stageResults.add(
-                    BootstrapResult.success(
-                        stage = RuntimeStage.LAUNCHER_ACTIVITY,
-                        message = "Launcher Activity resolved: $launcherClassName",
-                        evidence = listOf(
-                            BootstrapEvidence("launcherActivityClass", launcherClassName),
-                            BootstrapEvidence("resolver", launcherResolution.source),
-                            BootstrapEvidence("loadable", "true")
-                        ),
-                        durationMs = clock() - stage6StartMs
-                    )
-                )
-            } else {
-                stageResults.add(
-                    BootstrapResult.failed(
-                        stage = RuntimeStage.LAUNCHER_ACTIVITY,
-                        message = "Launcher Activity class not loadable: $launcherClassName",
-                        evidence = listOf(
-                            BootstrapEvidence("launcherActivityClass", launcherClassName),
-                            BootstrapEvidence("resolver", launcherResolution.source),
-                            BootstrapEvidence("loadable", "false")
-                        ),
-                        durationMs = clock() - stage6StartMs
-                    )
-                )
-                return null
-            }
-        } else {
-            stageResults.add(
-                BootstrapResult.skipped(
-                    stage = RuntimeStage.LAUNCHER_ACTIVITY,
-                    message = "No launcher Activity resolved from manifest or InstallRecord"
-                )
-            )
-        }
-        return launcherClassName
-    }
-
-    private fun resolveLauncherActivity(
-        installRecord: InstallRecord,
-        originApkPath: String,
-        resolvedPackage: ResolvedPackage? = null
-    ): LauncherResolution {
-        val resolvedFromManifest = resolvedPackage?.launcherActivityName ?: runCatching {
-            packageResolver?.resolve(originApkPath)?.launcherActivityName
-        }.getOrNull()
-        if (!resolvedFromManifest.isNullOrBlank()) {
-            return LauncherResolution(resolvedFromManifest, "VirtualPackageResolver")
-        }
-
-        val resolvedFromInstallRecord = runCatching {
-            launcherActivityResolver(installRecord)
-        }.getOrNull()
-        return LauncherResolution(resolvedFromInstallRecord, "InstallRecord")
-    }
-
-    private data class LauncherResolution(
-        val className: String?,
-        val source: String
-    )
     private fun failedHostedResult(
         instanceId: String,
         stageResults: List<BootstrapResult>,
