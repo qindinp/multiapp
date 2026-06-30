@@ -169,6 +169,27 @@ class HostedRuntimeBootstrapTest {
     }
 
     @Test
+    fun `run returns structured config failure when instance id is blank`() {
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(emptyMap()),
+            installRecordStore = FakeInstallRecordStore()
+        )
+
+        val result = bootstrap.run(" ")
+
+        assertFalse(result.success)
+        assertEquals(" ", result.instanceId)
+        assertNull(result.guestClassLoader)
+        assertNull(result.guestApplication)
+        assertEquals(BootstrapStatus.FAILED, result.summary.overallStatus)
+        val configStage = result.stageResults.single()
+        assertEquals(RuntimeStage.CONFIG, configStage.stage)
+        assertEquals(BootstrapStatus.FAILED, configStage.status)
+        assertEquals("Instance not found:  ", configStage.message)
+        assertNotNull(result.diagnostics)
+    }
+
+    @Test
     fun `run returns failure when install record not found`() {
         val bootstrap = HostedRuntimeBootstrap(
             instanceManager = FakeInstanceManager(
@@ -217,6 +238,41 @@ class HostedRuntimeBootstrapTest {
         assertEquals("com.example.app", result.originPackageName)
         assertEquals(apkFile.absolutePath, result.originApkPath)
         assertEquals(BootstrapStatus.SUCCESS, result.summary.overallStatus)
+    }
+
+    @Test
+    fun `run uses InstallRecord originApkPath as classloader APK source`(
+        @TempDir tempDir: File
+    ) {
+        val installRecordApk = File(tempDir, "install-record-origin.apk").apply {
+            writeBytes(byteArrayOf(0x50, 0x4B))
+        }
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        val decoyInstanceApk = File(dataRoot, "base.apk").apply { writeText("not the install artifact") }
+        var capturedClassLoaderApkPath: String? = null
+        val instance = instanceRecord(originPackageName = "com.example.factsource").copy(
+            dataRoot = dataRoot.absolutePath
+        )
+        val installRecord = installRecord(
+            packageName = "com.example.factsource",
+            originApkPath = installRecordApk.absolutePath
+        )
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(mapOf("inst-001" to instance)),
+            installRecordStore = FakeInstallRecordStore(mapOf("com.example.factsource" to installRecord)),
+            classLoaderFactory = { apkPath, _ ->
+                capturedClassLoaderApkPath = apkPath
+                ClassLoader.getSystemClassLoader()
+            }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        assertEquals("com.example.factsource", result.installId)
+        assertEquals(installRecordApk.absolutePath, result.originApkPath)
+        assertEquals(installRecordApk.absolutePath, capturedClassLoaderApkPath)
+        assertNotEquals(decoyInstanceApk.absolutePath, capturedClassLoaderApkPath)
     }
 
     @Test
@@ -638,6 +694,65 @@ class HostedRuntimeBootstrapTest {
         assertEquals("1", evidence["providerAuthorityMapSize"])
         assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
         assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
+    }
+
+    @Test
+    fun `run records slice 3 stage results before classloader evidence`(
+        @TempDir tempDir: File
+    ) {
+        val apkFile = File(tempDir, "example.apk").apply { writeBytes(byteArrayOf(0x50, 0x4B)) }
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        val libDir = File(dataRoot, "lib").apply { mkdirs() }
+        val mockContext: Context = mockk(relaxed = true)
+        every { mockContext.packageName } returns "com.multiapp.app"
+        val packageResolver = object : VirtualPackageResolver {
+            override fun resolve(apkPath: String): ResolvedPackage? {
+                assertEquals(apkFile.absolutePath, apkPath)
+                return ResolvedPackage(
+                    packageName = "com.example.app",
+                    versionCode = 1L,
+                    versionName = "1.0",
+                    targetSdk = 35,
+                    minSdk = 28,
+                    providers = listOf(
+                        ResolvedComponent(
+                            name = "com.example.app.ProbeProvider",
+                            exported = false,
+                            authorities = listOf("com.example.app.probe")
+                        )
+                    )
+                )
+            }
+        }
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(
+                mapOf("inst-001" to instanceRecord().copy(dataRoot = dataRoot.absolutePath))
+            ),
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
+            ),
+            hostContext = mockContext,
+            classLoaderFactory = { _, _ -> ClassLoader.getSystemClassLoader() },
+            applicationClassNameResolver = { _, _ -> null },
+            packageResolver = packageResolver
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val nativeStage = result.stageResults.first { it.stage == RuntimeStage.NATIVE_LIBS }
+        assertEquals(BootstrapStatus.SUCCESS, nativeStage.status)
+        assertEquals(libDir.absolutePath, nativeStage.evidence.find { it.key == "nativeLibraryDir" }?.value)
+        val snapshotStage = result.stageResults.first { it.stage == RuntimeStage.RESOURCES }
+        assertEquals(BootstrapStatus.SUCCESS, snapshotStage.status)
+        assertEquals("1", snapshotStage.evidence.find { it.key == "providerCount" }?.value)
+        val providerStage = result.stageResults.first { it.stage == RuntimeStage.GUEST_CONTEXT }
+        assertEquals(BootstrapStatus.SUCCESS, providerStage.status)
+        assertEquals("SKIPPED", providerStage.evidence.find { it.key == "providerHookInstallStatus" }?.value)
+        assertEquals("PROFILE_DISABLED", providerStage.evidence.find { it.key == "providerHookInstallReason" }?.value)
+        val classLoaderStage = result.stageResults.first { it.stage == RuntimeStage.CLASS_LOADER }
+        assertEquals(libDir.absolutePath, classLoaderStage.evidence.find { it.key == "nativeLibraryDir" }?.value)
+        assertEquals("true", classLoaderStage.evidence.find { it.key == "providerRoutingEnabled" }?.value)
     }
 
     @Test

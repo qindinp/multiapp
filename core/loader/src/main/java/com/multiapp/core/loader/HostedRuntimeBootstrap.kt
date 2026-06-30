@@ -97,115 +97,106 @@ class HostedRuntimeBootstrap(
         val stageResults = mutableListOf<BootstrapResult>()
         val overallStartMs = clock()
 
-        // Stage 1: Load instance record
-        val stage1StartMs = clock()
-        val instance = runCatching {
-            instanceManager.getInstance(instanceId)
-        }.getOrNull()
-        val stage1DurationMs = clock() - stage1StartMs
-
-        if (instance == null) {
-            val failedResult = BootstrapResult.failed(
-                stage = RuntimeStage.CONFIG,
-                message = "Instance not found: $instanceId",
-                durationMs = stage1DurationMs
+        if (instanceId.isBlank()) {
+            val configStartMs = clock()
+            stageResults.add(
+                BootstrapResult.failed(
+                    stage = RuntimeStage.CONFIG,
+                    message = "Instance not found: $instanceId",
+                    durationMs = clock() - configStartMs
+                )
             )
-            stageResults.add(failedResult)
             return failedHostedResult(instanceId, stageResults)
         }
 
-        stageResults.add(
-            BootstrapResult.success(
-                stage = RuntimeStage.CONFIG,
-                message = "Instance loaded: ${instance.originPackageName}",
-                evidence = listOf(
-                    BootstrapEvidence("instanceId", instanceId),
-                    BootstrapEvidence("originPackageName", instance.originPackageName)
-                ),
-                durationMs = stage1DurationMs
-            )
-        )
-
-        // Stage 2: Load install record
-        val stage2StartMs = clock()
-        val installRecord = runCatching {
-            installRecordStore.load(instance.originPackageName)
-        }.getOrNull()
-        val stage2DurationMs = clock() - stage2StartMs
-
-        if (installRecord == null) {
-            val failedResult = BootstrapResult.failed(
-                stage = RuntimeStage.PACKAGE_METADATA,
-                message = "Install record not found: ${instance.originPackageName}",
-                durationMs = stage2DurationMs
-            )
-            stageResults.add(failedResult)
-            return failedHostedResult(instanceId, stageResults, originPackageName = instance.originPackageName)
+        val configOutput = ConfigStage(instanceManager, clock)
+            .execute(BootstrapStageInput(instanceId = instanceId))
+        stageResults.add(configOutput.result)
+        if (configOutput.isTerminalFailure) {
+            return failedHostedResult(instanceId, stageResults)
         }
 
-        stageResults.add(
-            BootstrapResult.success(
-                stage = RuntimeStage.PACKAGE_METADATA,
-                message = "Install record loaded: ${installRecord.packageName}",
-                evidence = listOf(
-                    BootstrapEvidence("packageName", installRecord.packageName),
-                    BootstrapEvidence("versionName", installRecord.versionName)
-                ),
-                durationMs = stage2DurationMs
+        val installRecordOutput = InstallRecordStage(installRecordStore, clock)
+            .execute(configOutput.context)
+        stageResults.add(installRecordOutput.result)
+        if (installRecordOutput.isTerminalFailure) {
+            return failedHostedResult(
+                instanceId = instanceId,
+                stageResults = stageResults,
+                originPackageName = configOutput.context.instance?.originPackageName
             )
-        )
+        }
 
-        // Stage 3: Resolve origin APK
-        val stage3StartMs = clock()
-        val originApkPath = installRecord.originApkPath
-        val apkExists = runCatching {
-            File(originApkPath).exists()
-        }.getOrDefault(false)
-        val stage3DurationMs = clock() - stage3StartMs
-
-        if (!apkExists) {
-            val failedResult = BootstrapResult.failed(
-                stage = RuntimeStage.ORIGIN_APK,
-                message = "Origin APK not found: $originApkPath",
-                durationMs = stage3DurationMs
-            )
-            stageResults.add(failedResult)
+        val originApkOutput = OriginApkStage(clock = clock)
+            .execute(installRecordOutput.context)
+        stageResults.add(originApkOutput.result)
+        val instance = requireNotNull(originApkOutput.context.instance) {
+            "Config stage must provide instance before resolving origin APK"
+        }
+        val installRecord = requireNotNull(originApkOutput.context.installRecord) {
+            "Install record stage must provide install record before resolving origin APK"
+        }
+        if (originApkOutput.isTerminalFailure) {
             return failedHostedResult(
                 instanceId, stageResults,
                 originPackageName = instance.originPackageName,
                 installId = installRecord.packageName
             )
         }
-
-        stageResults.add(
-            BootstrapResult.success(
-                stage = RuntimeStage.ORIGIN_APK,
-                message = "Origin APK resolved: $originApkPath",
-                evidence = listOf(
-                    BootstrapEvidence("originApkPath", originApkPath)
-                ),
-                durationMs = stage3DurationMs
-            )
-        )
-
-        val nativeLibraryDir = resolveNativeLibraryDir(instance.dataRoot)
-        val resolvedPackage = resolvePackageMetadata(originApkPath)
-        val packageSnapshot = VirtualPackageSnapshotFactory.create(
-            instance = instance,
-            installRecord = installRecord,
-            resolvedPackage = resolvedPackage,
-            nativeLibraryDir = nativeLibraryDir
-        )
-        VirtualPackageRegistry.global.register(packageSnapshot)
-        val providerRoutingPlan = VirtualProviderRoutingPlanFactory().create(
-            snapshot = packageSnapshot,
-            hostPackageName = hostContext?.packageName
-        )
-        val providerHookInstallResult = if (providerHookInstallEnabled) {
-            providerHookInstaller.install(providerRoutingPlan)
-        } else {
-            VirtualProviderHookInstallResult.Skipped(providerRoutingPlan, "PROFILE_DISABLED")
+        val originApkPath = requireNotNull(originApkOutput.context.originApkPath) {
+            "Origin APK stage must provide origin APK path after success"
         }
+
+        val nativeLibrariesOutput = NativeLibrariesStage(
+            nativeLibraryDirResolver = { dataRoot -> resolveNativeLibraryDir(dataRoot) },
+            clock = clock
+        ).execute(originApkOutput.context)
+        stageResults.add(nativeLibrariesOutput.result)
+        if (nativeLibrariesOutput.isTerminalFailure) {
+            return failedHostedResult(
+                instanceId, stageResults,
+                originPackageName = instance.originPackageName,
+                originApkPath = originApkPath,
+                installId = installRecord.packageName
+            )
+        }
+        val nativeLibraryDir = nativeLibrariesOutput.context.nativeLibraryDir
+
+        val packageSnapshotOutput = PackageSnapshotStage(
+            packageMetadataResolver = { apkPath -> resolvePackageMetadata(apkPath) },
+            packageRegistry = VirtualPackageRegistry.global,
+            clock = clock
+        ).execute(nativeLibrariesOutput.context)
+        stageResults.add(packageSnapshotOutput.result)
+        if (packageSnapshotOutput.isTerminalFailure) {
+            return failedHostedResult(
+                instanceId, stageResults,
+                originPackageName = instance.originPackageName,
+                originApkPath = originApkPath,
+                installId = installRecord.packageName
+            )
+        }
+        val resolvedPackage = packageSnapshotOutput.context.resolvedPackage
+        val packageSnapshot = requireNotNull(packageSnapshotOutput.context.packageSnapshot) {
+            "Package snapshot stage must provide package snapshot after success"
+        }
+
+        val providerRoutingOutput = ProviderRoutingStage(
+            hostPackageName = hostContext?.packageName,
+            providerHookInstallEnabled = providerHookInstallEnabled,
+            providerHookInstaller = providerHookInstaller,
+            clock = clock
+        ).execute(packageSnapshotOutput.context)
+        stageResults.add(providerRoutingOutput.result)
+        if (providerRoutingOutput.isTerminalFailure) {
+            return failedHostedResult(
+                instanceId, stageResults,
+                originPackageName = instance.originPackageName,
+                originApkPath = originApkPath,
+                installId = installRecord.packageName
+            )
+        }
+        val providerRoutingEvidence = providerRoutingOutput.result.evidence
 
         // Stage 4: Create guest ClassLoader
         val stage4StartMs = clock()
@@ -236,7 +227,7 @@ class HostedRuntimeBootstrap(
                 evidence = listOf(
                     BootstrapEvidence("classLoaderClass", guestClassLoader.javaClass.name),
                     BootstrapEvidence("nativeLibraryDir", nativeLibraryDir ?: "")
-                ) + providerRoutingPlan.toEvidence() + providerHookInstallResult.toEvidence(),
+                ) + providerRoutingEvidence,
                 durationMs = stage4DurationMs
             )
         )
