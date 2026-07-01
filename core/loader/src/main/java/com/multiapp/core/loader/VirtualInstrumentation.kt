@@ -7,16 +7,18 @@ import android.content.Intent
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
+import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
-class VirtualInstrumentation(
-    private val base: Instrumentation
+open class VirtualInstrumentation(
+    protected val base: Instrumentation
 ) : Instrumentation() {
 
     private val hostedRuntimeCache = ConcurrentHashMap<String, HostedActivityRuntime>()
@@ -24,6 +26,7 @@ class VirtualInstrumentation(
     companion object {
         private const val TAG = "VirtualInstrumentation"
         private const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
+        private const val EXTRA_VIRTUAL_ACTIVITY_TOKEN = "multiapp.virtualActivityToken"
         private const val EXTRA_GUEST_ACTIVITY_CLASS_NAME = "multiapp.guestActivityClassName"
         private const val EXTRA_HOST_PACKAGE_NAME = "multiapp.hostPackageName"
         private const val EXTRA_ORIGINAL_GUEST_INTENT = "multiapp.originalGuestIntent"
@@ -31,6 +34,7 @@ class VirtualInstrumentation(
         private const val INSTALLS_DIR = "installs"
         private const val INSTANCE_DATA_DIR = "instance_data"
         private const val EVIDENCE_DIR = "hosted_launch_evidence"
+        private const val TOKEN_EVIDENCE_PREFIX_LENGTH = 8
     }
 
     override fun newActivity(
@@ -47,6 +51,8 @@ class VirtualInstrumentation(
         Log.d(TAG, "callActivityOnCreate activity=${activity.javaClass.name}")
         injectHostedActivityContextIfNeeded(activity)
         base.callActivityOnCreate(activity, icicle)
+        writeLifecycleEvidence(activity, "onCreate")
+        ensureActivityResultBaselineEvidence(activity)
     }
 
     override fun callActivityOnCreate(
@@ -57,7 +63,54 @@ class VirtualInstrumentation(
         Log.d(TAG, "callActivityOnCreate persistent activity=${activity.javaClass.name}")
         injectHostedActivityContextIfNeeded(activity)
         base.callActivityOnCreate(activity, icicle, persistentState)
+        writeLifecycleEvidence(activity, "onCreate")
+        ensureActivityResultBaselineEvidence(activity)
     }
+
+    override fun callActivityOnStart(activity: Activity) {
+        base.callActivityOnStart(activity)
+        writeLifecycleEvidence(activity, "onStart")
+    }
+
+    override fun callActivityOnResume(activity: Activity) {
+        base.callActivityOnResume(activity)
+        writeLifecycleEvidence(activity, "onResume")
+    }
+
+    override fun callActivityOnPause(activity: Activity) {
+        writeLifecycleEvidence(activity, "onPause")
+        base.callActivityOnPause(activity)
+    }
+
+    override fun callActivityOnStop(activity: Activity) {
+        writeLifecycleEvidence(activity, "onStop")
+        base.callActivityOnStop(activity)
+    }
+
+    override fun callActivityOnDestroy(activity: Activity) {
+        writeLifecycleEvidence(activity, "onDestroy")
+        markActivityFinishedIfNeeded(activity)
+        base.callActivityOnDestroy(activity)
+    }
+
+    override fun callActivityOnNewIntent(activity: Activity, intent: Intent) {
+        dispatchHostedNewIntent(activity, intent) { guestIntent ->
+            base.callActivityOnNewIntent(activity, guestIntent)
+        }
+    }
+
+    protected fun dispatchHostedNewIntent(
+        activity: Activity,
+        intent: Intent,
+        callBase: (Intent) -> Unit
+    ) {
+        val guestIntent = buildHostedNewIntent(activity, intent)
+        callBase(guestIntent)
+        activity.setIntent(guestIntent)
+        writeLifecycleEvidence(activity, "onNewIntent")
+        writeNewIntentEvidence(activity, guestIntent)
+    }
+
 
     @Suppress("unused")
     fun execStartActivity(
@@ -286,7 +339,9 @@ class VirtualInstrumentation(
     private fun buildGuestActivityIntent(
         proxyIntent: Intent,
         instanceId: String,
-        guestActivityClassName: String
+        guestActivityClassName: String,
+        virtualActivityToken: String? = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN),
+        hostPackageName: String? = proxyIntent.getStringExtra(EXTRA_HOST_PACKAGE_NAME)
     ): Intent {
         val guestIntent = proxyIntent.getParcelableExtra<Intent>(EXTRA_ORIGINAL_GUEST_INTENT)
             ?.let { Intent(it) }
@@ -294,10 +349,34 @@ class VirtualInstrumentation(
         return guestIntent.apply {
             putExtra(EXTRA_INSTANCE_ID, instanceId)
             putExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME, guestActivityClassName)
-            proxyIntent.getStringExtra(EXTRA_HOST_PACKAGE_NAME)?.let { hostPackageName ->
-                putExtra(EXTRA_HOST_PACKAGE_NAME, hostPackageName)
+            virtualActivityToken?.takeIf { it.isNotBlank() }?.let { token ->
+                putExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN, token)
+            }
+            hostPackageName?.takeIf { it.isNotBlank() }?.let { packageName ->
+                putExtra(EXTRA_HOST_PACKAGE_NAME, packageName)
             }
         }
+    }
+
+    private fun buildHostedNewIntent(activity: Activity, proxyIntent: Intent): Intent {
+        val currentIntent = activity.intent
+        val instanceId = proxyIntent.getStringExtra(EXTRA_INSTANCE_ID)
+            ?: currentIntent?.getStringExtra(EXTRA_INSTANCE_ID)
+            ?: return proxyIntent
+        val guestActivityClassName = proxyIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME)
+            ?: currentIntent?.getStringExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME)
+            ?: return proxyIntent
+        val virtualActivityToken = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+            ?: currentIntent?.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+        val hostPackageName = proxyIntent.getStringExtra(EXTRA_HOST_PACKAGE_NAME)
+            ?: currentIntent?.getStringExtra(EXTRA_HOST_PACKAGE_NAME)
+        return buildGuestActivityIntent(
+            proxyIntent = proxyIntent,
+            instanceId = instanceId,
+            guestActivityClassName = guestActivityClassName,
+            virtualActivityToken = virtualActivityToken,
+            hostPackageName = hostPackageName
+        )
     }
 
     private fun createHostedRuntime(instanceId: String): HostedActivityRuntime {
@@ -517,7 +596,7 @@ class VirtualInstrumentation(
                     "reason=$reason",
                     "intentAction=${intent.action.orEmpty()}",
                     "intentComponent=${intent.component?.flattenToShortString().orEmpty()}",
-                    "intentData=${intent.dataString.orEmpty()}"
+                    "intentData=${intent.dataString?.redactUriForEvidence().orEmpty()}"
                 ).joinToString("\n")
             )
         }.onFailure { error ->
@@ -551,6 +630,172 @@ class VirtualInstrumentation(
     private fun currentFilesDirOrNull(): File? = runCatching {
         ActivityThreadCompat.currentApplication().filesDir
     }.getOrNull()
+
+    private fun writeLifecycleEvidence(activity: Activity, event: String) {
+        val activityIdentity = activity.hostedActivityIdentity() ?: return
+        val record = VirtualActivityRecordManager.global.resolve(activityIdentity.token)
+        val reason = when {
+            activityIdentity.token.isBlank() -> "TOKEN_MISSING"
+            record == null -> "ACTIVITY_RECORD_MISSING"
+            else -> ""
+        }
+        writeEvidenceLines(
+            instanceId = activityIdentity.instanceId,
+            fileName = HostedActivityEvidenceFiles.lifecycle(activityIdentity.instanceId),
+            lines = listOf(
+                "status=${if (reason.isBlank()) "GUEST_ACTIVITY_LIFECYCLE" else "GUEST_ACTIVITY_LIFECYCLE_UNLINKED"}",
+                "stage=ACTIVITY_LIFECYCLE",
+                "event=$event",
+                "instanceId=${activityIdentity.instanceId}",
+                "guestActivityClassName=${activityIdentity.guestActivityClassName}",
+                "token=${activityIdentity.token.redactTokenForEvidence()}",
+                "activityRecordFound=${record != null}",
+                "activityRecordState=${record?.state?.name.orEmpty()}",
+                "isFinishing=${activity.isFinishing}",
+                "taskId=${activity.taskId}",
+                "reason=$reason"
+            ),
+            append = true
+        )
+    }
+
+    private fun writeNewIntentEvidence(activity: Activity, intent: Intent) {
+        val activityIdentity = activity.hostedActivityIdentity() ?: return
+        val pending = VirtualActivityRecordManager.global.consumePendingNewIntent(activityIdentity.token)
+        val reason = when {
+            activityIdentity.token.isBlank() -> "TOKEN_MISSING"
+            pending == null -> "NO_PENDING_NEW_INTENT_RECORD"
+            else -> ""
+        }
+        writeEvidenceLines(
+            instanceId = activityIdentity.instanceId,
+            fileName = HostedActivityEvidenceFiles.newIntent(activityIdentity.instanceId),
+            lines = listOf(
+                "status=${if (reason.isBlank()) "GUEST_ACTIVITY_ON_NEW_INTENT" else "GUEST_ACTIVITY_ON_NEW_INTENT_UNLINKED"}",
+                "stage=ACTIVITY_NEW_INTENT",
+                "instanceId=${activityIdentity.instanceId}",
+                "guestActivityClassName=${activityIdentity.guestActivityClassName}",
+                "token=${activityIdentity.token.redactTokenForEvidence()}",
+                "pendingNewIntentConsumed=${pending != null}",
+                "pendingAction=${pending?.dataIntent?.action.orEmpty()}",
+                "pendingDataUri=${pending?.dataIntent?.dataUri?.redactUriForEvidence().orEmpty()}",
+                "pendingFlags=${pending?.intentFlags ?: 0}",
+                "sourceToken=${pending?.sourceToken?.redactTokenForEvidence().orEmpty()}",
+                "intentAction=${intent.action.orEmpty()}",
+                "intentDataUri=${intent.dataString?.redactUriForEvidence().orEmpty()}",
+                "reason=$reason"
+            )
+        )
+    }
+
+    private fun ensureActivityResultBaselineEvidence(activity: Activity) {
+        val activityIdentity = activity.hostedActivityIdentity() ?: return
+        writeActivityResultEvidence(
+            activity = activity,
+            requestCode = -1,
+            resultCode = 0,
+            data = null,
+            consumedResult = null,
+            unsupportedReason = "HOST_PROXY_RESULT_ROUTING_NOT_IMPLEMENTED"
+        )
+    }
+
+    private fun writeActivityResultEvidence(
+        activity: Activity,
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?,
+        consumedResult: VirtualActivityResult?,
+        unsupportedReason: String
+    ) {
+        val activityIdentity = activity.hostedActivityIdentity() ?: return
+        val isSupported = unsupportedReason.isBlank() && consumedResult != null
+        val resolvedUnsupportedReason = when {
+            isSupported -> ""
+            unsupportedReason.isNotBlank() -> unsupportedReason
+            else -> "NO_VIRTUAL_RESULT_RECORD"
+        }
+        writeEvidenceLines(
+            instanceId = activityIdentity.instanceId,
+            fileName = HostedActivityEvidenceFiles.result(activityIdentity.instanceId),
+            lines = listOf(
+                "status=${if (isSupported) "ACTIVITY_RESULT_DELIVERED" else "ACTIVITY_RESULT_UNSUPPORTED"}",
+                "stage=ACTIVITY_RESULT_BASELINE",
+                "instanceId=${activityIdentity.instanceId}",
+                "guestActivityClassName=${activityIdentity.guestActivityClassName}",
+                "token=${activityIdentity.token.redactTokenForEvidence()}",
+                "resultSupported=$isSupported",
+                "requestCode=$requestCode",
+                "resultCode=$resultCode",
+                "virtualResultConsumed=${consumedResult != null}",
+                "virtualResultCode=${consumedResult?.resultCode ?: 0}",
+                "dataAction=${data?.action.orEmpty()}",
+                "dataUri=${data?.dataString?.redactUriForEvidence().orEmpty()}",
+                "unsupportedReason=$resolvedUnsupportedReason"
+            )
+        )
+    }
+
+
+    private fun markActivityFinishedIfNeeded(activity: Activity) {
+        if (!activity.isFinishing) return
+        val token = activity.hostedActivityIdentity()?.token ?: return
+        VirtualActivityRecordManager.global.finish(token)
+    }
+
+    private fun Activity.hostedActivityIdentity(): HostedActivityIdentity? {
+        val currentIntent = intent ?: return null
+        val instanceId = currentIntent.getStringExtra(EXTRA_INSTANCE_ID)?.takeIf { it.isNotBlank() } ?: return null
+        val guestActivityClassName = currentIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val token = currentIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        return HostedActivityIdentity(
+            instanceId = instanceId,
+            guestActivityClassName = guestActivityClassName,
+            token = token
+        )
+    }
+
+    private fun writeEvidenceLines(
+        instanceId: String,
+        fileName: String,
+        lines: List<String>,
+        append: Boolean = false
+    ) {
+        runCatching {
+            val evidenceDir = File(ActivityThreadCompat.currentApplication().filesDir, EVIDENCE_DIR).apply { mkdirs() }.canonicalFile
+            val file = File(evidenceDir, fileName).canonicalFile
+            require(file.parentFile == evidenceDir) { "Activity evidence path escapes evidence dir" }
+            val text = lines.joinToString("\n") { sanitizeEvidenceLine(it) }
+            if (append && file.isFile) {
+                file.appendText("\n---\n$text")
+            } else {
+                file.writeText(text)
+            }
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write Activity lifecycle evidence for instanceId=$instanceId", error)
+        }
+    }
+
+
+    private fun sanitizeEvidenceLine(value: String): String = EvidenceSanitizer.sanitizeEvidenceLine(value)
+
+    private fun String.redactUriForEvidence(): String = EvidenceSanitizer.redactUriForEvidence(this)
+
+    private fun String.redactTokenForEvidence(): String {
+        if (isBlank()) return ""
+        if (length <= TOKEN_EVIDENCE_PREFIX_LENGTH) return "<redacted>"
+        return take(TOKEN_EVIDENCE_PREFIX_LENGTH) + "...<redacted>"
+    }
+
+    private data class HostedActivityIdentity(
+        val instanceId: String,
+        val guestActivityClassName: String,
+        val token: String
+    )
 
     private fun writeActivityContextEvidence(
         filesDir: File,

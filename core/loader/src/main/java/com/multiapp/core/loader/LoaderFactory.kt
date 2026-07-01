@@ -24,15 +24,12 @@ import java.lang.reflect.Field
 import java.util.zip.ZipFile
 
 /**
- * 【最小 POC 骨架】LoaderFactory
+ * Legacy Stub transitional loader.
  *
- * 只验证核心链路：Stub 启动 → 替换 ClassLoader → 原始 Application 创建成功
- *
- * 剥离所有非必要依赖：NativeHook、HookEngine、AntiDetection、IdentityHook、
- * SignatureBypass、ConfigEncryptor、StealthClassLoader 等。
- *
- * 日志用 android.util.Log 而非 Timber（避免依赖）。
- * 配置用简单正则提取（避免 Gson 依赖）。
+ * This class remains as a compatibility/evidence path for existing Stub-based
+ * instances. It is not the final v2 hosted container runtime and should not grow
+ * new QQReader-specific or protected-app baseline behavior. New runtime behavior
+ * belongs in explicit bootstrap stages, profiles, or virtual service modules.
  */
 class LoaderFactory : AppComponentFactory() {
 
@@ -2166,17 +2163,20 @@ class LoaderFactory : AppComponentFactory() {
 
         // ── QQReader 文件/Provider/协议诊断 hook ──
         try {
-            if (lsplantOk) {
-                val fileDiagOk = com.multiapp.core.hook.QqReaderFileJavaDiag.install(hookEngine)
-                logD("  QQReader java file diag installed: $fileDiagOk")
-                val providerDiagOk = com.multiapp.core.hook.QqReaderProviderDiag.install(hookEngine, guestCl)
-                logD("  QQReader provider diag installed: $providerDiagOk")
-                val protocolDiagOk = com.multiapp.core.hook.QqReaderProtocolDiag.install(hookEngine, guestCl)
-                logD("  QQReader protocol diag installed: $protocolDiagOk")
-                val eqctCompatOk = com.multiapp.core.hook.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
-                logD("  QQReader eqct plaintext compat installed: $eqctCompatOk")
-                val loginDiagOk = com.multiapp.core.hook.QqReaderYwLoginJavaDiag.install(hookEngine, guestCl)
-                logD("  QQReader YWLogin java diag installed: $loginDiagOk")
+            val diagnosticsGate = QqReaderProfile.diagnosticsGate(
+                packageName = config.originalPkg,
+                cloneProfile = config.cloneProfile,
+                lsplantOk = lsplantOk,
+                explicitDiagnosticsEnabled = isTruthyProperty("debug.multiapp.qqreader.diagnostics", false)
+            )
+            logD("  QQReader diagnostics gate: allowed=${diagnosticsGate.allowed} reason=${diagnosticsGate.reason}")
+            if (diagnosticsGate.allowed) {
+                val diag = QqReaderProfile.installDiagnosticHooks(hookEngine, guestCl)
+                logD("  QQReader java file diag installed: ${diag.fileDiag}")
+                logD("  QQReader provider diag installed: ${diag.providerDiag}")
+                logD("  QQReader protocol diag installed: ${diag.protocolDiag}")
+                logD("  QQReader eqct plaintext compat installed: ${diag.eqctCompat}")
+                logD("  QQReader YWLogin java diag installed: ${diag.loginDiag}")
             }
         } catch (e: Throwable) {
             logD("  QQReader diag hooks skipped: ${e.javaClass.simpleName}: ${e.message}")
@@ -2693,17 +2693,23 @@ class LoaderFactory : AppComponentFactory() {
 
                 logD("  preloadPackerLib: keep ReaderApplication.initLoginSDK and Fock.sign original")
                 try {
-                    if (lsplantOk) {
-                        val fileDiagOk = com.multiapp.core.hook.QqReaderFileJavaDiag.install(hookEngine)
-                        logD("  preloadPackerLib: QQReader java file diag installed: $fileDiagOk")
-                        val providerDiagOk = com.multiapp.core.hook.QqReaderProviderDiag.install(hookEngine, guestCl)
-                        logD("  preloadPackerLib: QQReader provider diag installed: $providerDiagOk")
-                        val protocolDiagOk = com.multiapp.core.hook.QqReaderProtocolDiag.install(hookEngine, guestCl)
-                        logD("  preloadPackerLib: QQReader protocol diag installed: $protocolDiagOk")
-                        val eqctCompatOk = com.multiapp.core.hook.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
-                        logD("  preloadPackerLib: QQReader eqct plaintext compat installed: $eqctCompatOk")
-                        val loginDiagOk = com.multiapp.core.hook.QqReaderYwLoginJavaDiag.install(hookEngine, guestCl)
-                        logD("  preloadPackerLib: QQReader YWLogin java diag installed: $loginDiagOk")
+                    val diagnosticsGate = QqReaderProfile.diagnosticsGate(
+                        packageName = currentConfig?.originalPkg,
+                        cloneProfile = currentConfig?.cloneProfile,
+                        lsplantOk = lsplantOk,
+                        explicitDiagnosticsEnabled = isTruthyProperty("debug.multiapp.qqreader.diagnostics", false)
+                    )
+                    logD(
+                        "  preloadPackerLib: QQReader diagnostics gate: " +
+                            "allowed=${diagnosticsGate.allowed} reason=${diagnosticsGate.reason}"
+                    )
+                    if (diagnosticsGate.allowed) {
+                        val diag = QqReaderProfile.installDiagnosticHooks(hookEngine, guestCl)
+                        logD("  preloadPackerLib: QQReader java file diag installed: ${diag.fileDiag}")
+                        logD("  preloadPackerLib: QQReader provider diag installed: ${diag.providerDiag}")
+                        logD("  preloadPackerLib: QQReader protocol diag installed: ${diag.protocolDiag}")
+                        logD("  preloadPackerLib: QQReader eqct plaintext compat installed: ${diag.eqctCompat}")
+                        logD("  preloadPackerLib: QQReader YWLogin java diag installed: ${diag.loginDiag}")
                     }
                 } catch (e: Throwable) {
                     logD("  preloadPackerLib: QQReader java file diag skipped: ${e.javaClass.simpleName}: ${e.message}")

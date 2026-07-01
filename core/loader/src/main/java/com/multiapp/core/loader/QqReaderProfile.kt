@@ -3,16 +3,11 @@ package com.multiapp.core.loader
 import android.util.Log
 
 /**
- * QQ Reader 兼容配置 — 集中管理 QQ 阅读器应用的 hook 和兼容逻辑。
+ * Legacy QQ Reader diagnostic/compatibility profile.
  *
- * 从 LoaderFactory.installAppSpecificPostLoadHooks 提取：
- * - ShortcutManager.cihai() 跳过快捷方式创建（icon 资源找不到会崩溃）
- * - ReaderApplication.initPushSDK() 跳过推送初始化（YWPushSDK Bundle NPE）
- * - Pangle 广告 SDK (ZeusPlatformUtils.initZeus) 跳过初始化
- * - QQReader 文件/Provider/协议诊断 hook
- * - QQReader eqct plaintext 兼容
- *
- * 所有 hook 使用 LSPlant（通过 HookEngine），需要 lsplantOk=true。
+ * Protected baseline must not enable these hooks by default. QQ Reader should
+ * normally run through CloneProfile.NORMAL with protected baseline policy; these
+ * LSPlant-backed hooks are only for explicit legacy/diagnostic comparison.
  */
 object QqReaderProfile {
 
@@ -37,18 +32,30 @@ object QqReaderProfile {
                 eqctCompatInstalled || loginDiagInstalled
     }
 
+    data class DiagnosticsGate(
+        val allowed: Boolean,
+        val reason: String,
+        val protectedPackage: Boolean,
+        val explicitDiagnosticsEnabled: Boolean,
+        val lsplantReady: Boolean
+    )
+
     /**
-     * 安装所有 QQReader 兼容 hook。
+     * Installs explicit legacy/diagnostic QQReader hooks.
      *
-     * @param guestCl guest ClassLoader（加载原始 APK 类）
-     * @param hookEngine HookEngine 实例
-     * @param lsplantOk LSPlant 是否初始化成功
-     * @return hook 安装结果
+     * This must remain gated by profile/policy and must not be treated as the
+     * default protected-app startup path.
      */
     fun installAll(
         guestCl: ClassLoader,
         hookEngine: com.multiapp.core.hook.HookEngine,
-        lsplantOk: Boolean
+        lsplantOk: Boolean,
+        diagnosticsGate: DiagnosticsGate = diagnosticsGate(
+            packageName = null,
+            cloneProfile = null,
+            lsplantOk = lsplantOk,
+            explicitDiagnosticsEnabled = false
+        )
     ): HookResult {
         var result = HookResult()
 
@@ -56,7 +63,7 @@ object QqReaderProfile {
         result = result.copy(pushHooked = installPushHook(guestCl, hookEngine, lsplantOk))
         result = result.copy(pangleHooked = installPangleHook(guestCl, hookEngine, lsplantOk))
 
-        if (lsplantOk) {
+        if (diagnosticsGate.allowed) {
             val diag = installDiagnosticHooks(hookEngine, guestCl)
             result = result.copy(
                 fileDiagInstalled = diag.fileDiag,
@@ -65,6 +72,8 @@ object QqReaderProfile {
                 eqctCompatInstalled = diag.eqctCompat,
                 loginDiagInstalled = diag.loginDiag
             )
+        } else {
+            Log.d(TAG, "QQReader diagnostics skipped by gate: ${diagnosticsGate.reason}")
         }
 
         Log.d(TAG, "Hook result: $result")
@@ -72,7 +81,7 @@ object QqReaderProfile {
     }
 
     /**
-     * 跳过 ShortcutManager.cihai() — icon 资源找不到会崩溃。
+     * Legacy diagnostic hook for ShortcutManager.cihai; not baseline behavior.
      */
     fun installShortcutHook(
         guestCl: ClassLoader,
@@ -102,7 +111,7 @@ object QqReaderProfile {
     }
 
     /**
-     * 跳过 ReaderApplication.initPushSDK() — YWPushSDK Bundle NPE。
+     * Legacy diagnostic hook for ReaderApplication.initPushSDK; not baseline behavior.
      */
     fun installPushHook(
         guestCl: ClassLoader,
@@ -132,7 +141,7 @@ object QqReaderProfile {
     }
 
     /**
-     * 跳过 Pangle 广告 SDK (ZeusPlatformUtils.initZeus) 初始化。
+     * Legacy diagnostic hook for Pangle init; not baseline behavior.
      */
     fun installPangleHook(
         guestCl: ClassLoader,
@@ -175,7 +184,8 @@ object QqReaderProfile {
     )
 
     /**
-     * 安装 QQReader 文件/Provider/协议诊断 hook 和 eqct plaintext 兼容。
+     * Installs explicit QQReader diagnostics; protected baseline keeps this
+     * disabled unless explicitly requested.
      */
     fun installDiagnosticHooks(
         hookEngine: com.multiapp.core.hook.HookEngine,
@@ -214,5 +224,44 @@ object QqReaderProfile {
     fun isQqReaderPackage(packageName: String?): Boolean {
         return packageName == "com.qq.reader" ||
             packageName?.startsWith("com.qq.reader.") == true
+    }
+
+    fun diagnosticsGate(
+        packageName: String?,
+        cloneProfile: String?,
+        lsplantOk: Boolean,
+        explicitDiagnosticsEnabled: Boolean
+    ): DiagnosticsGate {
+        val protectedPackage = isQqReaderPackage(packageName) || cloneProfile == "QQ_READER_SPECIAL"
+        return when {
+            !protectedPackage -> DiagnosticsGate(
+                allowed = false,
+                reason = "NOT_QQ_READER_PROFILE",
+                protectedPackage = false,
+                explicitDiagnosticsEnabled = explicitDiagnosticsEnabled,
+                lsplantReady = lsplantOk
+            )
+            !explicitDiagnosticsEnabled -> DiagnosticsGate(
+                allowed = false,
+                reason = "EXPLICIT_DIAGNOSTICS_DISABLED",
+                protectedPackage = true,
+                explicitDiagnosticsEnabled = false,
+                lsplantReady = lsplantOk
+            )
+            !lsplantOk -> DiagnosticsGate(
+                allowed = false,
+                reason = "LSPLANT_NOT_READY",
+                protectedPackage = true,
+                explicitDiagnosticsEnabled = true,
+                lsplantReady = false
+            )
+            else -> DiagnosticsGate(
+                allowed = true,
+                reason = "ALLOWED",
+                protectedPackage = true,
+                explicitDiagnosticsEnabled = true,
+                lsplantReady = true
+            )
+        }
     }
 }

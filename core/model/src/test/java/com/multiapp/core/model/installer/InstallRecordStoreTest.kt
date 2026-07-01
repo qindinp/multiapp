@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -132,6 +133,27 @@ class InstallRecordStoreTest {
         val loaded = store.load("com.example.timestamp")
         assertNotNull(loaded)
         assertTrue(loaded.updatedAtMs >= beforeSave, "updatedAt should be set to current time on save")
+    }
+
+    @Test
+    fun `load rejects unsafe packageName before filesystem access`() {
+        val store = JsonInstallRecordStore(File(tempDir, "records"))
+        File(tempDir, "evil.json").writeText("not an install record")
+
+        assertFailsWith<IllegalArgumentException> {
+            store.load("../evil")
+        }
+    }
+
+    @Test
+    fun `delete rejects unsafe packageName before filesystem access`() {
+        val store = JsonInstallRecordStore(File(tempDir, "records"))
+        val outsideRecord = File(tempDir, "evil.json").apply { writeText("do not delete") }
+
+        assertFailsWith<IllegalArgumentException> {
+            store.delete("../evil")
+        }
+        assertTrue(outsideRecord.exists())
     }
 
     private fun createRecord(

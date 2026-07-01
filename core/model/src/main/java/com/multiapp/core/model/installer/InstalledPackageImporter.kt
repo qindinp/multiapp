@@ -48,14 +48,15 @@ class InstalledPackageImporter(
         originCertSha256: String = ""
     ): Result<ImportResult> {
         return try {
-            val originFile = File(originApkPath)
-            if (!originFile.exists()) {
+            requireSafeInstallPackageName(packageName)
+            val originFile = File(originApkPath).canonicalFile
+            if (!originFile.isFile) {
                 return Result.failure(IllegalArgumentException("APK file not found: $originApkPath"))
             }
 
             val originApkSha256 = computeSha256(originFile)
 
-            val destFile = File(artifactDir, "$packageName-origin.apk")
+            val destFile = artifactFileFor(packageName)
             copyAsReadOnlyArtifact(originFile, destFile)
 
             val now = System.currentTimeMillis()
@@ -109,6 +110,18 @@ class InstalledPackageImporter(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun artifactFileFor(packageName: String): File {
+        val artifactRoot = artifactDir.canonicalFile
+        if (!artifactRoot.exists() && !artifactRoot.mkdirs()) {
+            throw IllegalStateException("Unable to create artifact dir: ${artifactRoot.absolutePath}")
+        }
+        val destFile = File(artifactRoot, "$packageName-origin.apk").canonicalFile
+        require(destFile.parentFile == artifactRoot) {
+            "Artifact path escapes artifactDir"
+        }
+        return destFile
     }
 
     private fun copyAsReadOnlyArtifact(originFile: File, destFile: File) {

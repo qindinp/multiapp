@@ -1,11 +1,14 @@
 package com.multiapp.core.loader
 
+import android.annotation.TargetApi
 import android.app.Instrumentation
+import android.os.Build
 import android.util.Log
 
 object VirtualInstrumentationInstaller {
 
     private const val TAG = "VirtualInstrInstaller"
+    private const val API_LEVEL_COMPONENT_CALLER = 35
 
     @Volatile
     private var originalInstrumentation: Instrumentation? = null
@@ -18,9 +21,22 @@ object VirtualInstrumentationInstaller {
                 return@runCatching
             }
             originalInstrumentation = current
-            ActivityThreadCompat.setInstrumentation(VirtualInstrumentation(current))
+            ActivityThreadCompat.setInstrumentation(createVirtualInstrumentation(current))
             Log.i(TAG, "VirtualInstrumentation installed: base=${current.javaClass.name}")
         }
+    }
+
+    private fun createVirtualInstrumentation(base: Instrumentation): VirtualInstrumentation {
+        return if (Build.VERSION.SDK_INT >= API_LEVEL_COMPONENT_CALLER) {
+            createApi35VirtualInstrumentation(base)
+        } else {
+            VirtualInstrumentation(base)
+        }
+    }
+
+    @TargetApi(API_LEVEL_COMPONENT_CALLER)
+    private fun createApi35VirtualInstrumentation(base: Instrumentation): VirtualInstrumentation {
+        return VirtualInstrumentationApi35(base)
     }
 
     fun restore(): Result<Unit> {

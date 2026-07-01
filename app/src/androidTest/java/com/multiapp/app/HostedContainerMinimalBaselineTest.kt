@@ -53,7 +53,9 @@ class HostedContainerMinimalBaselineTest {
         }
         ContainerRuntimePaths.hostedLaunchEvidenceDir(targetContext)
             .listFiles()
-            ?.forEach { file -> file.deleteRecursively() }
+            ?.forEach { file ->
+                assertTrue("failed to delete stale hosted evidence: ${file.absolutePath}", file.deleteRecursively())
+            }
     }
 
     @Test
@@ -121,19 +123,68 @@ class HostedContainerMinimalBaselineTest {
                 )
             ).close()
             instrumentation.waitForIdleSync()
-            waitForRuntimeEvidence(instance.instanceId)
+            waitForRuntimeEvidence(instance.instanceId, includeNewIntent = false)
+            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-lifecycle", "status=GUEST_ACTIVITY_LIFECYCLE")
+            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-lifecycle", "activityRecordFound=true")
+            assertRuntimeEvidenceDoesNotHaveLine(
+                instance.instanceId,
+                "activity-lifecycle",
+                "status=GUEST_ACTIVITY_LIFECYCLE_UNLINKED"
+            )
+            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "activityRecordFound=false")
+            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "reason=TOKEN_MISSING")
+            assertRuntimeEvidenceDoesNotHaveLine(
+                instance.instanceId,
+                "activity-lifecycle",
+                "guestActivityClassName=com.multiapp.app.container.ContainerActivity"
+            )
+            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "reason=ACTIVITY_RECORD_MISSING")
+            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "status=ACTIVITY_RESULT_UNSUPPORTED")
+            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "resultSupported=false")
+            assertRuntimeEvidenceHasLine(
+                instance.instanceId,
+                "activity-result",
+                "unsupportedReason=HOST_PROXY_RESULT_ROUTING_NOT_IMPLEMENTED"
+            )
+
+            ActivityScenario.launch<ContainerActivity>(
+                ContainerActivity.createIntent(
+                    targetContext,
+                    instance.instanceId,
+                    "androidTest:minimal-new-intent-${index + 1}"
+                )
+            ).close()
+            instrumentation.waitForIdleSync()
+            waitForRuntimeEvidence(instance.instanceId, includeNewIntent = true)
+            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "status=GUEST_ACTIVITY_ON_NEW_INTENT")
+            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "pendingNewIntentConsumed=true")
+            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "reason=")
+            assertRuntimeEvidenceDoesNotHaveLine(
+                instance.instanceId,
+                "activity-new-intent",
+                "status=GUEST_ACTIVITY_ON_NEW_INTENT_UNLINKED"
+            )
+            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-new-intent", "pendingNewIntentConsumed=false")
+            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-new-intent", "reason=TOKEN_MISSING")
+            assertRuntimeEvidenceDoesNotHaveLine(
+                instance.instanceId,
+                "activity-new-intent",
+                "reason=NO_PENDING_NEW_INTENT_RECORD"
+            )
         }
     }
 
-    private fun waitForRuntimeEvidence(instanceId: String) {
+    private fun waitForRuntimeEvidence(instanceId: String, includeNewIntent: Boolean = false) {
         val requiredComponents = listOf(
             "launch",
             "activity-instrumentation",
             "activity-context",
+            "activity-lifecycle",
+            "activity-result",
             "provider-proxy",
             "service-proxy",
             "broadcast"
-        )
+        ) + if (includeNewIntent) listOf("activity-new-intent") else emptyList()
         val deadline = System.currentTimeMillis() + 8_000L
         while (System.currentTimeMillis() < deadline) {
             val missing = requiredComponents.filterNot { component ->
@@ -146,6 +197,36 @@ class HostedContainerMinimalBaselineTest {
             ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component).isFile
         }
         assertTrue("missing hosted runtime evidence for $instanceId: $missing", missing.isEmpty())
+    }
+
+    private fun assertRuntimeEvidenceHasLine(
+        instanceId: String,
+        component: String,
+        expectedLine: String
+    ) {
+        val file = ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component)
+        assertTrue("missing $component evidence for $instanceId", file.isFile)
+        val text = file.readText()
+        val lines = text.lines().map { it.trim() }
+        assertTrue(
+            "$component evidence for $instanceId did not contain exact line $expectedLine:\n$text",
+            expectedLine in lines
+        )
+    }
+
+    private fun assertRuntimeEvidenceDoesNotHaveLine(
+        instanceId: String,
+        component: String,
+        unexpectedLine: String
+    ) {
+        val file = ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component)
+        assertTrue("missing $component evidence for $instanceId", file.isFile)
+        val text = file.readText()
+        val lines = text.lines().map { it.trim() }
+        assertTrue(
+            "$component evidence for $instanceId unexpectedly contained exact line $unexpectedLine:\n$text",
+            unexpectedLine !in lines
+        )
     }
 
     private fun findInstalledMinimalPackage(): PackageInfo? = findInstalledPackage(minimalPackageName)

@@ -191,7 +191,11 @@ class ContainerActivity : Activity() {
             val proxyLaunchResult = launchProxyActivity(
                 instanceId = instanceId,
                 originPackageName = result.originPackageName ?: result.virtualPackageName ?: "",
-                guestActivityClassName = launcherClassName
+                guestActivityClassName = launcherClassName,
+                launchMode = result.packageSnapshot
+                    ?.activities
+                    ?.firstOrNull { it.name == launcherClassName }
+                    ?.launchMode
             )
             if (proxyLaunchResult.isFailure) {
                 writeLaunchEvidence(
@@ -226,7 +230,8 @@ class ContainerActivity : Activity() {
     private fun launchProxyActivity(
         instanceId: String,
         originPackageName: String,
-        guestActivityClassName: String
+        guestActivityClassName: String,
+        launchMode: String?
     ): Result<com.multiapp.core.model.virtual.VirtualActivityRecord> {
         Log.i(TAG, "Launching proxy Activity for guest: $guestActivityClassName")
         val manager = VirtualActivityManager(
@@ -236,7 +241,8 @@ class ContainerActivity : Activity() {
         return manager.launchGuestLauncher(
             instanceId = instanceId,
             originPackageName = originPackageName,
-            guestActivityClassName = guestActivityClassName
+            guestActivityClassName = guestActivityClassName,
+            launchMode = launchMode
         )
     }
 

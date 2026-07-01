@@ -100,6 +100,8 @@ class VirtualContextWrapper(
 
     private var lastBroadcastReceiverRegistrationResult: BroadcastReceiverRegistrationResult? = null
 
+    private var lastStorageEvidence: VirtualStorageEvidence? = null
+
     private val virtualPackageManager: PackageManager? by lazy(LazyThreadSafetyMode.NONE) {
         config.packageSnapshot?.let { snapshot ->
             VirtualPackageManagerWrapper(base.packageManager, snapshot)
@@ -234,40 +236,76 @@ class VirtualContextWrapper(
 
     override fun getTheme(): Resources.Theme = guestTheme
 
-    override fun getDataDir(): File = File(config.dataDir).apply { mkdirs() }
+    override fun getDataDir(): File = recordStorage(StorageOperation.DATA_DIR, null, File(config.dataDir).apply { mkdirs() })
 
-    override fun getFilesDir(): File = VirtualContextStorage.filesDir(config.dataDir)
+    override fun getFilesDir(): File = recordStorage(
+        StorageOperation.FILES_DIR,
+        null,
+        VirtualContextStorage.filesDir(config.dataDir)
+    )
 
-    override fun getCacheDir(): File = VirtualContextStorage.cacheDir(config.dataDir)
+    override fun getCacheDir(): File = recordStorage(
+        StorageOperation.CACHE_DIR,
+        null,
+        VirtualContextStorage.cacheDir(config.dataDir)
+    )
 
-    override fun getCodeCacheDir(): File = VirtualContextStorage.codeCacheDir(config.dataDir)
+    override fun getCodeCacheDir(): File = recordStorage(
+        StorageOperation.CODE_CACHE_DIR,
+        null,
+        VirtualContextStorage.codeCacheDir(config.dataDir)
+    )
 
-    override fun getNoBackupFilesDir(): File = VirtualContextStorage.noBackupFilesDir(config.dataDir)
+    override fun getNoBackupFilesDir(): File = recordStorage(
+        StorageOperation.NO_BACKUP_DIR,
+        null,
+        VirtualContextStorage.noBackupFilesDir(config.dataDir)
+    )
 
-    override fun getFileStreamPath(name: String): File =
+    override fun getFileStreamPath(name: String): File = recordStorage(
+        StorageOperation.FILE_STREAM_PATH,
+        name,
         VirtualContextStorage.fileStreamPath(config.dataDir, name)
+    )
 
-    override fun openFileInput(name: String): FileInputStream =
-        FileInputStream(getFileStreamPath(name))
+    override fun openFileInput(name: String): FileInputStream {
+        val path = VirtualContextStorage.fileStreamPath(config.dataDir, name)
+        recordStorage(StorageOperation.OPEN_FILE_INPUT, name, path)
+        return FileInputStream(path)
+    }
 
     override fun openFileOutput(name: String, mode: Int): FileOutputStream {
         val append = mode and Context.MODE_APPEND == Context.MODE_APPEND
-        return FileOutputStream(getFileStreamPath(name), append)
+        val path = VirtualContextStorage.fileStreamPath(config.dataDir, name)
+        recordStorage(StorageOperation.OPEN_FILE_OUTPUT, name, path)
+        return FileOutputStream(path, append)
     }
 
-    override fun deleteFile(name: String): Boolean = getFileStreamPath(name).delete()
+    override fun deleteFile(name: String): Boolean {
+        val path = VirtualContextStorage.fileStreamPath(config.dataDir, name)
+        recordStorage(StorageOperation.DELETE_FILE, name, path)
+        return path.delete()
+    }
 
-    override fun fileList(): Array<String> = VirtualContextStorage.listFileNames(filesDir)
+    override fun fileList(): Array<String> {
+        val path = VirtualContextStorage.filesDir(config.dataDir)
+        recordStorage(StorageOperation.FILE_LIST, null, path)
+        return VirtualContextStorage.listFileNames(path)
+    }
 
-    override fun getDatabasePath(name: String): File =
+    override fun getDatabasePath(name: String): File = recordStorage(
+        StorageOperation.DATABASE_PATH,
+        name,
         VirtualContextStorage.databasePath(config.dataDir, name)
+    )
 
     override fun openOrCreateDatabase(
         name: String,
         mode: Int,
         factory: SQLiteDatabase.CursorFactory?
     ): SQLiteDatabase {
-        val path = getDatabasePath(name)
+        val path = VirtualContextStorage.databasePath(config.dataDir, name)
+        recordStorage(StorageOperation.OPEN_OR_CREATE_DATABASE, name, path)
         path.parentFile?.mkdirs()
         return SQLiteDatabase.openOrCreateDatabase(path, factory)
     }
@@ -278,18 +316,31 @@ class VirtualContextWrapper(
         factory: SQLiteDatabase.CursorFactory?,
         errorHandler: DatabaseErrorHandler?
     ): SQLiteDatabase {
-        val path = getDatabasePath(name)
+        val path = VirtualContextStorage.databasePath(config.dataDir, name)
+        recordStorage(StorageOperation.OPEN_OR_CREATE_DATABASE, name, path)
         path.parentFile?.mkdirs()
         return SQLiteDatabase.openOrCreateDatabase(path.absolutePath, factory, errorHandler)
     }
 
-    override fun deleteDatabase(name: String): Boolean = getDatabasePath(name).delete()
+    override fun deleteDatabase(name: String): Boolean {
+        val path = VirtualContextStorage.databasePath(config.dataDir, name)
+        recordStorage(StorageOperation.DELETE_DATABASE, name, path)
+        return path.delete()
+    }
 
-    override fun databaseList(): Array<String> =
-        VirtualContextStorage.listFileNames(VirtualContextStorage.databasesDir(config.dataDir))
+    override fun databaseList(): Array<String> {
+        val path = VirtualContextStorage.databasesDir(config.dataDir)
+        recordStorage(StorageOperation.DATABASE_LIST, null, path)
+        return VirtualContextStorage.listFileNames(path)
+    }
 
     override fun getSharedPreferences(name: String, mode: Int): SharedPreferences {
-        val safeName = VirtualContextStorage.sanitizePathSegment(name)
+        val safeName = VirtualContextStorage.sanitizePathSegment(name.ifBlank { "default" })
+        recordStorage(
+            StorageOperation.SHARED_PREFERENCES,
+            name,
+            VirtualContextStorage.sharedPrefsPath(config.dataDir, safeName)
+        )
         return synchronized(sharedPreferences) {
             sharedPreferences.getOrPut(safeName) {
                 FileBackedSharedPreferences(VirtualContextStorage.sharedPrefsPath(config.dataDir, safeName))
@@ -298,15 +349,26 @@ class VirtualContextWrapper(
     }
 
     override fun getDir(name: String, mode: Int): File {
-        return File(config.dataDir, "app_${VirtualContextStorage.sanitizePathSegment(name)}").apply { mkdirs() }
+        return recordStorage(
+            StorageOperation.APP_DIR,
+            name,
+            VirtualContextStorage.appDir(config.dataDir, name)
+        )
     }
 
     override fun getExternalFilesDir(type: String?): File? {
-        return VirtualContextStorage.externalFilesDir(config.dataDir, type)
+        return recordStorage(
+            StorageOperation.EXTERNAL_FILES_DIR,
+            type,
+            VirtualContextStorage.externalFilesDir(config.dataDir, type)
+        )
     }
 
-    override fun getExternalCacheDir(): File? =
+    override fun getExternalCacheDir(): File? = recordStorage(
+        StorageOperation.EXTERNAL_CACHE_DIR,
+        null,
         VirtualContextStorage.externalCacheDir(config.dataDir)
+    )
 
     internal fun resourceSource(): ResourceSource = virtualResourceBundle.source
 
@@ -318,6 +380,23 @@ class VirtualContextWrapper(
 
     internal fun lastBroadcastReceiverRegistrationResult(): BroadcastReceiverRegistrationResult? =
         lastBroadcastReceiverRegistrationResult
+
+    internal fun lastStorageEvidence(): VirtualStorageEvidence? = lastStorageEvidence
+
+    private fun recordStorage(
+        operation: StorageOperation,
+        logicalName: String?,
+        redirectedFile: File
+    ): File {
+        lastStorageEvidence = VirtualContextStorage.evidence(
+            dataRoot = config.dataDir,
+            operation = operation,
+            logicalName = logicalName,
+            redirectedFile = redirectedFile,
+            nativeLibraryDir = config.nativeLibraryDir
+        )
+        return redirectedFile
+    }
 
     private fun createFallbackApplicationInfo(): ApplicationInfo {
         val baseInfo = runCatching { super.getApplicationInfo() }.getOrNull() ?: ApplicationInfo()

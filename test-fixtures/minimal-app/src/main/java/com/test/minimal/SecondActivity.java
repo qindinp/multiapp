@@ -3,6 +3,7 @@ package com.test.minimal;
 import android.app.Activity;
 import android.os.Bundle;
 import android.util.Log;
+import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -28,6 +29,14 @@ public class SecondActivity extends Activity {
         info.setText("packageName: " + getPackageName() + "\napplication: " + getApplication().getClass().getName());
         info.setTextSize(16);
         layout.addView(info);
+
+        Button finishButton = new Button(this);
+        finishButton.setText("Finish SecondActivity");
+        finishButton.setOnClickListener(v -> {
+            Log.d(TAG, "SecondActivity.finish() requested");
+            finish();
+        });
+        layout.addView(finishButton);
 
         setContentView(layout);
         Log.d(TAG, "=== SecondActivity.onCreate() complete ===");

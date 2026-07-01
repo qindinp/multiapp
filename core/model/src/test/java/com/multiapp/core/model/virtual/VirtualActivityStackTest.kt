@@ -86,6 +86,35 @@ class VirtualActivityStackTest {
     }
 
     @Test
+    fun `finish top activity after A to B back reveals previous activity`() {
+        val stack = VirtualActivityStack()
+        stack.launch(record(token = "token-a", activity = "MainActivity"))
+        stack.launch(record(token = "token-b", activity = "SecondActivity"))
+
+        val finished = stack.finishByToken("token-b")
+
+        assertEquals(VirtualActivityState.FINISHED, finished?.state)
+        assertEquals("token-b", finished?.token)
+        assertEquals(listOf("token-a"), stack.listTasks().single().activities.map { it.token })
+        assertEquals("token-a", stack.findByToken("token-a")?.token)
+        assertNull(stack.findByToken("token-b"))
+    }
+
+    @Test
+    fun `finish missing token preserves current task`() {
+        val stack = VirtualActivityStack()
+        stack.launch(record(token = "token-a", activity = "MainActivity"))
+        stack.launch(record(token = "token-b", activity = "SecondActivity"))
+
+        val finished = stack.finishByToken("missing-token")
+
+        assertNull(finished)
+        assertEquals(listOf("token-a", "token-b"), stack.listTasks().single().activities.map { it.token })
+        assertEquals("token-a", stack.findByToken("token-a")?.token)
+        assertEquals("token-b", stack.findByToken("token-b")?.token)
+    }
+
+    @Test
     fun `finish by token marks activity finished and removes it from task while task remains queryable`() {
         val stack = VirtualActivityStack()
         val launched = stack.launch(record(token = "token-1", activity = "MainActivity"))

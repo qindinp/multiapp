@@ -15,6 +15,8 @@ import io.mockk.mockk
 import io.mockk.slot
 import io.mockk.verify
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -66,6 +68,26 @@ class VirtualContextWrapperTest {
         val a = VirtualContextConfig("i1", "o1", "v1", "/d1", "/s1", null, ClassLoader.getSystemClassLoader())
         val b = VirtualContextConfig("i1", "o1", "v1", "/d1", "/s1", null, ClassLoader.getSystemClassLoader())
         assertEquals(a, b)
+    }
+
+    @Test
+    fun `storage api records redirect evidence`(@TempDir dataRoot: File) {
+        val wrapper = wrapper(
+            snapshot = snapshot().copy(
+                dataDir = dataRoot.absolutePath,
+                nativeLibraryDir = File(dataRoot, "lib").absolutePath
+            )
+        )
+
+        val path = wrapper.getFileStreamPath("nested_name.txt")
+
+        val evidence = wrapper.lastStorageEvidence()
+        assertEquals(File(dataRoot, "files/nested_name.txt").canonicalFile, path)
+        assertEquals(StorageOperation.FILE_STREAM_PATH, evidence?.operation)
+        assertEquals("nested_name.txt", evidence?.logicalName)
+        assertEquals(path.canonicalPath, evidence?.redirectedPath?.let { File(it).canonicalPath })
+        assertTrue(evidence?.withinDataRoot == true)
+        assertTrue(evidence?.nativeLibraryRedirected == true)
     }
 
     @Test

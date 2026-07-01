@@ -67,4 +67,37 @@ class ProxyActivityRegistryTest {
         assertEquals("ProxySingleTask0", singleTask.proxyActivityClassName)
         assertEquals("singleTask", singleTask.launchMode)
     }
+
+    @Test
+    fun `registerExisting reserves active proxy slots`() {
+        val registry = ProxyActivityRegistry(
+            proxyActivityClassNames = listOf("ProxySingleTop0", "ProxySingleTop1"),
+            launchModeByClassName = mapOf(
+                "ProxySingleTop0" to "singleTop",
+                "ProxySingleTop1" to "singleTop"
+            )
+        )
+        registry.registerExisting(
+            listOf(
+                VirtualActivityRecord(
+                    token = "existing-token",
+                    instanceId = "inst-001",
+                    originPackageName = "com.test",
+                    guestActivityClassName = "com.test.FirstActivity",
+                    proxyActivityClassName = "ProxySingleTop0",
+                    launchMode = "singleTop",
+                    state = VirtualActivityState.RESUMED
+                )
+            )
+        )
+
+        val allocated = registry.allocate(
+            instanceId = "inst-001",
+            originPackageName = "com.test",
+            guestActivityClassName = "com.test.SecondActivity",
+            launchMode = "singleTop"
+        )
+
+        assertEquals("ProxySingleTop1", allocated.proxyActivityClassName)
+    }
 }

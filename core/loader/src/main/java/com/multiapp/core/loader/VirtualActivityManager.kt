@@ -2,8 +2,10 @@ package com.multiapp.core.loader
 
 import android.content.Context
 import android.content.Intent
+import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.VirtualActivityRecord
+import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 
 data class ProxyActivityLaunchSpec(
     val hostPackageName: String,
@@ -21,6 +23,10 @@ class VirtualActivityManager(
     private val hostPackageName: String = context.packageName,
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global
 ) {
+    init {
+        proxyActivityRegistry.registerExisting(activityRecordManager.list())
+    }
+
     companion object {
         const val EXTRA_VIRTUAL_ACTIVITY_TOKEN = "multiapp.virtualActivityToken"
         const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
@@ -33,19 +39,22 @@ class VirtualActivityManager(
     fun launchGuestLauncher(
         instanceId: String,
         originPackageName: String,
-        guestActivityClassName: String
+        guestActivityClassName: String,
+        launchMode: String? = null
     ): Result<VirtualActivityRecord> {
         return runCatching {
+            val launcherIntent = Intent()
             val record = allocateGuestActivity(
                 VirtualActivityLaunchRequest(
                     instanceId = instanceId,
                     originPackageName = originPackageName,
                     guestActivityClassName = guestActivityClassName,
-                    sourceIntent = Intent(),
-                    reason = "launcher"
+                    sourceIntent = launcherIntent,
+                    reason = "launcher",
+                    launchMode = launchMode
                 )
             )
-            context.startActivity(createProxyIntent(record, sourceIntent = Intent()))
+            context.startActivity(createProxyIntent(record, sourceIntent = launcherIntent))
             record
         }
     }
@@ -65,7 +74,11 @@ class VirtualActivityManager(
             guestActivityClassName = request.guestActivityClassName,
             launchMode = request.launchMode
         )
-        return activityRecordManager.registerLaunch(record, request.sourceIntent.flags).activity
+        return activityRecordManager.registerLaunch(
+            record,
+            request.sourceIntent.safeFlags(),
+            request.sourceIntent.toVirtualIntentSnapshot()
+        ).activity
     }
 
     fun createProxyIntent(record: VirtualActivityRecord, sourceIntent: Intent? = null): Intent {
@@ -98,4 +111,23 @@ class VirtualActivityManager(
             launchMode = record.launchMode
         )
     }
+
+    private fun Intent.toVirtualIntentSnapshot(): VirtualIntentSnapshot {
+        val sourceExtras = runCatching { extras }.getOrNull()
+        val extrasSnapshot = sourceExtras
+            ?.keySet()
+            ?.associateWith { "<present>" }
+            .orEmpty()
+        return VirtualIntentSnapshot(
+            flags = safeFlags(),
+            action = runCatching { action }.getOrNull(),
+            dataUri = runCatching { dataString?.redactUriForEvidence() }.getOrNull(),
+            categories = runCatching { categories.orEmpty().toSet() }.getOrDefault(emptySet()),
+            extras = extrasSnapshot
+        )
+    }
+
+    private fun Intent.safeFlags(): Int = runCatching { flags }.getOrDefault(0)
+
+    private fun String.redactUriForEvidence(): String = EvidenceSanitizer.redactUriForEvidence(this)
 }

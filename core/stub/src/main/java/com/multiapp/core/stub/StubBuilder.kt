@@ -21,8 +21,11 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 /**
- * Stub APK 构建器
- * 组装完整的 Stub APK: manifest + DEX + 原始 APK (assets) + 配置 + 签名
+ * Legacy Stub APK builder.
+ *
+ * Builds the transitional Stub APK used by existing legacy instances and
+ * evidence comparison. v2 hosted-container instances should not use this as
+ * their final runtime path.
  */
 class StubBuilder(
     private val context: android.content.Context? = null,
@@ -120,8 +123,9 @@ class StubBuilder(
             val loaderDex = getLoaderDex()
             Log.w("StubBuilder", "loader.dex: ${loaderDex.size} bytes")
 
-            // 5.5 注入 JiaguLoader helper 类到 DEX（用于从 guest ClassLoader 加载 native 库）
-            // 配合 I/O 重定向欺骗壳的完整性校验
+            // 5.5 Legacy protected-app helper injection for non-NORMAL profiles only.
+            // Kept for diagnostic/compatibility comparison; NORMAL protected baseline skips
+            // DEX/native patching and should rely on the guest runtime environment.
             val injectableApk = File(workDir, "origin_inject.apk")
             originApk.copyTo(injectableApk, overwrite = true)
             if (config.cloneProfile != CloneProfile.NORMAL) {
@@ -131,7 +135,7 @@ class StubBuilder(
             }
             Log.w("StubBuilder", "injectableApk: ${injectableApk.length()} bytes")
 
-            // 6. 组装 APK (含 patched DEX)
+            // 6. Assemble legacy Stub APK. patchedDexFiles are only for explicit legacy profiles.
             val patchedDexFiles = config.patchedDexPaths.map { File(it) }.filter { it.exists() }
             val xposedModuleFiles = config.xposedModules.map { File(it) }.filter { it.exists() }
             val xposedInitEntries = collectXposedInitEntries(xposedModuleFiles)
@@ -142,7 +146,7 @@ class StubBuilder(
                 manifestBytes = manifestBytes,
                 loaderDex = loaderDex,
                 originApk = injectableApk,
-                originalApk = originApk,  // 未修改的原始 APK（用于完整性校验重定向）
+                originalApk = originApk,  // Unmodified origin APK retained for legacy evidence/path comparison.
                 configFile = configFile,
                 config = config,
                 iconFile = iconFile,

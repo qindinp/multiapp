@@ -101,6 +101,49 @@ class VirtualProviderDispatcherTest {
         assertEquals("PROVIDER_NOT_FOUND", missing.evidence.reason)
     }
 
+    @Test
+    fun `method dispatch evidence records provider operation status`() {
+        val snapshot = snapshot()
+        val registry = VirtualPackageRegistry().apply { register(snapshot) }
+        val processRuntime = VirtualProcessRuntime()
+        val providerRuntime = VirtualProviderRuntime(
+            providerFactory = ProviderFactory { _, _ -> FakeProvider() },
+            providerAttacher = ProviderAttacher { _, _, _ -> }
+        )
+        processRuntime.bindApplication("inst-001") {
+            hostedResult(snapshot, success = true, guestClassLoader = ClassLoader.getSystemClassLoader())
+        }
+        val dispatcher = VirtualProviderDispatcher(
+            hostPackageName = "com.multiapp.app",
+            packageRegistry = registry,
+            processRuntime = processRuntime,
+            providerRuntime = providerRuntime,
+            hostContext = mockk<Context>(relaxed = true)
+        )
+
+        val result = dispatcher.dispatch("inst-001", "com.test.minimal.probe")
+        val evidence = VirtualProviderEvidence.methodDispatch(result, "query")
+
+        assertEquals(VirtualProviderEvidence.Operation.QUERY, evidence.operation)
+        assertEquals(true, evidence.success)
+        assertEquals("PROVIDER_CREATED", evidence.reason)
+        assertEquals("inst-001", evidence.instanceId)
+        assertEquals("com.test.minimal.probe", evidence.guestAuthority)
+        assertEquals("com.test.minimal.ProbeProvider", evidence.providerClassName)
+    }
+
+    @Test
+    fun `method dispatch evidence records dispatcher failure status`() {
+        val result = VirtualProviderDispatchResult.InstanceNotFound("missing-inst")
+
+        val evidence = VirtualProviderEvidence.methodDispatch(result, "update")
+
+        assertEquals(VirtualProviderEvidence.Operation.UPDATE, evidence.operation)
+        assertEquals(false, evidence.success)
+        assertEquals("missing-inst", evidence.instanceId)
+        assertEquals("INSTANCE_NOT_FOUND", evidence.reason)
+    }
+
     private fun snapshot() = VirtualPackageSnapshot(
         instanceId = "inst-001",
         originPackageName = "com.test.minimal",

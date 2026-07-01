@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class HostedActivityEvidenceFilesTest {
     @Test
@@ -18,5 +19,45 @@ class HostedActivityEvidenceFilesTest {
             "inst-001.activity-remap.properties",
             HostedActivityEvidenceFiles.remap("inst-001")
         )
+        assertEquals(
+            "inst-001.activity-lifecycle.properties",
+            HostedActivityEvidenceFiles.lifecycle("inst-001")
+        )
+        assertEquals(
+            "inst-001.activity-new-intent.properties",
+            HostedActivityEvidenceFiles.newIntent("inst-001")
+        )
+        assertEquals(
+            "inst-001.activity-result.properties",
+            HostedActivityEvidenceFiles.result("inst-001")
+        )
+    }
+
+    @Test
+    fun `activity evidence file names reject unsafe instance ids`() {
+        listOf(
+            "../inst-001",
+            "inst/001",
+            "inst\\001",
+            "",
+            " ",
+            " inst-001",
+            "inst-001 ",
+            ".",
+            "..",
+            "a..b",
+            "/inst",
+            "C:inst",
+            "inst:001",
+            "inst\u0000evil",
+            "%2e%2e",
+            "..%2fsecret",
+            "%2fabsolute",
+            "inst%5c001"
+        ).forEach { instanceId ->
+            assertFailsWith<IllegalArgumentException> {
+                HostedActivityEvidenceFiles.lifecycle(instanceId)
+            }
+        }
     }
 }

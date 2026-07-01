@@ -11,7 +11,14 @@ data class VirtualProviderEvidence(
 ) {
     enum class Operation {
         ACQUIRE_PROVIDER,
-        NOTIFY_CHANGE
+        QUERY,
+        GET_TYPE,
+        INSERT,
+        DELETE,
+        UPDATE,
+        CALL,
+        NOTIFY_CHANGE,
+        UNKNOWN
     }
 
     companion object {
@@ -80,6 +87,91 @@ data class VirtualProviderEvidence(
                 success = true,
                 reason = null
             )
+        }
+
+        fun methodDispatch(
+            acquireResult: VirtualProviderDispatchResult?,
+            operationName: String
+        ): VirtualProviderEvidence {
+            val operation = operationName.toProviderOperation()
+            return when (acquireResult) {
+                is VirtualProviderDispatchResult.ProviderReady -> fromResolution(
+                    resolution = acquireResult.resolution,
+                    operation = operation,
+                    success = true,
+                    reason = if (acquireResult.cached) "PROVIDER_CACHED" else "PROVIDER_CREATED"
+                )
+                is VirtualProviderDispatchResult.RuntimeNotBound -> fromResolution(
+                    resolution = acquireResult.resolution,
+                    operation = operation,
+                    success = false,
+                    reason = acquireResult.evidence.reason ?: "RUNTIME_NOT_BOUND"
+                )
+                is VirtualProviderDispatchResult.RuntimeIncomplete -> fromResolution(
+                    resolution = acquireResult.resolution,
+                    operation = operation,
+                    success = false,
+                    reason = acquireResult.reason
+                )
+                is VirtualProviderDispatchResult.ProviderCreateFailed -> fromResolution(
+                    resolution = acquireResult.resolution,
+                    operation = operation,
+                    success = false,
+                    reason = acquireResult.error.message ?: acquireResult.error.javaClass.name
+                )
+                is VirtualProviderDispatchResult.ProviderAttachFailed -> fromResolution(
+                    resolution = acquireResult.resolution,
+                    operation = operation,
+                    success = false,
+                    reason = acquireResult.error.message ?: acquireResult.error.javaClass.name
+                )
+                is VirtualProviderDispatchResult.ProviderNotFound -> VirtualProviderEvidence(
+                    instanceId = acquireResult.instanceId,
+                    guestAuthority = acquireResult.guestAuthority,
+                    proxyAuthority = null,
+                    providerClassName = null,
+                    operation = operation,
+                    success = false,
+                    reason = acquireResult.evidence.reason ?: "PROVIDER_NOT_FOUND"
+                )
+                is VirtualProviderDispatchResult.InstanceNotFound -> VirtualProviderEvidence(
+                    instanceId = acquireResult.instanceId,
+                    guestAuthority = null,
+                    proxyAuthority = null,
+                    providerClassName = null,
+                    operation = operation,
+                    success = false,
+                    reason = "INSTANCE_NOT_FOUND"
+                )
+                is VirtualProviderDispatchResult.InvalidProxyUri -> VirtualProviderEvidence(
+                    instanceId = null,
+                    guestAuthority = null,
+                    proxyAuthority = null,
+                    providerClassName = null,
+                    operation = operation,
+                    success = false,
+                    reason = acquireResult.reason
+                )
+                null -> VirtualProviderEvidence(
+                    instanceId = null,
+                    guestAuthority = null,
+                    proxyAuthority = null,
+                    providerClassName = null,
+                    operation = operation,
+                    success = false,
+                    reason = "missing uri"
+                )
+            }
+        }
+
+        private fun String.toProviderOperation(): Operation = when (substringBefore(':')) {
+            "query" -> Operation.QUERY
+            "getType" -> Operation.GET_TYPE
+            "insert" -> Operation.INSERT
+            "delete" -> Operation.DELETE
+            "update" -> Operation.UPDATE
+            "call" -> Operation.CALL
+            else -> Operation.UNKNOWN
         }
 
         private fun fromResolution(

@@ -273,6 +273,45 @@ class InstanceManagerTest {
     }
 
     @Test
+    fun `createInstance persists only originPackageName reference to InstallRecord facts`() {
+        val installStore = JsonInstallRecordStore(File(tempDir, "installs_reference_only"))
+        val installRecord = InstallRecord(
+            packageName = "com.example.referenceonly",
+            originApkPath = "/tmp/reference-only.apk",
+            originApkSha256 = "origin-sha",
+            originCertSha256 = "cert-sha",
+            versionCode = 42,
+            versionName = "4.2",
+            targetSdk = 35,
+            minSdk = 28,
+            activities = listOf(com.multiapp.core.model.installer.ComponentInfo("com.example.MainActivity")),
+            nativeLibraries = listOf("libsample.so"),
+            abiList = listOf("arm64-v8a"),
+            installTimeMs = 1000L
+        )
+        installStore.save(installRecord).getOrThrow()
+        val managerWithValidation = DefaultInstanceManager(
+            store = store,
+            dataRootBase = File(tempDir, "data_reference_only"),
+            installRecordStore = installStore,
+            clock = { currentTimeMs }
+        )
+
+        val result = managerWithValidation.createInstance("com.example.referenceonly", "Reference App")
+
+        assertTrue(result.isSuccess)
+        val record = result.getOrThrow()
+        val persisted = store.load(record.instanceId)!!
+        val persistedJson = File(tempDir, "records/${record.instanceId}.json").readText()
+        assertEquals("com.example.referenceonly", persisted.originPackageName)
+        assertFalse(persistedJson.contains("originApkPath"))
+        assertFalse(persistedJson.contains("originApkSha256"))
+        assertFalse(persistedJson.contains("originCertSha256"))
+        assertFalse(persistedJson.contains("activities"))
+        assertFalse(persistedJson.contains("nativeLibraries"))
+    }
+
+    @Test
     fun `createInstance succeeds without installRecordStore validation`() {
         // When installRecordStore is null (default), no validation is performed
         val result = manager.createInstance("com.example.any", "Any App")

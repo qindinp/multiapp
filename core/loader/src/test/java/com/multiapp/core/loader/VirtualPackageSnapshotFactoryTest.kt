@@ -110,6 +110,35 @@ class VirtualPackageSnapshotFactoryTest {
     }
 
     @Test
+    fun `activity info falls back to application theme when activity theme is missing`() {
+        val snapshot = VirtualPackageSnapshotFactory.create(
+            instance = instanceRecord(),
+            installRecord = installRecord(),
+            resolvedPackage = ResolvedPackage(
+                packageName = "com.test.minimal",
+                versionCode = 1,
+                versionName = "1.0",
+                targetSdk = 36,
+                minSdk = 28,
+                themeId = 0x7f010010,
+                launcherActivityName = "com.test.minimal.MainActivity",
+                activities = listOf(
+                    ResolvedComponent(
+                        name = "com.test.minimal.MainActivity",
+                        exported = true,
+                        themeId = 0
+                    )
+                )
+            ),
+            nativeLibraryDir = null
+        )
+
+        val activityInfo = VirtualPackageInfoFactory.activityInfo(snapshot, snapshot.activities.single())
+
+        assertEquals(0x7f010010, activityInfo.theme)
+    }
+
+    @Test
     fun `registry resolves snapshot by instance origin and virtual package`() {
         val registry = VirtualPackageRegistry()
         val snapshot = VirtualPackageSnapshotFactory.create(

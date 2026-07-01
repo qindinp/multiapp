@@ -1,7 +1,9 @@
 package com.multiapp.app.container
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.DisplayName
 import org.junit.jupiter.api.Test
@@ -51,7 +53,7 @@ class ContainerRuntimePathsTest {
     fun hostedLaunchEvidenceFileStaysUnderSharedDir(@TempDir filesDir: File) {
         val evidenceFile = ContainerRuntimePaths.hostedLaunchEvidenceFile(filesDir, "inst-001")
 
-        assertEquals(File(filesDir, "hosted_launch_evidence/inst-001.properties"), evidenceFile)
+        assertEquals(File(filesDir, "hosted_launch_evidence/inst-001.properties").canonicalFile, evidenceFile)
     }
 
     @Test
@@ -63,7 +65,49 @@ class ContainerRuntimePathsTest {
             component = "provider-proxy"
         )
 
-        assertEquals(File(filesDir, "hosted_launch_evidence/inst-001.provider-proxy.properties"), evidenceFile)
+        assertEquals(File(filesDir, "hosted_launch_evidence/inst-001.provider-proxy.properties").canonicalFile, evidenceFile)
+    }
+
+    @Test
+    @DisplayName("component evidence files reject unsafe instance and component segments")
+    fun componentEvidenceFileRejectsUnsafeSegments(@TempDir filesDir: File) {
+        val unsafeSegments = listOf(
+            "../inst",
+            "inst/001",
+            "inst\\001",
+            ".",
+            "..",
+            "",
+            " ",
+            " inst-001",
+            "inst-001 ",
+            "C:temp",
+            "inst:001",
+            "inst\u0000evil",
+            "%2e%2e",
+            "..%2fsecret",
+            "%2fabsolute",
+            "inst%5c001"
+        )
+
+        unsafeSegments.forEach { segment ->
+            assertThrows(IllegalArgumentException::class.java) {
+                ContainerRuntimePaths.hostedRuntimeEvidenceFile(filesDir, segment, "provider-proxy")
+            }
+            assertThrows(IllegalArgumentException::class.java) {
+                ContainerRuntimePaths.hostedRuntimeEvidenceFile(filesDir, "inst-001", segment)
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("hosted launch evidence file rejects unsafe instance ids")
+    fun hostedLaunchEvidenceFileRejectsUnsafeInstanceIds(@TempDir filesDir: File) {
+        listOf("../inst", "inst/001", "inst\\001", ".", "..", "", " ", "C:temp").forEach { instanceId ->
+            assertThrows(IllegalArgumentException::class.java) {
+                ContainerRuntimePaths.hostedLaunchEvidenceFile(filesDir, instanceId)
+            }
+        }
     }
 
     @Test
@@ -79,7 +123,51 @@ class ContainerRuntimePathsTest {
             )
         )
 
-        assertEquals(File(filesDir, "hosted_launch_evidence/inst-001.service-proxy.properties"), file)
+        assertEquals(File(filesDir, "hosted_launch_evidence/inst-001.service-proxy.properties").canonicalFile, file)
         assertEquals("status=STARTED\ndetail=line1 line2 line3", file.readText())
+    }
+
+    @Test
+    @DisplayName("runtime evidence writer redacts uri fields")
+    fun runtimeEvidenceWriterRedactsUriFields(@TempDir filesDir: File) {
+        val file = ContainerRuntimeEvidenceWriter.write(
+            filesDir = filesDir,
+            instanceId = "inst-001",
+            component = "provider-proxy",
+            fields = linkedMapOf(
+                "uri" to "content://proxy/items/1?token=secret&instanceId=inst-001#frag",
+                "intentData" to "https://user:pass@example.com/path?password=secret#fragment",
+                "intentDataUri" to "content://contacts/people/1/private?auth=secret",
+                "pendingDataUri" to "file:///data/data/com.test/secret.txt",
+                "dataUri" to "mailto:private@example.com",
+                "detail" to "keep?query=visible"
+            )
+        )
+        val text = file.readText()
+
+        assertTrue(text.contains("uri=content://proxy/<redacted>"))
+        assertTrue(text.contains("intentData=https://example.com/<redacted>"))
+        assertTrue(text.contains("intentDataUri=content://contacts/<redacted>"))
+        assertTrue(text.contains("pendingDataUri=file:///<redacted>"))
+        assertTrue(text.contains("dataUri=mailto:<redacted>"))
+        assertTrue(text.contains("detail=keep?query=visible"))
+        listOf("token=", "password=", "secret", "instanceId=", "fragment", "private@example.com", "user:pass").forEach { leaked ->
+            assertFalse(text.contains(leaked), "evidence leaked $leaked in $text")
+        }
+    }
+
+    @Test
+    @DisplayName("runtime evidence writer rejects unsafe evidence path inputs")
+    fun runtimeEvidenceWriterRejectsUnsafeEvidencePathInputs(@TempDir filesDir: File) {
+        assertThrows(IllegalArgumentException::class.java) {
+            ContainerRuntimeEvidenceWriter.write(
+                filesDir = filesDir,
+                instanceId = "../inst",
+                component = "service-proxy",
+                fields = mapOf("status" to "STARTED")
+            )
+        }
+
+        assertFalse(File(filesDir.parentFile, "inst.service-proxy.properties").exists())
     }
 }

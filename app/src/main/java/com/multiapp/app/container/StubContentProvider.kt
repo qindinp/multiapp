@@ -6,6 +6,7 @@ import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
 import android.util.Log
+import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.loader.VirtualProviderEvidence
 import com.multiapp.core.loader.VirtualProviderDispatchResult
 import com.multiapp.core.loader.VirtualProviderDispatcher
@@ -35,7 +36,7 @@ class StubContentProvider : ContentProvider() {
     ): Cursor? {
         val result = dispatch(uri)
         writeProviderEvidence("query", uri, result)
-        Log.w(TAG, "query dispatch result=${result.statusForLog()} uri=$uri")
+        Log.w(TAG, "query dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
             is VirtualProviderDispatchResult.ProviderReady -> result.provider.query(
                 uri.toGuestUri(result.resolution.guestAuthority),
@@ -51,7 +52,7 @@ class StubContentProvider : ContentProvider() {
     override fun getType(uri: Uri): String? {
         val result = dispatch(uri)
         writeProviderEvidence("getType", uri, result)
-        Log.w(TAG, "getType dispatch result=${result.statusForLog()} uri=$uri")
+        Log.w(TAG, "getType dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
             is VirtualProviderDispatchResult.ProviderReady -> result.provider.getType(
                 uri.toGuestUri(result.resolution.guestAuthority)
@@ -63,7 +64,7 @@ class StubContentProvider : ContentProvider() {
     override fun insert(uri: Uri, values: ContentValues?): Uri? {
         val result = dispatch(uri)
         writeProviderEvidence("insert", uri, result)
-        Log.w(TAG, "insert dispatch result=${result.statusForLog()} uri=$uri")
+        Log.w(TAG, "insert dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
             is VirtualProviderDispatchResult.ProviderReady -> result.provider.insert(
                 uri.toGuestUri(result.resolution.guestAuthority),
@@ -76,7 +77,7 @@ class StubContentProvider : ContentProvider() {
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
         val result = dispatch(uri)
         writeProviderEvidence("delete", uri, result)
-        Log.w(TAG, "delete dispatch result=${result.statusForLog()} uri=$uri")
+        Log.w(TAG, "delete dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
             is VirtualProviderDispatchResult.ProviderReady -> result.provider.delete(
                 uri.toGuestUri(result.resolution.guestAuthority),
@@ -95,7 +96,7 @@ class StubContentProvider : ContentProvider() {
     ): Int {
         val result = dispatch(uri)
         writeProviderEvidence("update", uri, result)
-        Log.w(TAG, "update dispatch result=${result.statusForLog()} uri=$uri")
+        Log.w(TAG, "update dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
             is VirtualProviderDispatchResult.ProviderReady -> result.provider.update(
                 uri.toGuestUri(result.resolution.guestAuthority),
@@ -111,7 +112,7 @@ class StubContentProvider : ContentProvider() {
         val uri = arg?.let { runCatching { Uri.parse(it) }.getOrNull() }
         val result = uri?.let { dispatch(it) }
         if (uri != null) writeProviderEvidence("call:$method", uri, result)
-        Log.w(TAG, "call dispatch result=${result.statusForLog()} method=$method arg=$arg")
+        Log.w(TAG, "call dispatch result=${result.statusForLog()} method=$method arg=${arg.redactUriStringForLog()}")
         return result.toBundle()
     }
 
@@ -127,6 +128,15 @@ class StubContentProvider : ContentProvider() {
         .authority(guestAuthority)
         .clearQuery()
         .build()
+
+    private fun Uri.redactForLog(): String = EvidenceSanitizer.redactUriForEvidence(toString())
+
+    private fun String?.redactUriStringForLog(): String = this
+        ?.let { value ->
+            val parsed = runCatching { Uri.parse(value) }.getOrNull()
+            parsed?.takeIf { !it.scheme.isNullOrBlank() }?.redactForLog() ?: "<non-uri>"
+        }
+        .orEmpty()
 
     private fun writeProviderEvidence(
         operationName: String,
@@ -300,13 +310,13 @@ class StubContentProvider : ContentProvider() {
     private fun VirtualProviderDispatchResult?.statusForLog(): String = when (this) {
         null -> "INVALID_PROXY_URI:missing uri"
         is VirtualProviderDispatchResult.ProviderReady -> "PROVIDER_READY:${if (cached) "cached" else "created"}:${resolution.providerClassName}"
-        is VirtualProviderDispatchResult.RuntimeNotBound -> "RUNTIME_NOT_BOUND:${resolution.instanceId}:${resolution.providerClassName}"
+        is VirtualProviderDispatchResult.RuntimeNotBound -> "RUNTIME_NOT_BOUND:${resolution.providerClassName}"
         is VirtualProviderDispatchResult.RuntimeIncomplete -> "RUNTIME_INCOMPLETE:$reason:${resolution.providerClassName}"
         is VirtualProviderDispatchResult.ProviderCreateFailed -> "PROVIDER_CREATE_FAILED:${error.message}:${resolution.providerClassName}"
         is VirtualProviderDispatchResult.ProviderAttachFailed -> "PROVIDER_ATTACH_FAILED:${error.message}:${resolution.providerClassName}"
         is VirtualProviderDispatchResult.InvalidProxyUri -> "INVALID_PROXY_URI:$reason"
-        is VirtualProviderDispatchResult.InstanceNotFound -> "INSTANCE_NOT_FOUND:$instanceId"
-        is VirtualProviderDispatchResult.ProviderNotFound -> "PROVIDER_NOT_FOUND:$instanceId:$guestAuthority"
+        is VirtualProviderDispatchResult.InstanceNotFound -> "INSTANCE_NOT_FOUND"
+        is VirtualProviderDispatchResult.ProviderNotFound -> "PROVIDER_NOT_FOUND"
     }
 
     companion object {

@@ -37,6 +37,13 @@ class ProxyActivityRegistry(
     }
 
     @Synchronized
+    fun registerExisting(existingRecords: List<VirtualActivityRecord>) {
+        existingRecords
+            .filter { it.state != VirtualActivityState.FINISHED && it.state != VirtualActivityState.DESTROYED }
+            .forEach { record -> records[record.token] = record }
+    }
+
+    @Synchronized
     fun resolve(token: String): VirtualActivityRecord? = records[token]
 
     @Synchronized

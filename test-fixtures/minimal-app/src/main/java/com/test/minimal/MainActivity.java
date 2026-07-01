@@ -33,6 +33,9 @@ public class MainActivity extends Activity {
     private static final String PROXY_GUEST_AUTHORITY = "multiapp_guestAuthority";
     private static final String GUEST_PROVIDER_AUTHORITY = "com.test.minimal.probe";
     private static final String ACTION_PROBE_BROADCAST = "com.test.minimal.ACTION_PROBE_BROADCAST";
+    private static final String ACTION_NEW_INTENT_PROBE = "com.test.minimal.ACTION_NEW_INTENT_PROBE";
+
+    private TextView newIntentStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -94,12 +97,41 @@ public class MainActivity extends Activity {
         });
         layout.addView(launchSecond);
 
+        newIntentStatus = new TextView(this);
+        newIntentStatus.setText("onNewIntent: pending");
+        newIntentStatus.setTextSize(16);
+        newIntentStatus.setTextColor(0xFF6A1B9A);
+        layout.addView(newIntentStatus);
+
+        Button relaunchSingleTop = new Button(this);
+        relaunchSingleTop.setText("Trigger onNewIntent");
+        relaunchSingleTop.setOnClickListener(v -> {
+            Log.d(TAG, "singleTop self relaunch requested");
+            Intent relaunch = new Intent(this, MainActivity.class)
+                .setAction(ACTION_NEW_INTENT_PROBE)
+                .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            startActivity(relaunch);
+        });
+        layout.addView(relaunchSingleTop);
+
         addText(layout, "\nIf this page is visible, the hosted container reached guest Activity.onCreate().", 14, 0xFF999999);
 
         scroll.addView(layout);
         setContentView(scroll);
 
         Log.d(TAG, "=== MainActivity.onCreate() complete ===");
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String action = intent != null ? intent.getAction() : "";
+        String marker = "onNewIntent: " + action;
+        Log.d(TAG, "=== MainActivity.onNewIntent(): " + action + " ===");
+        if (newIntentStatus != null) {
+            newIntentStatus.setText(marker);
+        }
     }
 
     private String runStorageProbe() {
@@ -194,7 +226,7 @@ public class MainActivity extends Activity {
                         status = cursor.getString(cursor.getColumnIndexOrThrow("status"));
                     }
                     out.append("provider.queryStatus: ").append(status).append("\n");
-                    out.append("provider.uri: ").append(uri).append("\n");
+                    out.append("provider.uri: ").append(redactUri(uri)).append("\n");
                 }
             }
         } catch (Exception e) {
@@ -204,6 +236,26 @@ public class MainActivity extends Activity {
         String result = out.toString();
         Log.d(TAG, "=== component probe ===\n" + result);
         return result;
+    }
+
+    private String redactUri(Uri uri) {
+        if (uri == null) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder();
+        if (uri.getScheme() != null && uri.getScheme().length() > 0) {
+            out.append(uri.getScheme()).append("://");
+        }
+        if (uri.getAuthority() != null && uri.getAuthority().length() > 0) {
+            out.append(uri.getAuthority());
+        }
+        if (uri.getEncodedPath() != null) {
+            out.append(uri.getEncodedPath());
+        }
+        if (uri.getEncodedQuery() != null || uri.getFragment() != null) {
+            out.append("<redacted>");
+        }
+        return out.toString();
     }
 
     private String runPackageManagerProbe() {

@@ -9,6 +9,7 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -176,6 +177,37 @@ class VirtualActivityManagerTest {
         assertEquals(listOf(root.token, detail.token), recordManager.listTasks().single().activities.map { it.token })
     }
 
+    @Test
+    fun `reused activity snapshots redact sensitive data uri`() {
+        val context = mockk<Context>(relaxed = true)
+        every { context.packageName } returns "com.multiapp.app"
+        val registry = ProxyActivityRegistry(
+            listOf("com.multiapp.app.container.ProxyActivitySingleTop0"),
+            mapOf("com.multiapp.app.container.ProxyActivitySingleTop0" to "singleTop")
+        )
+        val recordManager = VirtualActivityRecordManager()
+        val manager = VirtualActivityManager(context, registry, activityRecordManager = recordManager)
+        val firstRequest = request(
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            sourceIntent = intentWithData("https://example.com/start?token=first"),
+            launchMode = "singleTop"
+        )
+        val secondRequest = request(
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            sourceIntent = intentWithData("https://user:pass@example.com/private/path;token=second?password=secret#fragment"),
+            launchMode = "singleTop"
+        )
+
+        manager.allocateGuestActivity(firstRequest)
+        manager.allocateGuestActivity(secondRequest)
+        val pending = recordManager.lastLaunchResult()?.pendingNewIntent?.dataIntent
+
+        assertEquals("https://example.com/<redacted>", pending?.dataUri)
+        listOf("user:pass", "private", "token=", "password=", "secret", "fragment").forEach { leaked ->
+            assertFalse(pending?.dataUri?.contains(leaked) == true, "snapshot leaked $leaked in ${pending?.dataUri}")
+        }
+    }
+
     private fun request(
         guestActivityClassName: String,
         sourceIntent: Intent = intentWithFlags(),
@@ -191,5 +223,13 @@ class VirtualActivityManagerTest {
 
     private fun intentWithFlags(flags: Int = 0): Intent = mockk(relaxed = true) {
         every { this@mockk.flags } returns flags
+    }
+
+    private fun intentWithData(dataString: String): Intent = mockk(relaxed = true) {
+        every { this@mockk.flags } returns 0
+        every { this@mockk.dataString } returns dataString
+        every { this@mockk.action } returns "com.test.ACTION"
+        every { this@mockk.categories } returns emptySet()
+        every { this@mockk.extras } returns null
     }
 }

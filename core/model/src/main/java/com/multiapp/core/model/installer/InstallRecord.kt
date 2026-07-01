@@ -14,11 +14,20 @@ data class InstallMetadata(
     val activities: List<ComponentInfo> = emptyList(),
     val services: List<ComponentInfo> = emptyList(),
     val receivers: List<ComponentInfo> = emptyList(),
-    val providers: List<ComponentInfo> = emptyList()
+    val providers: List<ComponentInfo> = emptyList(),
+    val nativeLibraries: List<String> = emptyList(),
+    val abiList: List<String> = emptyList()
 )
 
 fun interface InstallMetadataResolver {
     fun resolve(packageName: String, originApkPath: String): InstallMetadata
+}
+
+internal fun requireSafeInstallPackageName(packageName: String) {
+    require(packageName.isNotBlank()) { "packageName must not be blank" }
+    require(!packageName.contains("..") && !packageName.contains("/") && !packageName.contains("\\")) {
+        "Invalid packageName: $packageName"
+    }
 }
 
 data class InstallRecord(
@@ -44,7 +53,7 @@ data class InstallRecord(
     val updatedAtMs: Long = installTimeMs
 ) {
     init {
-        require(packageName.isNotBlank()) { "packageName must not be blank" }
+        requireSafeInstallPackageName(packageName)
         require(originApkPath.isNotBlank()) { "originApkPath must not be blank" }
         require(originApkSha256.isNotBlank()) { "originApkSha256 must not be blank" }
         require(versionCode > 0) { "versionCode must be positive" }
@@ -52,5 +61,7 @@ data class InstallRecord(
         require(targetSdk > 0) { "targetSdk must be positive" }
         require(minSdk > 0) { "minSdk must be positive" }
         require(schemaVersion > 0) { "schemaVersion must be positive" }
+        require(nativeLibraries.none { it.isBlank() }) { "nativeLibraries must not contain blank entries" }
+        require(abiList.none { it.isBlank() }) { "abiList must not contain blank entries" }
     }
 }

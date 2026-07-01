@@ -54,7 +54,7 @@ internal object VirtualPackageInfoFactory {
             launchMode = toActivityInfoLaunchMode(component.launchMode)
             processName = component.processName
             taskAffinity = component.taskAffinity
-            theme = component.themeId
+            theme = component.themeId.takeIf { it != 0 } ?: snapshot.themeId
             screenOrientation = toActivityInfoScreenOrientation(component.screenOrientation)
             configChanges = toActivityInfoConfigChanges(component.configChanges)
             permission = component.permission

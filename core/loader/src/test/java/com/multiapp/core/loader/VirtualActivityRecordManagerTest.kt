@@ -134,6 +134,35 @@ class VirtualActivityRecordManagerTest {
     }
 
     @Test
+    fun `A to B back marks B finished and leaves A active`() {
+        val manager = VirtualActivityRecordManager()
+        manager.registerLaunch(record(token = "token-a", activity = "MainActivity", proxyActivityClassName = "ProxyActivity0"))
+        manager.registerLaunch(record(token = "token-b", activity = "SecondActivity", proxyActivityClassName = "ProxyActivity1"))
+
+        val finished = manager.finish("token-b")
+
+        assertEquals(VirtualActivityState.FINISHED, finished?.state)
+        assertEquals(VirtualActivityState.FINISHED, manager.resolve("token-b")?.state)
+        assertEquals("token-a", manager.resolve("token-a")?.token)
+        assertNull(manager.resolveByProxy("ProxyActivity1"))
+        assertEquals(listOf("token-a"), manager.listTasks().single().activities.map { it.token })
+    }
+
+    @Test
+    fun `finish missing token preserves active stack`() {
+        val manager = VirtualActivityRecordManager()
+        manager.registerLaunch(record(token = "token-a", activity = "MainActivity", proxyActivityClassName = "ProxyActivity0"))
+        manager.registerLaunch(record(token = "token-b", activity = "SecondActivity", proxyActivityClassName = "ProxyActivity1"))
+
+        val finished = manager.finish("missing-token")
+
+        assertNull(finished)
+        assertEquals(listOf("token-a", "token-b"), manager.listTasks().single().activities.map { it.token })
+        assertEquals("token-a", manager.resolve("token-a")?.token)
+        assertEquals("token-b", manager.resolve("token-b")?.token)
+    }
+
+    @Test
     fun `finish marks record finished removes proxy mapping and keeps task queryable`() {
         val manager = VirtualActivityRecordManager()
         val launched = manager.registerLaunch(record(token = "token-1", proxyActivityClassName = "ProxyActivity0")).activity

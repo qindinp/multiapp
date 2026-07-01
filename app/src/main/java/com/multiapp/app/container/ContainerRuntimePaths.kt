@@ -1,6 +1,7 @@
 package com.multiapp.app.container
 
 import android.content.Context
+import com.multiapp.core.common.EvidenceSanitizer
 import java.io.File
 
 /** Shared filesystem layout for v2 hosted container runtime state. */
@@ -43,16 +44,27 @@ object ContainerRuntimePaths {
         ensureDir(filesDir, HOSTED_LAUNCH_EVIDENCE_DIR)
 
     fun hostedLaunchEvidenceFile(context: Context, instanceId: String): File =
-        File(hostedLaunchEvidenceDir(context), "$instanceId.properties")
+        hostedLaunchEvidenceFile(context.filesDir, instanceId)
 
-    fun hostedLaunchEvidenceFile(filesDir: File, instanceId: String): File =
-        File(hostedLaunchEvidenceDir(filesDir), "$instanceId.properties")
+    fun hostedLaunchEvidenceFile(filesDir: File, instanceId: String): File {
+        val evidenceDir = hostedLaunchEvidenceDir(filesDir).canonicalFile
+        val safeInstanceId = EvidenceSanitizer.safeEvidenceSegment(instanceId, "instanceId")
+        val file = File(evidenceDir, "$safeInstanceId.properties").canonicalFile
+        require(file.parentFile == evidenceDir) { "hosted launch evidence path escapes evidence dir" }
+        return file
+    }
 
     fun hostedRuntimeEvidenceFile(context: Context, instanceId: String, component: String): File =
         hostedRuntimeEvidenceFile(context.filesDir, instanceId, component)
 
-    fun hostedRuntimeEvidenceFile(filesDir: File, instanceId: String, component: String): File =
-        File(hostedLaunchEvidenceDir(filesDir), "$instanceId.$component.properties")
+    fun hostedRuntimeEvidenceFile(filesDir: File, instanceId: String, component: String): File {
+        val evidenceDir = hostedLaunchEvidenceDir(filesDir).canonicalFile
+        val safeInstanceId = EvidenceSanitizer.safeEvidenceSegment(instanceId, "instanceId")
+        val safeComponent = EvidenceSanitizer.safeEvidenceSegment(component, "component")
+        val file = File(evidenceDir, "$safeInstanceId.$safeComponent.properties").canonicalFile
+        require(file.parentFile == evidenceDir) { "hosted runtime evidence path escapes evidence dir" }
+        return file
+    }
 
     fun nativeLibraryDirOrNull(dataRootPath: String?): String? {
         if (dataRootPath.isNullOrBlank()) return null

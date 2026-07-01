@@ -23,9 +23,7 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
     }
 
     override fun save(record: InstallRecord): Result<String> {
-        require(!record.packageName.contains("..") && !record.packageName.contains("/") && !record.packageName.contains("\\")) {
-            "Invalid packageName: ${record.packageName}"
-        }
+        requireSafeInstallPackageName(record.packageName)
         return try {
             val updatedRecord = record.copy(updatedAtMs = System.currentTimeMillis())
             val fileName = "${record.packageName}.json"
@@ -66,6 +64,7 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
     }
 
     override fun load(packageName: String): InstallRecord? {
+        requireSafeInstallPackageName(packageName)
         return try {
             val file = File(baseDir, "$packageName.json")
             if (!file.exists()) return null
@@ -103,6 +102,7 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
     }
 
     override fun delete(packageName: String): Boolean {
+        requireSafeInstallPackageName(packageName)
         val file = File(baseDir, "$packageName.json")
         return file.exists() && file.delete()
     }

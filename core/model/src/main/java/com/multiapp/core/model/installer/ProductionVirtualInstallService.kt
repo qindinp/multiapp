@@ -1,6 +1,8 @@
 package com.multiapp.core.model.installer
 
+import com.multiapp.core.model.VirtualApp
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.CancellationException
 
 /**
@@ -29,6 +31,44 @@ class ProductionVirtualInstallService(
         }
     }
 
+    override fun ensureInstallRecord(app: VirtualApp): Result<ImportResult> {
+        return try {
+            requireSafeInstallPackageName(app.packageName)
+            val existing = installRecordStore.load(app.packageName)
+            val appMetadata = app.toInstallMetadata()
+            val appApkSha256 = computeSha256OrNull(app.apkPath)
+            if (existing != null && !existing.needsAppRefresh(app, appMetadata, appApkSha256)) {
+                return Result.success(ImportResult(
+                    packageRecord = buildPackageRecord(existing),
+                    manifest = buildManifest(existing),
+                    recordPath = existing.originApkPath
+                ))
+            }
+
+            importer.importFromMetadata(
+                packageName = app.packageName,
+                originApkPath = app.apkPath,
+                versionCode = app.versionCode,
+                versionName = app.versionName,
+                targetSdk = app.targetSdkVersion,
+                minSdk = app.minSdkVersion,
+                applicationClassName = app.applicationClassName,
+                packageLabel = app.appName,
+                permissions = app.requestedPermissions,
+                activities = app.activities.map { ComponentInfo(it) },
+                services = app.services.map { ComponentInfo(it) },
+                receivers = app.receivers.map { ComponentInfo(it) },
+                providers = app.providers.map { ComponentInfo(it) },
+                nativeLibraries = emptyList(),
+                abiList = app.nativeAbis
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     override suspend fun importFromInstalledPackage(packageName: String): Result<ImportResult> {
         // Requires Android framework PackageManager - use importFromMetadata() instead
         // with pre-extracted metadata from VirtualApp (populated by LauncherViewModel.loadAllApps).
@@ -48,6 +88,7 @@ class ProductionVirtualInstallService(
         packageLabel: String?
     ): Result<ImportResult> {
         return try {
+            requireSafeInstallPackageName(packageName)
             val existing = installRecordStore.load(packageName)
             val resolvedMetadata = resolveInstallMetadata(packageName, originApkPath)
 
@@ -75,7 +116,9 @@ class ProductionVirtualInstallService(
                 activities = resolvedMetadata.activities,
                 services = resolvedMetadata.services,
                 receivers = resolvedMetadata.receivers,
-                providers = resolvedMetadata.providers
+                providers = resolvedMetadata.providers,
+                nativeLibraries = resolvedMetadata.nativeLibraries,
+                abiList = resolvedMetadata.abiList
             )
         } catch (e: CancellationException) {
             throw e
@@ -90,16 +133,68 @@ class ProductionVirtualInstallService(
         }.getOrNull() ?: InstallMetadata()
     }
 
+    private fun VirtualApp.toInstallMetadata(): InstallMetadata {
+        return InstallMetadata(
+            permissions = requestedPermissions,
+            activities = activities.map { ComponentInfo(it) },
+            services = services.map { ComponentInfo(it) },
+            receivers = receivers.map { ComponentInfo(it) },
+            providers = providers.map { ComponentInfo(it) },
+            nativeLibraries = emptyList(),
+            abiList = nativeAbis
+        )
+    }
+
     private fun InstallRecord.needsMetadataRefresh(metadata: InstallMetadata): Boolean {
         if (metadata == InstallMetadata()) return false
-        return activities.isEmpty() && metadata.activities.isNotEmpty() ||
+        return !matchesInstallMetadata(metadata) ||
+            activities.isEmpty() && metadata.activities.isNotEmpty() ||
             services.isEmpty() && metadata.services.isNotEmpty() ||
             receivers.isEmpty() && metadata.receivers.isNotEmpty() ||
             providers.isEmpty() && metadata.providers.isNotEmpty() ||
-            permissions.isEmpty() && metadata.permissions.isNotEmpty()
+            permissions.isEmpty() && metadata.permissions.isNotEmpty() ||
+            nativeLibraries.isEmpty() && metadata.nativeLibraries.isNotEmpty() ||
+            abiList.isEmpty() && metadata.abiList.isNotEmpty()
+    }
+
+    private fun InstallRecord.needsAppRefresh(
+        app: VirtualApp,
+        metadata: InstallMetadata,
+        appApkSha256: String?
+    ): Boolean {
+        return versionCode != app.versionCode ||
+            versionName != app.versionName ||
+            minSdk != app.minSdkVersion ||
+            targetSdk != app.targetSdkVersion ||
+            applicationClassName != app.applicationClassName ||
+            packageLabel != app.appName ||
+            appApkSha256 == null ||
+            originApkSha256 != appApkSha256 ||
+            needsMetadataRefresh(metadata)
+    }
+
+    private fun InstallRecord.matchesInstallMetadata(metadata: InstallMetadata): Boolean {
+        return nativeLibraries == metadata.nativeLibraries && abiList == metadata.abiList
+    }
+
+    private fun computeSha256OrNull(path: String): String? {
+        val file = runCatching { File(path).canonicalFile }.getOrNull() ?: return null
+        if (!file.isFile) return null
+        return runCatching {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(8192)
+                var read: Int
+                while (input.read(buffer).also { read = it } != -1) {
+                    digest.update(buffer, 0, read)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        }.getOrNull()
     }
 
     override fun getInstallRecord(packageName: String): InstallRecord? {
+        requireSafeInstallPackageName(packageName)
         return installRecordStore.load(packageName)
     }
 
@@ -108,10 +203,12 @@ class ProductionVirtualInstallService(
     }
 
     override fun deleteInstallRecord(packageName: String): Boolean {
+        requireSafeInstallPackageName(packageName)
         return installRecordStore.delete(packageName)
     }
 
     override fun hasInstallRecord(packageName: String): Boolean {
+        requireSafeInstallPackageName(packageName)
         return installRecordStore.load(packageName) != null
     }
 

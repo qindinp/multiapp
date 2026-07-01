@@ -1,6 +1,7 @@
 package com.multiapp.app.container
 
 import android.content.Context
+import com.multiapp.core.common.EvidenceSanitizer
 import java.io.File
 
 /** Writes small component-scoped evidence files for hosted runtime diagnostics. */
@@ -24,11 +25,6 @@ object ContainerRuntimeEvidenceWriter {
     }
 
     fun toLines(fields: Map<String, Any?>): List<String> = fields.map { (key, value) ->
-        "$key=${sanitize(value)}"
+        "$key=${EvidenceSanitizer.sanitizeEvidenceValue(key, value)}"
     }
-
-    private fun sanitize(value: Any?): String = value?.toString()
-        ?.replace('\r', ' ')
-        ?.replace('\n', ' ')
-        .orEmpty()
 }

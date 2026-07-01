@@ -94,4 +94,48 @@ class QqReaderProfileTest {
         assertFalse(result.eqctCompat)
         assertFalse(result.loginDiag)
     }
+
+    @Test
+    fun `diagnostics gate blocks protected profile unless explicitly enabled`() {
+        val gate = QqReaderProfile.diagnosticsGate(
+            packageName = "com.qq.reader",
+            cloneProfile = "QQ_READER_SPECIAL",
+            lsplantOk = true,
+            explicitDiagnosticsEnabled = false
+        )
+
+        assertFalse(gate.allowed)
+        assertTrue(gate.protectedPackage)
+        assertEquals("EXPLICIT_DIAGNOSTICS_DISABLED", gate.reason)
+    }
+
+    @Test
+    fun `diagnostics gate allows protected profile only when explicit and lsplant ready`() {
+        val gate = QqReaderProfile.diagnosticsGate(
+            packageName = "com.qq.reader",
+            cloneProfile = "NORMAL",
+            lsplantOk = true,
+            explicitDiagnosticsEnabled = true
+        )
+
+        assertTrue(gate.allowed)
+        assertTrue(gate.protectedPackage)
+        assertTrue(gate.explicitDiagnosticsEnabled)
+        assertTrue(gate.lsplantReady)
+        assertEquals("ALLOWED", gate.reason)
+    }
+
+    @Test
+    fun `diagnostics gate blocks non protected packages`() {
+        val gate = QqReaderProfile.diagnosticsGate(
+            packageName = "com.example.app",
+            cloneProfile = "NORMAL",
+            lsplantOk = true,
+            explicitDiagnosticsEnabled = true
+        )
+
+        assertFalse(gate.allowed)
+        assertFalse(gate.protectedPackage)
+        assertEquals("NOT_QQ_READER_PROFILE", gate.reason)
+    }
 }
