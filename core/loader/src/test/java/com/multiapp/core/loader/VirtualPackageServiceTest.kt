@@ -9,6 +9,7 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -126,6 +127,50 @@ class VirtualPackageServiceTest {
         assertNull(service.isInstantApp("com.other"))
     }
 
+    @Test
+    fun `runtime uid queries are snapshot scoped to package aliases`() {
+        val service = VirtualPackageService(snapshot())
+        val runtimeUid = 42420
+
+        assertEquals(runtimeUid, service.getPackageUid("com.test.minimal", runtimeUid))
+        assertEquals(runtimeUid, service.getPackageUid("com.multiapp.instance.abc", runtimeUid))
+        assertNull(service.getPackageUid("com.other", runtimeUid))
+        assertContentEquals(
+            arrayOf("com.test.minimal", "com.multiapp.instance.abc"),
+            service.getPackagesForUid(runtimeUid, runtimeUid)
+        )
+        assertEquals("com.test.minimal", service.getNameForUid(runtimeUid, runtimeUid))
+        assertNull(service.getPackagesForUid(98765, runtimeUid))
+        assertNull(service.getNameForUid(98765, runtimeUid))
+    }
+
+    @Test
+    fun `packages holding permissions are answered from snapshot permissions`() {
+        val service = VirtualPackageService(snapshot())
+
+        val packages = service.getPackagesHoldingPermissions(
+            arrayOf("android.permission.CAMERA", "android.permission.ACCESS_FINE_LOCATION")
+        )
+
+        assertEquals(listOf("com.test.minimal"), packages.map { it.packageName })
+        assertTrue(service.getPackagesHoldingPermissions(arrayOf("android.permission.RECORD_AUDIO")).isEmpty())
+        assertTrue(service.getPackagesHoldingPermissions(emptyArray()).isEmpty())
+    }
+
+    @Test
+    fun `content provider queries are scoped by runtime uid and process name`() {
+        val service = VirtualPackageService(snapshot())
+        val runtimeUid = 42420
+
+        val allProviders = service.queryContentProviders(null, runtimeUid, runtimeUid)
+        val processProviders = service.queryContentProviders("com.test.minimal:probe", runtimeUid, runtimeUid)
+
+        assertEquals(listOf("com.test.minimal.ProbeProvider"), allProviders.map { it.name })
+        assertEquals(listOf("com.test.minimal.ProbeProvider"), processProviders.map { it.name })
+        assertTrue(service.queryContentProviders("com.other", runtimeUid, runtimeUid).isEmpty())
+        assertTrue(service.queryContentProviders(null, 98765, runtimeUid).isEmpty())
+    }
+
     private fun component(
         className: String,
         packageName: String = "com.test.minimal"
@@ -160,6 +205,7 @@ class VirtualPackageServiceTest {
         sourceDir = "/data/apks/minimal.apk",
         dataDir = "/data/inst",
         applicationClassName = "com.test.minimal.MinimalApp",
+        processName = "com.test.minimal",
         launcherActivityName = "com.test.minimal.MainActivity",
         activities = listOf(
             ResolvedComponent(
@@ -213,6 +259,7 @@ class VirtualPackageServiceTest {
             ResolvedComponent(
                 name = "com.test.minimal.ProbeProvider",
                 exported = false,
+                processName = "com.test.minimal:probe",
                 intentFilters = listOf("com.test.PROBE"),
                 authorities = listOf("com.test.minimal.probe")
             )

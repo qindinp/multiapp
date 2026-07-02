@@ -22,13 +22,15 @@ import android.content.res.Resources
 import android.content.res.XmlResourceParser
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.os.Process
 import android.os.UserHandle
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
 /** PackageManager facade for one hosted virtual package snapshot. */
 class VirtualPackageManagerWrapper(
     private val base: PackageManager,
-    snapshot: VirtualPackageSnapshot
+    snapshot: VirtualPackageSnapshot,
+    private val runtimeUid: Int = runCatching { Process.myUid() }.getOrDefault(0)
 ) : PackageManager() {
 
     private val service = VirtualPackageService(snapshot)
@@ -151,13 +153,17 @@ class VirtualPackageManagerWrapper(
     override fun getInstantAppCookieMaxBytes(): Int = base.instantAppCookieMaxBytes
     override fun getInstrumentationInfo(className: ComponentName, flags: Int): InstrumentationInfo = base.getInstrumentationInfo(className, flags)
     override fun getLeanbackLaunchIntentForPackage(packageName: String): Intent? = base.getLeanbackLaunchIntentForPackage(packageName)
-    override fun getNameForUid(uid: Int): String? = base.getNameForUid(uid)
+    override fun getNameForUid(uid: Int): String? = service.getNameForUid(uid, runtimeUid) ?: base.getNameForUid(uid)
     override fun getPackageGids(packageName: String): IntArray = base.getPackageGids(packageName)
     override fun getPackageGids(packageName: String, flags: Int): IntArray = base.getPackageGids(packageName, flags)
     override fun getPackageInstaller(): PackageInstaller = base.packageInstaller
-    override fun getPackageUid(packageName: String, flags: Int): Int = base.getPackageUid(packageName, flags)
-    override fun getPackagesForUid(uid: Int): Array<String>? = base.getPackagesForUid(uid)
-    override fun getPackagesHoldingPermissions(permissions: Array<String>, flags: Int): List<PackageInfo> = base.getPackagesHoldingPermissions(permissions, flags)
+    override fun getPackageUid(packageName: String, flags: Int): Int = service.getPackageUid(packageName, runtimeUid) ?: base.getPackageUid(packageName, flags)
+    override fun getPackagesForUid(uid: Int): Array<String>? = service.getPackagesForUid(uid, runtimeUid) ?: base.getPackagesForUid(uid)
+    override fun getPackagesHoldingPermissions(permissions: Array<String>, flags: Int): List<PackageInfo> {
+        val virtualPackages = service.getPackagesHoldingPermissions(permissions)
+        val basePackages = base.getPackagesHoldingPermissions(permissions, flags)
+        return (virtualPackages + basePackages).distinctBy { it.packageName }
+    }
     override fun getPermissionGroupInfo(name: String, flags: Int): PermissionGroupInfo = base.getPermissionGroupInfo(name, flags)
     override fun getPermissionInfo(name: String, flags: Int): PermissionInfo = base.getPermissionInfo(name, flags)
     override fun getPreferredActivities(outFilters: MutableList<IntentFilter>, outActivities: MutableList<ComponentName>, packageName: String?): Int = base.getPreferredActivities(outFilters, outActivities, packageName)
@@ -180,7 +186,12 @@ class VirtualPackageManagerWrapper(
     override fun isPermissionRevokedByPolicy(permission: String, packageName: String): Boolean = base.isPermissionRevokedByPolicy(permission, packageName)
     override fun isSafeMode(): Boolean = base.isSafeMode
     override fun queryBroadcastReceivers(intent: Intent, flags: Int): List<ResolveInfo> = service.queryBroadcastReceivers(intent).ifEmpty { base.queryBroadcastReceivers(intent, flags) }
-    override fun queryContentProviders(processName: String?, uid: Int, flags: Int): List<ProviderInfo> = base.queryContentProviders(processName, uid, flags)
+    override fun queryContentProviders(processName: String?, uid: Int, flags: Int): List<ProviderInfo> {
+        val providers = service.queryContentProviders(processName, uid, runtimeUid)
+        if (uid == runtimeUid) return providers
+        val baseProviders = base.queryContentProviders(processName, uid, flags)
+        return (providers + baseProviders).distinctBy { "${it.authority}:${it.name}" }
+    }
     override fun queryInstrumentation(targetPackage: String, flags: Int): List<InstrumentationInfo> = base.queryInstrumentation(targetPackage, flags)
     override fun queryIntentActivityOptions(caller: ComponentName?, specifics: Array<Intent>?, intent: Intent, flags: Int): List<ResolveInfo> = base.queryIntentActivityOptions(caller, specifics, intent, flags)
     override fun queryIntentContentProviders(intent: Intent, flags: Int): List<ResolveInfo> = service.queryIntentContentProviders(intent).ifEmpty { base.queryIntentContentProviders(intent, flags) }

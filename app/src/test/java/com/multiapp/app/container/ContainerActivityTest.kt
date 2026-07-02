@@ -1,5 +1,6 @@
 package com.multiapp.app.container
 
+import com.multiapp.core.loader.BootstrapEvidence
 import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.RuntimeStage
@@ -101,6 +102,46 @@ class ContainerActivityTest {
         )
 
         assertFalse(ContainerActivity.shouldFinishAfterBootstrap(result))
+    }
+
+    @Test
+    @DisplayName("Package manager proxy stage evidence is converted to runtime evidence fields")
+    fun packageManagerProxyEvidenceFields() {
+        val result = BootstrapResult.success(
+            stage = RuntimeStage.PACKAGE_MANAGER_PROXY,
+            message = "Global PMS proxy installed",
+            evidence = listOf(
+                BootstrapEvidence("globalPmsProxyEnabled", "true"),
+                BootstrapEvidence("sPackageManagerPatched", "true"),
+                BootstrapEvidence("uidAggregateVirtualizationEnabled", "true")
+            ),
+            durationMs = 17L
+        )
+
+        val fields = ContainerActivity.packageManagerProxyEvidenceFields(result)
+
+        assertEquals("PACKAGE_MANAGER_PROXY", fields["stage"])
+        assertEquals("SUCCESS", fields["status"])
+        assertEquals("Global PMS proxy installed", fields["message"])
+        assertEquals("17", fields["durationMs"])
+        assertEquals("true", fields["globalPmsProxyEnabled"])
+        assertEquals("true", fields["sPackageManagerPatched"])
+        assertEquals("true", fields["uidAggregateVirtualizationEnabled"])
+    }
+
+    @Test
+    @DisplayName("Package manager proxy stage evidence lookup ignores unrelated stages")
+    fun packageManagerProxyStageLookupIgnoresUnrelatedStages() {
+        val result = bootstrapResult(
+            success = true,
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            stageResults = listOf(
+                BootstrapResult.success(RuntimeStage.RESOURCES),
+                BootstrapResult.success(RuntimeStage.APPLICATION)
+            )
+        )
+
+        assertNull(ContainerActivity.packageManagerProxyStageResult(result))
     }
 
     @Test

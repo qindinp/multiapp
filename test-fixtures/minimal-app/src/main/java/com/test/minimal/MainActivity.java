@@ -260,8 +260,14 @@ public class MainActivity extends Activity {
 
     private String runPackageManagerProbe() {
         StringBuilder out = new StringBuilder();
+        String contextPackageName = getPackageName();
+        int runtimeUid = android.os.Process.myUid();
+
+        out.append("pm.getPackageName: ").append(contextPackageName).append("\n");
+        out.append("pm.runtimeUid: ").append(runtimeUid).append("\n");
+
         try {
-            PackageInfo packageInfo = getPackageManager().getPackageInfo(getPackageName(), 0);
+            PackageInfo packageInfo = getPackageManager().getPackageInfo(contextPackageName, 0);
             out.append("pm.packageInfo.packageName: ").append(packageInfo.packageName).append("\n");
             out.append("pm.packageInfo.versionName: ").append(packageInfo.versionName).append("\n");
         } catch (Exception e) {
@@ -270,10 +276,62 @@ public class MainActivity extends Activity {
 
         try {
             out.append("pm.applicationInfo.packageName: ")
-                .append(getPackageManager().getApplicationInfo(getPackageName(), 0).packageName)
+                .append(getPackageManager().getApplicationInfo(contextPackageName, 0).packageName)
                 .append("\n");
         } catch (Exception e) {
             out.append("pm.getApplicationInfo failed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+        }
+
+        try {
+            out.append("pm.packageUid.originPackage: ")
+                .append(getPackageManager().getPackageUid("com.test.minimal", 0))
+                .append("\n");
+        } catch (Exception e) {
+            out.append("pm.getPackageUid.originPackage failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        }
+
+        try {
+            out.append("pm.packageUid.contextPackage: ")
+                .append(getPackageManager().getPackageUid(contextPackageName, 0))
+                .append("\n");
+        } catch (Exception e) {
+            out.append("pm.getPackageUid.contextPackage failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        }
+
+        try {
+            String[] packagesForUid = getPackageManager().getPackagesForUid(runtimeUid);
+            if (packagesForUid != null) {
+                java.util.Arrays.sort(packagesForUid);
+            }
+            out.append("pm.packagesForUid: ")
+                .append(java.util.Arrays.toString(packagesForUid))
+                .append("\n");
+        } catch (Exception e) {
+            out.append("pm.getPackagesForUid failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        }
+
+        try {
+            out.append("pm.nameForUid: ")
+                .append(getPackageManager().getNameForUid(runtimeUid))
+                .append("\n");
+        } catch (Exception e) {
+            out.append("pm.getNameForUid failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
         }
 
         try {

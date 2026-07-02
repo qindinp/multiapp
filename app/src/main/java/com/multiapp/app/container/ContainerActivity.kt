@@ -5,8 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.util.Log
+import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.HostedRuntimeBootstrap
+import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.loader.VirtualActivityManager
 import com.multiapp.core.loader.VirtualProcessRuntime
 import com.multiapp.core.model.instance.DefaultInstanceManager
@@ -101,6 +103,22 @@ class ContainerActivity : Activity() {
             )
         }
 
+        internal fun packageManagerProxyStageResult(result: HostedBootstrapResult): BootstrapResult? =
+            result.stageResults.firstOrNull { it.stage == RuntimeStage.PACKAGE_MANAGER_PROXY }
+
+        internal fun packageManagerProxyEvidenceFields(result: BootstrapResult): Map<String, String> {
+            return buildMap {
+                put("stage", result.stage.name)
+                put("status", result.status.name)
+                put("message", result.message)
+                put("durationMs", result.durationMs.toString())
+                result.errorClass?.let { put("errorClass", it) }
+                result.errorMessage?.let { put("errorMessage", it) }
+                result.rollbackNote?.let { put("rollbackNote", it) }
+                result.evidence.forEach { evidence -> put(evidence.key, evidence.value) }
+            }
+        }
+
         internal fun resolveNativeLibraryDir(dataRoot: String?): String? {
             if (dataRoot.isNullOrBlank()) return null
             return ContainerRuntimePaths.nativeLibraryDirOrNull(dataRoot)
@@ -162,6 +180,7 @@ class ContainerActivity : Activity() {
         val result = VirtualProcessRuntime.global.bindApplication(instanceId) {
             bootstrap.run(instanceId)
         }
+        writePackageManagerProxyEvidence(instanceId, result)
 
         if (!result.success) {
             Log.e(TAG, "Bootstrap failed for instanceId=$instanceId: ${result.summary.failureReason}")
@@ -257,6 +276,23 @@ class ContainerActivity : Activity() {
     /** Base directory for instance data roots. */
     private fun getDataRootDir(): File =
         ContainerRuntimePaths.instanceDataRootBase(this)
+
+    private fun writePackageManagerProxyEvidence(
+        instanceId: String,
+        result: HostedBootstrapResult
+    ) {
+        val stageResult = packageManagerProxyStageResult(result) ?: return
+        runCatching {
+            ContainerRuntimeEvidenceWriter.write(
+                context = this,
+                instanceId = instanceId,
+                component = "package-manager-proxy",
+                fields = packageManagerProxyEvidenceFields(stageResult)
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write package-manager-proxy evidence for instanceId=$instanceId", error)
+        }
+    }
 
     private fun writeLaunchEvidence(
         instanceId: String,

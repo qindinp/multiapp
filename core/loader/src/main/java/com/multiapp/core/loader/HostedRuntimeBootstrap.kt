@@ -84,6 +84,8 @@ class HostedRuntimeBootstrap(
     },
     private val providerHookInstallEnabled: Boolean = false,
     private val providerHookInstaller: VirtualProviderHookInstaller = VirtualProviderHookInstaller(),
+    private val packageManagerProxyInstaller: VirtualPackageManagerGlobalInstallAction = VirtualPackageManagerGlobalInstaller(),
+    private val runtimeUidProvider: () -> Int = { runCatching { android.os.Process.myUid() }.getOrDefault(0) },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
 
@@ -181,12 +183,28 @@ class HostedRuntimeBootstrap(
             "Package snapshot stage must provide package snapshot after success"
         }
 
+        val packageManagerProxyOutput = VirtualPackageManagerProxyStage(
+            hostContext = hostContext,
+            installer = packageManagerProxyInstaller,
+            runtimeUidProvider = runtimeUidProvider,
+            clock = clock
+        ).execute(packageSnapshotOutput.context)
+        stageResults.add(packageManagerProxyOutput.result)
+        if (packageManagerProxyOutput.isTerminalFailure) {
+            return failedHostedResult(
+                instanceId, stageResults,
+                originPackageName = instance.originPackageName,
+                originApkPath = originApkPath,
+                installId = installRecord.packageName
+            )
+        }
+
         val providerRoutingOutput = ProviderRoutingStage(
             hostPackageName = hostContext?.packageName,
             providerHookInstallEnabled = providerHookInstallEnabled,
             providerHookInstaller = providerHookInstaller,
             clock = clock
-        ).execute(packageSnapshotOutput.context)
+        ).execute(packageManagerProxyOutput.context)
         stageResults.add(providerRoutingOutput.result)
         if (providerRoutingOutput.isTerminalFailure) {
             return failedHostedResult(

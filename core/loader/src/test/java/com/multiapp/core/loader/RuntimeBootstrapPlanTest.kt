@@ -18,6 +18,7 @@ class RuntimeBootstrapPlanTest {
             RuntimeStage.ORIGIN_APK,
             RuntimeStage.NATIVE_LIBS,
             RuntimeStage.RESOURCES,
+            RuntimeStage.PACKAGE_MANAGER_PROXY,
             RuntimeStage.CLASS_LOADER,
             RuntimeStage.APPLICATION,
             RuntimeStage.LAUNCHER_ACTIVITY
@@ -76,6 +77,7 @@ class RuntimeBootstrapPlanTest {
 
         val expectedOptional = listOf(
             RuntimeStage.RESOURCES,
+            RuntimeStage.PACKAGE_MANAGER_PROXY,
             RuntimeStage.CLASS_LOADER,
             RuntimeStage.APPLICATION,
             RuntimeStage.LAUNCHER_ACTIVITY

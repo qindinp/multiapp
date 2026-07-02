@@ -124,6 +124,27 @@ class HostedContainerMinimalBaselineTest {
             ).close()
             instrumentation.waitForIdleSync()
             waitForRuntimeEvidence(instance.instanceId, includeNewIntent = false)
+            assertRuntimeEvidenceHasLine(instance.instanceId, "package-manager-proxy", "stage=PACKAGE_MANAGER_PROXY")
+            assertRuntimeEvidenceHasAnyLine(
+                instance.instanceId,
+                "package-manager-proxy",
+                setOf("status=SUCCESS", "status=DEGRADED")
+            )
+            assertRuntimeEvidenceHasLineStartingWith(
+                instance.instanceId,
+                "package-manager-proxy",
+                "globalPmsProxyEnabled="
+            )
+            assertRuntimeEvidenceHasLineStartingWith(
+                instance.instanceId,
+                "package-manager-proxy",
+                "sPackageManagerPatched="
+            )
+            assertRuntimeEvidenceHasLine(
+                instance.instanceId,
+                "package-manager-proxy",
+                "uidAggregateVirtualizationMode=merge-packages-preserve-name"
+            )
             assertRuntimeEvidenceHasLine(instance.instanceId, "activity-lifecycle", "status=GUEST_ACTIVITY_LIFECYCLE")
             assertRuntimeEvidenceHasLine(instance.instanceId, "activity-lifecycle", "activityRecordFound=true")
             assertRuntimeEvidenceDoesNotHaveLine(
@@ -177,6 +198,7 @@ class HostedContainerMinimalBaselineTest {
     private fun waitForRuntimeEvidence(instanceId: String, includeNewIntent: Boolean = false) {
         val requiredComponents = listOf(
             "launch",
+            "package-manager-proxy",
             "activity-instrumentation",
             "activity-context",
             "activity-lifecycle",
@@ -211,6 +233,36 @@ class HostedContainerMinimalBaselineTest {
         assertTrue(
             "$component evidence for $instanceId did not contain exact line $expectedLine:\n$text",
             expectedLine in lines
+        )
+    }
+
+    private fun assertRuntimeEvidenceHasAnyLine(
+        instanceId: String,
+        component: String,
+        expectedLines: Set<String>
+    ) {
+        val file = ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component)
+        assertTrue("missing $component evidence for $instanceId", file.isFile)
+        val text = file.readText()
+        val lines = text.lines().map { it.trim() }
+        assertTrue(
+            "$component evidence for $instanceId did not contain any expected line $expectedLines:\n$text",
+            expectedLines.any { it in lines }
+        )
+    }
+
+    private fun assertRuntimeEvidenceHasLineStartingWith(
+        instanceId: String,
+        component: String,
+        expectedPrefix: String
+    ) {
+        val file = ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component)
+        assertTrue("missing $component evidence for $instanceId", file.isFile)
+        val text = file.readText()
+        val lines = text.lines().map { it.trim() }
+        assertTrue(
+            "$component evidence for $instanceId did not contain line starting with $expectedPrefix:\n$text",
+            lines.any { it.startsWith(expectedPrefix) }
         )
     }
 

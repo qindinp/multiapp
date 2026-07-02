@@ -106,6 +106,37 @@ class VirtualPackageService(
     fun isInstantApp(packageName: String): Boolean? =
         if (snapshot.matchesPackageName(packageName)) false else null
 
+    fun getPackageUid(packageName: String, runtimeUid: Int): Int? =
+        if (snapshot.matchesPackageName(packageName)) runtimeUid else null
+
+    fun getPackagesForUid(uid: Int, runtimeUid: Int): Array<String>? =
+        if (uid == runtimeUid) packageAliases().toTypedArray() else null
+
+    fun getNameForUid(uid: Int, runtimeUid: Int): String? =
+        if (uid == runtimeUid) snapshot.originPackageName else null
+
+    fun getPackagesHoldingPermissions(permissions: Array<String>): List<PackageInfo> {
+        if (permissions.isEmpty()) return emptyList()
+        return if (permissions.any { it in snapshot.permissions }) {
+            listOf(VirtualPackageInfoFactory.packageInfo(snapshot))
+        } else {
+            emptyList()
+        }
+    }
+
+    fun queryContentProviders(processName: String?, uid: Int, runtimeUid: Int): List<ProviderInfo> {
+        if (uid != runtimeUid) return emptyList()
+        return snapshot.providers.mapNotNull { component ->
+            if (!component.matchesProcessName(processName)) return@mapNotNull null
+            VirtualPackageInfoFactory.providerInfo(snapshot, component)
+        }
+    }
+
+    fun packageAliases(): List<String> = listOf(
+        snapshot.originPackageName,
+        snapshot.virtualPackageName
+    ).filter { it.isNotBlank() }.distinct()
+
     private fun resolveLauncherActivity(intent: Intent): ResolveInfo? {
         if (intent.action != Intent.ACTION_MAIN) return null
         if (intent.categories?.contains(Intent.CATEGORY_LAUNCHER) != true) return null
@@ -127,6 +158,12 @@ class VirtualPackageService(
             components.filter { VirtualIntentFilterMatcher.matches(intent, it) }
         }
         return candidates.mapNotNull(toResolveInfo)
+    }
+
+    private fun ResolvedComponent.matchesProcessName(processName: String?): Boolean {
+        if (processName == null) return true
+        val componentProcessName = this.processName ?: snapshot.processName ?: snapshot.originPackageName
+        return componentProcessName == processName
     }
 }
 

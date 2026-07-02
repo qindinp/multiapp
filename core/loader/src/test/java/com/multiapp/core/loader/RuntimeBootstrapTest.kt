@@ -17,6 +17,7 @@ class RuntimeBootstrapTest {
                 RuntimeStage.PACKAGE_METADATA,
                 RuntimeStage.NATIVE_LIBS,
                 RuntimeStage.RESOURCES,
+                RuntimeStage.PACKAGE_MANAGER_PROXY,
                 RuntimeStage.CLASS_LOADER,
                 RuntimeStage.GUEST_CONTEXT,
                 RuntimeStage.APPLICATION,

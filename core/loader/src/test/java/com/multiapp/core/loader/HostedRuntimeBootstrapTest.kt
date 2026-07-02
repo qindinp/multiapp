@@ -131,7 +131,8 @@ class HostedRuntimeBootstrapTest {
     private fun validBootstrap(
         tempDir: File,
         hostContext: Context? = null,
-        applicationClassNameResolver: (ClassLoader, String?) -> String? = { _, _ -> null }
+        applicationClassNameResolver: (ClassLoader, String?) -> String? = { _, _ -> null },
+        packageManagerProxyInstaller: VirtualPackageManagerGlobalInstallAction = successfulPackageManagerProxyInstaller()
     ): Triple<HostedRuntimeBootstrap, File, FakeInstanceManager> {
         val apkFile = File(tempDir, "example.apk")
         apkFile.writeBytes(byteArrayOf(0x50, 0x4B))
@@ -144,9 +145,42 @@ class HostedRuntimeBootstrapTest {
                 mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
             ),
             hostContext = hostContext,
-            applicationClassNameResolver = applicationClassNameResolver
+            applicationClassNameResolver = applicationClassNameResolver,
+            packageManagerProxyInstaller = packageManagerProxyInstaller,
+            runtimeUidProvider = { 42420 }
         )
         return Triple(bootstrap, apkFile, instanceManager)
+    }
+
+    private fun successfulPackageManagerProxyInstaller() = VirtualPackageManagerGlobalInstallAction { _, snapshot, runtimeUid ->
+        VirtualPackageManagerGlobalInstallResult(
+            status = VirtualPackageManagerGlobalInstallStatus.INSTALLED,
+            instanceId = snapshot.instanceId,
+            originPackageName = snapshot.originPackageName,
+            virtualPackageName = snapshot.virtualPackageName,
+            runtimeUid = runtimeUid,
+            sPackageManagerRead = true,
+            sPackageManagerPatched = true,
+            ipackageManagerInterface = "fake.IPackageManager",
+            originalPackageManagerClass = "fake.Pms",
+            proxyClass = "fake.Proxy",
+            applicationPackageManagerPatchResults = listOf(
+                ActivityThreadPackageManagerPatchResult("hostContext.packageManager", patched = true)
+            )
+        )
+    }
+
+    private fun degradedPackageManagerProxyInstaller(reason: String) = VirtualPackageManagerGlobalInstallAction { _, snapshot, runtimeUid ->
+        VirtualPackageManagerGlobalInstallResult(
+            status = VirtualPackageManagerGlobalInstallStatus.DEGRADED,
+            instanceId = snapshot.instanceId,
+            originPackageName = snapshot.originPackageName,
+            virtualPackageName = snapshot.virtualPackageName,
+            runtimeUid = runtimeUid,
+            sPackageManagerRead = false,
+            sPackageManagerPatched = false,
+            degradedReasons = listOf(reason)
+        )
     }
 
     // ── Phase 1 Tests (existing) ─────────────────────────────────────────
@@ -753,6 +787,49 @@ class HostedRuntimeBootstrapTest {
         val classLoaderStage = result.stageResults.first { it.stage == RuntimeStage.CLASS_LOADER }
         assertEquals(libDir.absolutePath, classLoaderStage.evidence.find { it.key == "nativeLibraryDir" }?.value)
         assertEquals("true", classLoaderStage.evidence.find { it.key == "providerRoutingEnabled" }?.value)
+    }
+
+    @Test
+    fun `package manager proxy stage runs after snapshot and before application`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(tempDir)
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val stageOrder = result.stageResults.map { it.stage }
+        val snapshotIndex = stageOrder.indexOf(RuntimeStage.RESOURCES)
+        val proxyIndex = stageOrder.indexOf(RuntimeStage.PACKAGE_MANAGER_PROXY)
+        val applicationIndex = stageOrder.indexOf(RuntimeStage.APPLICATION)
+        assertTrue(proxyIndex > snapshotIndex)
+        assertTrue(proxyIndex < applicationIndex)
+        val proxyStage = result.stageResults.first { it.stage == RuntimeStage.PACKAGE_MANAGER_PROXY }
+        assertEquals(BootstrapStatus.SUCCESS, proxyStage.status)
+        val evidence = proxyStage.evidence.associate { it.key to it.value }
+        assertEquals("true", evidence["globalPmsProxyEnabled"])
+        assertEquals("package,application,component,intent,permission,uid", evidence["virtualizedQueryFamilies"])
+    }
+
+    @Test
+    fun `package manager proxy degraded result does not block application or launcher stages`(
+        @TempDir tempDir: File
+    ) {
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            packageManagerProxyInstaller = degradedPackageManagerProxyInstaller("S_PACKAGE_MANAGER_NULL")
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        assertTrue(result.success)
+        val proxyStage = result.stageResults.first { it.stage == RuntimeStage.PACKAGE_MANAGER_PROXY }
+        assertEquals(BootstrapStatus.DEGRADED, proxyStage.status)
+        assertTrue(proxyStage.evidence.first { it.key == "degradedReasons" }.value.contains("S_PACKAGE_MANAGER_NULL"))
+        val appStage = result.stageResults.first { it.stage == RuntimeStage.APPLICATION }
+        val launcherStage = result.stageResults.first { it.stage == RuntimeStage.LAUNCHER_ACTIVITY }
+        assertEquals(BootstrapStatus.SKIPPED, appStage.status)
+        assertEquals(BootstrapStatus.SKIPPED, launcherStage.status)
     }
 
     @Test

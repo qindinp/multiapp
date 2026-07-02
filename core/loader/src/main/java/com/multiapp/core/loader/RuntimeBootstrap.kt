@@ -6,6 +6,7 @@ enum class RuntimeStage(val order: Int) {
     PACKAGE_METADATA(20),
     NATIVE_LIBS(30),
     RESOURCES(40),
+    PACKAGE_MANAGER_PROXY(45),
     CLASS_LOADER(50),
     GUEST_CONTEXT(60),
     APPLICATION(70),
@@ -33,6 +34,7 @@ enum class StageReversibility {
             RuntimeStage.ORIGIN_APK -> IRREVERSIBLE
             RuntimeStage.NATIVE_LIBS -> IRREVERSIBLE
             RuntimeStage.RESOURCES -> PARTIALLY_REVERSIBLE
+            RuntimeStage.PACKAGE_MANAGER_PROXY -> PARTIALLY_REVERSIBLE
             RuntimeStage.CLASS_LOADER -> IRREVERSIBLE
             RuntimeStage.APPLICATION -> IRREVERSIBLE
             RuntimeStage.LAUNCHER_ACTIVITY -> IRREVERSIBLE

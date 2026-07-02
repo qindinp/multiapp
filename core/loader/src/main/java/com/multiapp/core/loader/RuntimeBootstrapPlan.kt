@@ -53,6 +53,7 @@ data class RuntimeBootstrapPlan(
                 RuntimeStage.ORIGIN_APK,
                 RuntimeStage.NATIVE_LIBS,
                 RuntimeStage.RESOURCES,
+                RuntimeStage.PACKAGE_MANAGER_PROXY,
                 RuntimeStage.CLASS_LOADER,
                 RuntimeStage.APPLICATION,
                 RuntimeStage.LAUNCHER_ACTIVITY
@@ -60,7 +61,7 @@ data class RuntimeBootstrapPlan(
             return RuntimeBootstrapPlan(
                 stages = stages,
                 requiredStages = stages.subList(0, 5),
-                optionalStages = stages.subList(5, 9),
+                optionalStages = stages.subList(5, 10),
                 profileName = "loader-factory-compatible",
                 diagnosticTags = listOf("loader-factory", "v1"),
                 createdAtMs = createdAtMs
