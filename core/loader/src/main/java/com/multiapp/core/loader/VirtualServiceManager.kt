@@ -196,7 +196,7 @@ class VirtualServiceDispatcher(
             applicationLabel = snapshot.applicationLabel,
             packageSnapshot = snapshot
         )
-        val guestContext = VirtualContextWrapper(
+        val guestContext = VirtualContextWrappers.create(
             base = context,
             config = config,
             guestClassLoader = guestClassLoader

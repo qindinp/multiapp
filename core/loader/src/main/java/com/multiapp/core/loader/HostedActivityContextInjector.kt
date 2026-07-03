@@ -41,11 +41,12 @@ internal object HostedActivityContextInjector {
     fun inject(
         activity: Activity,
         hostContext: Context,
+        hostPackageName: String?,
         config: VirtualContextConfig,
         guestApplication: Application?,
         guestClassLoader: ClassLoader
     ): InjectionResult {
-        val guestContext = VirtualContextWrapper(
+        val guestContext = VirtualContextWrappers.create(
             base = hostContext,
             config = config,
             guestClassLoader = guestClassLoader
@@ -61,6 +62,7 @@ internal object HostedActivityContextInjector {
         replaceFieldIfPresent(activity, "mResources", guestContext.resources)
         val loadedApkPatch = patchLoadedApkIfPresent(
             activity = activity,
+            hostPackageName = hostPackageName,
             guestContext = guestContext,
             config = config,
             applicationInfo = runtimeApplicationInfo,
@@ -182,6 +184,7 @@ internal object HostedActivityContextInjector {
 
     private fun patchLoadedApkIfPresent(
         activity: Activity,
+        hostPackageName: String?,
         guestContext: VirtualContextWrapper,
         config: VirtualContextConfig,
         applicationInfo: android.content.pm.ApplicationInfo,
@@ -213,13 +216,21 @@ internal object HostedActivityContextInjector {
             packageAliases = aliases,
             skippedReason = "LOADED_APK_TARGET_NOT_FOUND_AFTER_GUEST_SANDBOX_FAILED:${sandboxFailureClassName.orEmpty()}"
         )
+        val guardPackageName = hostPackageName
+            ?.takeIf { it.isNotBlank() }
+            ?.takeUnless { it == config.originPackageName || it == config.virtualPackageName }
+            ?: return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = loadedApk.javaClass.name,
+                packageAliases = aliases,
+                skippedReason = "HOST_PACKAGE_GUARD_UNAVAILABLE_AFTER_GUEST_SANDBOX_FAILED:${sandboxFailureClassName.orEmpty()}"
+            )
         return runCatching {
             ActivityThreadLoadedApkInstaller.install(
                 activityThread = activityThread,
                 loadedApk = loadedApk,
                 state = state,
                 packageAliases = aliases,
-                hostPackageName = guestContext.baseContext.packageName
+                hostPackageName = guardPackageName
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to install ActivityThread LoadedApk aliases", error)

@@ -1,7 +1,9 @@
 package com.multiapp.app
 
 import android.app.Application
+import com.multiapp.app.container.ContainerAmsApiEvidenceRecorder
 import com.multiapp.app.container.ContainerBroadcastEvidenceRecorder
+import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorders
 import com.multiapp.core.loader.VirtualBroadcastRecorders
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
 import dagger.hilt.android.HiltAndroidApp
@@ -21,6 +23,7 @@ class MultiAppApplication : Application() {
             .onFailure { Timber.e(it, "VirtualInstrumentation install failed") }
 
         VirtualBroadcastRecorders.install(ContainerBroadcastEvidenceRecorder(this))
+        VirtualAmsApiEvidenceRecorders.install(ContainerAmsApiEvidenceRecorder(this))
 
         Timber.d("MultiApp initialized")
     }

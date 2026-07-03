@@ -116,7 +116,7 @@ open class VirtualInstrumentation(
     fun execStartActivity(
         who: Context,
         contextThread: IBinder,
-        token: IBinder,
+        token: IBinder?,
         target: Activity?,
         intent: Intent,
         requestCode: Int,
@@ -138,7 +138,7 @@ open class VirtualInstrumentation(
     fun execStartActivity(
         who: Context,
         contextThread: IBinder,
-        token: IBinder,
+        token: IBinder?,
         target: Activity?,
         intent: Intent,
         requestCode: Int
@@ -148,7 +148,7 @@ open class VirtualInstrumentation(
     fun execStartActivity(
         who: Context,
         contextThread: IBinder,
-        token: IBinder,
+        token: IBinder?,
         target: String?,
         intent: Intent,
         requestCode: Int,
@@ -254,10 +254,12 @@ open class VirtualInstrumentation(
 
         runCatching {
             val runtime = createHostedRuntime(instanceId)
+            val hostPackageName = activity.intent?.getStringExtra(EXTRA_HOST_PACKAGE_NAME)?.takeIf { it.isNotBlank() }
             val config = buildVirtualContextConfig(runtime)
             val injection = HostedActivityContextInjector.inject(
                 activity = activity,
                 hostContext = runtime.hostApplication,
+                hostPackageName = hostPackageName,
                 config = config,
                 guestApplication = runtime.result.guestApplication,
                 guestClassLoader = runtime.result.guestClassLoader!!
@@ -451,7 +453,7 @@ open class VirtualInstrumentation(
     private fun invokeBaseExecStartActivity(
         who: Context,
         contextThread: IBinder,
-        token: IBinder,
+        token: IBinder?,
         target: Activity?,
         intent: Intent,
         requestCode: Int,
@@ -465,7 +467,7 @@ open class VirtualInstrumentation(
     private fun invokeBaseExecStartActivity(
         who: Context,
         contextThread: IBinder,
-        token: IBinder,
+        token: IBinder?,
         target: String?,
         intent: Intent,
         requestCode: Int,
@@ -480,7 +482,7 @@ open class VirtualInstrumentation(
         method: java.lang.reflect.Method,
         who: Context,
         contextThread: IBinder,
-        token: IBinder,
+        token: IBinder?,
         target: Any?,
         intent: Intent,
         requestCode: Int,

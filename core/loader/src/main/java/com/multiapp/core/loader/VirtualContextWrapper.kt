@@ -6,18 +6,26 @@ import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.IntentSender
+import android.content.ServiceConnection
 import android.content.SharedPreferences
+import android.os.Bundle
 import android.os.Handler
+import android.os.UserHandle
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.res.AssetManager
+import android.content.res.Configuration
 import android.content.res.Resources
+import android.view.Display
+import android.view.LayoutInflater
 import android.database.DatabaseErrorHandler
 import android.database.sqlite.SQLiteDatabase
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.concurrent.Executor
 
 /**
  * Wraps the host Context and overrides identity fields so the guest app
@@ -27,7 +35,7 @@ import java.io.FileOutputStream
  * inside ContainerActivity gets a Context that reports the guest's identity,
  * not the host MultiApp identity.
  */
-class VirtualContextWrapper(
+open class VirtualContextWrapper(
     private val base: Context,
     private val config: VirtualContextConfig,
     private val guestClassLoader: ClassLoader,
@@ -38,8 +46,23 @@ class VirtualContextWrapper(
     private val dynamicReceiverRegistry: VirtualDynamicReceiverRegistry = VirtualDynamicReceiverRegistry.global,
     private val serviceProxyIntentFactory: (VirtualServiceManager, VirtualServiceStartRequest) -> Intent = { manager, request ->
         manager.createProxyIntent(request)
-    }
+    },
+    private val amsDispatcher: VirtualAmsComponentDispatcher? = null
 ) : ContextWrapper(base) {
+
+    sealed class StartActivityMappingResult {
+        abstract val sourceIntent: Intent
+
+        data class Remapped(
+            override val sourceIntent: Intent,
+            val proxyIntent: Intent
+        ) : StartActivityMappingResult()
+
+        data class Blocked(
+            override val sourceIntent: Intent,
+            val reason: String
+        ) : StartActivityMappingResult()
+    }
 
     sealed class StartServiceMappingResult {
         abstract val sourceIntent: Intent
@@ -52,7 +75,7 @@ class VirtualContextWrapper(
             val proxyIntent: Intent
         ) : StartServiceMappingResult()
 
-        data class Fallback(
+        data class Blocked(
             override val sourceIntent: Intent,
             override val foreground: Boolean,
             val reason: String
@@ -91,6 +114,8 @@ class VirtualContextWrapper(
     private val guestResources: Resources get() = virtualResourceBundle.resources
 
     private val sharedPreferences = mutableMapOf<String, SharedPreferences>()
+
+    private var lastStartActivityMappingResult: StartActivityMappingResult? = null
 
     private var lastStartServiceMappingResult: StartServiceMappingResult? = null
 
@@ -137,44 +162,347 @@ class VirtualContextWrapper(
         }
     }
 
+    private val defaultAmsDispatcher: VirtualAmsComponentDispatcher by lazy(LazyThreadSafetyMode.NONE) {
+        DefaultVirtualAmsComponentDispatcher(
+            hostContext = base,
+            hostPackageName = base.packageName,
+            packageSnapshot = config.packageSnapshot,
+            instanceId = config.instanceId,
+            activityRecordManager = activityRecordManager,
+            proxyActivityRegistry = proxyActivityRegistry,
+            servicePackageRegistry = servicePackageRegistry,
+            serviceRuntime = serviceRuntime,
+            broadcastManager = broadcastManager,
+            serviceProxyIntentFactory = serviceProxyIntentFactory
+        )
+    }
+
     override fun getPackageName(): String = config.virtualPackageName
+
+    override fun getApplicationContext(): Context = this
+
+    override fun getBaseContext(): Context = this
+
+    override fun createContextForSplit(splitName: String?): Context = this
+
+    override fun createPackageContext(packageName: String?, flags: Int): Context = this
+
+    override fun createConfigurationContext(overrideConfiguration: Configuration): Context = this
+
+    override fun createDisplayContext(display: Display): Context = this
+
+    override fun createDeviceProtectedStorageContext(): Context = this
+
+    override fun createAttributionContext(attributionTag: String?): Context = this
+
+    override fun createWindowContext(display: Display, type: Int, options: Bundle?): Context = this
+
+    override fun createWindowContext(type: Int, options: Bundle?): Context = this
+
+    override fun createDeviceContext(deviceId: Int): Context = this
+
+    override fun getSystemService(name: String): Any? {
+        if (name == Context.LAYOUT_INFLATER_SERVICE) {
+            return (base.getSystemService(name) as? LayoutInflater)?.cloneInContext(this)
+        }
+        return base.getSystemService(name)
+    }
 
     override fun getPackageManager(): PackageManager = virtualPackageManager ?: base.packageManager
 
     override fun startActivity(intent: Intent) {
-        base.startActivity(remapStartActivityIntent(intent) ?: intent)
+        when (val result = componentDispatcher().resolveStartActivityIntent(intent)) {
+            is StartActivityMappingResult.Remapped -> {
+                lastStartActivityMappingResult = result
+                base.startActivity(result.proxyIntent)
+            }
+            is StartActivityMappingResult.Blocked -> lastStartActivityMappingResult = result
+        }
     }
 
     override fun startActivity(intent: Intent, options: android.os.Bundle?) {
-        base.startActivity(remapStartActivityIntent(intent) ?: intent, options)
+        when (val result = componentDispatcher().resolveStartActivityIntent(intent)) {
+            is StartActivityMappingResult.Remapped -> {
+                lastStartActivityMappingResult = result
+                base.startActivity(result.proxyIntent, options)
+            }
+            is StartActivityMappingResult.Blocked -> lastStartActivityMappingResult = result
+        }
+    }
+
+    override fun startActivities(intents: Array<Intent>) {
+        startActivities(intents, null)
+    }
+
+    override fun startActivities(intents: Array<Intent>, options: Bundle?) {
+        if (intents.isEmpty()) {
+            lastStartActivityMappingResult = StartActivityMappingResult.Blocked(
+                sourceIntent = Intent(),
+                reason = "emptyActivityLaunchUnsupported"
+            )
+            return
+        }
+        val results = componentDispatcher().resolveStartActivityIntents(intents.toList())
+        val blocked = results.filterIsInstance<StartActivityMappingResult.Blocked>().firstOrNull()
+        if (blocked != null) {
+            lastStartActivityMappingResult = blocked
+            return
+        }
+        val remapped = results.mapNotNull { it as? StartActivityMappingResult.Remapped }
+        if (remapped.size != intents.size) {
+            lastStartActivityMappingResult = StartActivityMappingResult.Blocked(
+                sourceIntent = intents.first(),
+                reason = "incompleteActivityBatchMapping"
+            )
+            return
+        }
+        lastStartActivityMappingResult = remapped.last()
+        base.startActivities(remapped.map { it.proxyIntent }.toTypedArray(), options)
+    }
+
+    override fun startIntentSender(
+        intent: IntentSender,
+        fillInIntent: Intent?,
+        flagsMask: Int,
+        flagsValues: Int,
+        extraFlags: Int
+    ) {
+        blockIntentSenderLaunch(fillInIntent)
+    }
+
+    override fun startIntentSender(
+        intent: IntentSender,
+        fillInIntent: Intent?,
+        flagsMask: Int,
+        flagsValues: Int,
+        extraFlags: Int,
+        options: Bundle?
+    ) {
+        blockIntentSenderLaunch(fillInIntent)
+    }
+
+    private fun blockIntentSenderLaunch(fillInIntent: Intent?) {
+        lastStartActivityMappingResult = StartActivityMappingResult.Blocked(
+            sourceIntent = fillInIntent ?: Intent(),
+            reason = "intentSenderLaunchUnsupported"
+        )
     }
 
     override fun startService(service: Intent): ComponentName? {
-        return base.startService(resolveStartServiceIntent(service, foreground = false))
+        val result = componentDispatcher().resolveStartServiceIntent(service, foreground = false)
+        lastStartServiceMappingResult = result
+        return when (result) {
+            is StartServiceMappingResult.Remapped -> base.startService(result.proxyIntent)
+            is StartServiceMappingResult.Blocked -> null
+        }
     }
 
     override fun startForegroundService(service: Intent): ComponentName? {
-        return base.startForegroundService(resolveStartServiceIntent(service, foreground = true))
+        val result = componentDispatcher().resolveStartServiceIntent(service, foreground = true)
+        lastStartServiceMappingResult = result
+        return when (result) {
+            is StartServiceMappingResult.Remapped -> base.startForegroundService(result.proxyIntent)
+            is StartServiceMappingResult.Blocked -> null
+        }
     }
 
     override fun stopService(service: Intent): Boolean {
-        val request = resolveStopServiceIntent(service) ?: return false.also {
+        val result = componentDispatcher().dispatchStopService(service) ?: return false.also {
             lastStopServiceDispatchResult = null
         }
-        val result = VirtualServiceDispatcher(
-            hostContext = base,
-            packageRegistry = servicePackageRegistry,
-            serviceRuntime = serviceRuntime
-        ).dispatchStop(request)
         lastStopServiceDispatchResult = result
         return result is VirtualServiceStopDispatchResult.ServiceStopped
     }
 
+    override fun bindService(service: Intent, conn: ServiceConnection, flags: Int): Boolean {
+        return dispatchBindServiceIntent(service, api = "bindService:int")
+    }
+
+    override fun bindService(
+        service: Intent,
+        flags: Int,
+        executor: Executor,
+        conn: ServiceConnection
+    ): Boolean {
+        return dispatchBindServiceIntent(service, api = "bindService:executor")
+    }
+
+    override fun bindServiceAsUser(
+        service: Intent,
+        conn: ServiceConnection,
+        flags: Int,
+        user: UserHandle
+    ): Boolean {
+        return dispatchBindServiceIntent(service, api = "bindServiceAsUser:int")
+    }
+
+    override fun bindIsolatedService(
+        service: Intent,
+        flags: Int,
+        instanceName: String,
+        executor: Executor,
+        conn: ServiceConnection
+    ): Boolean {
+        return dispatchBindServiceIntent(service, api = "bindIsolatedService:int")
+    }
+
+    override fun unbindService(conn: ServiceConnection) = Unit
+
+    override fun updateServiceGroup(conn: ServiceConnection, group: Int, importance: Int) = Unit
+
+    protected fun dispatchBindServiceIntent(service: Intent, api: String): Boolean {
+        val result = componentDispatcher().resolveStartServiceIntent(service, foreground = false)
+        lastStartServiceMappingResult = result
+        recordBindServiceEvidence(api, result)
+        return false
+    }
+
     override fun sendBroadcast(intent: Intent) {
-        val result = dispatchBroadcast(intent)
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendBroadcast(intent: Intent, receiverPermission: String?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendBroadcast(intent: Intent, receiverPermission: String?, options: Bundle?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendBroadcastAsUser(intent: Intent, user: UserHandle?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendBroadcastAsUser(intent: Intent, user: UserHandle?, receiverPermission: String?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendOrderedBroadcast(intent: Intent, receiverPermission: String?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendOrderedBroadcast(intent: Intent, receiverPermission: String?, options: Bundle?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendOrderedBroadcast(
+        intent: Intent,
+        receiverPermission: String?,
+        resultReceiver: BroadcastReceiver?,
+        scheduler: Handler?,
+        initialCode: Int,
+        initialData: String?,
+        initialExtras: Bundle?
+    ) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendOrderedBroadcast(
+        intent: Intent,
+        receiverPermission: String?,
+        options: Bundle?,
+        resultReceiver: BroadcastReceiver?,
+        scheduler: Handler?,
+        initialCode: Int,
+        initialData: String?,
+        initialExtras: Bundle?
+    ) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendOrderedBroadcast(
+        intent: Intent,
+        receiverPermission: String?,
+        receiverAppOp: String?,
+        resultReceiver: BroadcastReceiver?,
+        scheduler: Handler?,
+        initialCode: Int,
+        initialData: String?,
+        initialExtras: Bundle?
+    ) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendOrderedBroadcast(
+        intent: Intent,
+        initialCode: Int,
+        receiverPermission: String?,
+        receiverAppOp: String?,
+        resultReceiver: BroadcastReceiver?,
+        scheduler: Handler?,
+        initialData: String?,
+        initialExtras: Bundle?,
+        options: Bundle?
+    ) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendOrderedBroadcastAsUser(
+        intent: Intent,
+        user: UserHandle?,
+        receiverPermission: String?,
+        resultReceiver: BroadcastReceiver?,
+        scheduler: Handler?,
+        initialCode: Int,
+        initialData: String?,
+        initialExtras: Bundle?
+    ) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendStickyBroadcast(intent: Intent) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendStickyBroadcast(intent: Intent, options: Bundle?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendStickyBroadcastAsUser(intent: Intent, user: UserHandle?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun sendStickyOrderedBroadcast(
+        intent: Intent,
+        resultReceiver: BroadcastReceiver?,
+        scheduler: Handler?,
+        initialCode: Int,
+        initialData: String?,
+        initialExtras: Bundle?
+    ) {
+        val result = dispatchBroadcastIntent(intent)
+        recordStickyOrderedBroadcastEvidence("sendStickyOrderedBroadcast", result)
+    }
+
+    override fun sendStickyOrderedBroadcastAsUser(
+        intent: Intent,
+        user: UserHandle?,
+        resultReceiver: BroadcastReceiver?,
+        scheduler: Handler?,
+        initialCode: Int,
+        initialData: String?,
+        initialExtras: Bundle?
+    ) {
+        val result = dispatchBroadcastIntent(intent)
+        recordStickyOrderedBroadcastEvidence("sendStickyOrderedBroadcastAsUser", result)
+    }
+
+    override fun removeStickyBroadcast(intent: Intent) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    override fun removeStickyBroadcastAsUser(intent: Intent, user: UserHandle?) {
+        dispatchBroadcastIntent(intent)
+    }
+
+    protected fun dispatchBroadcastIntent(intent: Intent): VirtualBroadcastResult {
+        val result = componentDispatcher().dispatchBroadcast(
+            intent = intent,
+            virtualContext = this,
+            receiverClassLoader = guestClassLoader
+        )
         lastBroadcastDispatchResult = result
-        if (result is VirtualBroadcastResult.Delivered) return
-        base.sendBroadcast(intent)
+        return result
     }
 
     override fun registerReceiver(receiver: BroadcastReceiver?, filter: IntentFilter?): Intent? {
@@ -183,7 +511,8 @@ class VirtualContextWrapper(
                 receiver = receiver,
                 reason = "missingReceiverOrFilter"
             )
-            return base.registerReceiver(receiver, filter)
+            recordRegisterReceiverEvidence(registered = false, reason = "missingReceiverOrFilter")
+            return null
         }
         val virtualFilter = filter.toVirtualDynamicReceiverFilter()
         dynamicReceiverRegistry.register(config.instanceId, receiver, virtualFilter)
@@ -192,7 +521,12 @@ class VirtualContextWrapper(
             instanceId = config.instanceId,
             filter = virtualFilter
         )
+        recordRegisterReceiverEvidence(registered = true, reason = "")
         return null
+    }
+
+    override fun registerReceiver(receiver: BroadcastReceiver?, filter: IntentFilter?, flags: Int): Intent? {
+        return registerReceiver(receiver, filter)
     }
 
     override fun registerReceiver(
@@ -201,11 +535,34 @@ class VirtualContextWrapper(
         broadcastPermission: String?,
         scheduler: Handler?
     ): Intent? {
+        if (broadcastPermission == null && scheduler == null) {
+            return registerReceiver(receiver, filter)
+        }
         lastBroadcastReceiverRegistrationResult = BroadcastReceiverRegistrationResult.Fallback(
             receiver = receiver,
             reason = "permissionOrSchedulerUnsupported"
         )
-        return base.registerReceiver(receiver, filter, broadcastPermission, scheduler)
+        recordRegisterReceiverEvidence(registered = false, reason = "permissionOrSchedulerUnsupported")
+        return null
+    }
+
+    override fun registerReceiver(
+        receiver: BroadcastReceiver?,
+        filter: IntentFilter?,
+        broadcastPermission: String?,
+        scheduler: Handler?,
+        flags: Int
+    ): Intent? {
+        return if (broadcastPermission == null && scheduler == null) {
+            registerReceiver(receiver, filter)
+        } else {
+            lastBroadcastReceiverRegistrationResult = BroadcastReceiverRegistrationResult.Fallback(
+                receiver = receiver,
+                reason = "permissionOrSchedulerUnsupported"
+            )
+            recordRegisterReceiverEvidence(registered = false, reason = "permissionOrSchedulerUnsupported")
+            null
+        }
     }
 
     override fun unregisterReceiver(receiver: BroadcastReceiver) {
@@ -214,7 +571,6 @@ class VirtualContextWrapper(
                 receiver = receiver,
                 reason = "receiverNotRegistered"
             )
-            base.unregisterReceiver(receiver)
         } else {
             lastBroadcastReceiverRegistrationResult = BroadcastReceiverRegistrationResult.Unregistered(receiver)
         }
@@ -372,6 +728,8 @@ class VirtualContextWrapper(
 
     internal fun resourceSource(): ResourceSource = virtualResourceBundle.source
 
+    internal fun lastStartActivityMappingResult(): StartActivityMappingResult? = lastStartActivityMappingResult
+
     internal fun lastStartServiceMappingResult(): StartServiceMappingResult? = lastStartServiceMappingResult
 
     internal fun lastStopServiceDispatchResult(): VirtualServiceStopDispatchResult? = lastStopServiceDispatchResult
@@ -382,6 +740,69 @@ class VirtualContextWrapper(
         lastBroadcastReceiverRegistrationResult
 
     internal fun lastStorageEvidence(): VirtualStorageEvidence? = lastStorageEvidence
+
+    private fun recordRegisterReceiverEvidence(registered: Boolean, reason: String) {
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.REGISTER_RECEIVER,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = "registerReceiver",
+                status = if (registered) "DYNAMIC_RECEIVER_REGISTERED" else "DYNAMIC_RECEIVER_REJECTED",
+                hostFallback = false,
+                fields = linkedMapOf(
+                    "registered" to registered,
+                    "reason" to reason
+                )
+            )
+        )
+    }
+
+    private fun recordStickyOrderedBroadcastEvidence(api: String, result: VirtualBroadcastResult) {
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.STICKY_ORDERED_BROADCAST,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = api,
+                status = "STICKY_ORDERED_INTERCEPTED",
+                hostFallback = false,
+                fields = linkedMapOf(
+                    "dispatchStatus" to result.record.result.name,
+                    "receiverClassName" to result.record.receiverClassName.orEmpty(),
+                    "action" to result.record.action.orEmpty()
+                )
+            )
+        )
+    }
+
+    protected fun recordBindServiceEvidence(api: String, result: StartServiceMappingResult) {
+        val serviceResolved = result is StartServiceMappingResult.Remapped
+        val reason = when (result) {
+            is StartServiceMappingResult.Remapped -> result.startRequest.reason
+            is StartServiceMappingResult.Blocked -> result.reason
+        }
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = api,
+                status = "BIND_BLOCKED",
+                hostFallback = false,
+                fields = linkedMapOf(
+                    "returnValue" to false,
+                    "serviceResolved" to serviceResolved,
+                    "reason" to reason
+                )
+            )
+        )
+    }
+
+    private fun componentDispatcher(): VirtualAmsComponentDispatcher = amsDispatcher ?: defaultAmsDispatcher
 
     private fun recordStorage(
         operation: StorageOperation,
@@ -410,71 +831,6 @@ class VirtualContextWrapper(
         }
     }
 
-    private fun remapStartActivityIntent(intent: Intent): Intent? {
-        val snapshot = config.packageSnapshot ?: return null
-        val request = VirtualIntentResolver(snapshot).resolveActivity(intent) ?: return null
-        val manager = VirtualActivityManager(
-            context = base,
-            proxyActivityRegistry = proxyActivityRegistry,
-            hostPackageName = base.packageName,
-            activityRecordManager = activityRecordManager
-        )
-        return manager.createProxyIntent(manager.allocateGuestActivity(request), request.sourceIntent)
-    }
-
-    private fun resolveStartServiceIntent(intent: Intent, foreground: Boolean): Intent {
-        val snapshot = config.packageSnapshot ?: return intent.also {
-            lastStartServiceMappingResult = StartServiceMappingResult.Fallback(
-                sourceIntent = intent,
-                foreground = foreground,
-                reason = "missingPackageSnapshot"
-            )
-        }
-        if (intent.component == null) {
-            lastStartServiceMappingResult = StartServiceMappingResult.Fallback(
-                sourceIntent = intent,
-                foreground = foreground,
-                reason = "implicitServiceIntent"
-            )
-            return intent
-        }
-        val manager = VirtualServiceManager(hostPackageName = base.packageName)
-        val request = if (foreground) {
-            manager.resolveStartForegroundService(snapshot, intent)
-        } else {
-            manager.resolveStartService(snapshot, intent)
-        } ?: return intent.also {
-            lastStartServiceMappingResult = StartServiceMappingResult.Fallback(
-                sourceIntent = intent,
-                foreground = foreground,
-                reason = "unsupportedServiceIntent"
-            )
-        }
-        val proxyIntent = serviceProxyIntentFactory(manager, request)
-        lastStartServiceMappingResult = StartServiceMappingResult.Remapped(
-            sourceIntent = intent,
-            foreground = foreground,
-            startRequest = request,
-            proxyIntent = proxyIntent
-        )
-        return proxyIntent
-    }
-
-    private fun resolveStopServiceIntent(intent: Intent): VirtualServiceStopRequest? {
-        val snapshot = config.packageSnapshot ?: return null
-        val manager = VirtualServiceManager(hostPackageName = base.packageName)
-        return manager.resolveStopService(snapshot, intent)
-    }
-
-    private fun dispatchBroadcast(intent: Intent): VirtualBroadcastResult {
-        return broadcastManager.dispatch(
-            instanceId = config.instanceId,
-            snapshot = config.packageSnapshot,
-            intent = intent,
-            virtualContext = this,
-            receiverClassLoader = guestClassLoader
-        )
-    }
 
     private fun IntentFilter.toVirtualDynamicReceiverFilter(): VirtualDynamicReceiverFilter {
         val actions = (0 until countActions()).mapNotNull { index -> getAction(index) }.toSet()

@@ -49,7 +49,7 @@ class ApplicationStage(
             val guestApplication = appClass.getDeclaredConstructor().newInstance() as Application
             val context = hostContext
                 ?: throw IllegalStateException("hostContext is required for Application creation")
-            val guestContext = VirtualContextWrapper(
+            val guestContext = VirtualContextWrappers.create(
                 base = context,
                 config = VirtualContextConfig(
                     instanceId = input.instanceId,

@@ -1,15 +1,21 @@
 package com.test.minimal;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.ServiceConnection;
 import android.content.pm.PackageInfo;
 import android.content.pm.ResolveInfo;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.IBinder;
 import android.util.Log;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -33,6 +39,8 @@ public class MainActivity extends Activity {
     private static final String PROXY_GUEST_AUTHORITY = "multiapp_guestAuthority";
     private static final String GUEST_PROVIDER_AUTHORITY = "com.test.minimal.probe";
     private static final String ACTION_PROBE_BROADCAST = "com.test.minimal.ACTION_PROBE_BROADCAST";
+    private static final String ACTION_PR8_DYNAMIC_RECEIVER = "com.test.minimal.ACTION_PR8_DYNAMIC_RECEIVER";
+    private static final String ACTION_PR8_STICKY_ORDERED = "com.test.minimal.ACTION_PR8_STICKY_ORDERED";
     private static final String ACTION_NEW_INTENT_PROBE = "com.test.minimal.ACTION_NEW_INTENT_PROBE";
 
     private TextView newIntentStatus;
@@ -88,6 +96,9 @@ public class MainActivity extends Activity {
 
         String componentProbe = runComponentProbe();
         addText(layout, "\ncomponent probe:\n" + componentProbe, 14, 0xFF1B5E20);
+
+        String pr8AmsApiProbe = runPr8AmsApiProbe();
+        addText(layout, "\nPR-8 AMS API probe:\n" + pr8AmsApiProbe, 14, 0xFF880E4F);
 
         Button launchSecond = new Button(this);
         launchSecond.setText("Launch SecondActivity");
@@ -235,6 +246,82 @@ public class MainActivity extends Activity {
 
         String result = out.toString();
         Log.d(TAG, "=== component probe ===\n" + result);
+        return result;
+    }
+
+    private String runPr8AmsApiProbe() {
+        StringBuilder out = new StringBuilder();
+
+        BroadcastReceiver dynamicReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                Log.d(TAG, "=== PR-8 dynamic receiver === action=" + (intent != null ? intent.getAction() : ""));
+            }
+        };
+        IntentFilter dynamicFilter = new IntentFilter(ACTION_PR8_DYNAMIC_RECEIVER);
+        boolean dynamicReceiverRegistered = false;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(dynamicReceiver, dynamicFilter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(dynamicReceiver, dynamicFilter);
+            }
+            dynamicReceiverRegistered = true;
+            out.append("registerReceiver.dynamic: registered\n");
+        } catch (Exception e) {
+            out.append("registerReceiver.dynamic failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        } finally {
+            if (dynamicReceiverRegistered) {
+                unregisterReceiver(dynamicReceiver);
+                out.append("registerReceiver.dynamic: unregistered\n");
+            }
+        }
+
+        try {
+            Intent stickyOrdered = new Intent(ACTION_PR8_STICKY_ORDERED);
+            sendStickyOrderedBroadcast(stickyOrdered, null, null, 0, "pr8", null);
+            out.append("stickyOrdered.sent: ").append(ACTION_PR8_STICKY_ORDERED).append("\n");
+        } catch (Exception e) {
+            out.append("stickyOrdered failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        }
+
+        try {
+            Intent bindIntent = new Intent().setComponent(new ComponentName(getPackageName(), ProbeService.class.getName()));
+            ServiceConnection connection = new ServiceConnection() {
+                @Override
+                public void onServiceConnected(ComponentName name, IBinder service) {
+                    Log.d(TAG, "=== PR-8 bindService connected === " + name);
+                }
+
+                @Override
+                public void onServiceDisconnected(ComponentName name) {
+                    Log.d(TAG, "=== PR-8 bindService disconnected === " + name);
+                }
+            };
+            boolean bound = bindService(bindIntent, connection, BIND_AUTO_CREATE);
+            out.append("bindService.result: ").append(bound).append("\n");
+            if (bound) {
+                unbindService(connection);
+                out.append("bindService.unbound: true\n");
+            }
+        } catch (Exception e) {
+            out.append("bindService failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        }
+
+        String result = out.toString();
+        Log.d(TAG, "=== PR-8 AMS API probe ===\n" + result);
         return result;
     }
 

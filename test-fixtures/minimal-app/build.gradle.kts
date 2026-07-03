@@ -30,5 +30,7 @@ android {
 }
 
 dependencies {
-    // 零外部依赖 — 纯 Android framework
+    // Runtime remains Android framework only; test dependencies validate fixture probes.
+    testImplementation(libs.junit5.api)
+    testRuntimeOnly(libs.junit5.engine)
 }
