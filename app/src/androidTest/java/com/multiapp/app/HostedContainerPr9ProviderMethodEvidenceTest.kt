@@ -122,16 +122,26 @@ class HostedContainerPr9ProviderMethodEvidenceTest {
             compatibilityMode = CompatibilityMode.DEFAULT
         ).getOrThrow()
 
-        ActivityScenario.launch<ContainerActivity>(
+        val instrumentationInstall = VirtualInstrumentationInstaller.install()
+        assertTrue(instrumentationInstall.exceptionOrNull()?.stackTraceToString(), instrumentationInstall.isSuccess)
+        assertTrue(
+            "VirtualInstrumentation must be installed before launching the hosted proxy Activity",
+            VirtualInstrumentationInstaller.isInstalled()
+        )
+
+        val scenario = ActivityScenario.launch<ContainerActivity>(
             ContainerActivity.createIntent(
                 targetContext,
                 instance.instanceId,
                 "androidTest:pr9-provider-method-evidence"
             )
-        ).close()
-        instrumentation.waitForIdleSync()
-
-        waitForPr9ProviderEvidence(instance.instanceId)
+        )
+        try {
+            instrumentation.waitForIdleSync()
+            waitForPr9ProviderEvidence(instance.instanceId)
+        } finally {
+            scenario.close()
+        }
 
         pr9ProviderMethodEvidence.forEach { (component, operation) ->
             assertRuntimeEvidenceHasLine(instance.instanceId, component, "stage=PROVIDER_PROXY")

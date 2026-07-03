@@ -3,6 +3,7 @@ package com.test.minimal;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.ContentProviderClient;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
@@ -282,8 +283,13 @@ public class MainActivity extends Activity {
                 } catch (Exception e) {
                     out.append("provider.callFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
                 }
-                try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
-                    out.append("provider.openFile: ").append(descriptor != null).append("\n");
+                try (ContentProviderClient client = getContentResolver().acquireContentProviderClient(uri)) {
+                    ParcelFileDescriptor descriptor = client != null ? client.openFile(uri, "r") : null;
+                    try {
+                        out.append("provider.openFile: ").append(descriptor != null).append("\n");
+                    } finally {
+                        if (descriptor != null) descriptor.close();
+                    }
                 } catch (Exception e) {
                     out.append("provider.openFileFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
                 }

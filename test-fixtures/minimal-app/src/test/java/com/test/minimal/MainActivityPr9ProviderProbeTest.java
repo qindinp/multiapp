@@ -23,7 +23,7 @@ class MainActivityPr9ProviderProbeTest {
         assertTrue(source.contains("getContentResolver().delete(uri, null, null)"));
         assertTrue(source.contains("getContentResolver().bulkInsert(uri, new ContentValues[]"));
         assertTrue(source.contains("getContentResolver().call(uri, \"probeCall\", uri.toString(), new Bundle())"));
-        assertTrue(source.contains("getContentResolver().openFileDescriptor(uri, \"r\")"));
+        assertTrue(source.contains("client.openFile(uri, \"r\")"));
         assertTrue(source.contains("getContentResolver().openAssetFileDescriptor(uri, \"r\")"));
     }
 }
