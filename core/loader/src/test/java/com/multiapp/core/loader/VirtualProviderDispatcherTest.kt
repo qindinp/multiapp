@@ -144,6 +144,29 @@ class VirtualProviderDispatcherTest {
         assertEquals("INSTANCE_NOT_FOUND", evidence.reason)
     }
 
+    @Test
+    fun `method dispatch evidence maps PR9 provider operations`() {
+        val result = VirtualProviderDispatchResult.ProviderReady(
+            resolution = resolution(),
+            provider = FakeProvider(),
+            cached = true,
+            evidence = VirtualProviderEvidence.acquisition(resolution(), success = true)
+        )
+
+        mapOf(
+            "openFile:r" to VirtualProviderEvidence.Operation.OPEN_FILE,
+            "openAssetFile:r" to VirtualProviderEvidence.Operation.OPEN_ASSET_FILE,
+            "bulkInsert" to VirtualProviderEvidence.Operation.BULK_INSERT,
+            "call:probeCall" to VirtualProviderEvidence.Operation.CALL
+        ).forEach { (operationName, operation) ->
+            val evidence = VirtualProviderEvidence.methodDispatch(result, operationName)
+
+            assertEquals(operation, evidence.operation)
+            assertEquals(true, evidence.success)
+            assertEquals("PROVIDER_CACHED", evidence.reason)
+        }
+    }
+
     private fun snapshot() = VirtualPackageSnapshot(
         instanceId = "inst-001",
         originPackageName = "com.test.minimal",
@@ -162,6 +185,16 @@ class VirtualProviderDispatcherTest {
                 authorities = listOf("com.test.minimal.probe")
             )
         )
+    )
+
+    private fun resolution() = VirtualProviderResolution(
+        instanceId = "inst-001",
+        originPackageName = "com.test.minimal",
+        virtualPackageName = "com.multiapp.instance.abc",
+        guestAuthority = "com.test.minimal.probe",
+        proxyAuthority = "com.multiapp.app.multiapp.provider.stub",
+        providerClassName = "com.test.minimal.ProbeProvider",
+        providerInfo = ProviderInfo()
     )
 
     private fun hostedResult(

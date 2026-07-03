@@ -17,6 +17,9 @@ data class VirtualProviderEvidence(
         DELETE,
         UPDATE,
         CALL,
+        OPEN_FILE,
+        OPEN_ASSET_FILE,
+        BULK_INSERT,
         NOTIFY_CHANGE,
         UNKNOWN
     }
@@ -171,6 +174,9 @@ data class VirtualProviderEvidence(
             "delete" -> Operation.DELETE
             "update" -> Operation.UPDATE
             "call" -> Operation.CALL
+            "openFile" -> Operation.OPEN_FILE
+            "openAssetFile" -> Operation.OPEN_ASSET_FILE
+            "bulkInsert" -> Operation.BULK_INSERT
             else -> Operation.UNKNOWN
         }
 

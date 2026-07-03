@@ -2,15 +2,18 @@ package com.multiapp.app.container
 
 import android.content.ContentProvider
 import android.content.ContentValues
+import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.loader.VirtualProviderEvidence
 import com.multiapp.core.loader.VirtualProviderDispatchResult
 import com.multiapp.core.loader.VirtualProviderDispatcher
 import com.multiapp.core.loader.VirtualProviderManager
+import java.io.FileNotFoundException
 
 /**
  * Host-declared provider slot for v2 hosted container provider virtualization.
@@ -74,6 +77,19 @@ class StubContentProvider : ContentProvider() {
         }
     }
 
+    override fun bulkInsert(uri: Uri, values: Array<out ContentValues>): Int {
+        val result = dispatch(uri)
+        writeProviderEvidence("bulkInsert", uri, result)
+        Log.w(TAG, "bulkInsert dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
+        return when (result) {
+            is VirtualProviderDispatchResult.ProviderReady -> result.provider.bulkInsert(
+                uri.toGuestUri(result.resolution.guestAuthority),
+                values
+            )
+            else -> 0
+        }
+    }
+
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
         val result = dispatch(uri)
         writeProviderEvidence("delete", uri, result)
@@ -113,7 +129,49 @@ class StubContentProvider : ContentProvider() {
         val result = uri?.let { dispatch(it) }
         if (uri != null) writeProviderEvidence("call:$method", uri, result)
         Log.w(TAG, "call dispatch result=${result.statusForLog()} method=$method arg=${arg.redactUriStringForLog()}")
-        return result.toBundle()
+        val bundle = result.toBundle()
+        if (uri != null && result is VirtualProviderDispatchResult.ProviderReady) {
+            val guestResult = result.provider.call(
+                method,
+                uri.toGuestUri(result.resolution.guestAuthority).toString(),
+                extras
+            )
+            if (guestResult != null) {
+                bundle.putAll(guestResult)
+                bundle.putString("providerMethodResult", "RETURNED")
+            } else {
+                bundle.putString("providerMethodResult", "NULL")
+            }
+        }
+        return bundle
+    }
+
+    @Throws(FileNotFoundException::class)
+    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
+        val result = dispatch(uri)
+        writeProviderEvidence("openFile:$mode", uri, result)
+        Log.w(TAG, "openFile dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
+        return when (result) {
+            is VirtualProviderDispatchResult.ProviderReady -> result.provider.openFile(
+                uri.toGuestUri(result.resolution.guestAuthority),
+                mode
+            )
+            else -> throw FileNotFoundException(result.statusForLog())
+        }
+    }
+
+    @Throws(FileNotFoundException::class)
+    override fun openAssetFile(uri: Uri, mode: String): AssetFileDescriptor? {
+        val result = dispatch(uri)
+        writeProviderEvidence("openAssetFile:$mode", uri, result)
+        Log.w(TAG, "openAssetFile dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
+        return when (result) {
+            is VirtualProviderDispatchResult.ProviderReady -> result.provider.openAssetFile(
+                uri.toGuestUri(result.resolution.guestAuthority),
+                mode
+            )
+            else -> throw FileNotFoundException(result.statusForLog())
+        }
     }
 
     private fun dispatch(uri: Uri): VirtualProviderDispatchResult {
@@ -147,11 +205,18 @@ class StubContentProvider : ContentProvider() {
             ?: uri.getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID)
             ?: return
         runCatching {
+            val fields = result.toEvidenceFields(operationName, uri)
             ContainerRuntimeEvidenceWriter.write(
                 context = requireNotNull(context),
                 instanceId = instanceId,
                 component = "provider-proxy",
-                fields = result.toEvidenceFields(operationName, uri)
+                fields = fields
+            )
+            ContainerRuntimeEvidenceWriter.write(
+                context = requireNotNull(context),
+                instanceId = instanceId,
+                component = ProviderMethodEvidenceComponents.forOperation(operationName),
+                fields = fields
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write provider evidence for instanceId=$instanceId", error)
@@ -229,21 +294,27 @@ class StubContentProvider : ContentProvider() {
     private fun VirtualProviderDispatchResult?.toEvidenceFields(
         operationName: String,
         uri: Uri
-    ): Map<String, Any?> = linkedMapOf(
-        "status" to statusName(),
-        "stage" to "PROVIDER_PROXY",
-        "operationName" to operationName,
-        "uri" to uri.toString(),
-        "instanceId" to instanceIdForEvidence().orEmpty(),
-        "guestAuthority" to guestAuthorityForEvidence().orEmpty(),
-        "providerClassName" to providerClassNameForEvidence().orEmpty(),
-        "proxyAuthority" to evidenceOrNull()?.proxyAuthority.orEmpty(),
-        "evidenceOperation" to evidenceOrNull()?.operation?.name.orEmpty(),
-        "evidenceSuccess" to (evidenceOrNull()?.success ?: false),
-        "reason" to reasonForEvidence().orEmpty(),
-        "cached" to ((this as? VirtualProviderDispatchResult.ProviderReady)?.cached ?: false),
-        "detail" to statusForLog()
-    )
+    ): Map<String, Any?> {
+        val methodEvidence = VirtualProviderEvidence.methodDispatch(this, operationName)
+        return linkedMapOf(
+            "status" to statusName(),
+            "stage" to "PROVIDER_PROXY",
+            "operationName" to operationName,
+            "uri" to uri.toString(),
+            "instanceId" to instanceIdForEvidence().orEmpty(),
+            "originPackageName" to originPackageNameForEvidence().orEmpty(),
+            "virtualPackageName" to virtualPackageNameForEvidence().orEmpty(),
+            "guestAuthority" to guestAuthorityForEvidence().orEmpty(),
+            "providerClassName" to providerClassNameForEvidence().orEmpty(),
+            "proxyAuthority" to methodEvidence.proxyAuthority.orEmpty(),
+            "evidenceOperation" to methodEvidence.operation.name,
+            "evidenceSuccess" to methodEvidence.success,
+            "reason" to methodEvidence.reason.orEmpty(),
+            "dispatcherStatus" to statusName(),
+            "cached" to ((this as? VirtualProviderDispatchResult.ProviderReady)?.cached ?: false),
+            "detail" to statusForLog()
+        )
+    }
 
     private fun VirtualProviderDispatchResult?.evidenceOrNull(): VirtualProviderEvidence? = when (this) {
         is VirtualProviderDispatchResult.ProviderReady -> evidence
@@ -273,6 +344,24 @@ class StubContentProvider : ContentProvider() {
         is VirtualProviderDispatchResult.ProviderCreateFailed -> resolution.guestAuthority
         is VirtualProviderDispatchResult.ProviderAttachFailed -> resolution.guestAuthority
         is VirtualProviderDispatchResult.ProviderNotFound -> guestAuthority
+        else -> null
+    }
+
+    private fun VirtualProviderDispatchResult?.originPackageNameForEvidence(): String? = when (this) {
+        is VirtualProviderDispatchResult.ProviderReady -> resolution.originPackageName
+        is VirtualProviderDispatchResult.RuntimeNotBound -> resolution.originPackageName
+        is VirtualProviderDispatchResult.RuntimeIncomplete -> resolution.originPackageName
+        is VirtualProviderDispatchResult.ProviderCreateFailed -> resolution.originPackageName
+        is VirtualProviderDispatchResult.ProviderAttachFailed -> resolution.originPackageName
+        else -> null
+    }
+
+    private fun VirtualProviderDispatchResult?.virtualPackageNameForEvidence(): String? = when (this) {
+        is VirtualProviderDispatchResult.ProviderReady -> resolution.virtualPackageName
+        is VirtualProviderDispatchResult.RuntimeNotBound -> resolution.virtualPackageName
+        is VirtualProviderDispatchResult.RuntimeIncomplete -> resolution.virtualPackageName
+        is VirtualProviderDispatchResult.ProviderCreateFailed -> resolution.virtualPackageName
+        is VirtualProviderDispatchResult.ProviderAttachFailed -> resolution.virtualPackageName
         else -> null
     }
 

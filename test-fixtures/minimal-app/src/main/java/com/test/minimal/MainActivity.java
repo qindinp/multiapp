@@ -3,12 +3,14 @@ package com.test.minimal;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.content.pm.PackageInfo;
 import android.content.pm.ResolveInfo;
+import android.content.res.AssetFileDescriptor;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
@@ -16,6 +18,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.widget.Button;
 import android.widget.LinearLayout;
@@ -238,6 +241,56 @@ public class MainActivity extends Activity {
                     }
                     out.append("provider.queryStatus: ").append(status).append("\n");
                     out.append("provider.uri: ").append(redactUri(uri)).append("\n");
+                }
+                try {
+                    ContentValues values = new ContentValues();
+                    values.put("name", "insert-probe");
+                    Uri inserted = getContentResolver().insert(uri, values);
+                    out.append("provider.insertUri: ").append(inserted != null ? redactUri(inserted) : "null").append("\n");
+                } catch (Exception e) {
+                    out.append("provider.insertFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+                }
+                try {
+                    ContentValues values = new ContentValues();
+                    values.put("name", "update-probe");
+                    int updated = getContentResolver().update(uri, values, null, null);
+                    out.append("provider.updateRows: ").append(updated).append("\n");
+                } catch (Exception e) {
+                    out.append("provider.updateFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+                }
+                try {
+                    int deleted = getContentResolver().delete(uri, null, null);
+                    out.append("provider.deleteRows: ").append(deleted).append("\n");
+                } catch (Exception e) {
+                    out.append("provider.deleteFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+                }
+                try {
+                    ContentValues first = new ContentValues();
+                    first.put("name", "bulk-one");
+                    ContentValues second = new ContentValues();
+                    second.put("name", "bulk-two");
+                    int bulkRows = getContentResolver().bulkInsert(uri, new ContentValues[] { first, second });
+                    out.append("provider.bulkRows: ").append(bulkRows).append("\n");
+                } catch (Exception e) {
+                    out.append("provider.bulkFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+                }
+                try {
+                    Bundle callResult = getContentResolver().call(uri, "probeCall", uri.toString(), new Bundle());
+                    out.append("provider.callStatus: ")
+                        .append(callResult != null ? callResult.getString("providerCallStatus", "null") : "null")
+                        .append("\n");
+                } catch (Exception e) {
+                    out.append("provider.callFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+                }
+                try (ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r")) {
+                    out.append("provider.openFile: ").append(descriptor != null).append("\n");
+                } catch (Exception e) {
+                    out.append("provider.openFileFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+                }
+                try (AssetFileDescriptor descriptor = getContentResolver().openAssetFileDescriptor(uri, "r")) {
+                    out.append("provider.openAssetFile: ").append(descriptor != null).append("\n");
+                } catch (Exception e) {
+                    out.append("provider.openAssetFileFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
                 }
             }
         } catch (Exception e) {
