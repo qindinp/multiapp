@@ -196,6 +196,7 @@ class ContainerActivity : Activity() {
             finish()
             return
         }
+        writeStorageDiagnosticsEvidence(result)
 
         val guestApp = result.guestApplication
         if (guestApp != null) {
@@ -313,6 +314,14 @@ class ContainerActivity : Activity() {
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write launch evidence for instanceId=$instanceId", error)
+        }
+    }
+
+    private fun writeStorageDiagnosticsEvidence(result: HostedBootstrapResult) {
+        runCatching {
+            ContainerStorageDiagnosticsEvidence.write(this, result)
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write PR-10 storage diagnostics for instanceId=${result.instanceId}", error)
         }
     }
 }

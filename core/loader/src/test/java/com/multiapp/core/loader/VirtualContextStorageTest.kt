@@ -148,4 +148,94 @@ class VirtualContextStorageTest {
         assertTrue(evidence.withinDataRoot)
         assertTrue(evidence.nativeLibraryRedirected)
     }
+
+    @Test
+    fun `java absolute path diagnostics rewrite origin package paths under data root`(@TempDir dataRoot: File) {
+        val diagnostics = VirtualStoragePathDiagnostics.javaAbsolutePathDiagnostics(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            caller = "test"
+        )
+
+        assertEquals(4, diagnostics.size)
+        assertEquals(
+            File(dataRoot, "files/pr10-data-data.txt").canonicalPath,
+            File(diagnostics.single { it.probeName == "data-data" }.redirectedPath).canonicalPath
+        )
+        assertEquals(
+            File(dataRoot, "files/pr10-data-user.txt").canonicalPath,
+            File(diagnostics.single { it.probeName == "data-user" }.redirectedPath).canonicalPath
+        )
+        assertEquals(
+            File(dataRoot, "external_files/pr10-sdcard.txt").canonicalPath,
+            File(diagnostics.single { it.probeName == "sdcard" }.redirectedPath).canonicalPath
+        )
+        assertEquals(
+            File(dataRoot, "external_files/pr10-storage-emulated.txt").canonicalPath,
+            File(diagnostics.single { it.probeName == "storage-emulated" }.redirectedPath).canonicalPath
+        )
+        diagnostics.forEach { diagnostic ->
+            assertEquals(VirtualStorageDiagnosticKind.JAVA_ABSOLUTE_PATH, diagnostic.kind)
+            assertEquals(VirtualStorageDiagnosticStatus.REDIRECTED, diagnostic.status)
+            assertEquals("inst-001", diagnostic.instanceId)
+            assertTrue(diagnostic.withinDataRoot)
+        }
+    }
+
+    @Test
+    fun `java absolute path diagnostics leave sibling package paths unchanged`(@TempDir dataRoot: File) {
+        val diagnostic = VirtualStoragePathDiagnostics.diagnoseJavaAbsolutePath(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            originalPath = "/data/data/com.example.app2/files/probe.txt",
+            caller = "test"
+        )
+
+        assertEquals(VirtualStorageDiagnosticStatus.UNCHANGED, diagnostic.status)
+        assertEquals("/data/data/com.example.app2/files/probe.txt", diagnostic.redirectedPath)
+        assertEquals("PATH_NOT_MATCHED", diagnostic.reason)
+        assertTrue(!diagnostic.withinDataRoot)
+    }
+
+    @Test
+    fun `java absolute path diagnostics reject traversal outside data root`(@TempDir dataRoot: File) {
+        val diagnostic = VirtualStoragePathDiagnostics.diagnoseJavaAbsolutePath(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            originalPath = "/data/data/com.example.app/../../escaped.txt",
+            caller = "test"
+        )
+
+        assertEquals(VirtualStorageDiagnosticStatus.UNSUPPORTED, diagnostic.status)
+        assertEquals("", diagnostic.redirectedPath)
+        assertEquals("REDIRECTED_PATH_ESCAPES_DATA_ROOT", diagnostic.reason)
+        assertTrue(diagnostic.candidateWithinDataRoot == false)
+        assertTrue(!diagnostic.withinDataRoot)
+    }
+
+    @Test
+    fun `native io diagnostics are explicit unsupported gaps with candidate redirects`(@TempDir dataRoot: File) {
+        val diagnostics = VirtualStoragePathDiagnostics.nativeIoUnsupportedDiagnostics(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            caller = "test"
+        )
+
+        assertEquals(VirtualStoragePathDiagnostics.DEFAULT_NATIVE_IO_OPERATIONS, diagnostics.map { it.operation })
+        diagnostics.forEach { diagnostic ->
+            assertEquals(VirtualStorageDiagnosticKind.NATIVE_IO, diagnostic.kind)
+            assertEquals(VirtualStorageDiagnosticStatus.UNSUPPORTED, diagnostic.status)
+            assertEquals("", diagnostic.redirectedPath)
+            assertEquals("NATIVE_IO_HOOK_NOT_INSTALLED_FOR_ORDINARY_BASELINE", diagnostic.reason)
+            assertTrue(diagnostic.candidateWithinDataRoot == true)
+        }
+    }
 }
