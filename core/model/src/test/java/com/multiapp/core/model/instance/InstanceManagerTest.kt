@@ -60,6 +60,31 @@ class InstanceManagerTest {
     }
 
     @Test
+    fun `createInstance removes dataRoot when record save fails`() {
+        val dataRootBase = File(tempDir, "data_save_failure")
+        val failingStore = object : InstanceRecordStore {
+            override fun save(record: VirtualInstanceRecord): Result<String> {
+                return Result.failure(IllegalStateException("save failed"))
+            }
+
+            override fun load(instanceId: String): VirtualInstanceRecord? = null
+            override fun loadByOrigin(originPackageName: String): List<VirtualInstanceRecord> = emptyList()
+            override fun listAll(): List<VirtualInstanceRecord> = emptyList()
+            override fun delete(instanceId: String): Boolean = false
+        }
+        val failingManager = DefaultInstanceManager(
+            store = failingStore,
+            dataRootBase = dataRootBase,
+            clock = { currentTimeMs }
+        )
+
+        val result = failingManager.createInstance("com.example.app", "Example")
+
+        assertTrue(result.isFailure)
+        assertTrue(dataRootBase.listFiles().isNullOrEmpty())
+    }
+
+    @Test
     fun `createInstance saves record to store`() {
         val result = manager.createInstance("com.example.app", "Example")
         assertTrue(result.isSuccess)

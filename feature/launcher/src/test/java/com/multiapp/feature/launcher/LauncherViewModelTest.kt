@@ -1,17 +1,16 @@
 package com.multiapp.feature.launcher
 
+import com.multiapp.core.instance.CloneCreateFailureException
+import com.multiapp.core.instance.CloneCreateResult
+import com.multiapp.core.instance.CloneCreateUseCase
+import com.multiapp.core.instance.InstalledAppRepository
+import com.multiapp.core.instance.InstanceLaunchUseCase
 import com.multiapp.core.model.VirtualApp
-import com.multiapp.core.model.installer.ImportResult
-import com.multiapp.core.model.installer.VirtualInstallService
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
-import io.mockk.every
-import io.mockk.mockk
-import io.mockk.unmockkAll
-import io.mockk.verify
-import io.mockk.verifyOrder
+import io.mockk.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -20,7 +19,6 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -30,61 +28,118 @@ class LauncherViewModelTest {
 
     private val testDispatcher = UnconfinedTestDispatcher()
     private lateinit var instanceManager: InstanceManager
-    private lateinit var installService: VirtualInstallService
+    private lateinit var cloneCreateUseCase: CloneCreateUseCase
+    private lateinit var installedAppRepository: InstalledAppRepository
+    private lateinit var launchUseCase: InstanceLaunchUseCase
 
     @BeforeEach
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
+        launcherIoDispatcher = testDispatcher
         instanceManager = mockk(relaxed = true)
-        installService = mockk(relaxed = true)
+        cloneCreateUseCase = mockk(relaxed = true)
+        installedAppRepository = mockk(relaxed = true)
+        launchUseCase = mockk(relaxed = true)
         every { instanceManager.listInstances() } returns emptyList()
+        every { installedAppRepository.listInstalledApps(any()) } returns emptyList()
+        every { launchUseCase.launch(any()) } returns Result.success(Unit)
     }
 
     @AfterEach
     fun tearDown() {
+        launcherIoDispatcher = Dispatchers.IO
         Dispatchers.resetMain()
         unmockkAll()
     }
 
     @Test
-    fun `createInstance ensures install record before creating instance`() = runTest {
+    fun `createInstance delegates to create use case and refreshes instances`() = runTest {
         val app = testApp()
         val record = testRecord(originPackageName = app.packageName, displayName = app.appName)
-        every { installService.ensureInstallRecord(app) } returns Result.success(mockk<ImportResult>())
-        every {
-            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
-        } returns Result.success(record)
+        every { cloneCreateUseCase.create(app, null) } returns Result.success(
+            CloneCreateResult(record, createLatencyMs = 42L, cleanupStatus = "not_required")
+        )
         every { instanceManager.listInstances() } returnsMany listOf(emptyList(), listOf(record))
 
-        val viewModel = LauncherViewModel(instanceManager, installService)
+        val viewModel = createViewModel()
 
         viewModel.createInstance(app)
 
-        verifyOrder {
-            installService.ensureInstallRecord(app)
-            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
-        }
+        verify { cloneCreateUseCase.create(app, null) }
         assertEquals(listOf(record), viewModel.uiState.value.instances)
+        assertEquals(record.instanceId, viewModel.uiState.value.lastCreatedInstanceId)
+        assertEquals(42L, viewModel.uiState.value.lastCreateLatencyMs)
         assertNull(viewModel.uiState.value.error)
         assertNull(viewModel.uiState.value.creationStep)
     }
 
     @Test
-    fun `createInstance does not create instance when install import fails`() = runTest {
+    fun `createInstance shows friendly failure and cleanup detail`() = runTest {
         val app = testApp()
-        every { installService.ensureInstallRecord(app) } returns
-            Result.failure(IllegalArgumentException("APK file not found: ${app.apkPath}"))
+        every { cloneCreateUseCase.create(app, "Work") } returns Result.failure(
+            CloneCreateFailureException(
+                failureCode = "origin_apk_missing",
+                userMessage = "找不到应用",
+                technicalReason = "目标应用可能已卸载",
+                cleanupStatus = "install_deleted",
+                cause = IllegalArgumentException("missing")
+            )
+        )
 
-        val viewModel = LauncherViewModel(instanceManager, installService)
+        val viewModel = createViewModel()
 
-        viewModel.createInstance(app)
+        viewModel.createInstance(app, "Work")
 
-        verify(exactly = 0) {
-            instanceManager.createInstance(any(), any(), any())
-        }
-        assertNotNull(viewModel.uiState.value.error)
-        assertEquals("APK file not found: ${app.apkPath}", viewModel.uiState.value.errorDetail)
+        assertEquals("找不到应用", viewModel.uiState.value.error)
+        assertEquals("目标应用可能已卸载\ncleanup=install_deleted", viewModel.uiState.value.errorDetail)
         assertNull(viewModel.uiState.value.creationStep)
+    }
+
+    @Test
+    fun `loadAllApps delegates package query to repository`() = runTest {
+        val apps = listOf(testApp())
+        every { installedAppRepository.listInstalledApps(false) } returns apps
+        val viewModel = createViewModel()
+
+        viewModel.loadAllApps()
+
+        verify { installedAppRepository.listInstalledApps(false) }
+        assertEquals(apps, viewModel.allApps.value)
+    }
+
+    @Test
+    fun `launchInstance delegates to launch use case`() = runTest {
+        val viewModel = createViewModel()
+
+        viewModel.launchInstance("instance-1")
+
+        verify { launchUseCase.launch("instance-1") }
+    }
+
+    @Test
+    fun `normalizeApkComponentName expands manifest component names`() {
+        assertEquals(
+            "com.example.app.MainActivity",
+            normalizeApkComponentName("com.example.app", ".MainActivity")
+        )
+        assertEquals(
+            "com.example.app.MainActivity",
+            normalizeApkComponentName("com.example.app", "MainActivity")
+        )
+        assertEquals(
+            "com.other.ExternalActivity",
+            normalizeApkComponentName("com.example.app", "com.other.ExternalActivity")
+        )
+        assertNull(normalizeApkComponentName("com.example.app", " "))
+    }
+
+    private fun createViewModel(): LauncherViewModel {
+        return LauncherViewModel(
+            instanceManager = instanceManager,
+            cloneCreateUseCase = cloneCreateUseCase,
+            installedAppRepository = installedAppRepository,
+            instanceLaunchUseCase = launchUseCase
+        )
     }
 
     private fun testApp(): VirtualApp = VirtualApp(

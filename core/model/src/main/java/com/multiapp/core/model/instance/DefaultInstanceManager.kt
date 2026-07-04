@@ -32,6 +32,7 @@ class DefaultInstanceManager(
         displayName: String,
         compatibilityMode: CompatibilityMode
     ): Result<VirtualInstanceRecord> {
+        val baseDirRef = arrayOfNulls<File>(1)
         return runCatching {
             // Validate that InstallRecord exists if store is provided.
             // This prevents creating instances that HostedRuntimeBootstrap cannot start.
@@ -48,6 +49,7 @@ class DefaultInstanceManager(
             val virtualPackageName = "com.multiapp.instance.$shortId"
 
             val baseDir = File(dataRootBase, instanceId)
+            baseDirRef[0] = baseDir
             val dataRoot = InstanceDataRoot.fromBaseDir(instanceId, baseDir)
 
             // Create directory structure
@@ -75,6 +77,8 @@ class DefaultInstanceManager(
 
             store.save(record).getOrThrow()
             record
+        }.onFailure {
+            baseDirRef[0]?.takeIf { it.exists() }?.deleteRecursively()
         }
     }
 

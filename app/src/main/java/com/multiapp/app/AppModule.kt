@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.core.hook.HookEngine
+import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceRecordStore
@@ -25,6 +26,7 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import java.io.File
 import javax.inject.Singleton
 
 @Module
@@ -76,7 +78,11 @@ object AppModule {
 
     private fun packageManagerInstallMetadataResolver(context: Context): InstallMetadataResolver {
         val appContext = context.applicationContext
-        return InstallMetadataResolver { packageName, _ ->
+        val manifestParser = ManifestParser(appContext)
+        return InstallMetadataResolver { packageName, originApkPath ->
+            parseInstallMetadataFromApk(packageName, originApkPath, manifestParser)?.let { metadata ->
+                return@InstallMetadataResolver metadata
+            }
             val packageInfo = appContext.packageManager.getInstalledPackageInfoWithComponents(packageName)
             InstallMetadata(
                 permissions = packageInfo.requestedPermissions?.toList().orEmpty(),
@@ -86,6 +92,35 @@ object AppModule {
                 providers = packageInfo.providers.toComponentInfos()
             )
         }
+    }
+
+    private fun parseInstallMetadataFromApk(
+        packageName: String,
+        originApkPath: String,
+        manifestParser: ManifestParser
+    ): InstallMetadata? {
+        val originApk = File(originApkPath).takeIf { it.isFile } ?: return null
+        return runCatching {
+            val manifest = manifestParser.parse(originApk)
+            val manifestPackageName = manifest.packageName.ifBlank { packageName }
+            if (manifestPackageName != packageName) return@runCatching null
+            InstallMetadata(
+                permissions = manifest.permissions,
+                activities = manifest.activities.toInstallComponentInfos(manifestPackageName),
+                services = manifest.services.toInstallComponentInfos(manifestPackageName),
+                receivers = manifest.receivers.toInstallComponentInfos(manifestPackageName),
+                providers = manifest.providers.mapNotNull { provider ->
+                    normalizeManifestComponentName(manifestPackageName, provider.name)?.let { name ->
+                        ComponentInfo(
+                            name = name,
+                            exported = provider.exported,
+                            permission = provider.permission,
+                            grantUriPermissions = provider.grantUriPermissions
+                        )
+                    }
+                }
+            )
+        }.getOrNull()
     }
 
     private fun PackageManager.getInstalledPackageInfoWithComponents(packageName: String): PackageInfo {
@@ -114,6 +149,28 @@ object AppModule {
                 )
             }
         }.orEmpty()
+    }
+
+    private fun List<ManifestParser.ComponentInfo>.toInstallComponentInfos(packageName: String): List<ComponentInfo> {
+        return mapNotNull { component ->
+            normalizeManifestComponentName(packageName, component.name)?.let { name ->
+                ComponentInfo(
+                    name = name,
+                    exported = component.exported,
+                    permission = component.permission
+                )
+            }
+        }
+    }
+
+    private fun normalizeManifestComponentName(packageName: String, name: String?): String? {
+        if (name.isNullOrBlank()) return null
+        val trimmed = name.trim()
+        return when {
+            trimmed.startsWith(".") -> packageName + trimmed
+            '.' !in trimmed -> "$packageName.$trimmed"
+            else -> trimmed
+        }
     }
 
     private fun android.content.pm.ComponentInfo.componentPermission(): String? = when (this) {

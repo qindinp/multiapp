@@ -1,14 +1,11 @@
 package com.multiapp.feature.appmanager
 
-import android.content.ComponentName
-import android.content.Context
-import android.content.Intent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.multiapp.core.instance.InstanceLaunchUseCase
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -39,7 +36,7 @@ sealed interface AppManagerEvent {
 @HiltViewModel
 class AppManagerViewModel @Inject constructor(
     private val instanceManager: InstanceManager,
-    @ApplicationContext private val context: Context
+    private val instanceLaunchUseCase: InstanceLaunchUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AppManagerUiState())
@@ -94,20 +91,11 @@ class AppManagerViewModel @Inject constructor(
 
     fun launchInstance(instanceId: String) {
         viewModelScope.launch {
-            try {
-                val intent = Intent().apply {
-                    component = ComponentName(
-                        "com.multiapp.app",
-                        "com.multiapp.app.container.ContainerActivity"
-                    )
-                    putExtra("multiapp.instanceId", instanceId)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(intent)
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                Timber.e(e, "Failed to launch instance")
-                _events.send(AppManagerEvent.LaunchFailed(instanceId, e.message ?: "未知错误"))
+            val result = instanceLaunchUseCase.launch(instanceId)
+            result.exceptionOrNull()?.let { error ->
+                if (error is CancellationException) throw error
+                Timber.e(error, "Failed to launch instance")
+                _events.send(AppManagerEvent.LaunchFailed(instanceId, error.message ?: "未知错误"))
             }
         }
     }

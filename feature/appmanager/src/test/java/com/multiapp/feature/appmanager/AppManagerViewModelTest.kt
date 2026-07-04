@@ -1,14 +1,13 @@
 package com.multiapp.feature.appmanager
 
-import android.content.Context
+import com.multiapp.core.instance.InstanceLaunchUseCase
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
-import io.mockk.every
-import io.mockk.mockk
-import io.mockk.unmockkAll
-import io.mockk.verify
+import io.mockk.*
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -27,14 +26,15 @@ class AppManagerViewModelTest {
 
     private val testDispatcher = UnconfinedTestDispatcher()
     private lateinit var instanceManager: InstanceManager
-    private lateinit var context: Context
+    private lateinit var launchUseCase: InstanceLaunchUseCase
 
     @BeforeEach
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
         instanceManager = mockk(relaxed = true)
-        context = mockk(relaxed = true)
+        launchUseCase = mockk(relaxed = true)
         every { instanceManager.listInstances() } returns emptyList()
+        every { launchUseCase.launch(any()) } returns Result.success(Unit)
     }
 
     @AfterEach
@@ -48,7 +48,7 @@ class AppManagerViewModelTest {
         val records = listOf(testRecord("instance-1"), testRecord("instance-2"))
         every { instanceManager.listInstances() } returns records
 
-        val viewModel = AppManagerViewModel(instanceManager, context)
+        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
 
         assertFalse(viewModel.uiState.value.isLoading)
         assertNull(viewModel.uiState.value.error)
@@ -60,7 +60,7 @@ class AppManagerViewModelTest {
         val first = listOf(testRecord("instance-1"))
         val second = listOf(testRecord("instance-1"), testRecord("instance-2"))
         every { instanceManager.listInstances() } returnsMany listOf(first, second)
-        val viewModel = AppManagerViewModel(instanceManager, context)
+        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
 
         viewModel.onEvent(AppManagerEvent.Refresh)
 
@@ -71,7 +71,7 @@ class AppManagerViewModelTest {
     @Test
     fun `delete removes instance and reloads list`() = runTest {
         every { instanceManager.deleteInstance("instance-1") } returns true
-        val viewModel = AppManagerViewModel(instanceManager, context)
+        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
 
         viewModel.onEvent(AppManagerEvent.DeleteInstance("instance-1"))
 
@@ -83,11 +83,25 @@ class AppManagerViewModelTest {
     @Test
     fun `delete failure sets error`() = runTest {
         every { instanceManager.deleteInstance("missing") } throws IllegalArgumentException("missing")
-        val viewModel = AppManagerViewModel(instanceManager, context)
+        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
 
         viewModel.onEvent(AppManagerEvent.DeleteInstance("missing"))
 
         assertEquals("missing", viewModel.uiState.value.error)
+    }
+
+    @Test
+    fun `launch failure emits launch failed event`() = runTest {
+        every { launchUseCase.launch("instance-1") } returns Result.failure(IllegalStateException("boom"))
+        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
+
+        val eventJob = launch(testDispatcher) {
+            assertEquals(AppManagerEvent.LaunchFailed("instance-1", "boom"), viewModel.events.first())
+        }
+        viewModel.onEvent(AppManagerEvent.LaunchInstance("instance-1"))
+        eventJob.join()
+
+        verify { launchUseCase.launch("instance-1") }
     }
 
     private fun testRecord(instanceId: String): VirtualInstanceRecord = VirtualInstanceRecord(

@@ -2,14 +2,23 @@ package com.multiapp.feature.launcher
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.content.Context
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import com.multiapp.core.instance.CloneCreateFailureException
+import com.multiapp.core.instance.CloneCreateUseCase
+import com.multiapp.core.instance.InstalledAppRepository
+import com.multiapp.core.instance.InstanceLaunchUseCase
+import com.multiapp.core.manifest.ComponentExtractor
+import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.model.instance.InstanceManager
-import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.VirtualApp
-import com.multiapp.core.model.installer.VirtualInstallService
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,20 +27,39 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import timber.log.Timber
+import java.io.File
+import java.util.zip.ZipFile
 import javax.inject.Inject
+
+internal var launcherIoDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+internal fun normalizeApkComponentName(packageName: String, name: String?): String? {
+    if (name.isNullOrBlank()) return null
+    val trimmed = name.trim()
+    return when {
+        trimmed.startsWith(".") -> packageName + trimmed
+        '.' !in trimmed -> "$packageName.$trimmed"
+        else -> trimmed
+    }
+}
 
 data class LauncherUiState(
     val instances: List<VirtualInstanceRecord> = emptyList(),
     val isLoading: Boolean = false,
     val error: String? = null,
     val errorDetail: String? = null,
-    val creationStep: String? = null
+    val creationStep: String? = null,
+    val lastCreatedInstanceId: String? = null,
+    val importedApkCandidate: VirtualApp? = null,
+    val lastCreateLatencyMs: Long? = null
 )
 
 @HiltViewModel
 class LauncherViewModel @Inject constructor(
     private val instanceManager: InstanceManager,
-    private val virtualInstallService: VirtualInstallService
+    private val cloneCreateUseCase: CloneCreateUseCase,
+    private val installedAppRepository: InstalledAppRepository,
+    private val instanceLaunchUseCase: InstanceLaunchUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LauncherUiState())
@@ -61,29 +89,96 @@ class LauncherViewModel @Inject constructor(
         }
     }
 
-    fun createInstance(app: VirtualApp) {
-        viewModelScope.launch {
-            _uiState.update { it.copy(creationStep = "准备中…", error = null) }
-
+    fun createInstance(
+        app: VirtualApp,
+        displayName: String? = null
+    ) {
+        val currentState = _uiState.value
+        if (currentState.creationStep != null) return
+        _uiState.value = currentState.copy(
+            creationStep = "读取应用信息…",
+            error = null,
+            errorDetail = null,
+            lastCreatedInstanceId = null,
+            importedApkCandidate = null,
+            lastCreateLatencyMs = null
+        )
+        viewModelScope.launch(launcherIoDispatcher) {
             try {
-                // Step 1: Ensure InstallRecord exists for this package
-                _uiState.update { it.copy(creationStep = "导入应用信息…") }
-                val importResult = virtualInstallService.ensureInstallRecord(app)
-                importResult.getOrThrow()
+                _uiState.update { it.copy(creationStep = "复制 APK 并导入元数据…") }
+                val createResult = cloneCreateUseCase.create(app, displayName).getOrThrow()
 
-                // Step 2: Create VirtualInstanceRecord (InstanceManager validates InstallRecord exists)
-                _uiState.update { it.copy(creationStep = "创建实例…") }
-                val result = instanceManager.createInstance(
-                    originPackageName = app.packageName,
-                    displayName = app.appName
-                )
-                result.getOrThrow()
-
-                _uiState.update { it.copy(creationStep = null) }
-                loadInstances()
+                _uiState.update { it.copy(creationStep = "刷新分身列表…") }
+                val records = instanceManager.listInstances()
+                _uiState.update {
+                    it.copy(
+                        instances = records,
+                        isLoading = false,
+                        creationStep = null,
+                        lastCreatedInstanceId = createResult.instance.instanceId,
+                        lastCreateLatencyMs = createResult.createLatencyMs
+                    )
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to create instance")
+                val (friendly, detail) = e.toUserError()
+                _uiState.update {
+                    it.copy(creationStep = null, error = friendly, errorDetail = detail)
+                }
+            }
+        }
+    }
+
+    fun suggestedDisplayName(app: VirtualApp): String = cloneCreateUseCase.suggestedDisplayName(app)
+
+    fun clearError() {
+        _uiState.update { it.copy(error = null, errorDetail = null) }
+    }
+
+    fun clearLastCreatedInstance() {
+        _uiState.update { it.copy(lastCreatedInstanceId = null) }
+    }
+
+    fun clearImportedApkCandidate() {
+        _uiState.update { it.copy(importedApkCandidate = null) }
+    }
+
+    fun launchInstance(instanceId: String) {
+        viewModelScope.launch {
+            val result = instanceLaunchUseCase.launch(instanceId)
+            result.exceptionOrNull()?.let { error ->
+                Timber.e(error, "Failed to launch instance")
+                _uiState.update {
+                    it.copy(error = "启动失败", errorDetail = error.message ?: "无法打开分身")
+                }
+            }
+        }
+    }
+
+    fun importApkFile(context: Context, uri: Uri) {
+        val currentState = _uiState.value
+        if (currentState.creationStep != null) return
+        _uiState.value = currentState.copy(
+            creationStep = "复制 APK 文件…",
+            error = null,
+            errorDetail = null,
+            importedApkCandidate = null
+        )
+        viewModelScope.launch(launcherIoDispatcher) {
+            try {
+                val apkFile = copyApkToImportDir(context.applicationContext, uri)
+                _uiState.update { it.copy(creationStep = "解析 APK 信息…") }
+                val app = parseApkFile(context.applicationContext, apkFile)
+                _uiState.update {
+                    it.copy(
+                        creationStep = null,
+                        importedApkCandidate = app
+                    )
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Timber.e(e, "Failed to import APK file")
                 val (friendly, detail) = e.toUserError()
                 _uiState.update {
                     it.copy(creationStep = null, error = friendly, errorDetail = detail)
@@ -109,29 +204,11 @@ class LauncherViewModel @Inject constructor(
         }
     }
 
-    fun loadAllApps(packageManager: PackageManager) {
-        if (_allApps.value.isNotEmpty()) return
-        viewModelScope.launch(Dispatchers.IO) {
+    fun loadAllApps(forceRefresh: Boolean = false) {
+        if (!forceRefresh && _allApps.value.isNotEmpty()) return
+        viewModelScope.launch(launcherIoDispatcher) {
             try {
-                val apps = packageManager.getInstalledPackages(PackageManager.GET_META_DATA)
-                    .filter { it.packageName != "com.multiapp.app" }
-                    .mapNotNull { pkg ->
-                        val appInfo = pkg.applicationInfo ?: return@mapNotNull null
-                        VirtualApp(
-                            packageName = pkg.packageName,
-                            appName = appInfo.loadLabel(packageManager).toString(),
-                            icon = appInfo.loadIcon(packageManager),
-                            versionName = pkg.versionName ?: "",
-                            versionCode = pkg.longVersionCode,
-                            apkPath = appInfo.sourceDir,
-                            instanceId = "",
-                            mainActivity = packageManager.getLaunchIntentForPackage(pkg.packageName)?.component?.className,
-                            targetSdkVersion = appInfo.targetSdkVersion,
-                            minSdkVersion = appInfo.minSdkVersion,
-                            applicationClassName = appInfo.className
-                        )
-                    }
-                    .sortedBy { it.appName.lowercase() }
+                val apps = installedAppRepository.listInstalledApps(forceRefresh)
                 _allApps.value = apps
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -140,10 +217,116 @@ class LauncherViewModel @Inject constructor(
         }
     }
 
+    private fun copyApkToImportDir(context: Context, uri: Uri): File {
+        val importDir = File(context.filesDir, "imported_apks").apply { mkdirs() }
+        val file = File(importDir, "import-${System.currentTimeMillis()}.apk").canonicalFile
+        require(file.parentFile == importDir.canonicalFile) { "APK import path escapes import dir" }
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            file.outputStream().use { output -> input.copyTo(output) }
+        } ?: throw IllegalArgumentException("无法读取 APK 文件")
+        require(file.isFile && file.length() > 0L) { "APK file is empty" }
+        return file
+    }
+
+    private fun parseApkFile(context: Context, apkFile: File): VirtualApp {
+        val packageManager = context.packageManager
+        val info = packageManager.getArchivePackageInfo(apkFile.absolutePath)
+        val manifest = ManifestParser(context.applicationContext).parse(apkFile)
+        val packageName = manifest.packageName.ifBlank {
+            info?.packageName ?: throw IllegalArgumentException("无法解析 APK 文件")
+        }
+        val appInfo = info?.applicationInfo
+        appInfo?.sourceDir = apkFile.absolutePath
+        appInfo?.publicSourceDir = apkFile.absolutePath
+
+        val launcher = ComponentExtractor().extractLauncherActivity(manifest)
+        val mainActivity = normalizeApkComponentName(
+            packageName,
+            launcher?.targetActivityName ?: launcher?.name
+        ) ?: inferLauncherActivity(packageName, info)
+        require(mainActivity != null) { "No launcher activity" }
+
+        return VirtualApp(
+            packageName = packageName,
+            appName = appInfo?.loadLabel(packageManager)?.toString()?.takeIf { it.isNotBlank() }
+                ?: manifest.applicationLabel
+                ?: packageName,
+            icon = runCatching { appInfo?.loadIcon(packageManager) }.getOrNull(),
+            versionName = info?.versionName ?: "unknown",
+            versionCode = info?.longVersionCode?.takeIf { it > 0L } ?: 1L,
+            apkPath = apkFile.absolutePath,
+            instanceId = "",
+            mainActivity = mainActivity,
+            isSystemApp = false,
+            targetSdkVersion = manifest.targetSdkVersion,
+            minSdkVersion = manifest.minSdkVersion,
+            applicationClassName = normalizeApkComponentName(packageName, manifest.applicationClass)
+                ?: appInfo?.className,
+            requestedPermissions = manifest.permissions.ifEmpty {
+                info?.requestedPermissions?.toList().orEmpty()
+            },
+            activities = manifest.activities.mapNotNull { normalizeApkComponentName(packageName, it.name) },
+            services = manifest.services.mapNotNull { normalizeApkComponentName(packageName, it.name) },
+            receivers = manifest.receivers.mapNotNull { normalizeApkComponentName(packageName, it.name) },
+            providers = manifest.providers.mapNotNull { normalizeApkComponentName(packageName, it.name) },
+            nativeAbis = detectNativeAbis(apkFile),
+            activityAliases = manifest.activities
+                .mapNotNull { component ->
+                    val alias = normalizeApkComponentName(packageName, component.name)
+                    val target = normalizeApkComponentName(packageName, component.targetActivityName)
+                    if (alias != null && target != null) alias to target else null
+                }
+                .toMap()
+        )
+    }
+
+    private fun inferLauncherActivity(packageName: String, info: PackageInfo?): String? {
+        val activities = info?.activities?.mapNotNull { it.name }.orEmpty()
+        return when {
+            activities.size == 1 -> activities.first()
+            else -> activities.firstOrNull { it.substringAfterLast(".") == "MainActivity" }
+        }?.let { normalizeApkComponentName(packageName, it) }
+    }
+
+    private fun PackageManager.getArchivePackageInfo(apkPath: String): PackageInfo? {
+        val flags = PackageManager.GET_ACTIVITIES or
+            PackageManager.GET_SERVICES or
+            PackageManager.GET_RECEIVERS or
+            PackageManager.GET_PROVIDERS or
+            PackageManager.GET_PERMISSIONS or
+            PackageManager.GET_META_DATA
+        return if (Build.VERSION.SDK_INT >= 33) {
+            getPackageArchiveInfo(apkPath, PackageManager.PackageInfoFlags.of(flags.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            getPackageArchiveInfo(apkPath, flags)
+        }
+    }
+
+    private fun detectNativeAbis(apkFile: File): List<String> {
+        return runCatching {
+            ZipFile(apkFile).use { zip ->
+                zip.entries().asSequence()
+                    .map { it.name }
+                    .filter { it.startsWith("lib/") && it.endsWith(".so") }
+                    .mapNotNull { it.split("/").getOrNull(1) }
+                    .filter { it.isNotBlank() }
+                    .toSet()
+                    .sorted()
+            }
+        }.getOrElse { emptyList() }
+    }
+
     /**
      * 将技术异常转换为用户友好的错误信息
      */
     private fun Exception.toUserError(): Pair<String, String?> {
+        if (this is CloneCreateFailureException) {
+            return userMessage to listOfNotNull(
+                technicalReason,
+                cleanupStatus.takeIf { it != "not_required" }?.let { "cleanup=$it" }
+            ).joinToString("\n").takeIf { it.isNotBlank() }
+        }
         val msg = message ?: ""
         return when {
             msg.contains("loader.dex not found") ->

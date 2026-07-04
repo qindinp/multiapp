@@ -314,7 +314,7 @@ private fun AppManagerCard(
                     DetailRow(Icons.Default.FolderOpen, "原始包名", instance.originPackageName)
                     DetailRow(Icons.Default.Folder, "虚拟包名", instance.virtualPackageName)
                     DetailRow(Icons.Default.Storage, "数据目录", instance.dataRoot)
-                    DetailRow(Icons.Default.Shield, "兼容模式", instance.compatibilityMode.name)
+                    DetailRow(Icons.Default.Shield, "运行路线", "v2 hosted container")
                     DetailRow(Icons.Default.Security, "基线策略", instance.protectedBaselinePolicy)
                 }
             }
@@ -374,7 +374,7 @@ private fun InstanceDetailDialog(
                     DetailDialogRow(Icons.Default.Storage, "数据目录", instance.dataRoot)
                 }
                 DetailDialogSection("策略") {
-                    DetailDialogRow(Icons.Default.Shield, "兼容模式", instance.compatibilityMode.name)
+                    DetailDialogRow(Icons.Default.Shield, "运行路线", "v2 hosted container")
                     DetailDialogRow(Icons.Default.Security, "基线策略", instance.protectedBaselinePolicy)
                 }
             }
