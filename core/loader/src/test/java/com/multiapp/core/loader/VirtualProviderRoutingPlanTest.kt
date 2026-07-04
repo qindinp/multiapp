@@ -23,7 +23,7 @@ class VirtualProviderRoutingPlanTest {
     }
 
     @Test
-    fun `create uses pass-through hook with acquisition proxy fallback when host is available`() {
+    fun `create uses acquisition proxy as default instance scoped route when host is available`() {
         val plan = VirtualProviderRoutingPlanFactory().create(
             snapshot = snapshot(),
             hostPackageName = "com.multiapp.app"
@@ -32,16 +32,35 @@ class VirtualProviderRoutingPlanTest {
         assertTrue(plan.enabled)
         assertEquals("AUTHORITY_MAP_READY", plan.reason)
         assertEquals(
+            ProviderRoutingStrategy.ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY,
+            plan.primaryStrategy
+        )
+        assertEquals(
+            ProviderRoutingStrategy.NONE,
+            plan.fallbackStrategy
+        )
+        assertEquals(
+            mapOf("com.test.minimal.probe" to "com.multiapp.app.multiapp.provider.stub"),
+            plan.authorityMap
+        )
+    }
+
+    @Test
+    fun `create can opt into pass-through hook with acquisition proxy fallback`() {
+        val plan = VirtualProviderRoutingPlanFactory().create(
+            snapshot = snapshot(),
+            hostPackageName = "com.multiapp.app",
+            passThroughHookAllowed = true
+        )
+
+        assertTrue(plan.enabled)
+        assertEquals(
             ProviderRoutingStrategy.CONTENT_RESOLVER_PASS_THROUGH_HOOK,
             plan.primaryStrategy
         )
         assertEquals(
             ProviderRoutingStrategy.ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY,
             plan.fallbackStrategy
-        )
-        assertEquals(
-            mapOf("com.test.minimal.probe" to "com.multiapp.app.multiapp.provider.stub"),
-            plan.authorityMap
         )
     }
 
@@ -72,12 +91,20 @@ class VirtualProviderRoutingPlanTest {
 
         assertEquals("true", evidence["providerRoutingEnabled"])
         assertEquals("AUTHORITY_MAP_READY", evidence["providerRoutingReason"])
-        assertEquals("CONTENT_RESOLVER_PASS_THROUGH_HOOK", evidence["providerRoutingPrimary"])
-        assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingFallback"])
+        assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingPrimary"])
+        assertEquals("NONE", evidence["providerRoutingFallback"])
         assertEquals("1", evidence["providerCount"])
         assertEquals("1", evidence["providerAuthorityCount"])
         assertEquals("1", evidence["providerAuthorityMapSize"])
         assertEquals("com.multiapp.app", evidence["providerHostPackage"])
+        assertEquals("INSTANCE", evidence["providerRoutingScope"])
+        assertEquals("false", evidence["processWideProviderHook"])
+        assertEquals("VirtualContentResolver", evidence["authorityRewriteEntry"])
+        assertEquals("1", evidence["providerPolicyPermissionCount"])
+        assertEquals("1", evidence["providerPolicyGrantUriPermissionCount"])
+        assertEquals("0", evidence["providerPolicyExportedCount"])
+        assertEquals("0", evidence["providerPolicyUnguardedExportedCount"])
+        assertEquals("INTERNAL_ONLY", evidence["providerPolicyStatuses"])
     }
 
     private fun snapshot(
@@ -85,7 +112,9 @@ class VirtualProviderRoutingPlanTest {
             ResolvedComponent(
                 name = "com.test.minimal.ProbeProvider",
                 exported = false,
-                authorities = listOf("com.test.minimal.probe")
+                authorities = listOf("com.test.minimal.probe"),
+                permission = "com.test.minimal.permission.PROBE",
+                grantUriPermissions = true
             )
         )
     ) = VirtualPackageSnapshot(

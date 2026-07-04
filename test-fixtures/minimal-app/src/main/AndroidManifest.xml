@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <permission
+        android:name="com.test.minimal.permission.PROBE_PROVIDER"
+        android:protectionLevel="signature" />
+
     <application
         android:name=".MinimalApp"
         android:label="MinimalTest"
@@ -34,7 +38,9 @@
         <provider
             android:name=".ProbeProvider"
             android:authorities="com.test.minimal.probe"
-            android:exported="false" />
+            android:exported="false"
+            android:permission="com.test.minimal.permission.PROBE_PROVIDER"
+            android:grantUriPermissions="true" />
 
     </application>
 </manifest>

@@ -699,7 +699,9 @@ class HostedRuntimeBootstrapTest {
                         ResolvedComponent(
                             name = "com.example.app.ProbeProvider",
                             exported = false,
-                            authorities = listOf("com.example.app.probe")
+                            authorities = listOf("com.example.app.probe"),
+                            permission = "com.example.app.permission.PROBE",
+                            grantUriPermissions = true
                         )
                     )
                 )
@@ -723,9 +725,15 @@ class HostedRuntimeBootstrapTest {
         val evidence = classLoaderStage.evidence.associate { it.key to it.value }
         assertEquals("true", evidence["providerRoutingEnabled"])
         assertEquals("AUTHORITY_MAP_READY", evidence["providerRoutingReason"])
-        assertEquals("CONTENT_RESOLVER_PASS_THROUGH_HOOK", evidence["providerRoutingPrimary"])
-        assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingFallback"])
+        assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingPrimary"])
+        assertEquals("NONE", evidence["providerRoutingFallback"])
         assertEquals("1", evidence["providerAuthorityMapSize"])
+        assertEquals("INSTANCE", evidence["providerRoutingScope"])
+        assertEquals("false", evidence["processWideProviderHook"])
+        assertEquals("VirtualContentResolver", evidence["authorityRewriteEntry"])
+        assertEquals("1", evidence["providerPolicyPermissionCount"])
+        assertEquals("1", evidence["providerPolicyGrantUriPermissionCount"])
+        assertEquals("INTERNAL_ONLY", evidence["providerPolicyStatuses"])
         assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
         assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
     }

@@ -4,14 +4,13 @@ import android.net.Uri
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
 /**
- * Rewrites guest provider authorities to the host-declared stub provider.
+ * Named provider-resolution entry for v2 ContentResolver virtualization.
  *
  * Android's public ContentResolver operations are final on modern SDK stubs,
- * so the production call-site must be a hook/proxy layer around provider
- * acquisition rather than a ContentResolver subclass. This class keeps the
- * authority mapping deterministic and testable for that runtime layer.
+ * so this is not an Android ContentResolver subclass. It is the deterministic
+ * authority/URI rewrite entry used by provider acquisition and routing evidence.
  */
-class VirtualProviderUriRewriter(
+class VirtualContentResolver(
     private val hostPackageName: String,
     private val providerManagerFactory: (String) -> VirtualProviderManager = { VirtualProviderManager(it) }
 ) {
@@ -19,10 +18,10 @@ class VirtualProviderUriRewriter(
         providerManagerFactory(hostPackageName)
     }
 
-    fun rewrite(snapshot: VirtualPackageSnapshot, uri: Uri): VirtualProviderUriRewrite? =
+    fun rewriteProviderUri(snapshot: VirtualPackageSnapshot, uri: Uri): VirtualProviderUriRewrite? =
         providerManager.rewriteUri(snapshot, uri)
 
-    fun rewriteAuthority(snapshot: VirtualPackageSnapshot, authority: String): VirtualProviderAuthorityRewrite? {
+    fun rewriteProviderAuthority(snapshot: VirtualPackageSnapshot, authority: String): VirtualProviderAuthorityRewrite? {
         val resolution = providerManager.resolve(snapshot, authority) ?: return null
         return VirtualProviderAuthorityRewrite(
             originalAuthority = authority,
@@ -30,6 +29,21 @@ class VirtualProviderUriRewriter(
             resolution = resolution
         )
     }
+}
+
+class VirtualProviderUriRewriter(
+    private val virtualContentResolver: VirtualContentResolver
+) {
+    constructor(
+        hostPackageName: String,
+        providerManagerFactory: (String) -> VirtualProviderManager = { VirtualProviderManager(it) }
+    ) : this(VirtualContentResolver(hostPackageName, providerManagerFactory))
+
+    fun rewrite(snapshot: VirtualPackageSnapshot, uri: Uri): VirtualProviderUriRewrite? =
+        virtualContentResolver.rewriteProviderUri(snapshot, uri)
+
+    fun rewriteAuthority(snapshot: VirtualPackageSnapshot, authority: String): VirtualProviderAuthorityRewrite? =
+        virtualContentResolver.rewriteProviderAuthority(snapshot, authority)
 }
 
 data class VirtualProviderAuthorityRewrite(
@@ -40,7 +54,7 @@ data class VirtualProviderAuthorityRewrite(
 
 class VirtualProviderAuthorityMapFactory(
     private val hostPackageName: String,
-    private val rewriter: VirtualProviderUriRewriter = VirtualProviderUriRewriter(hostPackageName)
+    private val virtualContentResolver: VirtualContentResolver = VirtualContentResolver(hostPackageName)
 ) {
     fun create(snapshot: VirtualPackageSnapshot): Map<String, String> {
         val mappings = linkedMapOf<String, String>()
@@ -48,7 +62,7 @@ class VirtualProviderAuthorityMapFactory(
             .flatMap { it.authorities }
             .distinct()
             .forEach { authority ->
-                val rewrite = rewriter.rewriteAuthority(snapshot, authority)
+                val rewrite = virtualContentResolver.rewriteProviderAuthority(snapshot, authority)
                 if (rewrite != null) {
                     mappings[authority] = rewrite.proxyAuthority
                 }

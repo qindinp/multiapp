@@ -73,7 +73,13 @@ class ManifestGeneratorTest {
     fun `generateBytes should handle providers with authority rewrite`() {
         val manifest = createTestManifest().copy(
             providers = listOf(
-                ManifestParser.ProviderInfo("com.test.MyProvider", "com.test.provider", true)
+                ManifestParser.ProviderInfo(
+                    name = "com.test.MyProvider",
+                    authorities = "com.test.provider",
+                    exported = true,
+                    grantUriPermissions = true,
+                    permission = "com.test.permission.PROVIDER"
+                )
             )
         )
         val config = createTestConfig()
@@ -82,6 +88,8 @@ class ManifestGeneratorTest {
         val bytes = generator.generateBytes("com.test.stub", manifest, launcherActivity, config)
 
         assertTrue(bytes.isNotEmpty(), "Should produce non-empty output")
+        assertTrue(containsBytes(bytes, "com.test.permission.PROVIDER".toByteArray(Charsets.UTF_8)), "Should contain provider permission")
+        assertTrue(containsBytes(bytes, "grantUriPermissions".toByteArray(Charsets.UTF_8)), "Should contain grantUriPermissions")
     }
 
     @Test

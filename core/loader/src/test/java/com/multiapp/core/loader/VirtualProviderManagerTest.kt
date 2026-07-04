@@ -27,6 +27,13 @@ class VirtualProviderManagerTest {
         assertEquals("com.test.minimal.ProbeProvider", resolution.providerClassName)
         assertEquals("com.test.minimal.ProbeProvider", resolution.providerInfo.name)
         assertEquals("com.test.minimal.probe", resolution.providerInfo.authority)
+        assertEquals("com.test.minimal.permission.PROBE", resolution.providerInfo.readPermission)
+        assertEquals("com.test.minimal.permission.PROBE", resolution.providerInfo.writePermission)
+        assertEquals(true, resolution.providerInfo.grantUriPermissions)
+        assertEquals("INTERNAL_ONLY", resolution.policy.status)
+        assertEquals("INSTANCE", resolution.policy.routingScope)
+        assertEquals(false, resolution.policy.processWideProviderHook)
+        assertEquals("VirtualContentResolver", resolution.policy.authorityRewriteEntry)
     }
 
     @Test
@@ -43,13 +50,22 @@ class VirtualProviderManagerTest {
 
     @Test
     fun `authority rewriter maps guest authority to stable proxy authority`() {
-        val result = VirtualProviderUriRewriter("com.multiapp.app")
-            .rewriteAuthority(snapshot(), "com.test.minimal.probe")
+        val result = VirtualContentResolver("com.multiapp.app")
+            .rewriteProviderAuthority(snapshot(), "com.test.minimal.probe")
 
         assertNotNull(result)
         assertEquals("com.test.minimal.probe", result.originalAuthority)
         assertEquals("com.multiapp.app.multiapp.provider.stub", result.proxyAuthority)
         assertEquals("com.test.minimal.ProbeProvider", result.resolution.providerClassName)
+    }
+
+    @Test
+    fun `compatibility rewriter delegates to VirtualContentResolver entry`() {
+        val result = VirtualProviderUriRewriter("com.multiapp.app")
+            .rewriteAuthority(snapshot(), "com.test.minimal.probe")
+
+        assertNotNull(result)
+        assertEquals("VirtualContentResolver", result.resolution.policy.authorityRewriteEntry)
     }
 
     @Test
@@ -87,6 +103,9 @@ class VirtualProviderManagerTest {
         assertEquals("com.test.minimal.probe", resolved.guestAuthority)
         assertEquals("com.multiapp.app.multiapp.provider.stub", resolved.proxyAuthority)
         assertEquals("com.test.minimal.ProbeProvider", resolved.providerClassName)
+        assertEquals("INTERNAL_ONLY", resolved.policy?.status)
+        assertEquals("com.test.minimal.permission.PROBE", resolved.policy?.permission)
+        assertEquals(true, resolved.policy?.grantUriPermissions)
         assertEquals(true, resolved.success)
         assertNull(resolved.reason)
         assertEquals("missing.authority", notFound.guestAuthority)
@@ -133,7 +152,9 @@ class VirtualProviderManagerTest {
             ResolvedComponent(
                 name = "com.test.minimal.ProbeProvider",
                 exported = false,
-                authorities = listOf("com.test.minimal.probe")
+                authorities = listOf("com.test.minimal.probe"),
+                permission = "com.test.minimal.permission.PROBE",
+                grantUriPermissions = true
             )
         )
     )

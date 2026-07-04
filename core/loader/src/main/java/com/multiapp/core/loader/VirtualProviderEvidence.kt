@@ -7,7 +7,8 @@ data class VirtualProviderEvidence(
     val providerClassName: String?,
     val operation: Operation,
     val success: Boolean,
-    val reason: String? = null
+    val reason: String? = null,
+    val policy: VirtualProviderPolicy? = null
 ) {
     enum class Operation {
         ACQUIRE_PROVIDER,
@@ -40,7 +41,8 @@ data class VirtualProviderEvidence(
                     providerClassName = null,
                     operation = Operation.ACQUIRE_PROVIDER,
                     success = false,
-                    reason = "PROVIDER_NOT_FOUND"
+                    reason = "PROVIDER_NOT_FOUND",
+                    policy = null
                 )
             }
         }
@@ -66,7 +68,8 @@ data class VirtualProviderEvidence(
             providerClassName = null,
             operation = Operation.ACQUIRE_PROVIDER,
             success = false,
-            reason = "PROVIDER_NOT_FOUND"
+            reason = "PROVIDER_NOT_FOUND",
+            policy = null
         )
 
         fun notifyChange(
@@ -81,7 +84,8 @@ data class VirtualProviderEvidence(
                     providerClassName = null,
                     operation = Operation.NOTIFY_CHANGE,
                     success = false,
-                    reason = "PROVIDER_NOT_FOUND"
+                    reason = "PROVIDER_NOT_FOUND",
+                    policy = null
                 )
             }
             return fromResolution(
@@ -135,7 +139,8 @@ data class VirtualProviderEvidence(
                     providerClassName = null,
                     operation = operation,
                     success = false,
-                    reason = acquireResult.evidence.reason ?: "PROVIDER_NOT_FOUND"
+                    reason = acquireResult.evidence.reason ?: "PROVIDER_NOT_FOUND",
+                    policy = null
                 )
                 is VirtualProviderDispatchResult.InstanceNotFound -> VirtualProviderEvidence(
                     instanceId = acquireResult.instanceId,
@@ -144,7 +149,8 @@ data class VirtualProviderEvidence(
                     providerClassName = null,
                     operation = operation,
                     success = false,
-                    reason = "INSTANCE_NOT_FOUND"
+                    reason = "INSTANCE_NOT_FOUND",
+                    policy = null
                 )
                 is VirtualProviderDispatchResult.InvalidProxyUri -> VirtualProviderEvidence(
                     instanceId = null,
@@ -153,7 +159,8 @@ data class VirtualProviderEvidence(
                     providerClassName = null,
                     operation = operation,
                     success = false,
-                    reason = acquireResult.reason
+                    reason = acquireResult.reason,
+                    policy = null
                 )
                 null -> VirtualProviderEvidence(
                     instanceId = null,
@@ -162,7 +169,8 @@ data class VirtualProviderEvidence(
                     providerClassName = null,
                     operation = operation,
                     success = false,
-                    reason = "missing uri"
+                    reason = "missing uri",
+                    policy = null
                 )
             }
         }
@@ -192,7 +200,8 @@ data class VirtualProviderEvidence(
             providerClassName = resolution.providerClassName,
             operation = operation,
             success = success,
-            reason = reason
+            reason = reason,
+            policy = resolution.policy
         )
     }
 }

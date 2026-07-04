@@ -21,7 +21,8 @@ data class VirtualProviderRoutingPlan(
     val primaryStrategy: ProviderRoutingStrategy,
     val fallbackStrategy: ProviderRoutingStrategy,
     val enabled: Boolean,
-    val reason: String
+    val reason: String,
+    val policySummary: VirtualProviderPolicySummary = VirtualProviderPolicySummary.EMPTY
 ) {
     fun toEvidence(): List<BootstrapEvidence> = listOf(
         BootstrapEvidence("providerRoutingEnabled", enabled.toString(), SOURCE),
@@ -32,7 +33,7 @@ data class VirtualProviderRoutingPlan(
         BootstrapEvidence("providerAuthorityCount", authorityCount.toString(), SOURCE),
         BootstrapEvidence("providerAuthorityMapSize", authorityMap.size.toString(), SOURCE),
         BootstrapEvidence("providerHostPackage", hostPackageName ?: "", SOURCE)
-    )
+    ) + policySummary.toEvidence()
 
     companion object {
         private const val SOURCE = "VirtualProviderRoutingPlan"
@@ -53,9 +54,10 @@ class VirtualProviderRoutingPlanFactory(
     fun create(
         snapshot: VirtualPackageSnapshot,
         hostPackageName: String?,
-        passThroughHookAllowed: Boolean = true
+        passThroughHookAllowed: Boolean = false
     ): VirtualProviderRoutingPlan {
         val authorities = snapshot.providers.flatMap { it.authorities }.distinct()
+        val policySummary = VirtualProviderPolicySummary.fromProviders(snapshot.providers)
         if (snapshot.providers.isEmpty() || authorities.isEmpty()) {
             return VirtualProviderRoutingPlan(
                 instanceId = snapshot.instanceId,
@@ -67,7 +69,8 @@ class VirtualProviderRoutingPlanFactory(
                 primaryStrategy = ProviderRoutingStrategy.NONE,
                 fallbackStrategy = ProviderRoutingStrategy.NONE,
                 enabled = false,
-                reason = "NO_GUEST_PROVIDERS"
+                reason = "NO_GUEST_PROVIDERS",
+                policySummary = policySummary
             )
         }
 
@@ -82,7 +85,8 @@ class VirtualProviderRoutingPlanFactory(
                 primaryStrategy = ProviderRoutingStrategy.ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY,
                 fallbackStrategy = ProviderRoutingStrategy.NONE,
                 enabled = false,
-                reason = "HOST_PACKAGE_UNAVAILABLE"
+                reason = "HOST_PACKAGE_UNAVAILABLE",
+                policySummary = policySummary
             )
         }
 
@@ -108,7 +112,8 @@ class VirtualProviderRoutingPlanFactory(
             primaryStrategy = primary,
             fallbackStrategy = fallback,
             enabled = authorityMap.isNotEmpty(),
-            reason = if (authorityMap.isNotEmpty()) "AUTHORITY_MAP_READY" else "AUTHORITY_MAP_EMPTY"
+            reason = if (authorityMap.isNotEmpty()) "AUTHORITY_MAP_READY" else "AUTHORITY_MAP_EMPTY",
+            policySummary = policySummary
         )
     }
 }

@@ -86,6 +86,9 @@ internal object VirtualPackageInfoFactory {
             enabled = true
             this.authority = authority
             processName = component.processName
+            readPermission = component.permission
+            writePermission = component.permission
+            grantUriPermissions = component.grantUriPermissions
             metaData = component.metaData.toBundleOrNull()
         }
     }

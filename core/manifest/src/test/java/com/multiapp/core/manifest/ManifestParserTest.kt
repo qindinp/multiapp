@@ -51,7 +51,9 @@ class ManifestParserTest {
 
                 <provider android:name=".MyProvider"
                     android:authorities="com.example.testapp.provider"
-                    android:exported="false"/>
+                    android:exported="false"
+                    android:permission="com.example.testapp.permission.PROVIDER"
+                    android:grantUriPermissions="true"/>
 
                 <provider android:name=".FileProvider"
                     android:authorities="com.example.testapp.fileprovider"
@@ -201,6 +203,16 @@ class ManifestParserTest {
             val provider = result.providers.find { it.name == ".MyProvider" }
             assertNotNull(provider)
             assertEquals("com.example.testapp.provider", provider!!.authorities)
+        }
+
+        @Test
+        fun `extracts provider policy attributes`() {
+            val result = parser.parseFromXml(fullManifestXml())
+            val provider = result.providers.find { it.name == ".MyProvider" }
+            assertNotNull(provider)
+            assertEquals("com.example.testapp.permission.PROVIDER", provider!!.permission)
+            assertTrue(provider.grantUriPermissions)
+            assertFalse(provider.exported)
         }
     }
 

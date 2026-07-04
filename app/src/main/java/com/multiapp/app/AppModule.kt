@@ -1,8 +1,11 @@
 package com.multiapp.app
 
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.content.pm.ProviderInfo
+import android.content.pm.ServiceInfo
 import android.os.Build
 import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.core.hook.HookEngine
@@ -103,8 +106,33 @@ object AppModule {
     private fun Array<out android.content.pm.ComponentInfo>?.toComponentInfos(): List<ComponentInfo> {
         return this?.mapNotNull { component ->
             component.name?.takeIf { it.isNotBlank() }?.let { name ->
-                ComponentInfo(name = name, exported = component.exported)
+                ComponentInfo(
+                    name = name,
+                    exported = component.exported,
+                    permission = component.componentPermission(),
+                    grantUriPermissions = (component as? ProviderInfo)?.grantUriPermissions ?: false
+                )
             }
         }.orEmpty()
+    }
+
+    private fun android.content.pm.ComponentInfo.componentPermission(): String? = when (this) {
+        is ActivityInfo -> permission
+        is ServiceInfo -> permission
+        is ProviderInfo -> providerPermission()
+        else -> null
+    }?.takeIf { it.isNotBlank() }
+
+    private fun ProviderInfo.providerPermission(): String? {
+        val readPermission = readPermission?.takeIf { it.isNotBlank() }
+        val writePermission = writePermission?.takeIf { it.isNotBlank() }
+        return when {
+            readPermission == null && writePermission == null -> null
+            readPermission == writePermission -> readPermission
+            else -> listOfNotNull(
+                readPermission?.let { "read=$it" },
+                writePermission?.let { "write=$it" }
+            ).joinToString(";")
+        }
     }
 }

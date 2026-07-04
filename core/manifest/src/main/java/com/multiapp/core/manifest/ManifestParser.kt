@@ -69,7 +69,8 @@ class ManifestParser @Inject constructor(
         val name: String,
         val authorities: String,
         val exported: Boolean = false,
-        val grantUriPermissions: Boolean = false
+        val grantUriPermissions: Boolean = false,
+        val permission: String? = null
     )
 
     data class MetaDataInfo(
@@ -316,7 +317,8 @@ class ManifestParser @Inject constructor(
                 name = prv.name ?: "",
                 authorities = prv.authority ?: "",
                 exported = prv.exported,
-                grantUriPermissions = prv.grantUriPermissions || prv.name?.contains("FileProvider") == true
+                grantUriPermissions = prv.grantUriPermissions || prv.name?.contains("FileProvider") == true,
+                permission = providerPermission(prv)
             )
         }
 
@@ -351,6 +353,19 @@ class ManifestParser @Inject constructor(
     /**
      * 从 ActivityInfo 数组中查找带 MAIN+LAUNCHER intent-filter 的 activity
      */
+    private fun providerPermission(provider: android.content.pm.ProviderInfo): String? {
+        val readPermission = provider.readPermission?.takeIf { it.isNotEmpty() }
+        val writePermission = provider.writePermission?.takeIf { it.isNotEmpty() }
+        return when {
+            readPermission == null && writePermission == null -> null
+            readPermission == writePermission -> readPermission
+            else -> listOfNotNull(
+                readPermission?.let { "read=$it" },
+                writePermission?.let { "write=$it" }
+            ).joinToString(";")
+        }
+    }
+
     private fun findLauncherFromFilters(activities: Array<android.content.pm.ActivityInfo>): String? {
         for (act in activities) {
             val filters = extractFiltersFromActivity(act)
@@ -549,7 +564,8 @@ class ManifestParser @Inject constructor(
                         name = name,
                         authorities = el.getAttributeNS(ANDROID_NS, "authorities"),
                         exported = el.getAttributeNS(ANDROID_NS, "exported") == "true",
-                        grantUriPermissions = el.getAttributeNS(ANDROID_NS, "grantUriPermissions") == "true"
+                        grantUriPermissions = el.getAttributeNS(ANDROID_NS, "grantUriPermissions") == "true",
+                        permission = el.getAttributeNS(ANDROID_NS, "permission").takeIf { it.isNotEmpty() }
                     )
                 )
                 val metaData = extractMetaData(el)

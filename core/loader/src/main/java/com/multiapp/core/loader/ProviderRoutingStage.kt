@@ -23,7 +23,8 @@ class ProviderRoutingStage(
 
         val providerRoutingPlan = routingPlanFactory.create(
             snapshot = packageSnapshot,
-            hostPackageName = hostPackageName
+            hostPackageName = hostPackageName,
+            passThroughHookAllowed = providerHookInstallEnabled
         )
         val providerHookInstallResult = if (providerHookInstallEnabled) {
             providerHookInstaller.install(providerRoutingPlan)

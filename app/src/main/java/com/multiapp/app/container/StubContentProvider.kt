@@ -289,6 +289,16 @@ class StubContentProvider : ContentProvider() {
         putBoolean("evidenceSuccess", evidence.success)
         putString("evidenceReason", evidence.reason)
         putString("proxyAuthority", evidence.proxyAuthority)
+        evidence.policy?.let { policy ->
+            putBoolean("providerExported", policy.exported)
+            putString("providerPermission", policy.permission.orEmpty())
+            putBoolean("providerGrantUriPermissions", policy.grantUriPermissions)
+            putString("providerPolicyStatus", policy.status)
+            putString("providerPolicyReason", policy.reason)
+            putString("providerRoutingScope", policy.routingScope)
+            putBoolean("processWideProviderHook", policy.processWideProviderHook)
+            putString("authorityRewriteEntry", policy.authorityRewriteEntry)
+        }
     }
 
     private fun VirtualProviderDispatchResult?.toEvidenceFields(
@@ -310,6 +320,14 @@ class StubContentProvider : ContentProvider() {
             "evidenceOperation" to methodEvidence.operation.name,
             "evidenceSuccess" to methodEvidence.success,
             "reason" to methodEvidence.reason.orEmpty(),
+            "providerExported" to (methodEvidence.policy?.exported ?: false),
+            "providerPermission" to methodEvidence.policy?.permission.orEmpty(),
+            "providerGrantUriPermissions" to (methodEvidence.policy?.grantUriPermissions ?: false),
+            "providerPolicyStatus" to methodEvidence.policy?.status.orEmpty(),
+            "providerPolicyReason" to methodEvidence.policy?.reason.orEmpty(),
+            "providerRoutingScope" to methodEvidence.policy?.routingScope.orEmpty(),
+            "processWideProviderHook" to (methodEvidence.policy?.processWideProviderHook ?: false),
+            "authorityRewriteEntry" to methodEvidence.policy?.authorityRewriteEntry.orEmpty(),
             "dispatcherStatus" to statusName(),
             "cached" to ((this as? VirtualProviderDispatchResult.ProviderReady)?.cached ?: false),
             "detail" to statusForLog()

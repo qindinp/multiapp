@@ -36,6 +36,11 @@ class ProviderRoutingStageTest {
         val evidence = output.result.evidence.associate { it.key to it.value }
         assertEquals("true", evidence["providerRoutingEnabled"])
         assertEquals("AUTHORITY_MAP_READY", evidence["providerRoutingReason"])
+        assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingPrimary"])
+        assertEquals("NONE", evidence["providerRoutingFallback"])
+        assertEquals("INSTANCE", evidence["providerRoutingScope"])
+        assertEquals("false", evidence["processWideProviderHook"])
+        assertEquals("VirtualContentResolver", evidence["authorityRewriteEntry"])
         assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
         assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
     }
@@ -59,6 +64,8 @@ class ProviderRoutingStageTest {
         val evidence = output.result.evidence.associate { it.key to it.value }
         assertEquals("INSTALLED", evidence["providerHookInstallStatus"])
         assertEquals("1", evidence["providerHookInstallAuthorityMapSize"])
+        assertEquals("CONTENT_RESOLVER_PASS_THROUGH_HOOK", evidence["providerRoutingPrimary"])
+        assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingFallback"])
         verify(atLeast = 1) {
             hookEngine.hookMethodPassThrough(any(), any(), any())
         }
@@ -98,7 +105,9 @@ class ProviderRoutingStageTest {
             ResolvedComponent(
                 name = "com.example.app.Provider",
                 exported = false,
-                authorities = listOf("com.example.app.provider")
+                authorities = listOf("com.example.app.provider"),
+                permission = "com.example.app.permission.PROBE",
+                grantUriPermissions = true
             )
         )
     )

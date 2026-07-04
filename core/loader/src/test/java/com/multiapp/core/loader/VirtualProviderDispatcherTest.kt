@@ -68,8 +68,13 @@ class VirtualProviderDispatcherTest {
         assertEquals(true, created.evidence.success)
         assertEquals("com.test.minimal.probe", created.evidence.guestAuthority)
         assertEquals("com.multiapp.app.multiapp.provider.stub", created.evidence.proxyAuthority)
+        assertEquals("INTERNAL_ONLY", created.evidence.policy?.status)
+        assertEquals("com.test.minimal.permission.PROBE", created.evidence.policy?.permission)
+        assertEquals(true, created.evidence.policy?.grantUriPermissions)
         assertEquals(1, attached.size)
         assertEquals("com.test.minimal.probe", attached.single().authority)
+        assertEquals("com.test.minimal.permission.PROBE", attached.single().readPermission)
+        assertEquals(true, attached.single().grantUriPermissions)
     }
 
     @Test
@@ -130,6 +135,10 @@ class VirtualProviderDispatcherTest {
         assertEquals("inst-001", evidence.instanceId)
         assertEquals("com.test.minimal.probe", evidence.guestAuthority)
         assertEquals("com.test.minimal.ProbeProvider", evidence.providerClassName)
+        assertEquals("INTERNAL_ONLY", evidence.policy?.status)
+        assertEquals("INSTANCE", evidence.policy?.routingScope)
+        assertEquals(false, evidence.policy?.processWideProviderHook)
+        assertEquals("VirtualContentResolver", evidence.policy?.authorityRewriteEntry)
     }
 
     @Test
@@ -182,7 +191,9 @@ class VirtualProviderDispatcherTest {
             ResolvedComponent(
                 name = "com.test.minimal.ProbeProvider",
                 exported = false,
-                authorities = listOf("com.test.minimal.probe")
+                authorities = listOf("com.test.minimal.probe"),
+                permission = "com.test.minimal.permission.PROBE",
+                grantUriPermissions = true
             )
         )
     )
@@ -194,7 +205,12 @@ class VirtualProviderDispatcherTest {
         guestAuthority = "com.test.minimal.probe",
         proxyAuthority = "com.multiapp.app.multiapp.provider.stub",
         providerClassName = "com.test.minimal.ProbeProvider",
-        providerInfo = ProviderInfo()
+        providerInfo = ProviderInfo().apply {
+            exported = false
+            readPermission = "com.test.minimal.permission.PROBE"
+            writePermission = "com.test.minimal.permission.PROBE"
+            grantUriPermissions = true
+        }
     )
 
     private fun hostedResult(

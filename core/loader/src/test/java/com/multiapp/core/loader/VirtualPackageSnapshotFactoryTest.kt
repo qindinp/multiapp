@@ -52,6 +52,8 @@ class VirtualPackageSnapshotFactoryTest {
                         name = "com.test.minimal.ProbeProvider",
                         exported = false,
                         authorities = listOf("com.test.minimal.probe"),
+                        permission = "com.test.permission.PROBE",
+                        grantUriPermissions = true,
                         metaData = mapOf("provider.mode" to "probe")
                     )
                 ),
@@ -73,6 +75,8 @@ class VirtualPackageSnapshotFactoryTest {
         assertEquals("portrait", snapshot.activities.single().screenOrientation)
         assertEquals("orientation|screenSize|keyboardHidden", snapshot.activities.single().configChanges)
         assertEquals("com.test.permission.START", snapshot.activities.single().permission)
+        assertEquals("com.test.permission.PROBE", snapshot.providers.single().permission)
+        assertEquals(true, snapshot.providers.single().grantUriPermissions)
         assertEquals("main", snapshot.activities.single().metaData["activity.mode"])
         assertTrue(snapshot.matchesPackageName("com.test.minimal"))
         assertTrue(snapshot.matchesPackageName("com.multiapp.instance.abc"))
@@ -107,6 +111,9 @@ class VirtualPackageSnapshotFactoryTest {
         assertEquals(":sync", serviceInfo.processName)
         assertEquals("com.test.permission.SYNC", serviceInfo.permission)
         assertEquals("com.test.minimal.probe", providerInfo.authority)
+        assertEquals("com.test.permission.PROBE", providerInfo.readPermission)
+        assertEquals("com.test.permission.PROBE", providerInfo.writePermission)
+        assertEquals(true, providerInfo.grantUriPermissions)
     }
 
     @Test

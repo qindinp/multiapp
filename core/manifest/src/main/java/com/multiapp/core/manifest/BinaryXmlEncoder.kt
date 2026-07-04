@@ -192,6 +192,7 @@ class BinaryXmlEncoder {
         for (p in rewrittenProviders) {
             otherStr(p.name)
             p.authorities?.let { otherStr(it) }
+            p.permission?.let { otherStr(it) }
         }
         for ((_, metaList) in manifest.providerMetaData) {
             for (meta in metaList) {
@@ -267,6 +268,9 @@ class BinaryXmlEncoder {
             if (p.grantUriPermissions) {
                 attrs.add(XmlAttr(ANDROID_NS_URI, "grantUriPermissions", "true",
                     typedValue = -1, dataType = TYPE_INT_BOOLEAN))
+            }
+            if (p.permission != null) {
+                attrs.add(XmlAttr(ANDROID_NS_URI, "permission", p.permission))
             }
             nodes.add(Node.ElemStart(null, "provider", attrs))
             if (encodeProviderMetaData) {

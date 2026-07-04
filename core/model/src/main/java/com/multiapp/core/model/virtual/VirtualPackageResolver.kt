@@ -54,6 +54,7 @@ data class ResolvedComponent(
     val screenOrientation: String? = null,
     val configChanges: String? = null,
     val permission: String? = null,
+    val grantUriPermissions: Boolean = false,
     val metaData: Map<String, String> = emptyMap()
 )
 

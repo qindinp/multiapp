@@ -53,10 +53,11 @@ class ManifestGenerator {
         val (rewrittenProviders, _) = authorityRewriter.rewrite(manifest.providers, config.instanceId, config.authorityMap)
         for (provider in rewrittenProviders) {
             val metaDataList = manifest.providerMetaData[provider.name] ?: emptyList()
+            val providerAttrs = providerAttrs(provider)
             if (metaDataList.isEmpty()) {
-                sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}" />""")
+                sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}"$providerAttrs />""")
             } else {
-                sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}">""")
+                sb.appendLine("""        <provider android:name="${provider.name}" android:authorities="${provider.authorities}" android:exported="${provider.exported}"$providerAttrs>""")
                 for (meta in metaDataList) {
                     val resourceAttr = meta.resource?.let { """ android:resource="$it"""" } ?: ""
                     val valueAttr = meta.value?.let { """ android:value="$it"""" } ?: ""
@@ -105,6 +106,11 @@ class ManifestGenerator {
         if (c.clearTaskOnLaunch) append(""" android:clearTaskOnLaunch="true"""")
         if (c.finishOnTaskLaunch) append(""" android:finishOnTaskLaunch="true"""")
         if (!c.enabled) append(""" android:enabled="false"""")
+    }
+
+    private fun providerAttrs(p: ManifestParser.ProviderInfo): String = buildString {
+        p.permission?.let { append(""" android:permission="$it"""") }
+        if (p.grantUriPermissions) append(""" android:grantUriPermissions="true"""")
     }
 }
 

@@ -2,7 +2,9 @@ package com.multiapp.core.model.installer
 
 data class ComponentInfo(
     val name: String,
-    val exported: Boolean = false
+    val exported: Boolean = false,
+    val permission: String? = null,
+    val grantUriPermissions: Boolean = false
 ) {
     init {
         require(name.isNotBlank()) { "component name must not be blank" }

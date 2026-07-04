@@ -83,6 +83,8 @@ class ManifestVirtualPackageResolver(
                                 .split(';')
                                 .map { it.trim() }
                                 .filter { it.isNotEmpty() },
+                            permission = provider.permission,
+                            grantUriPermissions = provider.grantUriPermissions,
                             metaData = manifest.providerMetaData[provider.name].toStringMap()
                         )
                     }

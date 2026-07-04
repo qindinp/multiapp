@@ -74,6 +74,9 @@ class VirtualProviderManager(
         this.name = provider.name
         this.authority = authority
         this.exported = provider.exported
+        this.readPermission = provider.permission
+        this.writePermission = provider.permission
+        this.grantUriPermissions = provider.grantUriPermissions
         this.applicationInfo = VirtualPackageInfoFactory.applicationInfo(snapshot)
     }
 }
@@ -85,7 +88,8 @@ data class VirtualProviderResolution(
     val guestAuthority: String,
     val proxyAuthority: String,
     val providerClassName: String,
-    val providerInfo: ProviderInfo
+    val providerInfo: ProviderInfo,
+    val policy: VirtualProviderPolicy = VirtualProviderPolicy.fromProviderInfo(providerInfo)
 )
 
 data class VirtualProviderUriRewrite(

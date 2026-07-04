@@ -1,6 +1,7 @@
 package com.multiapp.app
 
 import android.content.pm.PackageInfo
+import android.content.pm.ProviderInfo
 import android.os.Build
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -152,6 +153,18 @@ class HostedContainerPr9ProviderMethodEvidenceTest {
             assertRuntimeEvidenceHasLine(instance.instanceId, component, "providerClassName=com.test.minimal.ProbeProvider")
             assertRuntimeEvidenceHasLine(instance.instanceId, component, "evidenceOperation=$operation")
             assertRuntimeEvidenceHasLine(instance.instanceId, component, "evidenceSuccess=true")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "providerExported=false")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "providerPermission=com.test.minimal.permission.PROBE_PROVIDER")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "providerGrantUriPermissions=true")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "providerPolicyStatus=INTERNAL_ONLY")
+            assertRuntimeEvidenceHasLine(
+                instance.instanceId,
+                component,
+                "providerPolicyReason=exported=false;permission=com.test.minimal.permission.PROBE_PROVIDER;grantUriPermissions=true"
+            )
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "providerRoutingScope=INSTANCE")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "processWideProviderHook=false")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "authorityRewriteEntry=VirtualContentResolver")
             assertRuntimeEvidenceHasAnyLine(component = component, instanceId = instance.instanceId, expectedLines = setOf(
                 "status=PROVIDER_CREATED",
                 "status=PROVIDER_CACHED"
@@ -247,9 +260,27 @@ class HostedContainerPr9ProviderMethodEvidenceTest {
     private fun Array<out android.content.pm.ComponentInfo>?.toComponentInfos(): List<ComponentInfo> {
         return this?.mapNotNull { component ->
             component.name?.takeIf { it.isNotBlank() }?.let { name ->
-                ComponentInfo(name = name, exported = component.exported)
+                ComponentInfo(
+                    name = name,
+                    exported = component.exported,
+                    permission = (component as? ProviderInfo)?.providerPermission(),
+                    grantUriPermissions = (component as? ProviderInfo)?.grantUriPermissions ?: false
+                )
             }
         }.orEmpty()
+    }
+
+    private fun ProviderInfo.providerPermission(): String? {
+        val readPermission = readPermission?.takeIf { it.isNotBlank() }
+        val writePermission = writePermission?.takeIf { it.isNotBlank() }
+        return when {
+            readPermission == null && writePermission == null -> null
+            readPermission == writePermission -> readPermission
+            else -> listOfNotNull(
+                readPermission?.let { "read=$it" },
+                writePermission?.let { "write=$it" }
+            ).joinToString(";")
+        }
     }
 
     private fun PackageInfo.longVersionCodeCompat(): Long {
