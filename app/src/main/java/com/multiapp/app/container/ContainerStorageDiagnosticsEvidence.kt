@@ -75,6 +75,7 @@ object ContainerStorageDiagnosticsEvidence {
         diagnostic.candidateWithinDataRoot?.let { put("candidateWithinDataRoot", it) }
         if (diagnostic.kind == VirtualStorageDiagnosticKind.NATIVE_IO) {
             put("nativeIoDiagnosticStatus", diagnostic.status.name)
+            putAll(nativeRuntimeVerdictFields(diagnostic))
         }
         isolationMarker?.let { marker ->
             put("isolationMarkerPath", marker.absolutePath)
@@ -101,6 +102,16 @@ object ContainerStorageDiagnosticsEvidence {
                     "virtualPackageName" to virtualPackageName,
                     "dataRoot" to dataRoot,
                     "storageDiagnosticStatus" to VirtualStorageDiagnosticStatus.UNSUPPORTED.name,
+                    "nativeIoRedirectVerdict" to "UNSUPPORTED",
+                    "nativeIoRedirectVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                    "namespaceVerdict" to "UNKNOWN",
+                    "namespaceVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                    "findLibraryVerdict" to "UNKNOWN",
+                    "findLibraryVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                    "nativeLoadVerdict" to "UNKNOWN",
+                    "nativeLoadVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                    "procMapsSpoofEnabled" to false,
+                    "procStatusSpoofEnabled" to false,
                     "reason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
                     "caller" to CALLER
                 )
@@ -148,5 +159,33 @@ object ContainerStorageDiagnosticsEvidence {
             return "storage-native-${diagnostic.operation.orEmpty()}"
         }
         return javaProbeComponents[diagnostic.probeName] ?: "storage-java-absolute-path"
+    }
+
+    private fun nativeRuntimeVerdictFields(diagnostic: VirtualStoragePathDiagnostic): Map<String, Any?> {
+        val nativeIoRedirectVerdict = when (diagnostic.status) {
+            VirtualStorageDiagnosticStatus.REDIRECTED -> "PASS"
+            VirtualStorageDiagnosticStatus.UNSUPPORTED -> "UNSUPPORTED"
+            VirtualStorageDiagnosticStatus.UNCHANGED -> "FAIL"
+        }
+        val nativeIoRedirectReason = when (diagnostic.status) {
+            VirtualStorageDiagnosticStatus.REDIRECTED -> ""
+            VirtualStorageDiagnosticStatus.UNSUPPORTED -> diagnostic.reason.orEmpty()
+            VirtualStorageDiagnosticStatus.UNCHANGED -> diagnostic.reason ?: "NATIVE_IO_PATH_NOT_REDIRECTED"
+        }
+        return linkedMapOf(
+            "nativeIoRedirectVerdict" to nativeIoRedirectVerdict,
+            "nativeIoRedirectVerdictReason" to nativeIoRedirectReason,
+            "nativeRedirectScope" to "GUEST_PRIVATE_PATHS_ONLY",
+            "nativeIoRedirectEnabled" to (diagnostic.status == VirtualStorageDiagnosticStatus.REDIRECTED),
+            "nativeIoCandidateWithinDataRoot" to (diagnostic.candidateWithinDataRoot ?: false),
+            "namespaceVerdict" to "UNKNOWN",
+            "namespaceVerdictReason" to "NAMESPACE_COLLECTOR_NOT_IMPLEMENTED",
+            "findLibraryVerdict" to "UNKNOWN",
+            "findLibraryVerdictReason" to "FIND_LIBRARY_COLLECTOR_NOT_IMPLEMENTED",
+            "nativeLoadVerdict" to "UNKNOWN",
+            "nativeLoadVerdictReason" to "NATIVE_LOAD_COLLECTOR_NOT_IMPLEMENTED",
+            "procMapsSpoofEnabled" to false,
+            "procStatusSpoofEnabled" to false
+        )
     }
 }
