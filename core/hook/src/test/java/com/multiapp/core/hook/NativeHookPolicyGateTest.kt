@@ -46,11 +46,34 @@ class NativeHookPolicyGateTest {
         assertEquals("false", evidence["businessNativeStubsEnabled"])
         assertEquals("false", evidence["businessNativeWrappersEnabled"])
         assertEquals("false", evidence["nativeBaseHooksEnabled"])
+        assertEquals("false", evidence["mapsFilterEnabled"])
+        assertEquals("false", evidence["cmdlineSpoofEnabled"])
+        assertEquals("false", evidence["statusTracerPidSpoofEnabled"])
+        assertEquals("false", evidence["apkOpenRedirectEnabled"])
+        assertEquals("false", evidence["selfKillInterceptionEnabled"])
+        assertEquals("false", evidence["registerNativesLoggerEnabled"])
+        assertEquals("false", evidence["findClassLoggerEnabled"])
         assertEquals("false", evidence["methodReplacementEnabled"])
         assertEquals("false", evidence["noOpPatchesEnabled"])
+        assertEquals("false", evidence["invasiveNativeHooksEnabled"])
+        assertEquals("true", evidence["hookFreeBaselineCompatible"])
         assertEquals("true", evidence["containerIdentityVirtualizationEnabled"])
         assertEquals("true", evidence["packageManagerVirtualizationEnabled"])
         assertEquals("true", evidence["pathVirtualizationEnabled"])
+    }
+
+    @Test
+    fun `compatibility policy exposes invasive native toggles in evidence`() {
+        val evidence = NativeHookPolicyGate.baselineEvidence(NativeHookPolicy.compatibility())
+
+        assertEquals("COMPATIBILITY", evidence["policyMode"])
+        assertEquals("true", evidence["mapsFilterEnabled"])
+        assertEquals("true", evidence["cmdlineSpoofEnabled"])
+        assertEquals("true", evidence["statusTracerPidSpoofEnabled"])
+        assertEquals("true", evidence["apkOpenRedirectEnabled"])
+        assertEquals("true", evidence["selfKillInterceptionEnabled"])
+        assertEquals("true", evidence["invasiveNativeHooksEnabled"])
+        assertEquals("false", evidence["hookFreeBaselineCompatible"])
     }
 
     @Test
