@@ -33,11 +33,54 @@ data class VirtualProviderRoutingPlan(
         BootstrapEvidence("providerAuthorityCount", authorityCount.toString(), SOURCE),
         BootstrapEvidence("providerAuthorityMapSize", authorityMap.size.toString(), SOURCE),
         BootstrapEvidence("providerHostPackage", hostPackageName ?: "", SOURCE)
-    ) + policySummary.toEvidence()
+    ) + policySummary.toEvidence() + VirtualProviderOperationCapability.toEvidence(enabled)
 
     companion object {
         private const val SOURCE = "VirtualProviderRoutingPlan"
     }
+}
+
+object VirtualProviderOperationCapability {
+    private const val SOURCE = "VirtualProviderOperationCapability"
+    private const val ROUTED_BY_STUB_PROVIDER = "ROUTED_BY_STUB_PROVIDER"
+    private const val ROUTING_DISABLED = "ROUTING_DISABLED"
+    private const val UNSUPPORTED = "UNSUPPORTED"
+
+    private val routedOperations = listOf(
+        "query",
+        "insert",
+        "update",
+        "delete",
+        "call",
+        "bulkInsert",
+        "openFile",
+        "openAssetFile",
+        "openTypedAssetFile"
+    )
+
+    private val unsupportedOperations = linkedMapOf(
+        "notifyChange" to "CONTENT_RESOLVER_NOTIFY_CHANGE_NOT_VIRTUALIZED",
+        "ContentObserver" to "CONTENT_OBSERVER_REGISTRATION_NOT_VIRTUALIZED",
+        "grantUriPermission" to "URI_PERMISSION_GRANT_NOT_VIRTUALIZED"
+    )
+
+    fun toEvidence(routingEnabled: Boolean): List<BootstrapEvidence> {
+        val routedStatus = if (routingEnabled) ROUTED_BY_STUB_PROVIDER else ROUTING_DISABLED
+        return routedOperations.map { operation ->
+            BootstrapEvidence(operationStatusKey(operation), routedStatus, SOURCE)
+        } + unsupportedOperations.flatMap { (operation, reason) ->
+            listOf(
+                BootstrapEvidence(operationStatusKey(operation), UNSUPPORTED, SOURCE),
+                BootstrapEvidence(operationReasonKey(operation), reason, SOURCE)
+            )
+        }
+    }
+
+    private fun operationStatusKey(operation: String): String =
+        "providerOperation${operation.replaceFirstChar { it.uppercaseChar() }}Status"
+
+    private fun operationReasonKey(operation: String): String =
+        "providerOperation${operation.replaceFirstChar { it.uppercaseChar() }}Reason"
 }
 
 enum class ProviderRoutingStrategy {

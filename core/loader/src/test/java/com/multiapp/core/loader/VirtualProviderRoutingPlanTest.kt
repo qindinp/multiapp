@@ -105,6 +105,37 @@ class VirtualProviderRoutingPlanTest {
         assertEquals("0", evidence["providerPolicyExportedCount"])
         assertEquals("0", evidence["providerPolicyUnguardedExportedCount"])
         assertEquals("INTERNAL_ONLY", evidence["providerPolicyStatuses"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationQueryStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationInsertStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationUpdateStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationDeleteStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationCallStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationBulkInsertStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenFileStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenAssetFileStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenTypedAssetFileStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("CONTENT_RESOLVER_NOTIFY_CHANGE_NOT_VIRTUALIZED", evidence["providerOperationNotifyChangeReason"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationContentObserverStatus"])
+        assertEquals("CONTENT_OBSERVER_REGISTRATION_NOT_VIRTUALIZED", evidence["providerOperationContentObserverReason"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationGrantUriPermissionStatus"])
+        assertEquals("URI_PERMISSION_GRANT_NOT_VIRTUALIZED", evidence["providerOperationGrantUriPermissionReason"])
+    }
+
+    @Test
+    fun `toEvidence marks routed operations as disabled when provider routing is unavailable`() {
+        val plan = VirtualProviderRoutingPlanFactory().create(
+            snapshot = snapshot(providers = emptyList()),
+            hostPackageName = "com.multiapp.app"
+        )
+        val evidence = plan.toEvidence().associate { it.key to it.value }
+
+        assertEquals("false", evidence["providerRoutingEnabled"])
+        assertEquals("ROUTING_DISABLED", evidence["providerOperationQueryStatus"])
+        assertEquals("ROUTING_DISABLED", evidence["providerOperationOpenTypedAssetFileStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationContentObserverStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationGrantUriPermissionStatus"])
     }
 
     private fun snapshot(

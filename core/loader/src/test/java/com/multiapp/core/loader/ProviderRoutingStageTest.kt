@@ -41,6 +41,10 @@ class ProviderRoutingStageTest {
         assertEquals("INSTANCE", evidence["providerRoutingScope"])
         assertEquals("false", evidence["processWideProviderHook"])
         assertEquals("VirtualContentResolver", evidence["authorityRewriteEntry"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenTypedAssetFileStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationContentObserverStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationGrantUriPermissionStatus"])
         assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
         assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
     }

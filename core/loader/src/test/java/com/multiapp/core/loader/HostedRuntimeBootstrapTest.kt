@@ -780,6 +780,10 @@ class HostedRuntimeBootstrapTest {
         assertEquals("1", evidence["providerPolicyPermissionCount"])
         assertEquals("1", evidence["providerPolicyGrantUriPermissionCount"])
         assertEquals("INTERNAL_ONLY", evidence["providerPolicyStatuses"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenTypedAssetFileStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationContentObserverStatus"])
+        assertEquals("UNSUPPORTED", evidence["providerOperationGrantUriPermissionStatus"])
         assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
         assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
     }
