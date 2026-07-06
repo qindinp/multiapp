@@ -1,11 +1,15 @@
+@file:Suppress("DEPRECATION")
+
 package com.multiapp.core.loader
 
 import android.app.Activity
+import android.app.Fragment
 import android.app.Instrumentation
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.IBinder
+import android.os.UserHandle
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.hook.NativeHookPolicyResolver
@@ -145,7 +149,13 @@ open class VirtualInstrumentation(
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
-        val remapped = remapStartActivityIntent(target, who, intent) ?: intent
+        val remapped = remapStartActivityIntent(
+            target = target,
+            who = who,
+            intent = intent,
+            api = "execStartActivity:activity-options",
+            requestCode = requestCode
+        ) ?: intent
         return invokeBaseExecStartActivity(
             who = who,
             contextThread = contextThread,
@@ -165,7 +175,24 @@ open class VirtualInstrumentation(
         target: Activity?,
         intent: Intent,
         requestCode: Int
-    ): ActivityResult? = execStartActivity(who, contextThread, token, target, intent, requestCode, null)
+    ): ActivityResult? {
+        val remapped = remapStartActivityIntent(
+            target = target,
+            who = who,
+            intent = intent,
+            api = "execStartActivity:activity",
+            requestCode = requestCode
+        ) ?: intent
+        return invokeBaseExecStartActivity(
+            who = who,
+            contextThread = contextThread,
+            token = token,
+            target = target,
+            intent = remapped,
+            requestCode = requestCode,
+            options = null
+        )
+    }
 
     @Suppress("unused")
     fun execStartActivity(
@@ -177,24 +204,113 @@ open class VirtualInstrumentation(
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
+        val remapped = remapStartActivityIntent(
+            target = hostedStartActivitySource(who = who),
+            who = who,
+            intent = intent,
+            api = "execStartActivity:string-options",
+            requestCode = requestCode
+        ) ?: intent
         return invokeBaseExecStartActivity(
             who = who,
             contextThread = contextThread,
             token = token,
             target = target,
-            intent = intent,
+            intent = remapped,
             requestCode = requestCode,
             options = options
+        )
+    }
+
+    @Suppress("unused")
+    fun execStartActivity(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: String?,
+        intent: Intent,
+        requestCode: Int
+    ): ActivityResult? = execStartActivity(who, contextThread, token, target, intent, requestCode, null)
+
+    @Suppress("unused", "DEPRECATION")
+    fun execStartActivity(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: Fragment?,
+        intent: Intent,
+        requestCode: Int,
+        options: Bundle?
+    ): ActivityResult? {
+        val sourceActivity = target?.activity ?: hostedStartActivitySource(who = who)
+        val remapped = remapStartActivityIntent(
+            target = sourceActivity,
+            who = who,
+            intent = intent,
+            api = "execStartActivity:fragment-options",
+            requestCode = requestCode
+        ) ?: intent
+        return invokeBaseExecStartActivity(
+            who = who,
+            contextThread = contextThread,
+            token = token,
+            target = target,
+            intent = remapped,
+            requestCode = requestCode,
+            options = options
+        )
+    }
+
+    @Suppress("unused", "DEPRECATION")
+    fun execStartActivity(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: Fragment?,
+        intent: Intent,
+        requestCode: Int
+    ): ActivityResult? = execStartActivity(who, contextThread, token, target, intent, requestCode, null)
+
+    @Suppress("unused")
+    fun execStartActivity(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: Activity?,
+        intent: Intent,
+        requestCode: Int,
+        options: Bundle?,
+        user: UserHandle?
+    ): ActivityResult? {
+        val remapped = remapStartActivityIntent(
+            target = target,
+            who = who,
+            intent = intent,
+            api = "execStartActivity:activity-user",
+            requestCode = requestCode
+        ) ?: intent
+        return invokeBaseExecStartActivity(
+            who = who,
+            contextThread = contextThread,
+            token = token,
+            target = target,
+            intent = remapped,
+            requestCode = requestCode,
+            options = options,
+            user = user
         )
     }
 
     internal fun remapStartActivityIntent(
         target: Activity?,
         who: Context,
-        intent: Intent
+        intent: Intent,
+        api: String = "execStartActivity:activity",
+        requestCode: Int = -1
     ): Intent? {
         if (intent.component?.className?.contains(".container.ProxyActivity") == true) return null
-        val instanceId = target?.intent?.getStringExtra(EXTRA_INSTANCE_ID)
+        val sourceIntent = hostedStartActivitySource(target = target, who = who)?.intent
+        val instanceId = sourceIntent?.getStringExtra(EXTRA_INSTANCE_ID)
             ?.takeIf { it.isNotBlank() }
             ?: return null
 
@@ -204,6 +320,8 @@ open class VirtualInstrumentation(
                     filesDir = currentFilesDirOrNull(),
                     instanceId = instanceId,
                     reason = "RUNTIME_BOOTSTRAP_FAILED",
+                    api = api,
+                    requestCode = requestCode,
                     error = error
                 )
             }
@@ -216,17 +334,21 @@ open class VirtualInstrumentation(
                 filesDir = runtime.hostApplication.filesDir,
                 instanceId = instanceId,
                 reason = "PACKAGE_SNAPSHOT_MISSING",
+                api = api,
+                requestCode = requestCode,
                 intent = intent
             )
             return null
         }
 
-            val request = VirtualIntentResolver(snapshot).resolveActivity(intent)
+        val request = VirtualIntentResolver(snapshot).resolveActivity(intent)
         if (request == null) {
             writeRemapSkippedEvidence(
                 filesDir = runtime.hostApplication.filesDir,
                 instanceId = instanceId,
                 reason = "INTENT_NOT_RESOLVED",
+                api = api,
+                requestCode = requestCode,
                 intent = intent
             )
             return null
@@ -250,6 +372,8 @@ open class VirtualInstrumentation(
                     instanceId = instanceId,
                     guestActivityClassName = request.guestActivityClassName,
                     proxyActivityClassName = record.proxyActivityClassName,
+                    api = api,
+                    requestCode = requestCode,
                     reason = request.reason,
                     launchMode = record.launchMode
                 )
@@ -262,10 +386,17 @@ open class VirtualInstrumentation(
                 filesDir = runtime.hostApplication.filesDir,
                 instanceId = instanceId,
                 reason = "PROXY_INTENT_CREATE_FAILED",
+                api = api,
+                requestCode = requestCode,
                 error = error
             )
         }.getOrNull()
     }
+
+    internal fun hostedStartActivitySource(
+        target: Activity? = null,
+        who: Context
+    ): Activity? = target ?: who as? Activity
 
     private fun injectHostedActivityContextIfNeeded(
         activity: Activity,
@@ -493,12 +624,42 @@ open class VirtualInstrumentation(
         who: Context,
         contextThread: IBinder,
         token: IBinder?,
+        target: Activity?,
+        intent: Intent,
+        requestCode: Int,
+        options: Bundle?,
+        user: UserHandle?
+    ): ActivityResult? {
+        val method = findExecStartActivityWithUserMethod(Activity::class.java)
+        method.isAccessible = true
+        return method.invoke(base, who, contextThread, token, target, intent, requestCode, options, user) as? ActivityResult
+    }
+
+    private fun invokeBaseExecStartActivity(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
         target: String?,
         intent: Intent,
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
         val method = findExecStartActivityMethod(String::class.java, preferOptionsSignature = true)
+        method.isAccessible = true
+        return invokeExecStartActivityMethod(method, who, contextThread, token, target, intent, requestCode, options)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun invokeBaseExecStartActivity(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: Fragment?,
+        intent: Intent,
+        requestCode: Int,
+        options: Bundle?
+    ): ActivityResult? {
+        val method = findExecStartActivityMethod(Fragment::class.java, preferOptionsSignature = true)
         method.isAccessible = true
         return invokeExecStartActivityMethod(method, who, contextThread, token, target, intent, requestCode, options)
     }
@@ -562,6 +723,29 @@ open class VirtualInstrumentation(
         )
     }
 
+    private fun findExecStartActivityWithUserMethod(targetType: Class<*>): java.lang.reflect.Method {
+        val parameterTypes = arrayOf(
+            Context::class.java,
+            IBinder::class.java,
+            IBinder::class.java,
+            targetType,
+            Intent::class.java,
+            Integer.TYPE,
+            Bundle::class.java,
+            UserHandle::class.java
+        )
+        var clazz: Class<*>? = base.javaClass
+        while (clazz != null) {
+            runCatching { return clazz.getDeclaredMethod("execStartActivity", *parameterTypes) }
+            clazz = clazz.superclass
+        }
+        runCatching { return Instrumentation::class.java.getDeclaredMethod("execStartActivity", *parameterTypes) }
+        throw NoSuchMethodException(
+            "android.app.Instrumentation.execStartActivity target=${targetType.name} " +
+                "with user candidate=${parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name }}"
+        )
+    }
+
     private fun writeSubstitutionEvidence(
         filesDir: File,
         instanceId: String,
@@ -588,6 +772,8 @@ open class VirtualInstrumentation(
         instanceId: String,
         guestActivityClassName: String,
         proxyActivityClassName: String,
+        api: String,
+        requestCode: Int,
         reason: String,
         launchMode: String?
     ) {
@@ -597,6 +783,12 @@ open class VirtualInstrumentation(
                 listOf(
                     "status=GUEST_ACTIVITY_REMAP",
                     "stage=ACTIVITY_START_REMAP",
+                    "api=$api",
+                    "hostFallback=false",
+                    "requestCode=$requestCode",
+                    "resultRequested=${requestCode >= 0}",
+                    "activityResultVerdict=${if (requestCode >= 0) "UNSUPPORTED" else "NOT_REQUESTED"}",
+                    "activityResultVerdictReason=${if (requestCode >= 0) "HOST_PROXY_RESULT_ROUTING_NOT_IMPLEMENTED" else ""}",
                     "guestActivityClassName=$guestActivityClassName",
                     "proxyActivityClassName=$proxyActivityClassName",
                     "reason=$reason",
@@ -612,6 +804,8 @@ open class VirtualInstrumentation(
         filesDir: File,
         instanceId: String,
         reason: String,
+        api: String,
+        requestCode: Int,
         intent: Intent
     ) {
         runCatching {
@@ -620,6 +814,12 @@ open class VirtualInstrumentation(
                 listOf(
                     "status=GUEST_ACTIVITY_REMAP_SKIPPED",
                     "stage=ACTIVITY_START_REMAP",
+                    "api=$api",
+                    "hostFallback=true",
+                    "requestCode=$requestCode",
+                    "resultRequested=${requestCode >= 0}",
+                    "activityResultVerdict=${if (requestCode >= 0) "UNSUPPORTED" else "NOT_REQUESTED"}",
+                    "activityResultVerdictReason=${if (requestCode >= 0) "HOST_PROXY_RESULT_ROUTING_NOT_IMPLEMENTED" else ""}",
                     "reason=$reason",
                     "intentAction=${intent.action.orEmpty()}",
                     "intentComponent=${intent.component?.flattenToShortString().orEmpty()}",
@@ -635,6 +835,8 @@ open class VirtualInstrumentation(
         filesDir: File?,
         instanceId: String,
         reason: String,
+        api: String,
+        requestCode: Int,
         error: Throwable
     ) {
         val dir = filesDir ?: return
@@ -644,6 +846,12 @@ open class VirtualInstrumentation(
                 listOf(
                     "status=GUEST_ACTIVITY_REMAP_FAILED",
                     "stage=ACTIVITY_START_REMAP",
+                    "api=$api",
+                    "hostFallback=true",
+                    "requestCode=$requestCode",
+                    "resultRequested=${requestCode >= 0}",
+                    "activityResultVerdict=${if (requestCode >= 0) "UNSUPPORTED" else "NOT_REQUESTED"}",
+                    "activityResultVerdictReason=${if (requestCode >= 0) "HOST_PROXY_RESULT_ROUTING_NOT_IMPLEMENTED" else ""}",
                     "reason=$reason",
                     "errorClass=${error.javaClass.name}",
                     "errorMessage=${(error.message ?: "").replace('\n', ' ')}"
