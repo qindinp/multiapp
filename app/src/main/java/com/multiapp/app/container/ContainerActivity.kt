@@ -8,6 +8,7 @@ import android.util.Log
 import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.HostedRuntimeBootstrap
+import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.loader.VirtualActivityManager
 import com.multiapp.core.loader.VirtualProcessRuntime
@@ -125,23 +126,13 @@ class ContainerActivity : Activity() {
         }
     }
 
-    private val proxyActivityClassNames = listOf(
-        "com.multiapp.app.container.ProxyActivity0",
-        "com.multiapp.app.container.ProxyActivity1",
-        "com.multiapp.app.container.ProxyActivitySingleTop0",
-        "com.multiapp.app.container.ProxyActivitySingleTop1",
-        "com.multiapp.app.container.ProxyActivitySingleTask0",
-        "com.multiapp.app.container.ProxyActivitySingleTask1"
-    )
+    private val proxyActivityClassNames by lazy(LazyThreadSafetyMode.NONE) {
+        ProxyActivitySlots.classNames(packageName)
+    }
 
-    private val proxyLaunchModeByClassName = mapOf(
-        "com.multiapp.app.container.ProxyActivity0" to null,
-        "com.multiapp.app.container.ProxyActivity1" to null,
-        "com.multiapp.app.container.ProxyActivitySingleTop0" to "singleTop",
-        "com.multiapp.app.container.ProxyActivitySingleTop1" to "singleTop",
-        "com.multiapp.app.container.ProxyActivitySingleTask0" to "singleTask",
-        "com.multiapp.app.container.ProxyActivitySingleTask1" to "singleTask"
-    )
+    private val proxyLaunchModeByClassName by lazy(LazyThreadSafetyMode.NONE) {
+        ProxyActivitySlots.launchModeByClassName(packageName)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

@@ -74,10 +74,22 @@ class ProxyActivity0 : ProxyActivityBase()
 
 class ProxyActivity1 : ProxyActivityBase()
 
+class ProxyActivity2 : ProxyActivityBase()
+
+class ProxyActivity3 : ProxyActivityBase()
+
 class ProxyActivitySingleTop0 : ProxyActivityBase()
 
 class ProxyActivitySingleTop1 : ProxyActivityBase()
 
+class ProxyActivitySingleTop2 : ProxyActivityBase()
+
+class ProxyActivitySingleTop3 : ProxyActivityBase()
+
 class ProxyActivitySingleTask0 : ProxyActivityBase()
 
 class ProxyActivitySingleTask1 : ProxyActivityBase()
+
+class ProxyActivitySingleTask2 : ProxyActivityBase()
+
+class ProxyActivitySingleTask3 : ProxyActivityBase()

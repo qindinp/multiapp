@@ -39,43 +39,109 @@
         <activity
             android:name=".container.ProxyActivity0"
             android:exported="false"
+            android:excludeFromRecents="false"
             android:launchMode="standard"
             android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard0"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivity1"
             android:exported="false"
+            android:excludeFromRecents="false"
             android:launchMode="standard"
             android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard1"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity2"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard2"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity3"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard3"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivitySingleTop0"
             android:exported="false"
+            android:excludeFromRecents="false"
             android:launchMode="singleTop"
             android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop0"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivitySingleTop1"
             android:exported="false"
+            android:excludeFromRecents="false"
             android:launchMode="singleTop"
             android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop1"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop2"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop2"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop3"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop3"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivitySingleTask0"
             android:exported="false"
+            android:excludeFromRecents="false"
             android:launchMode="singleTask"
             android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask0"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
             android:name=".container.ProxyActivitySingleTask1"
             android:exported="false"
+            android:excludeFromRecents="false"
             android:launchMode="singleTask"
             android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask1"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask2"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask2"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask3"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask3"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 

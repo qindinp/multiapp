@@ -183,11 +183,15 @@ class DefaultVirtualAmsComponentDispatcher(
                 putExtra("multiapp.guestActivityLaunchMode", record.launchMode)
             }
             putExtra(VirtualActivityManager.EXTRA_ORIGINAL_GUEST_INTENT, Intent(sourceIntent))
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (sourceIntent.safeFlags().hasFlag(Intent.FLAG_ACTIVITY_NEW_TASK)) {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
         }
     }
 
     private fun Intent.safeFlags(): Int = runCatching { flags }.getOrDefault(0)
+
+    private fun Int.hasFlag(flag: Int): Boolean = this and flag != 0
 
     private fun Intent.toVirtualIntentSnapshot(): VirtualIntentSnapshot {
         val sourceExtras = runCatching { extras }.getOrNull()
@@ -208,24 +212,9 @@ class DefaultVirtualAmsComponentDispatcher(
 
     companion object {
         fun defaultProxyActivityRegistry(hostPackageName: String): ProxyActivityRegistry {
-            val proxyActivityClassNames = listOf(
-                "$hostPackageName.container.ProxyActivity0",
-                "$hostPackageName.container.ProxyActivity1",
-                "$hostPackageName.container.ProxyActivitySingleTop0",
-                "$hostPackageName.container.ProxyActivitySingleTop1",
-                "$hostPackageName.container.ProxyActivitySingleTask0",
-                "$hostPackageName.container.ProxyActivitySingleTask1"
-            )
             return ProxyActivityRegistry(
-                proxyActivityClassNames,
-                mapOf(
-                    "$hostPackageName.container.ProxyActivity0" to null,
-                    "$hostPackageName.container.ProxyActivity1" to null,
-                    "$hostPackageName.container.ProxyActivitySingleTop0" to "singleTop",
-                    "$hostPackageName.container.ProxyActivitySingleTop1" to "singleTop",
-                    "$hostPackageName.container.ProxyActivitySingleTask0" to "singleTask",
-                    "$hostPackageName.container.ProxyActivitySingleTask1" to "singleTask"
-                )
+                ProxyActivitySlots.classNames(hostPackageName),
+                ProxyActivitySlots.launchModeByClassName(hostPackageName)
             )
         }
     }

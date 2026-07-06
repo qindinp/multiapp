@@ -135,22 +135,8 @@ open class VirtualContextWrapper(
 
     private val proxyActivityRegistry by lazy(LazyThreadSafetyMode.NONE) {
         com.multiapp.core.model.virtual.ProxyActivityRegistry(
-            listOf(
-                "${base.packageName}.container.ProxyActivity0",
-                "${base.packageName}.container.ProxyActivity1",
-                "${base.packageName}.container.ProxyActivitySingleTop0",
-                "${base.packageName}.container.ProxyActivitySingleTop1",
-                "${base.packageName}.container.ProxyActivitySingleTask0",
-                "${base.packageName}.container.ProxyActivitySingleTask1"
-            ),
-            mapOf(
-                "${base.packageName}.container.ProxyActivity0" to null,
-                "${base.packageName}.container.ProxyActivity1" to null,
-                "${base.packageName}.container.ProxyActivitySingleTop0" to "singleTop",
-                "${base.packageName}.container.ProxyActivitySingleTop1" to "singleTop",
-                "${base.packageName}.container.ProxyActivitySingleTask0" to "singleTask",
-                "${base.packageName}.container.ProxyActivitySingleTask1" to "singleTask"
-            )
+            ProxyActivitySlots.classNames(base.packageName),
+            ProxyActivitySlots.launchModeByClassName(base.packageName)
         )
     }
 

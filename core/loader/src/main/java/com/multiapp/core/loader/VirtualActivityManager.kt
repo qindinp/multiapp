@@ -54,7 +54,7 @@ class VirtualActivityManager(
                     launchMode = launchMode
                 )
             )
-            context.startActivity(createProxyIntent(record, sourceIntent = launcherIntent))
+            context.startActivity(createProxyIntent(record, sourceIntent = launcherIntent, forceNewTask = true))
             record
         }
     }
@@ -81,7 +81,11 @@ class VirtualActivityManager(
         ).activity
     }
 
-    fun createProxyIntent(record: VirtualActivityRecord, sourceIntent: Intent? = null): Intent {
+    fun createProxyIntent(
+        record: VirtualActivityRecord,
+        sourceIntent: Intent? = null,
+        forceNewTask: Boolean = false
+    ): Intent {
         val spec = createProxyLaunchSpec(record)
         return Intent().apply {
             setClassName(spec.hostPackageName, spec.proxyActivityClassName)
@@ -96,7 +100,9 @@ class VirtualActivityManager(
             if (sourceIntent != null) {
                 putExtra(EXTRA_ORIGINAL_GUEST_INTENT, Intent(sourceIntent))
             }
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (forceNewTask || sourceIntent?.safeFlags()?.hasFlag(Intent.FLAG_ACTIVITY_NEW_TASK) == true) {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
         }
     }
 
@@ -128,6 +134,8 @@ class VirtualActivityManager(
     }
 
     private fun Intent.safeFlags(): Int = runCatching { flags }.getOrDefault(0)
+
+    private fun Int.hasFlag(flag: Int): Boolean = this and flag != 0
 
     private fun String.redactUriForEvidence(): String = EvidenceSanitizer.redactUriForEvidence(this)
 }

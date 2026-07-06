@@ -234,8 +234,8 @@ open class VirtualInstrumentation(
 
         return runCatching {
             val registry = ProxyActivityRegistry(
-                proxyActivityClassNames(runtime.hostApplication.packageName),
-                proxyLaunchModeByClassName(runtime.hostApplication.packageName)
+                ProxyActivitySlots.classNames(runtime.hostApplication.packageName),
+                ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName)
             )
             val manager = VirtualActivityManager(
                 context = who,
@@ -474,24 +474,6 @@ open class VirtualInstrumentation(
             Log.w(TAG, "Unable to write protected diagnostics evidence for instanceId=${result.instanceId}", error)
         }
     }
-
-    private fun proxyActivityClassNames(hostPackageName: String): List<String> = listOf(
-        "$hostPackageName.container.ProxyActivity0",
-        "$hostPackageName.container.ProxyActivity1",
-        "$hostPackageName.container.ProxyActivitySingleTop0",
-        "$hostPackageName.container.ProxyActivitySingleTop1",
-        "$hostPackageName.container.ProxyActivitySingleTask0",
-        "$hostPackageName.container.ProxyActivitySingleTask1"
-    )
-
-    private fun proxyLaunchModeByClassName(hostPackageName: String): Map<String, String?> = mapOf(
-        "$hostPackageName.container.ProxyActivity0" to null,
-        "$hostPackageName.container.ProxyActivity1" to null,
-        "$hostPackageName.container.ProxyActivitySingleTop0" to "singleTop",
-        "$hostPackageName.container.ProxyActivitySingleTop1" to "singleTop",
-        "$hostPackageName.container.ProxyActivitySingleTask0" to "singleTask",
-        "$hostPackageName.container.ProxyActivitySingleTask1" to "singleTask"
-    )
 
     private fun invokeBaseExecStartActivity(
         who: Context,
