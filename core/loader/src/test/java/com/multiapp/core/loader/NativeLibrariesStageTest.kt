@@ -106,6 +106,41 @@ class NativeLibrariesStageTest {
     }
 
     @Test
+    fun `execute records native private path redirect evidence without changing stage status`(
+        @TempDir tempDir: File
+    ) {
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        val libDir = File(dataRoot, "lib").apply { mkdirs() }
+        val instance = instanceRecord(dataRoot = dataRoot.absolutePath)
+        val stage = NativeLibrariesStage(
+            nativePrivatePathRedirectInstaller = NativePrivatePathRedirectInstaller { _, _, _, _ ->
+                NativePrivatePathRedirectInstallResult(
+                    hookInstalled = true,
+                    ruleCount = 2,
+                    reason = "PATH_HOOK_INSTALLED_NEEDS_DEVICE_IO_PROBE"
+                )
+            },
+            clock = fixedClock(500L, 505L)
+        )
+
+        val output = stage.execute(
+            BootstrapStageInput(instanceId = instance.instanceId, instance = instance)
+        )
+
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(5L, output.result.durationMs)
+        assertEquals(libDir.absolutePath, output.context.nativeLibraryDir)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("PARTIAL", evidence["nativePrivatePathRedirectVerdict"])
+        assertEquals("PARTIAL", evidence["nativeIoRedirectVerdict"])
+        assertEquals("2", evidence["nativePrivatePathRedirectRuleCount"])
+        assertEquals("GUEST_PRIVATE_PATHS_ONLY", evidence["nativeRedirectScope"])
+        assertEquals("UNSUPPORTED", evidence["nativeRealpathRedirectVerdict"])
+        assertEquals("false", evidence["procMapsSpoofEnabled"])
+        assertEquals("false", evidence["procStatusSpoofEnabled"])
+    }
+
+    @Test
     fun `execute fails terminally when instance is missing`() {
         val stage = NativeLibrariesStage(clock = fixedClock(300L, 302L))
 

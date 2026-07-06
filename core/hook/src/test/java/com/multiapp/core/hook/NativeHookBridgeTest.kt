@@ -242,8 +242,13 @@ class NativeHookBridgeTest {
 
     @Test
     fun `setupGuestPrivatePathRedirections creates only private path rules`() {
-        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+        val ruleCount = bridge.setupGuestPrivatePathRedirections(
+            "com.example.app",
+            "inst_001",
+            "/sandbox/example"
+        )
 
+        assertEquals(2, ruleCount)
         assertEquals(2, bridge.getRedirectionCount())
     }
 
@@ -283,9 +288,11 @@ class NativeHookBridgeTest {
 
     @Test
     fun `setupGuestPrivatePathRedirections ignores incomplete input`() {
-        bridge.setupGuestPrivatePathRedirections("", "inst_001", "/sandbox/example")
-        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "")
+        val blankPackageRules = bridge.setupGuestPrivatePathRedirections("", "inst_001", "/sandbox/example")
+        val blankRootRules = bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "")
 
+        assertEquals(0, blankPackageRules)
+        assertEquals(0, blankRootRules)
         assertEquals(0, bridge.getRedirectionCount())
         assertEquals(
             "/data/data/com.example.app/files/config.json",
@@ -718,6 +725,25 @@ class NativeHookBridgeTest {
     fun `isNativeAvailable returns false in unit test environment`() {
         // Native library is not available in JVM unit tests
         assertFalse(bridge.isNativeAvailable())
+    }
+
+    @Test
+    fun `initNativePathRedirectHooks does not seed anti detection hidden paths`() {
+        val result = bridge.initNativePathRedirectHooks(NativeHookPolicy.baseline())
+
+        assertFalse(result)
+        assertFalse(bridge.isPathHidden("/system/xbin/su"))
+        assertFalse(bridge.isPathHidden("/dev/socket/qemud"))
+        assertFalse(bridge.hasFakeContent("/proc/self/status"))
+        assertFalse(bridge.hasFakeContent("/proc/self/cmdline"))
+    }
+
+    @Test
+    fun `initNativePathRedirectHooks respects disabled path virtualization policy`() {
+        val result = bridge.initNativePathRedirectHooks(NativeHookPolicy.off())
+
+        assertFalse(result)
+        assertFalse(bridge.isPathHidden("/system/xbin/su"))
     }
 
     // ===== edge case tests =====

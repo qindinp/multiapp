@@ -149,6 +149,7 @@ class HostedRuntimeBootstrap(
         }
 
         val nativeLibrariesOutput = NativeLibrariesStage(
+            hostContext = hostContext,
             clock = clock
         ).execute(originApkOutput.context)
         stageResults.add(nativeLibrariesOutput.result)

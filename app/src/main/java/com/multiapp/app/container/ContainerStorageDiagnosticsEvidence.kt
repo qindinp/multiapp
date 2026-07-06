@@ -47,7 +47,8 @@ object ContainerStorageDiagnosticsEvidence {
             originPackageName = originPackageName,
             virtualPackageName = virtualPackageName,
             dataRoot = dataRoot,
-            caller = CALLER
+            caller = CALLER,
+            reason = nativeIoUnsupportedReason(result)
         ).forEach { diagnostic ->
             writeDiagnostic(context, diagnostic, null)
         }
@@ -187,5 +188,16 @@ object ContainerStorageDiagnosticsEvidence {
             "procMapsSpoofEnabled" to false,
             "procStatusSpoofEnabled" to false
         )
+    }
+
+    private fun nativeIoUnsupportedReason(result: HostedBootstrapResult): String {
+        val evidence = result.stageResults
+            .flatMap { it.evidence }
+            .associate { it.key to it.value }
+        return when (evidence["nativePrivatePathRedirectVerdict"]) {
+            "PARTIAL" -> "NATIVE_IO_DEVICE_PROBE_NOT_IMPLEMENTED"
+            "FAIL" -> evidence["nativePrivatePathRedirectReason"] ?: "PRIVATE_PATH_REDIRECT_RULES_INCOMPLETE"
+            else -> "NATIVE_IO_HOOK_NOT_INSTALLED_FOR_ORDINARY_BASELINE"
+        }
     }
 }

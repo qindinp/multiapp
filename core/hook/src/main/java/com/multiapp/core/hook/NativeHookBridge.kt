@@ -146,6 +146,8 @@ class NativeHookBridge {
     private val hiddenPaths = ConcurrentHashMap.newKeySet<String>()
     private val fakeFileContent = ConcurrentHashMap<String, ByteArray>()
     private var initialized = false
+    private var nativeBaseHooksInitialized = false
+    private var nativePathRedirectHooksInitialized = false
     private var nativeHooksAvailable = false
     private var appContext: android.content.Context? = null
 
@@ -819,17 +821,18 @@ class NativeHookBridge {
         Timber.tag(TAG).d("App redirections set for $guestPackageName ($instanceId)")
     }
 
-    fun setupGuestPrivatePathRedirections(guestPackageName: String, instanceId: String, dataRoot: String) {
+    fun setupGuestPrivatePathRedirections(guestPackageName: String, instanceId: String, dataRoot: String): Int {
         if (guestPackageName.isBlank() || dataRoot.isBlank()) {
             Timber.tag(TAG).w(
                 "Guest private path redirections skipped for instanceId=$instanceId: incomplete input"
             )
-            return
+            return 0
         }
         val targetRoot = dataRoot.trimEnd('/') + "/"
         addPathRedirection("/data/data/$guestPackageName/", targetRoot)
         addPathRedirection("/data/user/0/$guestPackageName/", targetRoot)
         Timber.tag(TAG).d("Guest private path redirections set for $guestPackageName ($instanceId)")
+        return 2
     }
 
     fun setupExternalStorageRedirections(instanceId: String, virtualSdcardDir: String) {
@@ -901,11 +904,13 @@ class NativeHookBridge {
         spoofedPackageName = null; spoofedPid = -1; appContext = null
         if (nativeHooksAvailable) nativeCleanup()
         initialized = false
+        nativeBaseHooksInitialized = false
+        nativePathRedirectHooksInitialized = false
         Timber.tag(TAG).i("Native hook bridge cleaned up")
     }
 
     fun initNativeHooks(context: android.content.Context? = null, hostDataDir: String? = null): Boolean {
-        if (initialized) return nativeHooksAvailable
+        if (nativeBaseHooksInitialized) return nativeHooksAvailable
         appContext = context?.applicationContext
         nativeHooksAvailable = tryLoadNativeLibrary()
         if (nativeHooksAvailable) {
@@ -929,7 +934,43 @@ class NativeHookBridge {
         }
         ROOT_PATHS.forEach { hiddenPaths.add(it) }
         EMULATOR_PATHS.forEach { hiddenPaths.add(it) }
+        nativeBaseHooksInitialized = true
         initialized = true
+        return nativeHooksAvailable
+    }
+
+    fun initNativePathRedirectHooks(
+        context: android.content.Context? = null,
+        hostDataDir: String? = null
+    ): Boolean {
+        if (nativePathRedirectHooksInitialized) return nativeHooksAvailable
+        appContext = context?.applicationContext
+        nativeHooksAvailable = tryLoadNativeLibrary()
+        if (nativeHooksAvailable) {
+            try {
+                val hooksOk = nativeInitPathRedirectHooks()
+                val effectiveDataDir = hostDataDir
+                    ?: appContext?.let { ctx ->
+                        try {
+                            ctx.dataDir.absolutePath
+                        } catch (e: Exception) {
+                            Timber.tag(TAG).w("Failed to get dataDir from context: ${e.message}")
+                            null
+                        }
+                    }
+                if (effectiveDataDir != null) {
+                    nativeSetHostDataPrefix(effectiveDataDir)
+                }
+                nativeHooksAvailable = hooksOk
+            } catch (e: Exception) {
+                Timber.tag(TAG).e(e, "Native path redirect hook init failed")
+                nativeHooksAvailable = false
+            }
+        } else {
+            Timber.tag(TAG).e("Native library not loaded - native path redirect hooks DISABLED")
+        }
+        nativePathRedirectHooksInitialized = true
+        initialized = nativeBaseHooksInitialized || nativePathRedirectHooksInitialized
         return nativeHooksAvailable
     }
 
@@ -951,6 +992,24 @@ class NativeHookBridge {
         return initNativeHooks(context, hostDataDir)
     }
 
+    fun initNativePathRedirectHooks(
+        policy: NativeHookPolicy,
+        context: android.content.Context? = null,
+        hostDataDir: String? = null,
+        component: String = "NativeHookBridge.initNativePathRedirectHooks"
+    ): Boolean {
+        val decision = NativeHookPolicyGate.evaluate(
+            policy = policy,
+            capability = NativeHookCapability.PATH_VIRTUALIZATION,
+            component = component
+        )
+        if (!decision.allowed) {
+            Timber.tag(TAG).i("Native path redirect hooks skipped by policy: %s", decision.evidence)
+            return false
+        }
+        return initNativePathRedirectHooks(context, hostDataDir)
+    }
+
     private fun buildFakeProcStatus(pid: Int, packageName: String): ByteArray {
         val name = packageName.take(15)
         return "Name:\t$name\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t$pid\nPid:\t$pid\nPPid:\t${pid - 1}\nTracerPid:\t0\n".toByteArray()
@@ -966,6 +1025,7 @@ class NativeHookBridge {
     }
 
     private external fun nativeInit(): Boolean
+    private external fun nativeInitPathRedirectHooks(): Boolean
     private external fun nativeAddPathRedirection(fromPrefix: String, toPrefix: String)
     private external fun nativeRemovePathRedirection(fromPrefix: String)
     private external fun nativeClearPathRedirections()

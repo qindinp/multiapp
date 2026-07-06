@@ -94,6 +94,7 @@ object VirtualStoragePathDiagnostics {
         virtualPackageName: String,
         dataRoot: String,
         caller: String,
+        reason: String = "NATIVE_IO_HOOK_NOT_INSTALLED_FOR_ORDINARY_BASELINE",
         operations: List<String> = DEFAULT_NATIVE_IO_OPERATIONS
     ): List<VirtualStoragePathDiagnostic> {
         return operations.map { operation ->
@@ -116,7 +117,7 @@ object VirtualStoragePathDiagnostics {
                 redirectedPath = "",
                 candidateRedirectedPath = candidate?.normalizedPath(),
                 caller = caller,
-                reason = "NATIVE_IO_HOOK_NOT_INSTALLED_FOR_ORDINARY_BASELINE",
+                reason = reason,
                 withinDataRoot = false,
                 candidateWithinDataRoot = candidate?.isWithin(File(dataRoot))
             )

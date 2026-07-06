@@ -1,8 +1,13 @@
 package com.multiapp.core.loader
 
+import android.content.Context
+
 internal class NativeLibrariesStage(
     private val nativeLibraryResolver: (originApkPath: String?, dataRoot: String?) -> NativeLibraryResolution =
         NativeLibraryPaths::resolveAndExtract,
+    private val hostContext: Context? = null,
+    private val nativePrivatePathRedirectInstaller: NativePrivatePathRedirectInstaller =
+        NativePrivatePathRedirectInstallers.bridge(),
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     fun execute(input: BootstrapStageInput): BootstrapStageOutput {
@@ -37,6 +42,13 @@ internal class NativeLibrariesStage(
             )
         }
         val nativeLibraryDir = resolution.nativeLibraryDir
+        val redirectInstallResult = nativePrivatePathRedirectInstaller.install(
+            instanceId = instance.instanceId,
+            originPackageName = instance.originPackageName,
+            dataRoot = instance.dataRoot,
+            hostContext = hostContext
+        )
+        val evidence = nativeEvidence(resolution, redirectInstallResult)
         val durationMs = clock() - startMs
         if (nativeLibraryDir.isNullOrBlank()) {
             return BootstrapStageOutput(
@@ -44,7 +56,7 @@ internal class NativeLibrariesStage(
                 result = BootstrapResult.skipped(
                     stage = RuntimeStage.NATIVE_LIBS,
                     message = "Instance native library directory not present",
-                    evidence = nativeEvidence(resolution)
+                    evidence = evidence
                 ).copy(durationMs = durationMs)
             )
         }
@@ -54,13 +66,16 @@ internal class NativeLibrariesStage(
             result = BootstrapResult.success(
                 stage = RuntimeStage.NATIVE_LIBS,
                 message = "Native library directory resolved: $nativeLibraryDir",
-                evidence = nativeEvidence(resolution),
+                evidence = evidence,
                 durationMs = durationMs
             )
         )
     }
 
-    private fun nativeEvidence(resolution: NativeLibraryResolution): List<BootstrapEvidence> {
+    private fun nativeEvidence(
+        resolution: NativeLibraryResolution,
+        redirectInstallResult: NativePrivatePathRedirectInstallResult
+    ): List<BootstrapEvidence> {
         val evidence = mutableListOf(
             BootstrapEvidence("nativeLibraryDir", resolution.nativeLibraryDir.orEmpty()),
             BootstrapEvidence("nativeLibraryRoot", resolution.nativeLibraryRoot.orEmpty()),
@@ -73,6 +88,7 @@ internal class NativeLibrariesStage(
             BootstrapEvidence("nativeLibraries", resolution.libraries.joinToString(","))
         )
         resolution.reason?.let { evidence += BootstrapEvidence("reason", it) }
+        evidence += redirectInstallResult.evidence()
         return evidence
     }
 }

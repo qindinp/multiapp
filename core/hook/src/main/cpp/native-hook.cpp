@@ -76,9 +76,15 @@
 static std::atomic_bool g_initialized{false};
 static std::atomic_bool g_register_natives_business_wrappers_enabled{false};
 static bool g_hooks_installed = false;
+static uint32_t g_installed_hook_profiles = 0;
 static std::shared_mutex g_mutex;
 static std::atomic_bool g_suppress_self_sigkill{false};
+static std::atomic_bool g_proc_cmdline_spoof_enabled{false};
+static std::atomic_bool g_status_tracerpid_spoof_enabled{false};
 static std::mutex g_online_materialize_mutex;
+
+static constexpr uint32_t HOOK_PROFILE_PATH_REDIRECT = 1u << 0;
+static constexpr uint32_t HOOK_PROFILE_FULL = 1u << 1;
 
 // Path redirection: source prefix → target prefix
 static std::unordered_map<std::string, std::string> g_path_redirects;
@@ -342,7 +348,8 @@ static ssize_t hooked_readlink(const char* path, char* buf, size_t bufsiz) {
     }
 
     // Spoof /proc/self/exe
-    if (is_proc_self_path(path) && strcmp(path, "/proc/self/exe") == 0) {
+    if (g_proc_cmdline_spoof_enabled.load(std::memory_order_relaxed) &&
+        is_proc_self_path(path) && strcmp(path, "/proc/self/exe") == 0) {
         std::shared_lock<std::shared_mutex> lock(g_mutex);
         if (!g_spoofed_package_name.empty()) {
             // Return a fake exe path
@@ -370,7 +377,8 @@ static FILE* hooked_fopen(const char* path, const char* mode) {
     }
 
     // Spoof /proc/self/cmdline
-    if (is_proc_self_path(path) && strcmp(path, "/proc/self/cmdline") == 0) {
+    if (g_proc_cmdline_spoof_enabled.load(std::memory_order_relaxed) &&
+        is_proc_self_path(path) && strcmp(path, "/proc/self/cmdline") == 0) {
         std::shared_lock<std::shared_mutex> lock(g_mutex);
         if (!g_spoofed_package_name.empty()) {
             // Create a temp file with spoofed cmdline
@@ -384,7 +392,8 @@ static FILE* hooked_fopen(const char* path, const char* mode) {
     }
 
     // Spoof /proc/self/status — replace TracerPid with 0
-    if (is_proc_self_path(path) && strcmp(path, "/proc/self/status") == 0) {
+    if (g_status_tracerpid_spoof_enabled.load(std::memory_order_relaxed) &&
+        is_proc_self_path(path) && strcmp(path, "/proc/self/status") == 0) {
         FILE* real_status = real_fopen(path, mode);
         if (real_status) {
             FILE* tmp = tmpfile();
@@ -638,26 +647,27 @@ struct HookEntry {
     const char* symbol;
     void* hook_func;
     void** original_func;
+    uint32_t profiles;
 };
 
 static HookEntry g_hook_entries[] = {
-    {nullptr,       "open",                    (void*)hooked_open,                 (void**)&real_open},
-    {nullptr,       "openat",                  (void*)hooked_openat,               (void**)&real_openat},
-    {nullptr,       "access",                  (void*)hooked_access,               (void**)&real_access},
-    {nullptr,       "stat",                    (void*)hooked_stat,                 (void**)&real_stat},
-    {nullptr,       "lstat",                   (void*)hooked_lstat,                (void**)&real_lstat},
-    {nullptr,       "readlink",                (void*)hooked_readlink,             (void**)&real_readlink},
-    {nullptr,       "fopen",                   (void*)hooked_fopen,                (void**)&real_fopen},
-    {nullptr,       "mkdir",                   (void*)hooked_mkdir,                (void**)&real_mkdir},
-    {nullptr,       "unlink",                  (void*)hooked_unlink,               (void**)&real_unlink},
-    {nullptr,       "rename",                  (void*)hooked_rename,               (void**)&real_rename},
-    {nullptr,       "__system_property_get",   (void*)hooked_system_property_get,  (void**)&real_system_property_get},
-    {nullptr,       "ptrace",                  (void*)hooked_ptrace,               (void**)&real_ptrace},
-    {nullptr,       "exit",                    (void*)hooked_exit,                 (void**)&real_exit},
-    {nullptr,       "_exit",                   (void*)hooked__exit,                (void**)&real__exit},
-    {"libdl.so",    "dlopen",                  (void*)hooked_dlopen,               (void**)&real_dlopen},
-    {"libdl.so",    "android_dlopen_ext",      (void*)hooked_android_dlopen_ext,   (void**)&real_android_dlopen_ext},
-    {"libdl.so",    "__loader_android_dlopen_ext", (void*)hooked_loader_android_dlopen_ext, (void**)&real_loader_android_dlopen_ext},
+    {nullptr,       "open",                    (void*)hooked_open,                 (void**)&real_open,                    HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "openat",                  (void*)hooked_openat,               (void**)&real_openat,                  HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "access",                  (void*)hooked_access,               (void**)&real_access,                  HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "stat",                    (void*)hooked_stat,                 (void**)&real_stat,                    HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "lstat",                   (void*)hooked_lstat,                (void**)&real_lstat,                   HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "readlink",                (void*)hooked_readlink,             (void**)&real_readlink,                HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "fopen",                   (void*)hooked_fopen,                (void**)&real_fopen,                   HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "mkdir",                   (void*)hooked_mkdir,                (void**)&real_mkdir,                   HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "unlink",                  (void*)hooked_unlink,               (void**)&real_unlink,                  HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "rename",                  (void*)hooked_rename,               (void**)&real_rename,                  HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "__system_property_get",   (void*)hooked_system_property_get,  (void**)&real_system_property_get,    HOOK_PROFILE_FULL},
+    {nullptr,       "ptrace",                  (void*)hooked_ptrace,               (void**)&real_ptrace,                  HOOK_PROFILE_FULL},
+    {nullptr,       "exit",                    (void*)hooked_exit,                 (void**)&real_exit,                    HOOK_PROFILE_FULL},
+    {nullptr,       "_exit",                   (void*)hooked__exit,                (void**)&real__exit,                   HOOK_PROFILE_FULL},
+    {"libdl.so",    "dlopen",                  (void*)hooked_dlopen,               (void**)&real_dlopen,                  HOOK_PROFILE_FULL},
+    {"libdl.so",    "android_dlopen_ext",      (void*)hooked_android_dlopen_ext,   (void**)&real_android_dlopen_ext,      HOOK_PROFILE_FULL},
+    {"libdl.so",    "__loader_android_dlopen_ext", (void*)hooked_loader_android_dlopen_ext, (void**)&real_loader_android_dlopen_ext, HOOK_PROFILE_FULL},
 };
 static constexpr int g_hook_count = sizeof(g_hook_entries) / sizeof(g_hook_entries[0]);
 
@@ -723,11 +733,20 @@ static void reinstall_all_hooks() {
  * ShadowHook handles trampoline allocation, instruction relocation,
  * and Android 16 seccomp-BPF compatibility automatically.
  */
-static bool install_shadowhook_hooks() {
-    LOGI("Installing hooks via ShadowHook...");
+static bool install_shadowhook_hooks(uint32_t requested_profiles, const char* caller) {
+    LOGI("Installing hooks via ShadowHook: caller=%s profiles=0x%x", caller, requested_profiles);
 
+    int requested_count = 0;
     int success_count = 0;
     for (int i = 0; i < g_hook_count; i++) {
+        if ((g_hook_entries[i].profiles & requested_profiles) == 0) {
+            continue;
+        }
+        requested_count++;
+        if (g_hook_stubs[i] != nullptr) {
+            success_count++;
+            continue;
+        }
         const char* lib = g_hook_entries[i].lib_name ? g_hook_entries[i].lib_name : "libc.so";
         void* stub = shadowhook_hook_sym_name(
             lib,
@@ -745,8 +764,15 @@ static bool install_shadowhook_hooks() {
         }
     }
 
-    LOGI("ShadowHook: %d/%d hooks installed", success_count, g_hook_count);
-    return success_count > 0;
+    bool ok = requested_count > 0 && success_count > 0;
+    if (ok) {
+        g_installed_hook_profiles |= requested_profiles;
+    }
+    LOGI("ShadowHook: %d/%d requested hooks available for profiles=0x%x",
+         success_count,
+         requested_count,
+         requested_profiles);
+    return ok;
 }
 
 static const char* shadowhook_mode_name(shadowhook_mode_t mode) {
@@ -796,15 +822,19 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInit(
     (void)env; (void)thiz;
     std::unique_lock<std::shared_mutex> lock(g_mutex);
 
-    if (g_initialized.load()) {
-        LOGI("Native hook engine already initialized");
+    if (g_initialized.load() && (g_installed_hook_profiles & HOOK_PROFILE_FULL) != 0) {
+        LOGI("Native hook engine already initialized for full profile");
         return JNI_TRUE;
     }
 
     LOGI("Initializing MultiApp native hook engine...");
 
-    bool shadowhookReady = init_shadowhook_for_runtime("nativeInit");
-    g_hooks_installed = shadowhookReady && install_shadowhook_hooks();
+    g_proc_cmdline_spoof_enabled.store(true, std::memory_order_relaxed);
+    g_status_tracerpid_spoof_enabled.store(true, std::memory_order_relaxed);
+
+    bool shadowhookReady = g_initialized.load() || init_shadowhook_for_runtime("nativeInit");
+    g_hooks_installed = shadowhookReady &&
+        install_shadowhook_hooks(HOOK_PROFILE_FULL, "nativeInit");
     if (!g_hooks_installed) {
         LOGW("ShadowHook installation failed — falling back to Java-level hooks only");
     }
@@ -812,6 +842,37 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInit(
     g_initialized.store(true);
     LOGI("Native hook engine initialized");
     return JNI_TRUE;
+}
+
+/**
+ * Initialize only native file path redirect hooks.
+ * This profile must not enable proc spoofing, property spoofing, self-kill
+ * interception, dlopen blocking, or package/business wrappers.
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeInitPathRedirectHooks(
+    JNIEnv* env, jobject thiz)
+{
+    (void)env; (void)thiz;
+    std::unique_lock<std::shared_mutex> lock(g_mutex);
+
+    if (g_initialized.load() && (g_installed_hook_profiles & HOOK_PROFILE_PATH_REDIRECT) != 0) {
+        LOGI("Native hook engine already initialized for path redirect profile");
+        return JNI_TRUE;
+    }
+
+    LOGI("Initializing MultiApp native path redirect hooks...");
+
+    bool shadowhookReady = g_initialized.load() || init_shadowhook_for_runtime("nativeInitPathRedirectHooks");
+    g_hooks_installed = shadowhookReady &&
+        install_shadowhook_hooks(HOOK_PROFILE_PATH_REDIRECT, "nativeInitPathRedirectHooks");
+    if (!g_hooks_installed) {
+        LOGW("ShadowHook path redirect hook installation failed");
+    }
+
+    g_initialized.store(true);
+    LOGI("Native path redirect hooks initialized");
+    return g_hooks_installed ? JNI_TRUE : JNI_FALSE;
 }
 
 /**
@@ -881,6 +942,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofProcSelf(
         std::unique_lock<std::shared_mutex> lock(g_mutex);
         g_spoofed_pid = pid;
         g_spoofed_package_name = std::string(pkg);
+        g_proc_cmdline_spoof_enabled.store(true, std::memory_order_relaxed);
+        g_status_tracerpid_spoof_enabled.store(true, std::memory_order_relaxed);
         LOGI("/proc/self spoof set: pid=%d, pkg=%s", pid, pkg);
         env->ReleaseStringUTFChars(packageName, pkg);
     }
@@ -899,8 +962,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSpoofTracerPid(
     JNIEnv* env, jobject thiz, jboolean enable)
 {
     (void)env; (void)thiz;
-    // TracerPid spoofing is automatically active when /proc/self/status
-    // is read through hooked_fopen. This method logs the intent.
+    g_status_tracerpid_spoof_enabled.store(enable == JNI_TRUE, std::memory_order_relaxed);
     LOGI("TracerPid spoofing %s", enable ? "enabled" : "disabled");
 }
 
@@ -974,6 +1036,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeCleanup(
     g_hidden_paths.clear();
     g_spoofed_pid = -1;
     g_spoofed_package_name.clear();
+    g_proc_cmdline_spoof_enabled.store(false, std::memory_order_relaxed);
+    g_status_tracerpid_spoof_enabled.store(false, std::memory_order_relaxed);
     g_host_data_prefix.clear();
     g_virtual_data_root.clear();
     // Note: ShadowHook inline hooks remain in place but do nothing without redirect rules
@@ -5589,7 +5653,10 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
         if (!g_initialized.load()) {
             LOGI("nativeSetupForLoader: initializing shadowhook...");
             bool shadowhookReady = init_shadowhook_for_runtime("nativeSetupForLoader");
-            g_hooks_installed = shadowhookReady && install_shadowhook_hooks();
+            g_proc_cmdline_spoof_enabled.store(true, std::memory_order_relaxed);
+            g_status_tracerpid_spoof_enabled.store(true, std::memory_order_relaxed);
+            g_hooks_installed = shadowhookReady &&
+                install_shadowhook_hooks(HOOK_PROFILE_FULL, "nativeSetupForLoader");
             g_initialized.store(true);
             if (g_hooks_installed) {
                 LOGI("nativeSetupForLoader: PLT/GOT hooks installed");
@@ -5606,6 +5673,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
             std::unique_lock<std::shared_mutex> lock(g_mutex);
             g_spoofed_pid = getpid();
             g_spoofed_package_name = std::string(pkg);
+            g_proc_cmdline_spoof_enabled.store(true, std::memory_order_relaxed);
+            g_status_tracerpid_spoof_enabled.store(true, std::memory_order_relaxed);
             LOGI("nativeSetupForLoader: /proc/self spoofed to '%s'", pkg);
             env->ReleaseStringUTFChars(packageName, pkg);
         }

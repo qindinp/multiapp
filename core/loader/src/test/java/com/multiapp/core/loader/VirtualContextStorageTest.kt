@@ -238,4 +238,23 @@ class VirtualContextStorageTest {
             assertTrue(diagnostic.candidateWithinDataRoot == true)
         }
     }
+
+    @Test
+    fun `native io diagnostics can report missing device probe after hook install`(@TempDir dataRoot: File) {
+        val diagnostics = VirtualStoragePathDiagnostics.nativeIoUnsupportedDiagnostics(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            caller = "test",
+            reason = "NATIVE_IO_DEVICE_PROBE_NOT_IMPLEMENTED"
+        )
+
+        diagnostics.forEach { diagnostic ->
+            assertEquals(VirtualStorageDiagnosticKind.NATIVE_IO, diagnostic.kind)
+            assertEquals(VirtualStorageDiagnosticStatus.UNSUPPORTED, diagnostic.status)
+            assertEquals("NATIVE_IO_DEVICE_PROBE_NOT_IMPLEMENTED", diagnostic.reason)
+            assertTrue(diagnostic.candidateWithinDataRoot == true)
+        }
+    }
 }
