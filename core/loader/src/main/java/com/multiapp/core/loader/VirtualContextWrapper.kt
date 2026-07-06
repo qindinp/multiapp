@@ -826,6 +826,7 @@ open class VirtualContextWrapper(
             dataDir = config.dataDir
             nonLocalizedLabel = config.applicationLabel ?: config.originPackageName
             nativeLibraryDir = config.nativeLibraryDir
+            theme = config.packageSnapshot?.themeId?.takeIf { it != 0 } ?: baseInfo.theme
         }
     }
 

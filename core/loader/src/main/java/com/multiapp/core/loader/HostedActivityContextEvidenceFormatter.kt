@@ -34,8 +34,11 @@ internal object HostedActivityContextEvidenceFormatter {
         "themeVerdict=${injection.themeVerdict}",
         "themeAppliedSource=${injection.themeAppliedSource}",
         "appCompatAttrsVerdict=${injection.appCompatAttrsVerdict}",
+        "themeEvidenceVerdict=${themeEvidenceVerdict(injection)}",
         "hostAppCompatBridgeApplied=${injection.hostAppCompatBridgeApplied}",
         "hostAppCompatFallbackApplied=${injection.hostAppCompatFallbackApplied}",
+        "hostProxyThemePreApplied=${injection.hostProxyThemePreApplied}",
+        "hostProxyThemePreAppliedResourceId=${injection.hostProxyThemePreAppliedResourceId}",
         "appCompatAttrsProbe=${injection.appCompatAttrsProbe}",
         "themeRuntimeOwner=${injection.themeRuntimeOwner}",
         "activityThemeProbe=${injection.activityThemeProbe}",
@@ -54,6 +57,20 @@ internal object HostedActivityContextEvidenceFormatter {
             injection.loadedApkPatchedFields.isNotEmpty() &&
             injection.loadedApkSkippedReason.isNullOrBlank()
         return if (loadedApkComplete && activityRecordComplete) "PASS" else "PARTIAL"
+    }
+
+    private fun themeEvidenceVerdict(injection: HostedActivityContextInjector.InjectionResult): String {
+        if (injection.themeVerdict == "FAIL" || injection.appCompatAttrsVerdict == "FAIL") return "FAIL"
+        val requiredFieldsPresent = injection.themeVerdict.isNotBlank() &&
+            injection.themeVerdict != "UNKNOWN" &&
+            injection.themeAppliedSource.isNotBlank() &&
+            injection.themeAppliedSource != "NONE" &&
+            injection.appCompatAttrsVerdict.isNotBlank() &&
+            injection.appCompatAttrsVerdict != "UNKNOWN"
+        val themeComplete = injection.themeVerdict == "PASS" &&
+            injection.appCompatAttrsVerdict == "PASS" &&
+            requiredFieldsPresent
+        return if (themeComplete) "PASS" else "PARTIAL"
     }
 
     private fun formatStringListMap(values: Map<String, List<String>>): String =

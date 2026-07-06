@@ -21,7 +21,7 @@ internal object HostedActivityIdentity {
         writeStringField(this, "deviceProtectedDataDir", config.dataDir)
         processName = runtimeProcessName(config)
         taskAffinity = runtimeTaskAffinity(config)
-        theme = source.theme
+        theme = config.packageSnapshot?.themeId?.takeIf { it != 0 } ?: source.theme
         nonLocalizedLabel = config.applicationLabel ?: source.nonLocalizedLabel ?: config.originPackageName
         enabled = true
     }
@@ -32,7 +32,9 @@ internal object HostedActivityIdentity {
         applicationInfo: ApplicationInfo
     ): ActivityInfo {
         val snapshot = config.packageSnapshot
-        val componentInfo = snapshot?.activities?.firstOrNull { it.name == guestActivityClassName }
+        val componentInfo = snapshot?.activities?.firstOrNull {
+            it.name == guestActivityClassName || it.targetActivityName == guestActivityClassName
+        }
         if (snapshot != null && componentInfo != null) {
             return ActivityInfo(VirtualPackageInfoFactory.activityInfo(snapshot, componentInfo)).apply {
                 packageName = config.virtualPackageName

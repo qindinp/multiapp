@@ -111,9 +111,13 @@ internal object VirtualPackageInfoFactory {
 
     fun findActivity(snapshot: VirtualPackageSnapshot, componentName: ComponentName): ActivityInfo? {
         if (!snapshot.matchesPackageName(componentName.packageName)) return null
-        return snapshot.activities.firstOrNull { it.name == componentName.className }
-            ?.let { activityInfo(snapshot, it) }
+        return findActivity(snapshot, componentName.className)
     }
+
+    internal fun findActivity(snapshot: VirtualPackageSnapshot, className: String): ActivityInfo? =
+        snapshot.activities.firstOrNull {
+            it.name == className || it.targetActivityName == className
+        }?.let { activityInfo(snapshot, it) }
 
     fun findService(snapshot: VirtualPackageSnapshot, componentName: ComponentName): ServiceInfo? {
         if (!snapshot.matchesPackageName(componentName.packageName)) return null

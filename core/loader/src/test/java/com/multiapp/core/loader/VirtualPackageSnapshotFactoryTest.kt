@@ -146,6 +146,38 @@ class VirtualPackageSnapshotFactoryTest {
     }
 
     @Test
+    fun `findActivity resolves alias target activity theme`() {
+        val snapshot = VirtualPackageSnapshotFactory.create(
+            instance = instanceRecord(),
+            installRecord = installRecord(),
+            resolvedPackage = ResolvedPackage(
+                packageName = "com.test.minimal",
+                versionCode = 1,
+                versionName = "1.0",
+                targetSdk = 36,
+                minSdk = 28,
+                themeId = 0x7f010010,
+                activities = listOf(
+                    ResolvedComponent(
+                        name = "com.test.minimal.LauncherAlias",
+                        exported = true,
+                        targetActivityName = "com.test.minimal.RealActivity",
+                        themeId = 0x7f010020
+                    )
+                )
+            ),
+            nativeLibraryDir = null
+        )
+
+        val activityInfo = VirtualPackageInfoFactory.findActivity(
+            snapshot,
+            "com.test.minimal.RealActivity"
+        )
+
+        assertEquals(0x7f010020, activityInfo?.theme)
+    }
+
+    @Test
     fun `registry resolves snapshot by instance origin and virtual package`() {
         val registry = VirtualPackageRegistry()
         val snapshot = VirtualPackageSnapshotFactory.create(

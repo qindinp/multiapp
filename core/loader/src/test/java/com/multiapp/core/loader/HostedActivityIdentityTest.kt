@@ -47,6 +47,7 @@ class HostedActivityIdentityTest {
             packageName = "com.multiapp.app"
             processName = "com.multiapp.app"
             taskAffinity = "com.multiapp.app"
+            theme = 0x01030000
         }
         val config = config(
             snapshot = snapshot(
@@ -59,6 +60,7 @@ class HostedActivityIdentityTest {
 
         assertEquals("com.test.minimal:reader", runtimeInfo.processName)
         assertEquals("com.test.minimal.reader", runtimeInfo.taskAffinity)
+        assertEquals(0x7f010001, runtimeInfo.theme)
     }
 
     @Test
@@ -120,6 +122,38 @@ class HostedActivityIdentityTest {
     }
 
     @Test
+    fun `activity info for record resolves alias target activity theme`() {
+        val config = config(
+            snapshot = snapshot().copy(
+                activities = listOf(
+                    ResolvedComponent(
+                        name = "com.test.minimal.LauncherAlias",
+                        targetActivityName = "com.test.minimal.RealActivity",
+                        exported = true,
+                        themeId = 0x7f010004
+                    )
+                )
+            )
+        )
+        val runtimeInfo = HostedActivityIdentity.applicationInfoForRuntime(
+            config = config,
+            source = ApplicationInfo().apply {
+                packageName = "com.test.minimal"
+                theme = 0x7f010001
+            }
+        )
+
+        val activityInfo = HostedActivityIdentity.activityInfoForRecord(
+            config = config,
+            guestActivityClassName = "com.test.minimal.RealActivity",
+            applicationInfo = runtimeInfo
+        )
+
+        assertEquals("com.test.minimal.RealActivity", activityInfo.name)
+        assertEquals(0x7f010004, activityInfo.theme)
+    }
+
+    @Test
     fun `activity info fallback uses virtual package when snapshot component is missing`() {
         val config = config(snapshot = snapshot())
         val runtimeInfo = HostedActivityIdentity.applicationInfoForRuntime(
@@ -140,7 +174,7 @@ class HostedActivityIdentityTest {
 
         assertEquals("com.multiapp.instance.abc", activityInfo.packageName)
         assertEquals("com.test.minimal.MissingActivity", activityInfo.name)
-        assertEquals(0x7f010003, activityInfo.theme)
+        assertEquals(0x7f010001, activityInfo.theme)
         assertEquals(false, activityInfo.exported)
         assertSame(runtimeInfo, activityInfo.applicationInfo)
     }

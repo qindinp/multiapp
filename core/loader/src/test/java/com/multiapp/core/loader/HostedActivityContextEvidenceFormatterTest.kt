@@ -43,6 +43,8 @@ class HostedActivityContextEvidenceFormatterTest {
             appCompatAttrsVerdict = "PASS",
             hostAppCompatBridgeApplied = true,
             hostAppCompatFallbackApplied = false,
+            hostProxyThemePreApplied = true,
+            hostProxyThemePreAppliedResourceId = 0x7f120123,
             appCompatAttrsProbe = "androidx.appcompat.R\$styleable:windowActionBar=0x7f030001:hasValue=true",
             themeRuntimeOwner = "GUEST_RUNTIME",
             activityThemeProbe = "activity-probe-pass",
@@ -80,8 +82,11 @@ class HostedActivityContextEvidenceFormatterTest {
         assertTrue("themeVerdict=PASS" in text)
         assertTrue("themeAppliedSource=HOST_PROXY_APPCOMPAT_BASELINE" in text)
         assertTrue("appCompatAttrsVerdict=PASS" in text)
+        assertTrue("themeEvidenceVerdict=PASS" in text)
         assertTrue("hostAppCompatBridgeApplied=true" in text)
         assertTrue("hostAppCompatFallbackApplied=false" in text)
+        assertTrue("hostProxyThemePreApplied=true" in text)
+        assertTrue("hostProxyThemePreAppliedResourceId=2131886371" in text)
         assertTrue("appCompatAttrsProbe=androidx.appcompat.R\$styleable:windowActionBar=0x7f030001:hasValue=true" in text)
         assertTrue("themeRuntimeOwner=GUEST_RUNTIME" in text)
         assertTrue("activityThemeProbe=activity-probe-pass" in text)
@@ -116,5 +121,6 @@ class HostedActivityContextEvidenceFormatterTest {
         )
 
         assertTrue("loadedApkEvidenceVerdict=PARTIAL" in text)
+        assertTrue("themeEvidenceVerdict=PARTIAL" in text)
     }
 }

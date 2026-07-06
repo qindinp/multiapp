@@ -43,6 +43,8 @@ internal object HostedActivityContextInjector {
         val appCompatAttrsVerdict: String = "UNKNOWN",
         val hostAppCompatBridgeApplied: Boolean = false,
         val hostAppCompatFallbackApplied: Boolean = false,
+        val hostProxyThemePreApplied: Boolean = false,
+        val hostProxyThemePreAppliedResourceId: Int = 0,
         val appCompatAttrsProbe: String = "",
         val themeRuntimeOwner: String = "UNKNOWN",
         val activityThemeProbe: String = "",
@@ -74,6 +76,10 @@ internal object HostedActivityContextInjector {
         val guestActivityClassName = activity.intent?.getStringExtra("multiapp.guestActivityClassName")
             ?.takeIf { it.isNotBlank() }
             ?: activity.javaClass.name
+        val hostProxyThemeBaseline = applyHostProxyThemeBaseline(
+            activity = activity,
+            hostContext = hostContext
+        )
 
         val runtimeApplicationInfo = HostedActivityIdentity.applicationInfoForRuntime(
             config = config,
@@ -104,7 +110,8 @@ internal object HostedActivityContextInjector {
             guestActivityClassName = guestActivityClassName,
             guestClassLoader = guestClassLoader,
             allowHostAppCompatFallback = allowHostAppCompatFallback,
-            baseContextInjectedBeforeTheme = contextInjected
+            baseContextInjectedBeforeTheme = contextInjected && !hostProxyThemeBaseline.applied,
+            hostProxyThemeBaseline = hostProxyThemeBaseline
         )
 
         return InjectionResult(
@@ -134,6 +141,8 @@ internal object HostedActivityContextInjector {
             appCompatAttrsVerdict = activityTheme.appCompatAttrsVerdict,
             hostAppCompatBridgeApplied = activityTheme.hostAppCompatBridgeApplied,
             hostAppCompatFallbackApplied = activityTheme.hostAppCompatFallbackApplied,
+            hostProxyThemePreApplied = hostProxyThemeBaseline.applied,
+            hostProxyThemePreAppliedResourceId = hostProxyThemeBaseline.themeResourceId,
             appCompatAttrsProbe = activityTheme.appCompatAttrsProbe,
             themeRuntimeOwner = activityTheme.runtimeOwner,
             activityThemeProbe = activityTheme.activityThemeProbe,
@@ -153,7 +162,8 @@ internal object HostedActivityContextInjector {
         guestActivityClassName: String,
         guestClassLoader: ClassLoader,
         allowHostAppCompatFallback: Boolean,
-        baseContextInjectedBeforeTheme: Boolean
+        baseContextInjectedBeforeTheme: Boolean,
+        hostProxyThemeBaseline: HostProxyThemeBaseline
     ): ActivityThemeResult {
         val guestTheme = resolveGuestActivityTheme(config, guestActivityClassName)
         if (guestTheme.themeResourceId != 0) {
@@ -167,7 +177,8 @@ internal object HostedActivityContextInjector {
                 originPackageName = config.originPackageName,
                 virtualPackageName = config.virtualPackageName,
                 allowHostAppCompatFallback = allowHostAppCompatFallback,
-                baseContextInjectedBeforeTheme = baseContextInjectedBeforeTheme
+                baseContextInjectedBeforeTheme = baseContextInjectedBeforeTheme,
+                hostProxyThemeBaseline = hostProxyThemeBaseline
             )
         }
 
@@ -181,7 +192,9 @@ internal object HostedActivityContextInjector {
             )
         }
         return runCatching {
-            activity.setTheme(themeId)
+            if (!hostProxyThemeBaseline.applied) {
+                activity.setTheme(themeId)
+            }
             activity.theme
             replaceFieldIfPresent(activity, "mThemeResource", themeId)
             val attrsProbe = appCompatAttrsProbe(
@@ -195,7 +208,11 @@ internal object HostedActivityContextInjector {
                 applied = true,
                 themeResourceId = themeId,
                 themeVerdict = if (attrsProbe.verdict == "PASS") "PASS" else "PARTIAL",
-                appliedSource = "HOST_PROXY_APPCOMPAT_BASELINE",
+                appliedSource = if (hostProxyThemeBaseline.applied) {
+                    "HOST_PROXY_APPCOMPAT_BASELINE_PRE_CONTEXT"
+                } else {
+                    "HOST_PROXY_APPCOMPAT_BASELINE"
+                },
                 appCompatAttrsVerdict = attrsProbe.verdict,
                 appCompatAttrsProbe = attrsProbe.detail,
                 runtimeOwner = "HOST_PROXY",
@@ -226,44 +243,68 @@ internal object HostedActivityContextInjector {
         guestClassLoader: ClassLoader,
         originPackageName: String,
         virtualPackageName: String,
-        @Suppress("UNUSED_PARAMETER") allowHostAppCompatFallback: Boolean,
-        baseContextInjectedBeforeTheme: Boolean
+        allowHostAppCompatFallback: Boolean,
+        baseContextInjectedBeforeTheme: Boolean,
+        hostProxyThemeBaseline: HostProxyThemeBaseline
     ): ActivityThemeResult {
         return runCatching {
-            guestContext.setTheme(themeResourceId)
+            val requiresAppCompatTheme = isAppCompatActivity(activity)
+            val hostProxyThemeId = resolveHostProxyTheme(hostContext)
+            val hostProxyBaselineApplied = requiresAppCompatTheme &&
+                (hostProxyThemeBaseline.applied || hostProxyThemeId != 0)
+            if (hostProxyBaselineApplied) {
+                if (!hostProxyThemeBaseline.applied) {
+                    activity.setTheme(hostProxyThemeId)
+                }
+            } else {
+                activity.setTheme(themeResourceId)
+            }
+
+            guestContext.setTheme(0)
             replaceFieldIfPresent(activity, "mResources", guestContext.resources)
-            activity.setTheme(themeResourceId)
             val hostBridgeApplied = applyHostAppCompatBridge(
                 hostContext = hostContext,
                 targetTheme = guestContext.theme
             )
             guestContext.theme.applyStyle(themeResourceId, true)
             val themeFieldPatched = replaceFieldIfPresent(activity, "mTheme", guestContext.theme)
-            replaceFieldIfPresent(activity, "mThemeResource", themeResourceId)
+            val runtimeThemeResourceId = if (hostProxyBaselineApplied) {
+                hostProxyThemeBaseline.themeResourceId.takeIf { it != 0 } ?: hostProxyThemeId
+            } else {
+                themeResourceId
+            }
+            replaceFieldIfPresent(activity, "mThemeResource", runtimeThemeResourceId)
             activity.applicationInfo?.let { info ->
                 info.theme = themeResourceId
             }
+            val allowHostStyleablePass = hostBridgeApplied || allowHostAppCompatFallback
             val attrsProbe = appCompatAttrsProbe(
                 activity,
                 guestClassLoader,
                 originPackageName,
                 virtualPackageName,
-                allowHostStyleablePass = false
+                allowHostStyleablePass = allowHostStyleablePass
             )
             val contextProbe = appCompatAttrsProbe(
                 guestContext,
                 guestClassLoader,
                 originPackageName,
                 virtualPackageName,
-                allowHostStyleablePass = false
+                allowHostStyleablePass = allowHostStyleablePass
             )
             ActivityThemeResult(
                 applied = true,
-                themeResourceId = themeResourceId,
+                themeResourceId = runtimeThemeResourceId,
                 themeVerdict = if (attrsProbe.verdict == "PASS") "PASS" else "PARTIAL",
-                appliedSource = appliedSource,
+                appliedSource = when {
+                    hostProxyBaselineApplied && hostBridgeApplied -> "$appliedSource+HOST_PROXY_APPCOMPAT_BRIDGE"
+                    hostBridgeApplied -> "$appliedSource+HOST_APPCOMPAT_BRIDGE"
+                    hostProxyBaselineApplied -> "$appliedSource+HOST_PROXY_APPCOMPAT_BASELINE"
+                    else -> appliedSource
+                },
                 appCompatAttrsVerdict = attrsProbe.verdict,
                 hostAppCompatBridgeApplied = hostBridgeApplied,
+                hostAppCompatFallbackApplied = hostProxyBaselineApplied,
                 appCompatAttrsProbe = listOf(
                     "activity=${attrsProbe.detail}",
                     "context=${contextProbe.detail}"
@@ -396,6 +437,28 @@ internal object HostedActivityContextInjector {
         }
     }
 
+    private fun applyHostProxyThemeBaseline(
+        activity: Activity,
+        hostContext: Context
+    ): HostProxyThemeBaseline {
+        val themeId = resolveHostProxyTheme(hostContext)
+        if (themeId == 0) return HostProxyThemeBaseline(applied = false, themeResourceId = 0)
+        return runCatching {
+            activity.setTheme(themeId)
+            activity.theme
+            replaceFieldIfPresent(activity, "mThemeResource", themeId)
+            HostProxyThemeBaseline(applied = true, themeResourceId = themeId)
+        }.onFailure { error ->
+            Log.d(TAG, "Host proxy theme baseline skipped: ${activity.javaClass.name}: ${error.message}")
+        }.getOrDefault(
+            HostProxyThemeBaseline(
+                applied = false,
+                themeResourceId = themeId,
+                skippedReason = "APPLY_FAILED"
+            )
+        )
+    }
+
     private fun resolveHostProxyTheme(hostContext: Context): Int {
         val resources = hostContext.resources
         val packageName = hostContext.packageName
@@ -409,6 +472,20 @@ internal object HostedActivityContextInjector {
                 .getField("Theme_AppCompat_Light_NoActionBar")
                 .getInt(null)
         }.getOrDefault(0)
+    }
+
+    private fun isAppCompatActivity(activity: Activity): Boolean {
+        var current: Class<*>? = activity.javaClass
+        while (current != null) {
+            val className = current.name
+            if (className == "androidx.appcompat.app.AppCompatActivity" ||
+                className.endsWith(".AppCompatActivity")
+            ) {
+                return true
+            }
+            current = current.superclass
+        }
+        return false
     }
 
     private fun patchActivityClientRecordIfPresent(
@@ -580,6 +657,12 @@ internal object HostedActivityContextInjector {
     private data class AppCompatAttrsProbe(
         val verdict: String,
         val detail: String
+    )
+
+    private data class HostProxyThemeBaseline(
+        val applied: Boolean,
+        val themeResourceId: Int,
+        val skippedReason: String = ""
     )
 
     private data class ActivityRecordInjectionResult(
