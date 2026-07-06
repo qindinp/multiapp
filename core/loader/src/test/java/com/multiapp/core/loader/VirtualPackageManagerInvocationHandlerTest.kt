@@ -151,6 +151,37 @@ class VirtualPackageManagerInvocationHandlerTest {
     }
 
     @Test
+    fun `component enabled setting methods are handled for virtual components`() {
+        val original = FakePackageManagerApiImpl()
+        val handler = VirtualPackageManagerInvocationHandler(
+            originalPackageManager = original,
+            service = VirtualPackageService(snapshot()),
+            runtimeUid = RUNTIME_UID
+        )
+        val component = component("com.test.minimal.SyncService")
+
+        val state = handler.invoke(
+            proxy = Any(),
+            method = apiMethod("getComponentEnabledSetting", android.content.ComponentName::class.java),
+            args = arrayOf(component)
+        ) as Int
+        val setResult = handler.invoke(
+            proxy = Any(),
+            method = apiMethod(
+                "setComponentEnabledSetting",
+                android.content.ComponentName::class.java,
+                Int::class.javaPrimitiveType!!,
+                Int::class.javaPrimitiveType!!
+            ),
+            args = arrayOf(component, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, 0)
+        )
+
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, state)
+        assertEquals(null, setResult)
+        assertTrue(original.calls.isEmpty())
+    }
+
+    @Test
     fun `unrelated package delegates to original PMS and original exception is unwrapped`() {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
@@ -361,6 +392,8 @@ class VirtualPackageManagerInvocationHandlerTest {
         fun getInstalledApplications(flags: Int): List<ApplicationInfo>
         fun getPackagesHoldingPermissions(permissions: Array<String>, flags: Int): List<PackageInfo>
         fun queryContentProviders(processName: String?, uid: Int, flags: Int): List<ProviderInfo>
+        fun getComponentEnabledSetting(componentName: android.content.ComponentName): Int
+        fun setComponentEnabledSetting(componentName: android.content.ComponentName, newState: Int, flags: Int)
         fun originalOnly(packageName: String): String
         fun throwsFor(packageName: String): String
     }
@@ -446,6 +479,19 @@ class VirtualPackageManagerInvocationHandlerTest {
             return emptyList()
         }
 
+        override fun getComponentEnabledSetting(componentName: android.content.ComponentName): Int {
+            calls += "getComponentEnabledSetting:${componentName.packageName}/${componentName.className}"
+            return PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        }
+
+        override fun setComponentEnabledSetting(
+            componentName: android.content.ComponentName,
+            newState: Int,
+            flags: Int
+        ) {
+            calls += "setComponentEnabledSetting:${componentName.packageName}/${componentName.className}:$newState:$flags"
+        }
+
         override fun originalOnly(packageName: String): String {
             calls += "originalOnly:$packageName"
             return "base:$packageName"
@@ -490,6 +536,14 @@ class VirtualPackageManagerInvocationHandlerTest {
         every { this@mockk.action } returns action
         every { categories } returns emptySet()
         every { scheme } returns null
+    }
+
+    private fun component(
+        className: String,
+        packageName: String = "com.test.minimal"
+    ) = mockk<android.content.ComponentName> {
+        every { this@mockk.packageName } returns packageName
+        every { this@mockk.className } returns className
     }
 
     private fun snapshot(

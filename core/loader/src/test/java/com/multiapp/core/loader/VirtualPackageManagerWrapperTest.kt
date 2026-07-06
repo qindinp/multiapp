@@ -8,6 +8,7 @@ import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -71,6 +72,19 @@ class VirtualPackageManagerWrapperTest {
     }
 
     @Test
+    fun `component enabled setting for virtual component does not hit base PMS`() {
+        val base = mockk<PackageManager>(relaxed = true)
+        val component = component("com.test.minimal.MainActivity")
+        val pm = VirtualPackageManagerWrapper(base, snapshot())
+
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, pm.getComponentEnabledSetting(component))
+        pm.setComponentEnabledSetting(component, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, 0)
+
+        verify(exactly = 0) { base.getComponentEnabledSetting(any()) }
+        verify(exactly = 0) { base.setComponentEnabledSetting(any(), any(), any()) }
+    }
+
+    @Test
     fun `permission controller runtime methods delegate or fall back without abstract PackageManager crash`() {
         val base = mockk<PackageManager>(relaxed = true)
         every { base.resolveActivity(any(), any<Int>()) } returns ResolveInfo().apply {
@@ -127,4 +141,12 @@ class VirtualPackageManagerWrapperTest {
         ),
         permissions = listOf("android.permission.CAMERA")
     )
+
+    private fun component(
+        className: String,
+        packageName: String = "com.test.minimal"
+    ) = mockk<android.content.ComponentName> {
+        every { this@mockk.packageName } returns packageName
+        every { this@mockk.className } returns className
+    }
 }

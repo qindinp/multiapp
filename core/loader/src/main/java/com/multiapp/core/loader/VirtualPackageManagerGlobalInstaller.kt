@@ -151,6 +151,8 @@ data class VirtualPackageManagerGlobalInstallResult(
         BootstrapEvidence("applicationPackageManagerPatchedTargets", patchedTargets(), SOURCE),
         BootstrapEvidence("virtualizedQueryFamilies", QUERY_FAMILIES, SOURCE),
         BootstrapEvidence("globalInterceptedMethods", INTERCEPTED_METHODS, SOURCE),
+        BootstrapEvidence("componentEnabledSettingVirtualizationEnabled", "true", SOURCE),
+        BootstrapEvidence("componentEnabledSettingMode", COMPONENT_ENABLED_SETTING_MODE, SOURCE),
         BootstrapEvidence("uidAggregateVirtualizationEnabled", "true", SOURCE),
         BootstrapEvidence("uidAggregateVirtualizationMode", UID_AGGREGATE_VIRTUALIZATION_MODE, SOURCE),
         BootstrapEvidence("deferredToLocalWrapperMethods", DEFERRED_TO_LOCAL_WRAPPER_METHODS, SOURCE),
@@ -170,11 +172,13 @@ data class VirtualPackageManagerGlobalInstallResult(
             "getPackageInfo,getPackageInfoVersioned,getApplicationInfo,getActivityInfo,getServiceInfo," +
                 "getReceiverInfo,getProviderInfo,resolveContentProvider,queryIntentActivities,resolveIntent," +
                 "resolveActivity,queryIntentServices,resolveService,queryIntentReceivers," +
-                "queryIntentContentProviders,getInstalledPackages,getInstalledApplications,checkPermission," +
+                "queryIntentContentProviders,getComponentEnabledSetting,setComponentEnabledSetting," +
+                "getInstalledPackages,getInstalledApplications,checkPermission," +
                 "getPackagesHoldingPermissions,getPackageUid,getPackagesForUid,getNameForUid," +
                 "queryContentProviders,isInstantApp"
         private const val DEFERRED_TO_LOCAL_WRAPPER_METHODS =
             "getPermissionControllerPackageName,buildRequestPermissionsIntent,shouldShowRequestPermissionRationale"
         private const val UID_AGGREGATE_VIRTUALIZATION_MODE = "merge-packages-preserve-name"
+        private const val COMPONENT_ENABLED_SETTING_MODE = "snapshot-default-noop"
     }
 }

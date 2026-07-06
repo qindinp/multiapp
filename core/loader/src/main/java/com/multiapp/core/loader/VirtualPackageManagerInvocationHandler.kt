@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.VersionedPackage
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
@@ -56,6 +57,20 @@ class VirtualPackageManagerInvocationHandler(
 
         "getProviderInfo" -> componentArg(args, 0)
             ?.let { component -> serviceForComponent(component)?.getProviderInfo(component)?.handled() }
+            ?: VirtualDispatchResult.NotHandled
+
+        "getComponentEnabledSetting" -> componentArg(args, 0)
+            ?.let { component -> serviceForComponent(component)?.getComponentEnabledSetting(component)?.handled() }
+            ?: VirtualDispatchResult.NotHandled
+
+        "setComponentEnabledSetting" -> componentArg(args, 0)
+            ?.let { component ->
+                val newState = intArg(args, 1) ?: PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                val flags = intArg(args, 2) ?: 0
+                serviceForComponent(component)
+                    ?.takeIf { it.setComponentEnabledSetting(component, newState, flags) }
+                    ?.let { VirtualDispatchResult.Handled(null) }
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "resolveContentProvider" -> stringArg(args, 0)

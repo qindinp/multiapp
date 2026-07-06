@@ -184,7 +184,8 @@ class VirtualPackageManagerWrapper(
     override fun getApplicationLogo(info: ApplicationInfo): Drawable = base.getApplicationLogo(info) ?: defaultActivityIcon
     override fun getApplicationLogo(packageName: String): Drawable = base.getApplicationLogo(packageName) ?: defaultActivityIcon
     override fun getChangedPackages(sequenceNumber: Int): ChangedPackages? = base.getChangedPackages(sequenceNumber)
-    override fun getComponentEnabledSetting(componentName: ComponentName): Int = base.getComponentEnabledSetting(componentName)
+    override fun getComponentEnabledSetting(componentName: ComponentName): Int =
+        service.getComponentEnabledSetting(componentName) ?: base.getComponentEnabledSetting(componentName)
     override fun getDefaultActivityIcon(): Drawable = base.getDefaultActivityIcon()
     override fun getDrawable(packageName: String, resid: Int, appInfo: ApplicationInfo?): Drawable? = base.getDrawable(packageName, resid, appInfo)
     override fun getInstallerPackageName(packageName: String): String? = base.getInstallerPackageName(packageName)
@@ -241,7 +242,10 @@ class VirtualPackageManagerWrapper(
     override fun resolveService(intent: Intent, flags: Int): ResolveInfo? = service.resolveService(intent) ?: base.resolveService(intent, flags)
     override fun setApplicationCategoryHint(packageName: String, categoryHint: Int) = base.setApplicationCategoryHint(packageName, categoryHint)
     override fun setApplicationEnabledSetting(packageName: String, newState: Int, flags: Int) = base.setApplicationEnabledSetting(packageName, newState, flags)
-    override fun setComponentEnabledSetting(componentName: ComponentName, newState: Int, flags: Int) = base.setComponentEnabledSetting(componentName, newState, flags)
+    override fun setComponentEnabledSetting(componentName: ComponentName, newState: Int, flags: Int) {
+        if (service.setComponentEnabledSetting(componentName, newState, flags)) return
+        base.setComponentEnabledSetting(componentName, newState, flags)
+    }
     override fun setInstallerPackageName(targetPackage: String, installerPackageName: String?) = base.setInstallerPackageName(targetPackage, installerPackageName)
     override fun updateInstantAppCookie(cookie: ByteArray?) = base.updateInstantAppCookie(cookie)
     override fun verifyPendingInstall(id: Int, verificationCode: Int) = base.verifyPendingInstall(id, verificationCode)

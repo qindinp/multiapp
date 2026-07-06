@@ -39,6 +39,37 @@ class VirtualPackageServiceTest {
     }
 
     @Test
+    fun `component enabled setting is answered only for snapshot components`() {
+        val service = VirtualPackageService(snapshot())
+
+        assertEquals(
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+            service.getComponentEnabledSetting(component("com.test.minimal.MainActivity"))
+        )
+        assertEquals(
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+            service.getComponentEnabledSetting(component("com.test.minimal.SyncService"))
+        )
+        assertEquals(
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+            service.getComponentEnabledSetting(component("com.test.minimal.BootReceiver"))
+        )
+        assertEquals(
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+            service.getComponentEnabledSetting(component("com.test.minimal.ProbeProvider"))
+        )
+        assertTrue(
+            service.setComponentEnabledSetting(
+                component("com.test.minimal.SyncService"),
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                0
+            )
+        )
+        assertNull(service.getComponentEnabledSetting(component("com.test.minimal.Missing")))
+        assertEquals(false, service.setComponentEnabledSetting(component("com.test.minimal.Missing"), 0, 0))
+    }
+
+    @Test
     fun `intent queries resolve activities services receivers and providers`() {
         val service = VirtualPackageService(snapshot())
 

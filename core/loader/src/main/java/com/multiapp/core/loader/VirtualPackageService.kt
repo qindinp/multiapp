@@ -44,6 +44,17 @@ class VirtualPackageService(
             ?.let { VirtualPackageInfoFactory.providerInfo(snapshot, it) }
     }
 
+    fun containsComponent(component: ComponentName): Boolean {
+        if (!snapshot.matchesPackageName(component.packageName)) return false
+        return allComponents().any { it.name == component.className || it.targetActivityName == component.className }
+    }
+
+    fun getComponentEnabledSetting(component: ComponentName): Int? =
+        if (containsComponent(component)) PackageManager.COMPONENT_ENABLED_STATE_DEFAULT else null
+
+    fun setComponentEnabledSetting(component: ComponentName, newState: Int, flags: Int): Boolean =
+        containsComponent(component)
+
     fun resolveContentProvider(authority: String): ProviderInfo? =
         VirtualPackageInfoFactory.findProvider(snapshot, authority)
 
@@ -136,6 +147,9 @@ class VirtualPackageService(
         snapshot.originPackageName,
         snapshot.virtualPackageName
     ).filter { it.isNotBlank() }.distinct()
+
+    private fun allComponents(): List<ResolvedComponent> =
+        snapshot.activities + snapshot.services + snapshot.receivers + snapshot.providers
 
     private fun resolveLauncherActivity(intent: Intent): ResolveInfo? {
         if (intent.action != Intent.ACTION_MAIN) return null
