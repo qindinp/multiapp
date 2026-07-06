@@ -583,28 +583,21 @@ class VirtualContextWrapperTest {
     }
 
     @Test
-    fun `startForegroundService remaps explicit guest service with foreground evidence`() {
+    fun `startForegroundService blocks explicit guest service as unsupported without host fallback`() {
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
-        val startedIntent = slot<Intent>()
-        val proxyIntent = mockk<Intent>(relaxed = true)
-        every { base.startForegroundService(capture(startedIntent)) } returns mockk(relaxed = true)
-        val wrapper = wrapper(
-            base = base,
-            serviceProxyIntentFactory = { _, _ -> proxyIntent }
-        )
+        val wrapper = wrapper(base = base)
 
-        wrapper.startForegroundService(sourceIntent)
+        val result = wrapper.startForegroundService(sourceIntent)
 
-        val evidence = assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(
-            wrapper.lastStartServiceMappingResult()
+        assertNull(result)
+        assertBlockedEvidence(
+            wrapper.lastStartServiceMappingResult(),
+            sourceIntent = sourceIntent,
+            reason = FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON,
+            foreground = true
         )
-        assertSame(sourceIntent, evidence.sourceIntent)
-        assertSame(proxyIntent, evidence.proxyIntent)
-        assertSame(evidence.proxyIntent, startedIntent.captured)
-        assertTrue(evidence.foreground)
-        assertTrue(evidence.startRequest.foreground)
-        assertEquals("explicitForeground", evidence.startRequest.reason)
+        verify(exactly = 0) { base.startForegroundService(any()) }
     }
 
     @Test
@@ -1179,6 +1172,39 @@ class VirtualContextWrapperTest {
             assertEquals(true, record.fields["serviceResolved"])
             assertEquals("explicit", record.fields["reason"])
             verify(exactly = 0) { base.bindService(any<Intent>(), any<ServiceConnection>(), any<Int>()) }
+        } finally {
+            VirtualAmsApiEvidenceRecorders.reset()
+        }
+    }
+
+    @Test
+    fun `startForegroundService records unsupported AMS API evidence while returning null`() {
+        val records = mutableListOf<VirtualAmsApiEvidenceRecord>()
+        VirtualAmsApiEvidenceRecorders.install { record -> records += record }
+        try {
+            val base = baseContext()
+            val wrapper = wrapper(
+                base = base,
+                snapshot = snapshot().copy(
+                    services = listOf(ResolvedComponent(name = "com.test.minimal.ProbeService", exported = false))
+                )
+            )
+            val service = explicitServiceIntent("com.test.minimal.ProbeService")
+
+            val result = wrapper.startForegroundService(service)
+
+            assertNull(result)
+            val record = records.single { it.component == VirtualAmsApiEvidenceComponent.START_FOREGROUND_SERVICE }
+            assertEquals("startForegroundService", record.api)
+            assertEquals("FOREGROUND_SERVICE_UNSUPPORTED", record.status)
+            assertEquals(false, record.hostFallback)
+            assertEquals("null", record.fields["returnValue"])
+            assertEquals(true, record.fields["serviceResolved"])
+            assertEquals(FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON, record.fields["reason"])
+            assertEquals(true, record.fields["foreground"])
+            assertEquals(false, record.fields["lifecycleImplemented"])
+            assertEquals("UNSUPPORTED", record.fields["capabilityVerdict"])
+            verify(exactly = 0) { base.startForegroundService(any()) }
         } finally {
             VirtualAmsApiEvidenceRecorders.reset()
         }

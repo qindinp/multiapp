@@ -27,6 +27,9 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.Executor
 
+internal const val FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON =
+    "FOREGROUND_SERVICE_LIFECYCLE_NOT_IMPLEMENTED"
+
 /**
  * Wraps the host Context and overrides identity fields so the guest app
  * sees its own package name, data directories, source path, and ClassLoader.
@@ -293,12 +296,10 @@ open class VirtualContextWrapper(
     }
 
     override fun startForegroundService(service: Intent): ComponentName? {
-        val result = componentDispatcher().resolveStartServiceIntent(service, foreground = true)
-        lastStartServiceMappingResult = result
-        return when (result) {
-            is StartServiceMappingResult.Remapped -> base.startForegroundService(result.proxyIntent)
-            is StartServiceMappingResult.Blocked -> null
-        }
+        val resolved = componentDispatcher().resolveStartServiceIntent(service, foreground = true)
+        lastStartServiceMappingResult = resolved
+        recordStartForegroundServiceEvidence("startForegroundService", resolved)
+        return null
     }
 
     override fun stopService(service: Intent): Boolean {
@@ -860,6 +861,35 @@ open class VirtualContextWrapper(
                     "returnValue" to false,
                     "serviceResolved" to serviceResolved,
                     "reason" to reason
+                )
+            )
+        )
+    }
+
+    private fun recordStartForegroundServiceEvidence(api: String, result: StartServiceMappingResult) {
+        val serviceResolved = result is StartServiceMappingResult.Remapped ||
+            (result is StartServiceMappingResult.Blocked &&
+                result.reason == FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON)
+        val reason = when (result) {
+            is StartServiceMappingResult.Remapped -> FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON
+            is StartServiceMappingResult.Blocked -> result.reason
+        }
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.START_FOREGROUND_SERVICE,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = api,
+                status = "FOREGROUND_SERVICE_UNSUPPORTED",
+                hostFallback = false,
+                fields = linkedMapOf(
+                    "returnValue" to "null",
+                    "serviceResolved" to serviceResolved,
+                    "reason" to reason,
+                    "foreground" to true,
+                    "lifecycleImplemented" to false,
+                    "capabilityVerdict" to "UNSUPPORTED"
                 )
             )
         )

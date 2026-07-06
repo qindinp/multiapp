@@ -128,15 +128,19 @@ class DefaultVirtualAmsComponentDispatcher(
             )
         }
         val manager = VirtualServiceManager(hostPackageName = hostPackageName)
-        val request = if (foreground) {
-            manager.resolveStartForegroundService(snapshot, intent)
-        } else {
-            manager.resolveStartService(snapshot, intent)
-        } ?: return VirtualContextWrapper.StartServiceMappingResult.Blocked(
-            sourceIntent = intent,
-            foreground = foreground,
-            reason = "unsupportedServiceIntent"
-        )
+        val request = manager.resolveStartService(snapshot, intent)
+            ?: return VirtualContextWrapper.StartServiceMappingResult.Blocked(
+                sourceIntent = intent,
+                foreground = foreground,
+                reason = "unsupportedServiceIntent"
+            )
+        if (foreground) {
+            return VirtualContextWrapper.StartServiceMappingResult.Blocked(
+                sourceIntent = intent,
+                foreground = true,
+                reason = FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON
+            )
+        }
         val proxyIntent = serviceProxyIntentFactory(manager, request)
         return VirtualContextWrapper.StartServiceMappingResult.Remapped(
             sourceIntent = intent,

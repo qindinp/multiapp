@@ -120,6 +120,19 @@ class VirtualAmsComponentDispatcherTest {
     }
 
     @Test
+    fun `resolveStartServiceIntent blocks foreground service lifecycle until implemented`() {
+        val dispatcher = dispatcher()
+        val intent = explicitIntent("com.test.minimal", "com.test.minimal.SyncService")
+
+        val result = dispatcher.resolveStartServiceIntent(intent, foreground = true)
+
+        val blocked = assertIs<VirtualContextWrapper.StartServiceMappingResult.Blocked>(result)
+        assertSame(intent, blocked.sourceIntent)
+        assertEquals(true, blocked.foreground)
+        assertEquals(FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON, blocked.reason)
+    }
+
+    @Test
     fun `resolveStartServiceIntent records fallback for implicit service`() {
         val dispatcher = dispatcher()
         val intent = mockk<Intent>(relaxed = true) {
