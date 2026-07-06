@@ -48,6 +48,34 @@ class VirtualIntentResolverTest {
     }
 
     @Test
+    fun `resolve launcher alias intent to target activity`() {
+        val resolver = VirtualIntentResolver(aliasSnapshot())
+        val intent = intent(
+            action = Intent.ACTION_MAIN,
+            categories = setOf(Intent.CATEGORY_LAUNCHER)
+        )
+
+        val request = resolver.resolveActivity(intent)
+
+        assertEquals("com.test.minimal.MainActivity", request?.guestActivityClassName)
+        assertEquals("launcher", request?.reason)
+    }
+
+    @Test
+    fun `resolve explicit alias activity to target activity`() {
+        val resolver = VirtualIntentResolver(aliasSnapshot())
+
+        val request = resolver.resolveExplicitActivity(
+            packageName = "com.test.minimal",
+            className = "com.test.minimal.launcher4",
+            sourceIntent = mockk(relaxed = true)
+        )
+
+        assertEquals("com.test.minimal.MainActivity", request?.guestActivityClassName)
+        assertEquals("explicit", request?.reason)
+    }
+
+    @Test
     fun `resolve implicit view intent using same filter matcher`() {
         val resolver = VirtualIntentResolver(snapshot())
         val intent = intent(
@@ -146,6 +174,34 @@ class VirtualIntentResolverTest {
                     )
                 )
             )
+        )
+    )
+
+    private fun aliasSnapshot() = VirtualPackageSnapshot(
+        instanceId = "inst-001",
+        originPackageName = "com.test.minimal",
+        virtualPackageName = "com.multiapp.instance.abc",
+        applicationLabel = "MinimalTest",
+        versionCode = 1,
+        versionName = "1.0",
+        targetSdk = 36,
+        minSdk = 28,
+        sourceDir = "/data/minimal.apk",
+        dataDir = "/data/inst",
+        launcherActivityName = "com.test.minimal.MainActivity",
+        activities = listOf(
+            ResolvedComponent(
+                name = "com.test.minimal.launcher4",
+                exported = true,
+                resolvedIntentFilters = listOf(
+                    ResolvedIntentFilter(
+                        actions = listOf(Intent.ACTION_MAIN),
+                        categories = listOf(Intent.CATEGORY_LAUNCHER)
+                    )
+                ),
+                targetActivityName = "com.test.minimal.MainActivity"
+            ),
+            ResolvedComponent("com.test.minimal.MainActivity", exported = false)
         )
     )
 }

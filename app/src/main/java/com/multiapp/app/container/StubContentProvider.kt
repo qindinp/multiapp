@@ -182,10 +182,7 @@ class StubContentProvider : ContentProvider() {
         ).dispatch(uri)
     }
 
-    private fun Uri.toGuestUri(guestAuthority: String): Uri = buildUpon()
-        .authority(guestAuthority)
-        .clearQuery()
-        .build()
+    private fun Uri.toGuestUri(guestAuthority: String): Uri = ProviderProxyUri.toGuestUri(this, guestAuthority)
 
     private fun Uri.redactForLog(): String = EvidenceSanitizer.redactUriForEvidence(toString())
 

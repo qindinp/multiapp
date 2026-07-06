@@ -21,6 +21,8 @@ import io.mockk.mockk
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
@@ -677,6 +679,50 @@ class HostedRuntimeBootstrapTest {
             libDir.absolutePath,
             classLoaderStage.evidence.find { it.key == "nativeLibraryDir" }?.value
         )
+    }
+
+    @Test
+    fun `native libraries are extracted from origin apk before classloader creation`(
+        @TempDir tempDir: File
+    ) {
+        val selectedAbi = NativeLibraryPaths.currentProcessSupportedAbis().first()
+        val apkFile = File(tempDir, "native-origin.apk").also { apk ->
+            ZipOutputStream(apk.outputStream()).use { zip ->
+                zip.putNextEntry(ZipEntry("lib/$selectedAbi/libapp_lib.so"))
+                zip.write(byteArrayOf(9, 8, 7, 6))
+                zip.closeEntry()
+            }
+        }
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        val instanceManager = FakeInstanceManager(
+            mapOf("inst-001" to instanceRecord().copy(dataRoot = dataRoot.absolutePath))
+        )
+        var capturedNativeLibraryDir: String? = null
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = instanceManager,
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
+            ),
+            classLoaderFactory = { _, nativeLibraryDir ->
+                capturedNativeLibraryDir = nativeLibraryDir
+                ClassLoader.getSystemClassLoader()
+            },
+            applicationClassNameResolver = { _, _ -> null }
+        )
+
+        val result = bootstrap.run("inst-001")
+
+        val abiDir = File(dataRoot, "lib/$selectedAbi")
+        assertTrue(result.success)
+        assertEquals(abiDir.absolutePath, capturedNativeLibraryDir)
+        assertTrue(File(abiDir, "libapp_lib.so").isFile)
+        val nativeStage = result.stageResults.first { it.stage == RuntimeStage.NATIVE_LIBS }
+        val nativeEvidence = nativeStage.evidence.associate { it.key to it.value }
+        assertEquals("APK_EXTRACTED_ABI_DIR", nativeEvidence["nativeLibrarySource"])
+        assertEquals("EXTRACTED", nativeEvidence["nativeLibrariesExtraction"])
+        assertEquals(abiDir.absolutePath, nativeEvidence["nativeLibraryDir"])
+        val classLoaderStage = result.stageResults.first { it.stage == RuntimeStage.CLASS_LOADER }
+        assertEquals(abiDir.absolutePath, classLoaderStage.evidence.find { it.key == "nativeLibraryDir" }?.value)
     }
 
     @Test

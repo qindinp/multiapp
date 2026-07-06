@@ -48,10 +48,10 @@ class DefaultVirtualActivityController : VirtualActivityController {
             component.intentFilters.contains(ACTION_MAIN) &&
                 component.intentFilters.contains(CATEGORY_LAUNCHER)
         }
-        launcherByFilter?.let { return it.name }
+        launcherByFilter?.let { return it.effectiveActivityClassName() }
 
         // Priority 3: First declared activity as fallback
-        return resolvedPackage.activities.firstOrNull()?.name
+        return resolvedPackage.activities.firstOrNull()?.effectiveActivityClassName()
     }
 
     override fun launchGuestActivity(
@@ -127,6 +127,9 @@ class DefaultVirtualActivityController : VirtualActivityController {
         throw NoSuchMethodException("attachBaseContext(Context) not found in hierarchy")
     }
 }
+
+private fun ResolvedComponent.effectiveActivityClassName(): String =
+    targetActivityName ?: name
 
 /**
  * Lightweight ContextWrapper that delegates identity overrides to the guest config.

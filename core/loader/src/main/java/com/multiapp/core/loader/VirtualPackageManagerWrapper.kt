@@ -113,6 +113,45 @@ class VirtualPackageManagerWrapper(
             ?: base.checkPermission(permissionName, packageName)
     }
 
+    @Suppress("unused")
+    fun getPermissionControllerPackageName(): String? {
+        return invokeBasePackageManagerMethod("getPermissionControllerPackageName") as? String
+            ?: resolvePermissionControllerPackageName()
+    }
+
+    @Suppress("unused")
+    fun buildRequestPermissionsIntent(permissions: Array<String>?): Intent {
+        val delegated = invokeBasePackageManagerMethod(
+            name = "buildRequestPermissionsIntent",
+            parameterTypes = arrayOf(Array<String>::class.java),
+            args = arrayOf(permissions)
+        ) as? Intent
+        if (delegated != null) return delegated
+
+        return Intent(ACTION_REQUEST_PERMISSIONS).apply {
+            putExtra(EXTRA_REQUEST_PERMISSIONS_NAMES, permissions ?: emptyArray())
+            getPermissionControllerPackageName()?.takeIf { it.isNotBlank() }?.let { setPackage(it) }
+        }
+    }
+
+    @Suppress("unused")
+    fun shouldShowRequestPermissionRationale(permissionName: String?): Boolean {
+        return invokeBasePackageManagerMethod(
+            name = "shouldShowRequestPermissionRationale",
+            parameterTypes = arrayOf(String::class.java),
+            args = arrayOf(permissionName)
+        ) as? Boolean ?: false
+    }
+
+    @Suppress("unused")
+    fun shouldShowRequestPermissionRationale(permissionName: String?, deviceId: Int): Boolean {
+        return invokeBasePackageManagerMethod(
+            name = "shouldShowRequestPermissionRationale",
+            parameterTypes = arrayOf(String::class.java, Integer.TYPE),
+            args = arrayOf(permissionName, deviceId)
+        ) as? Boolean ?: shouldShowRequestPermissionRationale(permissionName)
+    }
+
     override fun addPackageToPreferred(packageName: String) = base.addPackageToPreferred(packageName)
     override fun addPermission(info: PermissionInfo): Boolean = base.addPermission(info)
     override fun addPermissionAsync(info: PermissionInfo): Boolean = base.addPermissionAsync(info)
@@ -206,4 +245,35 @@ class VirtualPackageManagerWrapper(
     override fun setInstallerPackageName(targetPackage: String, installerPackageName: String?) = base.setInstallerPackageName(targetPackage, installerPackageName)
     override fun updateInstantAppCookie(cookie: ByteArray?) = base.updateInstantAppCookie(cookie)
     override fun verifyPendingInstall(id: Int, verificationCode: Int) = base.verifyPendingInstall(id, verificationCode)
+
+    private fun resolvePermissionControllerPackageName(): String? {
+        val requestIntent = Intent(ACTION_REQUEST_PERMISSIONS)
+        return runCatching {
+            base.resolveActivity(requestIntent, 0)?.activityInfo?.packageName
+        }.getOrNull()
+    }
+
+    private fun invokeBasePackageManagerMethod(
+        name: String,
+        parameterTypes: Array<Class<*>> = emptyArray(),
+        args: Array<Any?> = emptyArray()
+    ): Any? {
+        var current: Class<*>? = base.javaClass
+        while (current != null) {
+            val method = runCatching { current.getDeclaredMethod(name, *parameterTypes) }.getOrNull()
+            if (method != null) {
+                return runCatching {
+                    method.isAccessible = true
+                    method.invoke(base, *args)
+                }.getOrNull()
+            }
+            current = current.superclass
+        }
+        return null
+    }
+
+    private companion object {
+        const val ACTION_REQUEST_PERMISSIONS = "android.content.pm.action.REQUEST_PERMISSIONS"
+        const val EXTRA_REQUEST_PERMISSIONS_NAMES = "android.content.pm.extra.REQUEST_PERMISSIONS_NAMES"
+    }
 }

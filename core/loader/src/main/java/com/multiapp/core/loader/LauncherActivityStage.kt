@@ -39,17 +39,20 @@ class LauncherActivityStage(
             )
         }
 
-        val loadable = runCatching {
-            guestClassLoader.loadClass(launcherClassName)
-        }.isSuccess
+        val loadableLauncher = resolveLoadableLauncher(
+            launcherClassName = launcherClassName,
+            launcherResolution = launcherResolution,
+            input = input,
+            guestClassLoader = guestClassLoader
+        )
 
-        if (!loadable) {
+        if (!loadableLauncher.loadable) {
             return BootstrapStageOutput(
                 context = input.copy(launcherActivityClassName = null),
                 result = BootstrapResult.failed(
                     stage = RuntimeStage.LAUNCHER_ACTIVITY,
                     message = "Launcher Activity class not loadable: $launcherClassName",
-                    evidence = launcherEvidence(launcherClassName, launcherResolution.source, loadable = false),
+                    evidence = launcherEvidence(loadableLauncher),
                     durationMs = clock() - startMs
                 ),
                 terminalFailure = false
@@ -57,11 +60,11 @@ class LauncherActivityStage(
         }
 
         return BootstrapStageOutput(
-            context = input.copy(launcherActivityClassName = launcherClassName),
+            context = input.copy(launcherActivityClassName = loadableLauncher.className),
             result = BootstrapResult.success(
                 stage = RuntimeStage.LAUNCHER_ACTIVITY,
-                message = "Launcher Activity resolved: $launcherClassName",
-                evidence = launcherEvidence(launcherClassName, launcherResolution.source, loadable = true),
+                message = "Launcher Activity resolved: ${loadableLauncher.className}",
+                evidence = launcherEvidence(loadableLauncher),
                 durationMs = clock() - startMs
             ),
             terminalFailure = false
@@ -100,19 +103,68 @@ class LauncherActivityStage(
         terminalFailure = false
     )
 
-    private fun launcherEvidence(
+    private fun resolveLoadableLauncher(
         launcherClassName: String,
-        source: String,
-        loadable: Boolean
-    ): List<BootstrapEvidence> = listOf(
-        BootstrapEvidence("launcherActivityClass", launcherClassName),
-        BootstrapEvidence("resolver", source),
-        BootstrapEvidence("loadable", loadable.toString())
-    )
+        launcherResolution: LauncherResolution,
+        input: BootstrapStageInput,
+        guestClassLoader: ClassLoader
+    ): LoadableLauncher {
+        if (guestClassLoader.canLoad(launcherClassName)) {
+            return LoadableLauncher(
+                className = launcherClassName,
+                requestedClassName = launcherClassName,
+                source = launcherResolution.source,
+                loadable = true
+            )
+        }
+
+        val targetClassName = input.resolvedPackage
+            ?.activities
+            ?.firstOrNull { it.name == launcherClassName }
+            ?.targetActivityName
+            ?.takeIf { it.isNotBlank() && it != launcherClassName }
+
+        if (targetClassName != null && guestClassLoader.canLoad(targetClassName)) {
+            return LoadableLauncher(
+                className = targetClassName,
+                requestedClassName = launcherClassName,
+                source = launcherResolution.source,
+                loadable = true,
+                aliasTargetClassName = targetClassName
+            )
+        }
+
+        return LoadableLauncher(
+            className = launcherClassName,
+            requestedClassName = launcherClassName,
+            source = launcherResolution.source,
+            loadable = false,
+            aliasTargetClassName = targetClassName
+        )
+    }
+
+    private fun ClassLoader.canLoad(className: String): Boolean =
+        runCatching { loadClass(className) }.isSuccess
+
+    private fun launcherEvidence(resolution: LoadableLauncher): List<BootstrapEvidence> = buildList {
+        add(BootstrapEvidence("launcherActivityClass", resolution.className))
+        add(BootstrapEvidence("requestedLauncherActivityClass", resolution.requestedClassName))
+        resolution.aliasTargetClassName?.let { add(BootstrapEvidence("aliasTargetActivityClass", it)) }
+        add(BootstrapEvidence("resolver", resolution.source))
+        add(BootstrapEvidence("loadable", resolution.loadable.toString()))
+    }
 
     private data class LauncherResolution(
         val className: String?,
         val source: String
+    )
+
+    private data class LoadableLauncher(
+        val className: String,
+        val requestedClassName: String,
+        val source: String,
+        val loadable: Boolean,
+        val aliasTargetClassName: String? = null
     )
 
     private companion object {

@@ -199,7 +199,8 @@ class LoaderFactory : AppComponentFactory() {
 
     private val evidenceSink: EvidenceSink = RecorderEvidenceSink(bootstrapRecorder)
 
-    private val nativeHookPolicy = com.multiapp.core.hook.NativeHookPolicy.baseline()
+    private val nativeHookPolicy = com.multiapp.core.hook.NativeHookPolicyResolver
+        .resolveProtectedRuntimePolicy()
 
     private fun logPolicyDecision(decision: com.multiapp.core.hook.NativeHookPolicyDecision) {
         logD(

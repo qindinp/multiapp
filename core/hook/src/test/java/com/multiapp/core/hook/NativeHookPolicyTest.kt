@@ -52,6 +52,35 @@ class NativeHookPolicyTest {
     }
 
     @Test
+    fun `register natives diagnostic policy is observe only and does not enable class load hooks`() {
+        val policy = NativeHookPolicy.registerNativesDiagnostic()
+
+        assertTrue(policy.isHookFree())
+        assertTrue(policy.isEnabled(NativeHookCapability.REGISTER_NATIVES_LOGGING))
+        assertTrue(policy.isEnabled(NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY))
+        assertFalse(policy.isEnabled(NativeHookCapability.CLASS_LOAD_LOGGING))
+        assertFalse(policy.isEnabled(NativeHookCapability.LSPLANT_METHOD_HOOKS))
+        assertFalse(policy.isEnabled(NativeHookCapability.XPOSED_MODULES))
+        assertFalse(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_STUBS))
+        assertFalse(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_WRAPPERS))
+        assertFalse(policy.isEnabled(NativeHookCapability.NATIVE_BASE_HOOKS))
+        assertFalse(policy.isEnabled(NativeHookCapability.METHOD_REPLACEMENT))
+        assertFalse(policy.isEnabled(NativeHookCapability.NO_OP_PATCHES))
+    }
+
+    @Test
+    fun `policy resolver enables PR11 register natives diagnostics only from explicit property`() {
+        val baseline = NativeHookPolicyResolver.resolveProtectedRuntimePolicy { _, defaultValue -> defaultValue }
+        val diagnostics = NativeHookPolicyResolver.resolveProtectedRuntimePolicy { name, defaultValue ->
+            if (name == NativeHookPolicyResolver.PR11_REGISTER_NATIVES_DIAGNOSTICS_PROPERTY) "1" else defaultValue
+        }
+
+        assertFalse(baseline.isEnabled(NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY))
+        assertTrue(diagnostics.isEnabled(NativeHookCapability.REGISTER_NATIVES_OBSERVE_ONLY))
+        assertFalse(diagnostics.isEnabled(NativeHookCapability.CLASS_LOAD_LOGGING))
+    }
+
+    @Test
     fun `strict baseline rejects hook and diagnostic capabilities`() {
         val forbidden = setOf(
             NativeHookCapability.LSPLANT_METHOD_HOOKS,

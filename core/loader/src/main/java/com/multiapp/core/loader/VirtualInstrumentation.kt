@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
+import com.multiapp.core.hook.NativeHookPolicyResolver
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
@@ -65,6 +66,28 @@ open class VirtualInstrumentation(
         base.callActivityOnCreate(activity, icicle, persistentState)
         writeLifecycleEvidence(activity, "onCreate")
         ensureActivityResultBaselineEvidence(activity)
+    }
+
+    override fun callActivityOnPostCreate(activity: Activity, icicle: Bundle?) {
+        injectHostedActivityContextIfNeeded(
+            activity = activity,
+            injectionPhase = "preOnPostCreate",
+            allowHostAppCompatFallback = true
+        )
+        base.callActivityOnPostCreate(activity, icicle)
+    }
+
+    override fun callActivityOnPostCreate(
+        activity: Activity,
+        icicle: Bundle?,
+        persistentState: android.os.PersistableBundle?
+    ) {
+        injectHostedActivityContextIfNeeded(
+            activity = activity,
+            injectionPhase = "preOnPostCreate",
+            allowHostAppCompatFallback = true
+        )
+        base.callActivityOnPostCreate(activity, icicle, persistentState)
     }
 
     override fun callActivityOnStart(activity: Activity) {
@@ -244,7 +267,11 @@ open class VirtualInstrumentation(
         }.getOrNull()
     }
 
-    private fun injectHostedActivityContextIfNeeded(activity: Activity) {
+    private fun injectHostedActivityContextIfNeeded(
+        activity: Activity,
+        injectionPhase: String = "preOnCreate",
+        allowHostAppCompatFallback: Boolean = false
+    ) {
         val instanceId = activity.intent?.getStringExtra(EXTRA_INSTANCE_ID)?.takeIf { it.isNotBlank() }
             ?: return
         val guestActivityClassName = activity.intent
@@ -262,7 +289,9 @@ open class VirtualInstrumentation(
                 hostPackageName = hostPackageName,
                 config = config,
                 guestApplication = runtime.result.guestApplication,
-                guestClassLoader = runtime.result.guestClassLoader!!
+                guestClassLoader = runtime.result.guestClassLoader!!,
+                injectionPhase = injectionPhase,
+                allowHostAppCompatFallback = allowHostAppCompatFallback
             )
             writeActivityContextEvidence(
                 filesDir = runtime.hostApplication.filesDir,
@@ -400,6 +429,7 @@ open class VirtualInstrumentation(
         val result = VirtualProcessRuntime.global.bindApplication(instanceId) {
             bootstrap.run(instanceId)
         }
+        writeProtectedDiagnosticsEvidence(hostApplication.filesDir, result)
         require(result.success) {
             "Hosted bootstrap failed: " + (result.summary.failureReason ?: "unknown")
         }
@@ -425,11 +455,24 @@ open class VirtualInstrumentation(
             sourceDir = requireNotNull(result.originApkPath) {
                 "originApkPath is required for hosted Activity context"
             },
-            nativeLibraryDir = result.dataRoot?.let { File(it, "lib") }?.takeIf { it.isDirectory }?.absolutePath,
+            nativeLibraryDir = result.packageSnapshot?.nativeLibraryDir
+                ?: result.dataRoot?.let { NativeLibraryPaths.resolveAndExtract(null, it).nativeLibraryDir },
             classLoader = requireNotNull(result.guestClassLoader),
             applicationLabel = result.packageSnapshot?.applicationLabel ?: result.applicationLabel,
             packageSnapshot = result.packageSnapshot
         )
+    }
+
+    private fun writeProtectedDiagnosticsEvidence(filesDir: File, result: HostedBootstrapResult) {
+        runCatching {
+            ProtectedDiagnosticsEvidenceWriter.writeIfAllowed(
+                filesDir = filesDir,
+                result = result,
+                policy = NativeHookPolicyResolver.resolveProtectedRuntimePolicy()
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write protected diagnostics evidence for instanceId=${result.instanceId}", error)
+        }
     }
 
     private fun proxyActivityClassNames(hostPackageName: String): List<String> = listOf(

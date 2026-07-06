@@ -6,6 +6,8 @@ import com.multiapp.core.model.instance.VirtualInstanceRecord
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
@@ -59,6 +61,48 @@ class NativeLibrariesStageTest {
         assertEquals("INSTANCE_DATA_ROOT_LIB", evidence["nativeLibrarySource"])
         assertEquals("DEFERRED", evidence["nativeLibrariesExtraction"])
         assertEquals("instance lib dir not present", evidence["reason"])
+    }
+
+    @Test
+    fun `execute extracts supported native libraries from origin apk into abi dir`(
+        @TempDir tempDir: File
+    ) {
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        val selectedAbi = NativeLibraryPaths.currentProcessSupportedAbis().first()
+        val apkFile = File(tempDir, "origin.apk").also { apk ->
+            ZipOutputStream(apk.outputStream()).use { zip ->
+                zip.putNextEntry(ZipEntry("lib/$selectedAbi/libapp_lib.so"))
+                zip.write(byteArrayOf(1, 2, 3, 4))
+                zip.closeEntry()
+                if (selectedAbi != "armeabi-v7a") {
+                    zip.putNextEntry(ZipEntry("lib/armeabi-v7a/libapp_lib.so"))
+                    zip.write(byteArrayOf(5, 6, 7, 8))
+                    zip.closeEntry()
+                }
+            }
+        }
+        val instance = instanceRecord(dataRoot = dataRoot.absolutePath)
+        val stage = NativeLibrariesStage(clock = fixedClock(400L, 409L))
+
+        val output = stage.execute(
+            BootstrapStageInput(
+                instanceId = instance.instanceId,
+                instance = instance,
+                originApkPath = apkFile.absolutePath
+            )
+        )
+
+        val abiDir = File(dataRoot, "lib/$selectedAbi")
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(abiDir.absolutePath, output.context.nativeLibraryDir)
+        assertTrue(File(abiDir, "libapp_lib.so").isFile)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("APK_EXTRACTED_ABI_DIR", evidence["nativeLibrarySource"])
+        assertEquals("EXTRACTED", evidence["nativeLibrariesExtraction"])
+        assertEquals(selectedAbi, evidence["nativeLibrarySelectedAbi"])
+        assertEquals("1", evidence["nativeLibraryCount"])
+        assertEquals("1", evidence["nativeLibrariesCopiedCount"])
+        assertEquals("libapp_lib.so", evidence["nativeLibraries"])
     }
 
     @Test

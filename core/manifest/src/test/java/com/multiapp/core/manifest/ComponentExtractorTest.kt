@@ -202,6 +202,30 @@ class ComponentExtractorTest {
 
             assertNull(result)
         }
+
+        @Test
+        fun `launcher activity alias keeps target activity`() {
+            val manifest = createManifest(
+                activities = listOf(
+                    ManifestParser.ComponentInfo(
+                        name = ".launcher4",
+                        exported = true,
+                        intentFilters = listOf(
+                            ManifestParser.IntentFilterInfo(
+                                actions = listOf("android.intent.action.MAIN"),
+                                categories = listOf("android.intent.category.LAUNCHER")
+                            )
+                        ),
+                        targetActivityName = ".MainActivity"
+                    )
+                )
+            )
+
+            val result = extractor.extractLauncherActivity(manifest)
+
+            assertNotNull(result)
+            assertEquals(".MainActivity", result!!.targetActivityName)
+        }
     }
 
     // -- 2. extractAllComponents --

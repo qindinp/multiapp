@@ -26,7 +26,14 @@ class ClassLoaderStage(
                         message = "Guest ClassLoader created",
                         evidence = listOf(
                             BootstrapEvidence("classLoaderClass", guestClassLoader.javaClass.name),
-                            BootstrapEvidence("nativeLibraryDir", input.nativeLibraryDir.orEmpty())
+                            BootstrapEvidence("nativeLibraryDir", input.nativeLibraryDir.orEmpty()),
+                            BootstrapEvidence(
+                                "nativeLibrarySearchPath",
+                                NativeLibraryPaths.buildClassLoaderSearchPath(
+                                    apkPath = originApkPath,
+                                    nativeLibraryDir = input.nativeLibraryDir
+                                ).orEmpty()
+                            )
                         ) + additionalEvidence,
                         durationMs = clock() - startMs
                     )

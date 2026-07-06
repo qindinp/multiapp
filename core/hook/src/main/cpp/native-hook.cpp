@@ -2613,8 +2613,12 @@ static void capture_stubapp_native(const char* name, const char* sig, void* fnPt
     } else if (strcmp(name, "interface20") == 0 && strcmp(sig, "()Z") == 0) {
         g_orig_stub_interface20 = (StubInterface20Fn)fnPtr;
         LOGW("RegisterNatives StubApp: captured original interface20=%s", describe_native_address(fnPtr).c_str());
-        install_jiagu_token_insert_hook_from_stubapp("capture-interface20");
-        install_jiagu_fill_loop_hooks_from_stubapp("capture-interface20");
+        if (g_register_natives_business_wrappers_enabled.load(std::memory_order_relaxed)) {
+            install_jiagu_token_insert_hook_from_stubapp("capture-interface20");
+            install_jiagu_fill_loop_hooks_from_stubapp("capture-interface20");
+        } else {
+            LOGI("RegisterNatives StubApp: observe-only capture; jiagu token/fill hooks not installed");
+        }
     } else if (strcmp(name, "interface21") == 0 && strcmp(sig, "(Landroid/app/Application;)V") == 0) {
         g_orig_stub_interface21 = (StubInterfaceAppFn)fnPtr;
         LOGW("RegisterNatives StubApp: captured original interface21=%s", describe_native_address(fnPtr).c_str());

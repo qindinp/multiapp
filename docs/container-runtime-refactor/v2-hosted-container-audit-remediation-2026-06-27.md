@@ -1134,6 +1134,87 @@ interface20Verdict=<ORIGINAL_SHELL_REGISTERED|FALLBACK_REGISTERED|JNI_ONLOAD_NOT
 interface20VerdictReason=<reason>
 ```
 
+### 9.12 Manual log capture: native libraries and AppCompat proxy theme
+
+本轮根据用户手动点击后的 15 秒日志窗口排查两个现象：
+
+```text
+evidenceDir=.tmp/manual-log-capture-20260629-104034
+device=192.168.2.122:33811
+hostPackage=com.multiapp.app
+```
+
+#### AstroBox hosted instance
+
+前一轮白屏根因是 guest JNI 库未进入 hosted ClassLoader 的 native search path：
+
+```text
+java.lang.UnsatisfiedLinkError: dlopen failed: library "libapp_lib.so" not found
+```
+
+本轮修复后，origin APK 的匹配 ABI native libraries 会提取到实例目录：
+
+```text
+<instance dataRoot>/lib/libapp_lib.so
+<instance dataRoot>/lib/libimage_processing_util_jni.so
+PathClassLoader(apkPath, nativeLibraryDir, parent)
+RuntimeStage.NATIVE_LIBS
+```
+
+修复后日志显示 AstroBox 已进入 Activity proxy/substitution 链路，但新的崩溃点变为 AppCompat 主题检查：
+
+```text
+Process: com.multiapp.app
+Target activity: com.multiapp.app.container.ProxyActivity0
+java.lang.IllegalStateException: You need to use a Theme.AppCompat theme (or descendant) with this activity.
+```
+
+整改：
+
+```text
+app/build.gradle.kts                         -> add androidx.appcompat dependency
+gradle/libs.versions.toml                    -> appcompat version catalog entry
+app/src/main/res/values/themes.xml           -> Theme.MultiApp.Proxy parent=Theme.AppCompat.Light.NoActionBar
+app/src/main/AndroidManifest.xml             -> ContainerActivity / ProxyActivity* use Theme.MultiApp.Proxy
+```
+
+该整改只改变 hosted container/proxy Activity 的默认主题，不改变 MultiApp 主界面主题。
+
+#### QQ 阅读 / 起点类 protected app
+
+本轮证据显示 native library extraction 已修复之前的 `libjiagu_vip.so not found`：
+
+```text
+Load .../instance_data/.../lib/libjiagu_vip.so using isolated ns ... ok
+```
+
+新的阻塞点是壳 native method 未完成注册：
+
+```text
+No implementation found for boolean com.stub.StubApp.interface20()
+ContainerActivity: Bootstrap failed ... Guest Application creation failed: null
+```
+
+负责人判定：
+
+```text
+普通 APK native library search path 缺口已定位并修复。
+AstroBox 的下一轮真机复测重点是确认 AppCompat proxy theme 是否解除 onPostCreate 崩溃。
+QQ 阅读/起点类 protected app 不能标记兼容完成；当前 verdict 是 libjiagu native load PASS，但 interface20 registration FAIL/UNREGISTERED。
+默认 hosted runtime 仍不得启用 LSPlant/Xposed、business native wrappers、no-op stubs 或破坏壳逻辑。
+下一步进入 protected-app register-natives/interface20 evidence 分析，而不是直接打专项 patch。
+```
+
+验证记录：
+
+```powershell
+.\gradlew.bat --no-parallel :core:loader:testDebugUnitTest :app:compileDebugKotlin "-Dkotlin.compiler.execution.strategy=in-process" --console=plain --no-build-cache --no-daemon
+```
+
+```text
+result=BUILD SUCCESSFUL
+```
+
 边界声明：
 
 ```text

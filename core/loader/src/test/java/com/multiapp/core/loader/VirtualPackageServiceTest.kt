@@ -54,6 +54,16 @@ class VirtualPackageServiceTest {
     }
 
     @Test
+    fun `launcher activity alias keeps alias info with target activity`() {
+        val service = VirtualPackageService(aliasSnapshot())
+
+        val result = service.resolveActivity(intent(Intent.ACTION_MAIN, setOf(Intent.CATEGORY_LAUNCHER)))
+
+        assertEquals("com.test.minimal.launcher4", result?.activityInfo?.name)
+        assertEquals("com.test.minimal.MainActivity", result?.activityInfo?.targetActivity)
+    }
+
+    @Test
     fun `view activity matches http scheme filter`() {
         val service = VirtualPackageService(snapshot())
 
@@ -265,5 +275,33 @@ class VirtualPackageServiceTest {
             )
         ),
         permissions = listOf("android.permission.CAMERA")
+    )
+
+    private fun aliasSnapshot() = VirtualPackageSnapshot(
+        instanceId = "inst-001",
+        originPackageName = "com.test.minimal",
+        virtualPackageName = "com.multiapp.instance.abc",
+        applicationLabel = "MinimalTest",
+        versionCode = 42,
+        versionName = "4.2",
+        targetSdk = 36,
+        minSdk = 28,
+        sourceDir = "/data/apks/minimal.apk",
+        dataDir = "/data/inst",
+        launcherActivityName = "com.test.minimal.MainActivity",
+        activities = listOf(
+            ResolvedComponent(
+                name = "com.test.minimal.launcher4",
+                exported = true,
+                resolvedIntentFilters = listOf(
+                    ResolvedIntentFilter(
+                        actions = listOf(Intent.ACTION_MAIN),
+                        categories = listOf(Intent.CATEGORY_LAUNCHER)
+                    )
+                ),
+                targetActivityName = "com.test.minimal.MainActivity"
+            ),
+            ResolvedComponent(name = "com.test.minimal.MainActivity", exported = false)
+        )
     )
 }

@@ -55,7 +55,8 @@ data class ResolvedComponent(
     val configChanges: String? = null,
     val permission: String? = null,
     val grantUriPermissions: Boolean = false,
-    val metaData: Map<String, String> = emptyMap()
+    val metaData: Map<String, String> = emptyMap(),
+    val targetActivityName: String? = null
 )
 
 /**

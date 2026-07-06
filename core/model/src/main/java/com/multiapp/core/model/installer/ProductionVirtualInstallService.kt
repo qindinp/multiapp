@@ -36,8 +36,10 @@ class ProductionVirtualInstallService(
             requireSafeInstallPackageName(app.packageName)
             val existing = installRecordStore.load(app.packageName)
             val appMetadata = app.toInstallMetadata()
+            val resolvedMetadata = resolveInstallMetadata(app.packageName, app.apkPath)
+            val importMetadata = appMetadata.withResolvedFallback(resolvedMetadata)
             val appApkSha256 = computeSha256OrNull(app.apkPath)
-            if (existing != null && !existing.needsAppRefresh(app, appMetadata, appApkSha256)) {
+            if (existing != null && !existing.needsAppRefresh(app, importMetadata, appApkSha256)) {
                 return Result.success(ImportResult(
                     packageRecord = buildPackageRecord(existing),
                     manifest = buildManifest(existing),
@@ -54,13 +56,13 @@ class ProductionVirtualInstallService(
                 minSdk = app.minSdkVersion,
                 applicationClassName = app.applicationClassName,
                 packageLabel = app.appName,
-                permissions = app.requestedPermissions,
-                activities = app.activities.map { ComponentInfo(it) },
-                services = app.services.map { ComponentInfo(it) },
-                receivers = app.receivers.map { ComponentInfo(it) },
-                providers = app.providers.map { ComponentInfo(it) },
-                nativeLibraries = emptyList(),
-                abiList = app.nativeAbis
+                permissions = importMetadata.permissions,
+                activities = importMetadata.activities,
+                services = importMetadata.services,
+                receivers = importMetadata.receivers,
+                providers = importMetadata.providers,
+                nativeLibraries = importMetadata.nativeLibraries,
+                abiList = importMetadata.abiList
             )
         } catch (e: CancellationException) {
             throw e
@@ -145,6 +147,18 @@ class ProductionVirtualInstallService(
         )
     }
 
+    private fun InstallMetadata.withResolvedFallback(resolved: InstallMetadata): InstallMetadata {
+        return InstallMetadata(
+            permissions = resolved.permissions.ifEmpty { permissions },
+            activities = resolved.activities.ifEmpty { activities },
+            services = resolved.services.ifEmpty { services },
+            receivers = resolved.receivers.ifEmpty { receivers },
+            providers = resolved.providers.ifEmpty { providers },
+            nativeLibraries = resolved.nativeLibraries.ifEmpty { nativeLibraries },
+            abiList = resolved.abiList.ifEmpty { abiList }
+        )
+    }
+
     private fun InstallRecord.needsMetadataRefresh(metadata: InstallMetadata): Boolean {
         if (metadata == InstallMetadata()) return false
         return !matchesInstallMetadata(metadata) ||
@@ -210,6 +224,13 @@ class ProductionVirtualInstallService(
     override fun hasInstallRecord(packageName: String): Boolean {
         requireSafeInstallPackageName(packageName)
         return installRecordStore.load(packageName) != null
+    }
+
+    private fun requireSafeInstallPackageName(packageName: String) {
+        require(packageName.isNotBlank()) { "packageName must not be blank" }
+        require(!packageName.contains("..") && !packageName.contains("/") && !packageName.contains("\\")) {
+            "Invalid packageName: $packageName"
+        }
     }
 
     private fun buildManifest(record: InstallRecord): com.multiapp.core.model.InstallArtifactManifest {

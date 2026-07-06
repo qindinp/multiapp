@@ -25,6 +25,7 @@ class VirtualPackageResolverTest {
         assertNull(component.configChanges)
         assertNull(component.permission)
         assertTrue(component.metaData.isEmpty())
+        assertNull(component.targetActivityName)
     }
 
     @Test
@@ -47,7 +48,8 @@ class VirtualPackageResolverTest {
             screenOrientation = "portrait",
             configChanges = "orientation|screenSize",
             permission = "com.example.permission.START",
-            metaData = mapOf("feature" to "enabled")
+            metaData = mapOf("feature" to "enabled"),
+            targetActivityName = "com.example.TargetActivity"
         )
 
         assertEquals("com.example.MainActivity", component.name)
@@ -63,6 +65,7 @@ class VirtualPackageResolverTest {
         assertEquals("orientation|screenSize", component.configChanges)
         assertEquals("com.example.permission.START", component.permission)
         assertEquals("enabled", component.metaData["feature"])
+        assertEquals("com.example.TargetActivity", component.targetActivityName)
     }
 
     @Test

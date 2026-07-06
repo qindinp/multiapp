@@ -119,6 +119,12 @@ data class NativeHookPolicy(
             findClassLogger = true
         )
 
+        fun registerNativesDiagnostic(): NativeHookPolicy = NativeHookPolicy(
+            mode = NativeHookPolicyMode.DIAGNOSTIC,
+            registerNativesLogger = true,
+            findClassLogger = false
+        )
+
         fun compatibility(): NativeHookPolicy = NativeHookPolicy(
             mode = NativeHookPolicyMode.COMPATIBILITY,
             mapsFilter = true,

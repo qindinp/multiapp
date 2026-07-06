@@ -72,6 +72,28 @@ class DefaultVirtualActivityControllerTest {
     }
 
     @Test
+    fun `resolveLauncherActivity maps launcher alias to target activity`() {
+        val pkg = ResolvedPackage(
+            packageName = "com.example.app",
+            versionCode = 1,
+            versionName = "1.0",
+            targetSdk = 34,
+            minSdk = 21,
+            launcherActivityName = null,
+            activities = listOf(
+                ResolvedComponent(
+                    name = "com.example.app.launcher4",
+                    exported = true,
+                    intentFilters = listOf("android.intent.action.MAIN", "android.intent.category.LAUNCHER"),
+                    targetActivityName = "com.example.app.MainActivity"
+                )
+            )
+        )
+
+        assertEquals("com.example.app.MainActivity", controller.resolveLauncherActivity(pkg))
+    }
+
+    @Test
     fun `resolveLauncherActivity returns first activity when no MAIN LAUNCHER found`() {
         val pkg = ResolvedPackage(
             packageName = "com.example.app",

@@ -96,7 +96,7 @@ class ContainerActivity : Activity() {
                 virtualPackageName = virtualPackageName,
                 dataDir = resolvedDataRoot,
                 sourceDir = originApkPath,
-                nativeLibraryDir = resolveNativeLibraryDir(resolvedDataRoot),
+                nativeLibraryDir = packageSnapshot?.nativeLibraryDir ?: resolveNativeLibraryDir(resolvedDataRoot),
                 classLoader = guestClassLoader,
                 applicationLabel = packageSnapshot?.applicationLabel ?: applicationLabel,
                 packageSnapshot = packageSnapshot
@@ -214,7 +214,7 @@ class ContainerActivity : Activity() {
                 guestActivityClassName = launcherClassName,
                 launchMode = result.packageSnapshot
                     ?.activities
-                    ?.firstOrNull { it.name == launcherClassName }
+                    ?.firstOrNull { it.name == launcherClassName || it.targetActivityName == launcherClassName }
                     ?.launchMode
             )
             if (proxyLaunchResult.isFailure) {

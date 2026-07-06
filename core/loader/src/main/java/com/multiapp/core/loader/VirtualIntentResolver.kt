@@ -28,7 +28,7 @@ class VirtualIntentResolver(
             VirtualIntentFilterMatcher.matches(intent, component)
         }
         if (matched != null) {
-            return request(matched.name, intent, if (isLauncherIntent(intent)) "launcher" else "implicit", matched.launchMode)
+            return request(matched.effectiveActivityClassName(), intent, if (isLauncherIntent(intent)) "launcher" else "implicit", matched.launchMode)
         }
 
         if (isLauncherIntent(intent)) {
@@ -46,11 +46,13 @@ class VirtualIntentResolver(
     ): VirtualActivityLaunchRequest? {
         if (!snapshot.matchesPackageName(packageName)) return null
         val normalizedClassName = normalizeActivityClassName(className)
-        val component = snapshot.activities.firstOrNull { it.name == normalizedClassName }
+        val component = snapshot.activities.firstOrNull {
+            it.name == normalizedClassName || it.targetActivityName == normalizedClassName
+        }
         if (component == null && snapshot.launcherActivityName != normalizedClassName) {
             return null
         }
-        return request(normalizedClassName, sourceIntent, "explicit", component?.launchMode)
+        return request(component?.effectiveActivityClassName() ?: normalizedClassName, sourceIntent, "explicit", component?.launchMode)
     }
 
     private fun resolveExplicit(component: ComponentName): VirtualActivityLaunchRequest? {
@@ -82,3 +84,6 @@ class VirtualIntentResolver(
     private fun isLauncherIntent(intent: Intent): Boolean =
         intent.action == Intent.ACTION_MAIN && intent.categories?.contains(Intent.CATEGORY_LAUNCHER) == true
 }
+
+private fun com.multiapp.core.model.virtual.ResolvedComponent.effectiveActivityClassName(): String =
+    targetActivityName ?: name

@@ -32,3 +32,14 @@ and verified by Gradle.
 3. Keep LSPlant/Xposed/native business stubs/no-op patches as optional
    diagnostic or compatibility layers, not baseline dependencies.
 4. Record evidence at every runtime boundary before changing behavior.
+
+## Current Planning Entry Points
+
+- [v2 Container 成熟化执行蓝图](v2-container-maturity-execution-blueprint-2026-06-29.md) — execution roadmap for using open-source and commercial multi-app references without losing context across sessions; uses Blueprint Phase 0-10 slices and maps them to the authoritative Roadmap Phase A-G labels.
+- [v2 Reference Architecture Mapping](v2-reference-architecture-mapping-2026-06-29.md) — clean-room mapping from VirtualApp / BlackBox / DroidPlugin-style concepts to current MultiApp modules and evidence gates.
+- [v2 Current-State Refresh](v2-current-state-refresh-2026-06-29.md) — owner-gated current status, verification commands, missing device evidence, and anti-false-DONE checklist.
+- [v2 PR-2 Legacy Freeze + Comment Cleanup](v2-pr2-legacy-freeze-comment-cleanup-2026-06-29.md) — owner scope note for comment-only legacy freeze work; records that current mixed runtime diffs must be split or reclassified before PR-2 can be approved as clean comment cleanup.
+- [v2 PR-3 Install / Instance JVM Evidence](v2-pr3-install-instance-jvm-evidence-2026-06-29.md) — deterministic JVM evidence that InstallRecord is the fact source, InstanceRecord only references originPackageName, and HostedRuntimeBootstrap consumes InstallRecord.originApkPath; device evidence remains pending.
+- [v2 PR-4 RuntimeBootstrap Stage Pipeline Plan](v2-pr4-runtimebootstrap-stage-pipeline-plan-2026-06-29.md) — implementation plan for extracting HostedRuntimeBootstrap into stage contracts and stage-level JVM tests without absorbing PR-5/PR-6 device work.
+- [v2 Seven-Kernel-Gap Execution](v2-seven-kernel-gap-execution-2026-06-29.md) — pre-existing current evidence gate source; all seven gates remain PARTIAL until direct device/runtime evidence proves otherwise.
+- [v2 Hosted Container Audit Remediation](v2-hosted-container-audit-remediation-2026-06-27.md) — historical audit and remediation notes; use with the newer seven-gate document for current status.

@@ -8,6 +8,7 @@ internal object HostedActivityContextEvidenceFormatter {
     ): String = listOf(
         "status=GUEST_ACTIVITY_CONTEXT_INJECTED",
         "stage=ACTIVITY_CONTEXT",
+        "injectionPhase=${injection.injectionPhase}",
         "guestActivityClassName=$guestActivityClassName",
         "contextInjected=${injection.contextInjected}",
         "applicationInjected=${injection.applicationInjected}",
@@ -25,12 +26,35 @@ internal object HostedActivityContextEvidenceFormatter {
         "loadedApkAliasSkippedReasonsByField=${formatStringMap(injection.loadedApkAliasSkippedReasonsByField)}",
         "loadedApkSkippedReason=${injection.loadedApkSkippedReason.orEmpty()}",
         "loadedApkSource=${injection.loadedApkSource.orEmpty()}",
+        "loadedApkEvidenceVerdict=${loadedApkEvidenceVerdict(injection)}",
         "activityRecordPatchedFields=${injection.activityRecordPatchedFields.joinToString(",")}",
         "activityRecordSkippedReason=${injection.activityRecordSkippedReason.orEmpty()}",
         "appCompatThemeGuardApplied=${injection.appCompatThemeGuardApplied}",
         "appCompatThemeResourceId=${injection.appCompatThemeResourceId}",
+        "themeVerdict=${injection.themeVerdict}",
+        "themeAppliedSource=${injection.themeAppliedSource}",
+        "appCompatAttrsVerdict=${injection.appCompatAttrsVerdict}",
+        "hostAppCompatBridgeApplied=${injection.hostAppCompatBridgeApplied}",
+        "hostAppCompatFallbackApplied=${injection.hostAppCompatFallbackApplied}",
+        "appCompatAttrsProbe=${injection.appCompatAttrsProbe}",
+        "themeRuntimeOwner=${injection.themeRuntimeOwner}",
+        "activityThemeProbe=${injection.activityThemeProbe}",
+        "contextThemeProbe=${injection.contextThemeProbe}",
+        "themeFieldPatched=${injection.themeFieldPatched}",
+        "baseContextInjectedBeforeTheme=${injection.baseContextInjectedBeforeTheme}",
+        "hiddenApiBypassApplied=${injection.hiddenApiBypassApplied}",
         "dataDir=${injection.dataDir}"
     ).joinToString("\n")
+
+    private fun loadedApkEvidenceVerdict(injection: HostedActivityContextInjector.InjectionResult): String {
+        val requiredActivityRecordFields = setOf("activityInfo", "intent", "packageInfo")
+        val activityRecordComplete = injection.activityRecordPatchedFields.containsAll(requiredActivityRecordFields)
+        val loadedApkComplete = injection.loadedApkSource == "GUEST_SANDBOX" &&
+            injection.loadedApkInstalledAliasCount >= 2 &&
+            injection.loadedApkPatchedFields.isNotEmpty() &&
+            injection.loadedApkSkippedReason.isNullOrBlank()
+        return if (loadedApkComplete && activityRecordComplete) "PASS" else "PARTIAL"
+    }
 
     private fun formatStringListMap(values: Map<String, List<String>>): String =
         values.toSortedMap().entries.joinToString(";") { (field, entries) ->

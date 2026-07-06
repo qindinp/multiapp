@@ -31,6 +31,22 @@ class HostedActivityEvidenceFilesTest {
             "inst-001.activity-result.properties",
             HostedActivityEvidenceFiles.result("inst-001")
         )
+        assertEquals(
+            "inst-001.protected-diagnostics.properties",
+            HostedActivityEvidenceFiles.protectedDiagnostics("inst-001")
+        )
+        assertEquals(
+            "inst-001.native-load.properties",
+            HostedActivityEvidenceFiles.nativeLoad("inst-001")
+        )
+        assertEquals(
+            "inst-001.register-natives.properties",
+            HostedActivityEvidenceFiles.registerNatives("inst-001")
+        )
+        assertEquals(
+            "inst-001.protected-verdict.properties",
+            HostedActivityEvidenceFiles.protectedVerdict("inst-001")
+        )
     }
 
     @Test

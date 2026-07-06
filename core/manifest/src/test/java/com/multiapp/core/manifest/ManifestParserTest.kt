@@ -1,6 +1,9 @@
 package com.multiapp.core.manifest
 
 import android.content.Context
+import android.content.pm.ActivityInfo
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
@@ -75,6 +78,26 @@ class ManifestParserTest {
                         <category android:name="android.intent.category.LAUNCHER"/>
                     </intent-filter>
                 </activity>
+            </application>
+        </manifest>
+    """.trimIndent()
+
+    private fun aliasLauncherManifestXml(): String = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+            package="com.example.alias">
+
+            <application>
+                <activity android:name=".MainActivity" android:exported="false"/>
+                <activity-alias
+                    android:name=".launcher4"
+                    android:targetActivity=".MainActivity"
+                    android:exported="true">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN"/>
+                        <category android:name="android.intent.category.LAUNCHER"/>
+                    </intent-filter>
+                </activity-alias>
             </application>
         </manifest>
     """.trimIndent()
@@ -176,6 +199,29 @@ class ManifestParserTest {
         }
 
         @Test
+        fun `merge package info preserves application and activity theme ids`() {
+            val manifest = parser.parseFromXml(fullManifestXml())
+            val themed = parser.applyPackageInfoThemeIds(
+                manifest = manifest,
+                packageInfo = PackageInfo().apply {
+                    applicationInfo = ApplicationInfo().apply {
+                        theme = 0x7f100001
+                    }
+                    activities = arrayOf(
+                        ActivityInfo().apply {
+                            name = "com.example.testapp.MainActivity"
+                            theme = 0x7f100002
+                        }
+                    )
+                }
+            )
+
+            assertEquals(0x7f100001, themed.applicationThemeId)
+            assertEquals(0x7f100002, themed.activities.single { it.name == ".MainActivity" }.themeId)
+            assertEquals(0, themed.activities.single { it.name == ".SettingsActivity" }.themeId)
+        }
+
+        @Test
         fun `提取 exported 属性`() {
             val result = parser.parseFromXml(fullManifestXml())
             val mainActivity = result.activities.find { it.name == ".MainActivity" }
@@ -262,6 +308,18 @@ class ManifestParserTest {
             assertTrue(result.providers.isEmpty())
             assertTrue(result.permissions.isEmpty())
             assertNull(result.applicationClass)
+        }
+
+        @Test
+        fun `parseFromXml preserves activity alias target activity`() {
+            val result = parser.parseFromXml(aliasLauncherManifestXml())
+
+            val alias = result.activities.find { it.name == ".launcher4" }
+
+            assertNotNull(alias)
+            assertEquals(".MainActivity", alias!!.targetActivityName)
+            assertTrue(alias.intentFilters.single().actions.contains("android.intent.action.MAIN"))
+            assertTrue(alias.intentFilters.single().categories.contains("android.intent.category.LAUNCHER"))
         }
     }
 

@@ -6,7 +6,9 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.res.Resources
 import android.util.Log
+import com.multiapp.core.common.AndroidCompat
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.File
 
@@ -35,7 +37,20 @@ internal object HostedActivityContextInjector {
         val activityRecordPatchedFields: List<String> = emptyList(),
         val activityRecordSkippedReason: String? = null,
         val appCompatThemeGuardApplied: Boolean = false,
-        val appCompatThemeResourceId: Int = 0
+        val appCompatThemeResourceId: Int = 0,
+        val themeVerdict: String = "UNKNOWN",
+        val themeAppliedSource: String = "NONE",
+        val appCompatAttrsVerdict: String = "UNKNOWN",
+        val hostAppCompatBridgeApplied: Boolean = false,
+        val hostAppCompatFallbackApplied: Boolean = false,
+        val appCompatAttrsProbe: String = "",
+        val themeRuntimeOwner: String = "UNKNOWN",
+        val activityThemeProbe: String = "",
+        val contextThemeProbe: String = "",
+        val themeFieldPatched: Boolean = false,
+        val baseContextInjectedBeforeTheme: Boolean = false,
+        val hiddenApiBypassApplied: Boolean = false,
+        val injectionPhase: String = "preOnCreate"
     )
 
     fun inject(
@@ -44,19 +59,26 @@ internal object HostedActivityContextInjector {
         hostPackageName: String?,
         config: VirtualContextConfig,
         guestApplication: Application?,
-        guestClassLoader: ClassLoader
+        guestClassLoader: ClassLoader,
+        injectionPhase: String = "preOnCreate",
+        allowHostAppCompatFallback: Boolean = false
     ): InjectionResult {
         val guestContext = VirtualContextWrappers.create(
             base = hostContext,
             config = config,
             guestClassLoader = guestClassLoader
         )
+        val hiddenApiBypassApplied = runCatching { AndroidCompat.bypassHiddenApis() }
+            .onFailure { error -> Log.d(TAG, "Hidden API bypass unavailable: ${error.message}") }
+            .getOrDefault(false)
+        val guestActivityClassName = activity.intent?.getStringExtra("multiapp.guestActivityClassName")
+            ?.takeIf { it.isNotBlank() }
+            ?: activity.javaClass.name
 
         val runtimeApplicationInfo = HostedActivityIdentity.applicationInfoForRuntime(
             config = config,
             source = guestContext.applicationInfo
         )
-        val appCompatThemeGuard = applyHostAppCompatThemeGuardIfNeeded(activity, hostContext)
         val contextInjected = replaceBaseContext(activity, guestContext)
         val applicationInjected = guestApplication?.let { replaceApplication(activity, it) } ?: false
         replaceFieldIfPresent(activity, "mResources", guestContext.resources)
@@ -73,6 +95,16 @@ internal object HostedActivityContextInjector {
             config = config,
             applicationInfo = runtimeApplicationInfo,
             loadedApk = loadedApkPatch?.loadedApk
+        )
+        val activityTheme = applyHostedActivityTheme(
+            activity = activity,
+            hostContext = hostContext,
+            guestContext = guestContext,
+            config = config,
+            guestActivityClassName = guestActivityClassName,
+            guestClassLoader = guestClassLoader,
+            allowHostAppCompatFallback = allowHostAppCompatFallback,
+            baseContextInjectedBeforeTheme = contextInjected
         )
 
         return InjectionResult(
@@ -95,26 +127,273 @@ internal object HostedActivityContextInjector {
             loadedApkSource = loadedApkPatch?.source?.name,
             activityRecordPatchedFields = activityRecordPatch.patchResult?.patchedFields.orEmpty(),
             activityRecordSkippedReason = activityRecordPatch.patchResult?.skippedReason,
-            appCompatThemeGuardApplied = appCompatThemeGuard.applied,
-            appCompatThemeResourceId = appCompatThemeGuard.themeResourceId
+            appCompatThemeGuardApplied = activityTheme.applied,
+            appCompatThemeResourceId = activityTheme.themeResourceId,
+            themeVerdict = activityTheme.themeVerdict,
+            themeAppliedSource = activityTheme.appliedSource,
+            appCompatAttrsVerdict = activityTheme.appCompatAttrsVerdict,
+            hostAppCompatBridgeApplied = activityTheme.hostAppCompatBridgeApplied,
+            hostAppCompatFallbackApplied = activityTheme.hostAppCompatFallbackApplied,
+            appCompatAttrsProbe = activityTheme.appCompatAttrsProbe,
+            themeRuntimeOwner = activityTheme.runtimeOwner,
+            activityThemeProbe = activityTheme.activityThemeProbe,
+            contextThemeProbe = activityTheme.contextThemeProbe,
+            themeFieldPatched = activityTheme.themeFieldPatched,
+            baseContextInjectedBeforeTheme = activityTheme.baseContextInjectedBeforeTheme,
+            hiddenApiBypassApplied = hiddenApiBypassApplied,
+            injectionPhase = injectionPhase
         )
     }
 
-    private fun applyHostAppCompatThemeGuardIfNeeded(
+    private fun applyHostedActivityTheme(
         activity: Activity,
-        hostContext: Context
-    ): AppCompatThemeGuardResult {
-        if (!isAppCompatActivity(activity)) return AppCompatThemeGuardResult(applied = false)
+        hostContext: Context,
+        guestContext: VirtualContextWrapper,
+        config: VirtualContextConfig,
+        guestActivityClassName: String,
+        guestClassLoader: ClassLoader,
+        allowHostAppCompatFallback: Boolean,
+        baseContextInjectedBeforeTheme: Boolean
+    ): ActivityThemeResult {
+        val guestTheme = resolveGuestActivityTheme(config, guestActivityClassName)
+        if (guestTheme.themeResourceId != 0) {
+            return applyGuestActivityTheme(
+                activity = activity,
+                hostContext = hostContext,
+                guestContext = guestContext,
+                themeResourceId = guestTheme.themeResourceId,
+                appliedSource = guestTheme.source,
+                guestClassLoader = guestClassLoader,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                allowHostAppCompatFallback = allowHostAppCompatFallback,
+                baseContextInjectedBeforeTheme = baseContextInjectedBeforeTheme
+            )
+        }
+
         val themeId = resolveHostProxyTheme(hostContext)
-        if (themeId == 0) return AppCompatThemeGuardResult(applied = false)
+        if (themeId == 0) {
+            return ActivityThemeResult(
+                applied = false,
+                themeVerdict = "FAIL",
+                appliedSource = "HOST_PROXY_THEME_NOT_FOUND",
+                appCompatAttrsVerdict = "UNKNOWN"
+            )
+        }
         return runCatching {
             activity.setTheme(themeId)
             activity.theme
             replaceFieldIfPresent(activity, "mThemeResource", themeId)
-            AppCompatThemeGuardResult(applied = true, themeResourceId = themeId)
+            val attrsProbe = appCompatAttrsProbe(
+                activity,
+                guestClassLoader,
+                config.originPackageName,
+                config.virtualPackageName,
+                allowHostStyleablePass = true
+            )
+            ActivityThemeResult(
+                applied = true,
+                themeResourceId = themeId,
+                themeVerdict = if (attrsProbe.verdict == "PASS") "PASS" else "PARTIAL",
+                appliedSource = "HOST_PROXY_APPCOMPAT_BASELINE",
+                appCompatAttrsVerdict = attrsProbe.verdict,
+                appCompatAttrsProbe = attrsProbe.detail,
+                runtimeOwner = "HOST_PROXY",
+                activityThemeProbe = attrsProbe.detail,
+                contextThemeProbe = "NO_GUEST_THEME",
+                themeFieldPatched = false,
+                baseContextInjectedBeforeTheme = baseContextInjectedBeforeTheme
+            )
         }.onFailure { error ->
             Log.w(TAG, "Unable to apply host AppCompat theme guard: ${activity.javaClass.name}", error)
-        }.getOrDefault(AppCompatThemeGuardResult(applied = false, themeResourceId = themeId))
+        }.getOrDefault(
+            ActivityThemeResult(
+                applied = false,
+                themeResourceId = themeId,
+                themeVerdict = "FAIL",
+                appliedSource = "HOST_PROXY_APPCOMPAT_FAILED",
+                appCompatAttrsVerdict = "UNKNOWN"
+            )
+        )
+    }
+
+    private fun applyGuestActivityTheme(
+        activity: Activity,
+        hostContext: Context,
+        guestContext: VirtualContextWrapper,
+        themeResourceId: Int,
+        appliedSource: String,
+        guestClassLoader: ClassLoader,
+        originPackageName: String,
+        virtualPackageName: String,
+        @Suppress("UNUSED_PARAMETER") allowHostAppCompatFallback: Boolean,
+        baseContextInjectedBeforeTheme: Boolean
+    ): ActivityThemeResult {
+        return runCatching {
+            guestContext.setTheme(themeResourceId)
+            replaceFieldIfPresent(activity, "mResources", guestContext.resources)
+            activity.setTheme(themeResourceId)
+            val hostBridgeApplied = applyHostAppCompatBridge(
+                hostContext = hostContext,
+                targetTheme = guestContext.theme
+            )
+            guestContext.theme.applyStyle(themeResourceId, true)
+            val themeFieldPatched = replaceFieldIfPresent(activity, "mTheme", guestContext.theme)
+            replaceFieldIfPresent(activity, "mThemeResource", themeResourceId)
+            activity.applicationInfo?.let { info ->
+                info.theme = themeResourceId
+            }
+            val attrsProbe = appCompatAttrsProbe(
+                activity,
+                guestClassLoader,
+                originPackageName,
+                virtualPackageName,
+                allowHostStyleablePass = false
+            )
+            val contextProbe = appCompatAttrsProbe(
+                guestContext,
+                guestClassLoader,
+                originPackageName,
+                virtualPackageName,
+                allowHostStyleablePass = false
+            )
+            ActivityThemeResult(
+                applied = true,
+                themeResourceId = themeResourceId,
+                themeVerdict = if (attrsProbe.verdict == "PASS") "PASS" else "PARTIAL",
+                appliedSource = appliedSource,
+                appCompatAttrsVerdict = attrsProbe.verdict,
+                hostAppCompatBridgeApplied = hostBridgeApplied,
+                appCompatAttrsProbe = listOf(
+                    "activity=${attrsProbe.detail}",
+                    "context=${contextProbe.detail}"
+                ).joinToString(";"),
+                runtimeOwner = "GUEST_RUNTIME",
+                activityThemeProbe = attrsProbe.detail,
+                contextThemeProbe = contextProbe.detail,
+                themeFieldPatched = themeFieldPatched,
+                baseContextInjectedBeforeTheme = baseContextInjectedBeforeTheme
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to apply guest Activity theme: ${activity.javaClass.name}", error)
+        }.getOrDefault(
+            ActivityThemeResult(
+                applied = false,
+                themeResourceId = themeResourceId,
+                themeVerdict = "FAIL",
+                appliedSource = "${appliedSource}_FAILED",
+                appCompatAttrsVerdict = "UNKNOWN"
+            )
+        )
+    }
+
+    private fun resolveGuestActivityTheme(
+        config: VirtualContextConfig,
+        guestActivityClassName: String
+    ): ResolvedActivityTheme {
+        val snapshot = config.packageSnapshot ?: return ResolvedActivityTheme(0, "NONE")
+        val activityTheme = snapshot.activities.firstOrNull {
+            it.name == guestActivityClassName || it.targetActivityName == guestActivityClassName
+        }?.themeId ?: 0
+        if (activityTheme != 0) {
+            return ResolvedActivityTheme(activityTheme, "GUEST_ACTIVITY_THEME")
+        }
+        if (snapshot.themeId != 0) {
+            return ResolvedActivityTheme(snapshot.themeId, "GUEST_APPLICATION_THEME")
+        }
+        return ResolvedActivityTheme(0, "NONE")
+    }
+
+    private fun applyHostAppCompatBridge(
+        hostContext: Context,
+        targetTheme: Resources.Theme
+    ): Boolean {
+        val hostThemeId = resolveHostProxyTheme(hostContext)
+        if (hostThemeId == 0) return false
+        return runCatching {
+            val hostTheme = hostContext.resources.newTheme()
+            hostTheme.applyStyle(hostThemeId, true)
+            targetTheme.setTo(hostTheme)
+            true
+        }.onFailure { error ->
+            Log.d(TAG, "Host AppCompat theme bridge skipped: ${error.message}")
+        }.getOrDefault(false)
+    }
+
+    private fun appCompatAttrsProbe(
+        context: Context,
+        guestClassLoader: ClassLoader,
+        originPackageName: String,
+        virtualPackageName: String,
+        allowHostStyleablePass: Boolean
+    ): AppCompatAttrsProbe {
+        val styleableCandidates = listOf(
+            "androidx.appcompat.R\$styleable",
+            "$originPackageName.R\$styleable",
+            "$virtualPackageName.R\$styleable"
+        )
+        val attempts = mutableListOf<String>()
+        var sawFail = false
+        for (className in styleableCandidates) {
+            val styleableClass = runCatching {
+                Class.forName(className, false, guestClassLoader)
+            }.getOrNull()
+            if (styleableClass == null) {
+                attempts += "$className:CLASS_NOT_FOUND_IN_GUEST"
+                continue
+            }
+
+            val probe = probeStyleableClass(context, styleableClass, "guest:$className")
+            attempts += probe.detail
+            if (probe.verdict == "PASS") return probe
+            if (probe.verdict == "FAIL") sawFail = true
+        }
+        val hostStyleableClass = runCatching {
+            Class.forName("androidx.appcompat.R\$styleable")
+        }.getOrNull()
+        if (hostStyleableClass != null) {
+            val hostProbe = probeStyleableClass(context, hostStyleableClass, "host:androidx.appcompat.R\$styleable")
+            attempts += hostProbe.detail
+            if (hostProbe.verdict == "PASS") {
+                return if (allowHostStyleablePass) {
+                    hostProbe
+                } else {
+                    AppCompatAttrsProbe("HOST_ONLY", hostProbe.detail)
+                }
+            }
+            if (hostProbe.verdict == "FAIL") sawFail = true
+        }
+        return AppCompatAttrsProbe(
+            verdict = if (sawFail) "FAIL" else "UNKNOWN",
+            detail = attempts.joinToString(";")
+        )
+    }
+
+    private fun probeStyleableClass(
+        context: Context,
+        styleableClass: Class<*>,
+        label: String
+    ): AppCompatAttrsProbe {
+        return runCatching {
+            val attrs = styleableClass.getField("AppCompatTheme").get(null) as IntArray
+            val windowActionBarIndex = styleableClass.getField("AppCompatTheme_windowActionBar").getInt(null)
+            val typedArray = context.obtainStyledAttributes(attrs)
+            try {
+                val hasValue = typedArray.hasValue(windowActionBarIndex)
+                val attrId = attrs.getOrNull(windowActionBarIndex) ?: 0
+                AppCompatAttrsProbe(
+                    verdict = if (hasValue) "PASS" else "FAIL",
+                    detail = "$label:windowActionBar=0x${Integer.toHexString(attrId)}:hasValue=$hasValue"
+                )
+            } finally {
+                typedArray.recycle()
+            }
+        }.getOrElse { error ->
+            AppCompatAttrsProbe(
+                verdict = "UNKNOWN",
+                detail = "$label:${error.javaClass.simpleName}"
+            )
+        }
     }
 
     private fun resolveHostProxyTheme(hostContext: Context): Int {
@@ -130,18 +409,6 @@ internal object HostedActivityContextInjector {
                 .getField("Theme_AppCompat_Light_NoActionBar")
                 .getInt(null)
         }.getOrDefault(0)
-    }
-
-    private fun isAppCompatActivity(activity: Activity): Boolean {
-        var current: Class<*>? = activity.javaClass
-        while (current != null) {
-            if (current.name == "androidx.appcompat.app.AppCompatActivity" ||
-                current.name.contains("AppCompatActivity")) {
-                return true
-            }
-            current = current.superclass
-        }
-        return false
     }
 
     private fun patchActivityClientRecordIfPresent(
@@ -271,17 +538,48 @@ internal object HostedActivityContextInjector {
         }.getOrDefault(false)
     }
 
-    private fun replaceFieldIfPresent(target: Any, name: String, value: Any?) {
-        runCatching {
-            findFieldInHierarchy(target.javaClass, name)?.set(target, value)
+    private fun replaceFieldIfPresent(target: Any, name: String, value: Any?): Boolean {
+        val field = findFieldInHierarchy(target.javaClass, name) ?: return false
+        return runCatching {
+            field.set(target, value)
+            true
+        }.recoverCatching { reflectionError ->
+            UnsafeFieldWriter.write(target, field, value).getOrElse { unsafeError ->
+                throw IllegalStateException(
+                    "reflection=${reflectionError.javaClass.simpleName}, unsafe=${unsafeError.javaClass.simpleName}",
+                    unsafeError
+                )
+            }
+            true
         }.onFailure { error ->
             Log.d(TAG, "Optional field replace skipped: ${target.javaClass.name}.$name: ${error.message}")
-        }
+        }.getOrDefault(false)
     }
 
-    private data class AppCompatThemeGuardResult(
+    private data class ActivityThemeResult(
         val applied: Boolean,
-        val themeResourceId: Int = 0
+        val themeResourceId: Int = 0,
+        val themeVerdict: String = "UNKNOWN",
+        val appliedSource: String = "NONE",
+        val appCompatAttrsVerdict: String = "UNKNOWN",
+        val hostAppCompatBridgeApplied: Boolean = false,
+        val hostAppCompatFallbackApplied: Boolean = false,
+        val appCompatAttrsProbe: String = "",
+        val runtimeOwner: String = "UNKNOWN",
+        val activityThemeProbe: String = "",
+        val contextThemeProbe: String = "",
+        val themeFieldPatched: Boolean = false,
+        val baseContextInjectedBeforeTheme: Boolean = false
+    )
+
+    private data class ResolvedActivityTheme(
+        val themeResourceId: Int,
+        val source: String
+    )
+
+    private data class AppCompatAttrsProbe(
+        val verdict: String,
+        val detail: String
     )
 
     private data class ActivityRecordInjectionResult(
@@ -298,6 +596,46 @@ internal object HostedActivityContextInjector {
             }
             current = current.superclass
         }
+        runCatching {
+            return com.multiapp.core.common.findField(type, name)?.apply { isAccessible = true }
+        }.onFailure { error ->
+            Log.d(TAG, "HiddenApiBypass field lookup skipped: ${type.name}.$name: ${error.message}")
+        }
         return null
+    }
+
+    private object UnsafeFieldWriter {
+        private val unsafeClass by lazy(LazyThreadSafetyMode.NONE) { Class.forName("sun.misc.Unsafe") }
+        private val unsafe by lazy(LazyThreadSafetyMode.NONE) {
+            unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
+        }
+        private val objectFieldOffset by lazy(LazyThreadSafetyMode.NONE) {
+            unsafeClass.getDeclaredMethod("objectFieldOffset", java.lang.reflect.Field::class.java)
+        }
+        private val putObject by lazy(LazyThreadSafetyMode.NONE) {
+            unsafeClass.getDeclaredMethod(
+                "putObject",
+                Any::class.java,
+                Long::class.javaPrimitiveType,
+                Any::class.java
+            )
+        }
+        private val putInt by lazy(LazyThreadSafetyMode.NONE) {
+            unsafeClass.getDeclaredMethod(
+                "putInt",
+                Any::class.java,
+                Long::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType
+            )
+        }
+
+        fun write(target: Any, field: java.lang.reflect.Field, value: Any?): Result<Unit> = runCatching {
+            val offset = objectFieldOffset.invoke(unsafe, field) as Long
+            if (field.type == Int::class.javaPrimitiveType) {
+                putInt.invoke(unsafe, target, offset, value as? Int ?: 0)
+            } else {
+                putObject.invoke(unsafe, target, offset, value)
+            }
+        }
     }
 }

@@ -4,12 +4,7 @@ import android.util.Log
 import java.io.File
 
 /**
- * JiaguRuntime — 360 加固壳（libjiagu_vip.so）运行时实现
- *
- * 核心流程：
- * 1. prepareFiles: spoofProcSelf + ShadowHook + FindClass hook + GOT hook
- * 2. loadPackerLibrary: StubApp.load() → 壳 JNI_OnLoad → RegisterNatives
- * 3. installPostLoadHooks: Class.forName 触发 YWLoginManager <clinit> → interface11(59494)
+ * Runtime adapter for 360 Jiagu shells such as libjiagu_vip.so.
  */
 class JiaguRuntime : PackerRuntime {
 
@@ -38,17 +33,18 @@ class JiaguRuntime : PackerRuntime {
 
     override fun prepareFiles(context: PackerRuntimeContext): Boolean {
         val bridge = context.bridge
-
-        // 伪装 /proc/self/cmdline 为原始包名
+        val policy = context.nativeHookPolicy
         val originalPkg = context.originalPackageName
-        if (!originalPkg.isNullOrEmpty()) {
+
+        if (!originalPkg.isNullOrEmpty() && policy.cmdlineSpoof) {
             bridge.spoofProcSelf(android.os.Process.myPid(), originalPkg)
             Log.d(TAG, "prepareFiles: /proc/self spoofed to '$originalPkg'")
+        } else if (!originalPkg.isNullOrEmpty()) {
+            Log.i(TAG, "prepareFiles: /proc/self spoof skipped by policy mode=${policy.mode}")
         }
 
-        // ShadowHook 初始化（必须在 dlopen 之前）
         val nativeBaseDecision = NativeHookPolicyGate.evaluate(
-            policy = context.nativeHookPolicy,
+            policy = policy,
             capability = NativeHookCapability.NATIVE_BASE_HOOKS,
             component = "JiaguRuntime.prepareFiles.initNativeHooks"
         )
@@ -57,43 +53,56 @@ class JiaguRuntime : PackerRuntime {
         }
         val hooksOk = if (nativeBaseDecision.allowed) {
             bridge.initNativeHooks(
-                policy = context.nativeHookPolicy,
+                policy = policy,
                 component = "JiaguRuntime.prepareFiles.initNativeHooks"
             )
         } else {
             false
         }
         Log.d(TAG, "prepareFiles: native hooks initialized: $hooksOk")
+
         val stubPkg = context.stubPackageName
-        if (!stubPkg.isNullOrEmpty() && !originalPkg.isNullOrEmpty()) {
+        if (!stubPkg.isNullOrEmpty() && !originalPkg.isNullOrEmpty() && policy.cmdlineSpoof) {
             bridge.setJiaguPackageSpoof(stubPkg, originalPkg)
             Log.d(TAG, "prepareFiles: jiagu package spoof $stubPkg -> $originalPkg")
-        }
-        val jiaguJniDiagOk = bridge.installJiaguJniDiagHooks()
-        Log.d(TAG, "prepareFiles: Jiagu JNI diag hooks installed: $jiaguJniDiagOk")
-
-        // FindClass hook（壳的 JNI_OnLoad 需要通过 guest ClassLoader 查壳类）
-        val hookReady = bridge.setupFindClassHook(context.guestClassLoader, STUB_APP_CANDIDATES)
-        if (hookReady) {
-            bridge.installFindClassHook()
-            Log.d(TAG, "prepareFiles: FindClass hook installed")
+        } else if (!stubPkg.isNullOrEmpty() && !originalPkg.isNullOrEmpty()) {
+            Log.i(TAG, "prepareFiles: jiagu package spoof skipped by policy mode=${policy.mode}")
         }
 
-        // 完整性校验重定向（壳校验 APK 时重定向到原始 APK）
+        val classLoadDecision = NativeHookPolicyGate.evaluate(
+            policy = policy,
+            capability = NativeHookCapability.CLASS_LOAD_LOGGING,
+            component = "JiaguRuntime.prepareFiles.classLoadDiagnostics"
+        )
+        if (classLoadDecision.allowed) {
+            val jiaguJniDiagOk = bridge.installJiaguJniDiagHooks()
+            Log.d(TAG, "prepareFiles: Jiagu JNI diag hooks installed: $jiaguJniDiagOk")
+            val hookReady = bridge.setupFindClassHook(context.guestClassLoader, STUB_APP_CANDIDATES)
+            if (hookReady) {
+                bridge.installFindClassHook()
+                Log.d(TAG, "prepareFiles: FindClass hook installed")
+            }
+        } else {
+            Log.i(TAG, "prepareFiles: class-load/FindClass diagnostics policy gate ${classLoadDecision.status} ${classLoadDecision.evidence}")
+        }
+
         val modifiedApkPath = context.originApkPath
         val originalApkPath = context.originalApkPath
-        if (modifiedApkPath != null && originalApkPath != null) {
+        if (modifiedApkPath != null && originalApkPath != null && policy.apkOpenRedirect) {
             bridge.setIntegrityRedirect(modifiedApkPath, originalApkPath)
             Log.d(TAG, "prepareFiles: integrity redirect set")
+        } else if (modifiedApkPath != null && originalApkPath != null) {
+            Log.i(TAG, "prepareFiles: integrity redirect skipped by policy mode=${policy.mode}")
         }
 
-        // GOT hook libc.so（过滤 /proc/self/maps）
-        bridge.gotHookLibrary("libc.so")
-        Log.d(TAG, "prepareFiles: GOT hook on libc.so installed")
-
-        // GOT hook 壳相关库
-        arrayOf("libfockrt.so", "libfock.so").forEach { lib ->
-            try { bridge.gotHookLibrary(lib) } catch (_: Throwable) {}
+        if (nativeBaseDecision.allowed) {
+            bridge.gotHookLibrary("libc.so")
+            Log.d(TAG, "prepareFiles: GOT hook on libc.so installed")
+            arrayOf("libfockrt.so", "libfock.so").forEach { lib ->
+                try { bridge.gotHookLibrary(lib) } catch (_: Throwable) {}
+            }
+        } else {
+            Log.i(TAG, "prepareFiles: GOT hooks skipped by policy")
         }
 
         return true
@@ -112,7 +121,6 @@ class JiaguRuntime : PackerRuntime {
             return PackerLoadResult(false, false, emptyList(), diagnostics)
         }
 
-        // 调用 StubApp.load() — 壳的 JNI_OnLoad 在此期间执行
         try {
             val loadMethod = callerClass.declaredMethods.firstOrNull { m ->
                 m.name == "load" && m.parameterTypes.isEmpty() &&
@@ -139,11 +147,15 @@ class JiaguRuntime : PackerRuntime {
                         Log.w(TAG, "loadPackerLibrary: StubApp binding report after failure failed: ${reportError.message}")
                     }
                 }
-                // 补装 GOT hook
-                arrayOf(JIAGU_LIB, "libfockrt.so", "libfock.so").forEach { lib ->
-                    try { bridge.gotHookLibrary(lib) } catch (_: Throwable) {}
+
+                if (context.nativeHookPolicy.isEnabled(NativeHookCapability.NATIVE_BASE_HOOKS)) {
+                    arrayOf(JIAGU_LIB, "libfockrt.so", "libfock.so").forEach { lib ->
+                        try { bridge.gotHookLibrary(lib) } catch (_: Throwable) {}
+                    }
+                } else {
+                    Log.i(TAG, "loadPackerLibrary: post-load GOT hooks skipped by policy")
                 }
-                // 加载 libfockrt.so
+
                 try {
                     val originLibDir = context.originLibDir
                     if (originLibDir != null) {
@@ -164,30 +176,38 @@ class JiaguRuntime : PackerRuntime {
             diagnostics.add("StubApp.load() failed: ${e.message}")
         }
 
-        // ── Collect RegisterNatives evidence after StubApp.load() ──
         val evidenceList = mutableListOf<RegisterNativesEvidence>()
         try {
             val evidence = bridge.getStubAppRegisterNativesEvidence()
             if (evidence != null) {
                 evidenceList.add(evidence)
-                Log.d(TAG, "loadPackerLibrary: RegisterNatives evidence collected: " +
-                    "class=${evidence.className} count=${evidence.methodCount} " +
-                    "originalShellPath=${evidence.originalShellPath}")
+                Log.d(
+                    TAG,
+                    "loadPackerLibrary: RegisterNatives evidence collected: " +
+                        "class=${evidence.className} count=${evidence.methodCount} " +
+                        "originalShellPath=${evidence.originalShellPath}"
+                )
             }
         } catch (e: Throwable) {
             Log.w(TAG, "loadPackerLibrary: evidence collection failed: ${e.message}")
         }
 
-        return PackerLoadResult(jiaguLoaded, stubAppLoadSucceeded,
-            loadedLibPaths = emptyList(), diagnostics = diagnostics,
-            registerNativesEvidence = evidenceList)
+        return PackerLoadResult(
+            jiaguLoaded,
+            stubAppLoadSucceeded,
+            loadedLibPaths = emptyList(),
+            diagnostics = diagnostics,
+            registerNativesEvidence = evidenceList
+        )
     }
 
     override fun verifyRegisterNatives(guestCl: ClassLoader): Boolean {
         return try {
             val cls = resolveStubAppClass(guestCl) ?: return false
             cls.declaredMethods.any { it.name == "interface20" && it.parameterTypes.isEmpty() }
-        } catch (_: Throwable) { false }
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     override fun installPostLoadHooks(context: PackerRuntimeContext, loadResult: PackerLoadResult) {
@@ -219,7 +239,6 @@ class JiaguRuntime : PackerRuntime {
             return
         }
 
-        // QQ Reader 专项：壳加载后 dump 解密后的库（包含 BSS 段）
         val isQqReader = context.originalPackageName == "com.qq.reader" ||
             context.cloneProfile == "QQ_READER_SPECIAL"
         if (isQqReader && loadResult.jiaguLoaded) {
@@ -239,7 +258,6 @@ class JiaguRuntime : PackerRuntime {
             }
         }
 
-        // 注册缺失的 native stubs
         if (stubsDecision.allowed) {
             try { bridge.registerAllMissingNativeMethods(guestCl) } catch (_: Throwable) {}
             if (isQqReader && loadResult.jiaguLoaded) {
@@ -252,12 +270,8 @@ class JiaguRuntime : PackerRuntime {
             Log.i(TAG, "installPostLoadHooks: business native stubs policy gate ${stubsDecision.status} ${stubsDecision.evidence}")
         }
 
-        // LSPlant 初始化
         hookEngine.initLsplant(guestCl)
 
-        // QQ Reader's interface20 probes ClassLoader.loadClass during shell startup.
-        // Keep the Java-layer packer bypass out of this profile so LSPlant loadClass
-        // frames do not perturb the shell while the token map is being populated.
         if (isQqReader) {
             Log.w(TAG, "installPostLoadHooks: skipping AntiDetectionEngine Java packer bypass for QQ Reader")
         } else {
@@ -359,6 +373,8 @@ class JiaguRuntime : PackerRuntime {
             val clazz = Class.forName("android.os.SystemProperties")
             clazz.getDeclaredMethod("get", String::class.java, String::class.java)
                 .invoke(null, name, defaultValue) as String
-        } catch (_: Throwable) { defaultValue }
+        } catch (_: Throwable) {
+            defaultValue
+        }
     }
 }

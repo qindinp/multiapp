@@ -1,6 +1,7 @@
 package com.multiapp.core.loader
 
 import android.app.Application
+import dalvik.system.PathClassLoader
 import com.multiapp.core.hook.NativeDiagnosticsConfig
 import com.multiapp.core.hook.NativeDiagnosticsEvidence
 import com.multiapp.core.hook.NativeDiagnosticsProfile
@@ -13,7 +14,6 @@ import com.multiapp.core.model.virtual.ResolvedPackage
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageResolver
-import java.io.File
 
 /**
  * Result of a hosted runtime bootstrap attempt.
@@ -72,9 +72,8 @@ class HostedRuntimeBootstrap(
     private val instanceManager: InstanceManager,
     private val installRecordStore: InstallRecordStore,
     private val hostContext: android.content.Context? = null,
-    private val classLoaderFactory: (apkPath: String, nativeLibDir: String?) -> ClassLoader = { apk, _ ->
-        dalvik.system.PathClassLoader(apk, ClassLoader.getSystemClassLoader())
-    },
+    private val classLoaderFactory: (apkPath: String, nativeLibDir: String?) -> ClassLoader =
+        ::createDefaultGuestClassLoader,
     private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String? = { cl, path ->
         resolveApplicationClassNameFromManifest(hostContext, path)
     },
@@ -150,7 +149,6 @@ class HostedRuntimeBootstrap(
         }
 
         val nativeLibrariesOutput = NativeLibrariesStage(
-            nativeLibraryDirResolver = { dataRoot -> resolveNativeLibraryDir(dataRoot) },
             clock = clock
         ).execute(originApkOutput.context)
         stageResults.add(nativeLibrariesOutput.result)
@@ -286,9 +284,10 @@ class HostedRuntimeBootstrap(
     }
 
     internal fun resolveNativeLibraryDir(dataRoot: String?): String? {
-        if (dataRoot.isNullOrBlank()) return null
-        val libDir = File(dataRoot, "lib")
-        return libDir.takeIf { it.isDirectory }?.absolutePath
+        return NativeLibraryPaths.resolveAndExtract(
+            originApkPath = null,
+            dataRoot = dataRoot
+        ).nativeLibraryDir
     }
 
     internal fun resolvePackageMetadata(originApkPath: String): ResolvedPackage? = runCatching {
@@ -394,6 +393,91 @@ class HostedRuntimeBootstrap(
     companion object {
         private const val ACTION_MAIN = "android.intent.action.MAIN"
         private const val CATEGORY_LAUNCHER = "android.intent.category.LAUNCHER"
+
+        internal fun createDefaultGuestClassLoader(
+            apkPath: String,
+            nativeLibDir: String?
+        ): ClassLoader {
+            val librarySearchPath = NativeLibraryPaths.buildClassLoaderSearchPath(apkPath, nativeLibDir)
+            val classLoader = if (librarySearchPath.isNullOrBlank()) {
+                PathClassLoader(apkPath, ClassLoader.getSystemClassLoader())
+            } else {
+                PathClassLoader(apkPath, librarySearchPath, ClassLoader.getSystemClassLoader())
+            }
+            initializeSharedLibraryFields(classLoader)
+            if (!librarySearchPath.isNullOrBlank()) {
+                createClassloaderNamespace(classLoader, apkPath, librarySearchPath)
+            }
+            return classLoader
+        }
+
+        private fun initializeSharedLibraryFields(classLoader: ClassLoader) {
+            runCatching {
+                val baseDexClassLoaderClass = Class.forName("dalvik.system.BaseDexClassLoader")
+                val unsafeClass = Class.forName("sun.misc.Unsafe")
+                val theUnsafeField = unsafeClass.getDeclaredField("theUnsafe").apply {
+                    isAccessible = true
+                }
+                val unsafe = theUnsafeField.get(null)
+                val objectFieldOffset = unsafeClass.getDeclaredMethod(
+                    "objectFieldOffset",
+                    java.lang.reflect.Field::class.java
+                )
+                val getObject = unsafeClass.getDeclaredMethod(
+                    "getObject",
+                    Any::class.java,
+                    Long::class.javaPrimitiveType
+                )
+                val putObject = unsafeClass.getDeclaredMethod(
+                    "putObject",
+                    Any::class.java,
+                    Long::class.javaPrimitiveType,
+                    Any::class.java
+                )
+                val emptyClassLoaderArray = emptyArray<ClassLoader>()
+                listOf("sharedLibraries", "sharedLibrariesLoadedAfterApp").forEach { fieldName ->
+                    runCatching {
+                        val field = baseDexClassLoaderClass.getDeclaredField(fieldName)
+                        val offset = objectFieldOffset.invoke(unsafe, field) as Long
+                        if (getObject.invoke(unsafe, classLoader, offset) == null) {
+                            putObject.invoke(unsafe, classLoader, offset, emptyClassLoaderArray)
+                        }
+                    }
+                }
+            }
+        }
+
+        private fun createClassloaderNamespace(
+            classLoader: ClassLoader,
+            apkPath: String,
+            librarySearchPath: String
+        ) {
+            runCatching {
+                val factoryClass = Class.forName("com.android.internal.os.ClassLoaderFactory")
+                val createMethod = factoryClass.getDeclaredMethod(
+                    "createClassloaderNamespace",
+                    ClassLoader::class.java,
+                    Int::class.javaPrimitiveType,
+                    String::class.java,
+                    String::class.java,
+                    Boolean::class.javaPrimitiveType,
+                    String::class.java,
+                    String::class.java
+                ).apply {
+                    isAccessible = true
+                }
+                createMethod.invoke(
+                    null,
+                    classLoader,
+                    android.os.Build.VERSION.SDK_INT,
+                    librarySearchPath,
+                    "/data:/mnt/expand",
+                    false,
+                    apkPath,
+                    ""
+                )
+            }
+        }
 
         /**
          * Resolve Application class name from an APK's manifest using PackageManager.

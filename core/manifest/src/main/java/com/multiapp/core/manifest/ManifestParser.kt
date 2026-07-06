@@ -1,6 +1,8 @@
 package com.multiapp.core.manifest
 
 import net.dongliu.apk.parser.ApkFile
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import org.w3c.dom.Element
 import org.w3c.dom.NodeList
 import java.io.File
@@ -62,7 +64,8 @@ class ManifestParser @Inject constructor(
         val allowTaskReparenting: Boolean = false,
         val clearTaskOnLaunch: Boolean = false,
         val finishOnTaskLaunch: Boolean = false,
-        val enabled: Boolean = true
+        val enabled: Boolean = true,
+        val targetActivityName: String? = null
     )
 
     data class ProviderInfo(
@@ -209,7 +212,7 @@ class ManifestParser @Inject constructor(
             android.util.Log.w("ManifestParser", "apk-parser failed, falling back to PackageManager", e)
             return parseViaPackageManager(apkFile)
         }
-        return parseFromXml(manifestXml)
+        return mergePackageInfoThemeIds(apkFile, parseFromXml(manifestXml))
     }
 
     /**
@@ -261,6 +264,7 @@ class ManifestParser @Inject constructor(
                 exported = act.exported,
                 process = act.processName?.takeIf { it.isNotEmpty() },
                 intentFilters = resolvedFilters,
+                themeId = act.theme,
                 launchMode = convertLaunchMode(act.launchMode),
                 configChanges = convertConfigChanges(act.configChanges),
                 screenOrientation = convertScreenOrientation(act.screenOrientation),
@@ -272,7 +276,8 @@ class ManifestParser @Inject constructor(
                 allowTaskReparenting = (act.flags and 0x0020) != 0,
                 clearTaskOnLaunch = (act.flags and 0x0004) != 0,
                 finishOnTaskLaunch = (act.flags and 0x0002) != 0,
-                enabled = act.enabled
+                enabled = act.enabled,
+                targetActivityName = act.targetActivity?.takeIf { it.isNotEmpty() }
             )
         }
 
@@ -335,19 +340,66 @@ class ManifestParser @Inject constructor(
         val minSdk = appInfo?.minSdkVersion ?: 28
         val targetSdk = appInfo?.targetSdkVersion ?: 36
 
-        return ParsedManifest(
-            packageName = info.packageName,
-            applicationClass = applicationClass,
-            applicationLabel = applicationLabel,
-            activities = activities,
-            services = services,
-            receivers = receivers,
-            providers = providers,
-            permissions = permissions,
-            minSdkVersion = minSdk,
-            targetSdkVersion = targetSdk,
-            providerMetaData = providerMetaDataMap
+        return applyPackageInfoThemeIds(
+            manifest = ParsedManifest(
+                packageName = info.packageName,
+                applicationClass = applicationClass,
+                applicationLabel = applicationLabel,
+                activities = activities,
+                services = services,
+                receivers = receivers,
+                providers = providers,
+                permissions = permissions,
+                minSdkVersion = minSdk,
+                targetSdkVersion = targetSdk,
+                providerMetaData = providerMetaDataMap
+            ),
+            packageInfo = info
         )
+    }
+
+    private fun mergePackageInfoThemeIds(
+        apkFile: File,
+        manifest: ParsedManifest
+    ): ParsedManifest {
+        val flags = PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA
+        val info = runCatching {
+            context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, flags)
+        }.getOrNull() ?: return manifest
+        return applyPackageInfoThemeIds(manifest, info)
+    }
+
+    internal fun applyPackageInfoThemeIds(
+        manifest: ParsedManifest,
+        packageInfo: PackageInfo
+    ): ParsedManifest {
+        val applicationThemeId = packageInfo.applicationInfo?.theme ?: 0
+        val activityThemeByName = (packageInfo.activities ?: emptyArray())
+            .flatMap { activityInfo ->
+                listOfNotNull(
+                    activityInfo.name?.takeIf { it.isNotBlank() },
+                    activityInfo.targetActivity?.takeIf { it.isNotBlank() }
+                ).map { name -> normalizeComponentName(manifest.packageName, name) to activityInfo.theme }
+            }
+            .toMap()
+        return manifest.copy(
+            applicationThemeId = applicationThemeId,
+            activities = manifest.activities.map { component ->
+                val componentName = normalizeComponentName(manifest.packageName, component.name)
+                val targetName = component.targetActivityName
+                    ?.let { normalizeComponentName(manifest.packageName, it) }
+                val resolvedTheme = listOfNotNull(componentName, targetName)
+                    .firstNotNullOfOrNull { name -> activityThemeByName[name]?.takeIf { it != 0 } }
+                    ?: component.themeId
+                component.copy(themeId = resolvedTheme)
+            }
+        )
+    }
+
+    private fun normalizeComponentName(packageName: String, name: String): String = when {
+        name.startsWith(".") -> packageName + name
+        '.' !in name -> "$packageName.$name"
+        else -> name
     }
 
     /**
@@ -522,6 +574,11 @@ class ManifestParser @Inject constructor(
         forEachChild(applicationEl, tagName) { el ->
             val name = el.getAttributeNS(ANDROID_NS, "name")
             if (name.isNotEmpty()) {
+                val targetActivityName = if (tagName == "activity-alias") {
+                    el.getAttributeNS(ANDROID_NS, "targetActivity").takeIf { it.isNotEmpty() }
+                } else {
+                    null
+                }
                 components.add(
                     ComponentInfo(
                         name = name,
@@ -544,7 +601,8 @@ class ManifestParser @Inject constructor(
                         finishOnTaskLaunch = el.getAttributeNS(ANDROID_NS, "finishOnTaskLaunch") == "true",
                         enabled = el.getAttributeNS(ANDROID_NS, "enabled").let {
                             if (it.isEmpty()) true else it == "true"
-                        }
+                        },
+                        targetActivityName = targetActivityName
                     )
                 )
             }

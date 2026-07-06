@@ -1,6 +1,7 @@
 package com.multiapp.core.loader
 
 import com.multiapp.core.model.installer.InstallRecord
+import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedPackage
 import com.multiapp.core.model.virtual.VirtualPackageResolver
 import org.junit.jupiter.api.Test
@@ -77,6 +78,37 @@ class LauncherActivityStageTest {
     }
 
     @Test
+    fun `execute maps activity alias launcher to loadable target class`() {
+        val stage = LauncherActivityStage(
+            packageResolver = null,
+            launcherActivityResolver = { null },
+            clock = fixedClock(350L, 361L)
+        )
+
+        val output = stage.execute(
+            stageInput(
+                resolvedPackage = resolvedPackage(
+                    launcherActivityName = "com.example.alias.launcher4",
+                    activities = listOf(
+                        ResolvedComponent(
+                            name = "com.example.alias.launcher4",
+                            targetActivityName = "java.lang.String"
+                        )
+                    )
+                )
+            )
+        )
+
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals("java.lang.String", output.context.launcherActivityClassName)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("java.lang.String", evidence["launcherActivityClass"])
+        assertEquals("com.example.alias.launcher4", evidence["requestedLauncherActivityClass"])
+        assertEquals("java.lang.String", evidence["aliasTargetActivityClass"])
+        assertEquals("true", evidence["loadable"])
+    }
+
+    @Test
     fun `execute fails non terminal when launcher class is not loadable`() {
         val stage = LauncherActivityStage(
             packageResolver = null,
@@ -138,13 +170,17 @@ class LauncherActivityStageTest {
         installTimeMs = 500L
     )
 
-    private fun resolvedPackage(launcherActivityName: String?) = ResolvedPackage(
+    private fun resolvedPackage(
+        launcherActivityName: String?,
+        activities: List<ResolvedComponent> = emptyList()
+    ) = ResolvedPackage(
         packageName = "com.example.app",
         versionCode = 1L,
         versionName = "1.0",
         targetSdk = 35,
         minSdk = 28,
-        launcherActivityName = launcherActivityName
+        launcherActivityName = launcherActivityName,
+        activities = activities
     )
 
     private fun fixedClock(vararg values: Long): () -> Long {

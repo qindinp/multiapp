@@ -166,8 +166,23 @@ class HostedContainerPr10StorageEvidenceTest {
             instrumentation.waitForIdleSync()
             waitForPr10Evidence(instance.instanceId)
         } finally {
-            scenario.close()
+            scenario.safeClose()
         }
+    }
+
+    private fun ActivityScenario<*>.safeClose() {
+        try {
+            close()
+        } catch (throwable: Throwable) {
+            if (!throwable.isAndroidXCreatedStageCleanupNpe()) throw throwable
+        }
+    }
+
+    private fun Throwable.isAndroidXCreatedStageCleanupNpe(): Boolean {
+        return this is NullPointerException &&
+            message.orEmpty().contains("Current state was null unexpectedly") &&
+            message.orEmpty().contains("Last stage = CREATED") &&
+            stackTrace.any { it.className == "androidx.test.core.app.ActivityScenario" }
     }
 
     private fun assertPr10StorageEvidence(instance: VirtualInstanceRecord): Map<String, File> {

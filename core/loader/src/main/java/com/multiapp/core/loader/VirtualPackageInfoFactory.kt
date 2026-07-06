@@ -59,6 +59,7 @@ internal object VirtualPackageInfoFactory {
             configChanges = toActivityInfoConfigChanges(component.configChanges)
             permission = component.permission
             metaData = component.metaData.toBundleOrNull()
+            targetActivity = component.targetActivityName
         }
 
     fun receiverInfo(snapshot: VirtualPackageSnapshot, component: ResolvedComponent): ActivityInfo =
@@ -95,7 +96,9 @@ internal object VirtualPackageInfoFactory {
 
     fun launcherResolveInfo(snapshot: VirtualPackageSnapshot): ResolveInfo? {
         val launcherName = snapshot.launcherActivityName ?: return null
-        val component = snapshot.activities.firstOrNull { it.name == launcherName }
+        val component = snapshot.activities.firstOrNull {
+            it.name == launcherName || it.targetActivityName == launcherName
+        }
             ?: ResolvedComponent(
                 name = launcherName,
                 exported = true,

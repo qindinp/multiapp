@@ -5,6 +5,7 @@ import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.loader.toSummary
+import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
@@ -162,6 +163,40 @@ class ContainerActivityTest {
 
         assertEquals(dataRoot.absolutePath, config.dataDir)
         assertEquals(libDir.absolutePath, config.nativeLibraryDir)
+    }
+
+    @Test
+    @DisplayName("Virtual context config prefers package snapshot nativeLibraryDir")
+    fun buildVirtualContextConfigPrefersSnapshotNativeLibraryDir(@TempDir tempDir: File) {
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        File(dataRoot, "lib").apply { mkdirs() }
+        val abiLibDir = File(dataRoot, "lib/arm64-v8a").apply { mkdirs() }
+        val apkPath = File(tempDir, "base.apk").absolutePath
+
+        val config = ContainerActivity.buildVirtualContextConfig(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.abc123",
+            originApkPath = apkPath,
+            dataRoot = dataRoot.absolutePath,
+            fallbackDataRoot = File(tempDir, "fallback"),
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            packageSnapshot = VirtualPackageSnapshot(
+                instanceId = "inst-001",
+                originPackageName = "com.example.app",
+                virtualPackageName = "com.multiapp.instance.abc123",
+                applicationLabel = "Example",
+                versionCode = 1L,
+                versionName = "1.0",
+                targetSdk = 35,
+                minSdk = 28,
+                sourceDir = apkPath,
+                dataDir = dataRoot.absolutePath,
+                nativeLibraryDir = abiLibDir.absolutePath
+            )
+        )
+
+        assertEquals(abiLibDir.absolutePath, config.nativeLibraryDir)
     }
 
     @Test

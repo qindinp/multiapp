@@ -173,7 +173,8 @@ data class VirtualPackageManagerGlobalInstallResult(
                 "queryIntentContentProviders,getInstalledPackages,getInstalledApplications,checkPermission," +
                 "getPackagesHoldingPermissions,getPackageUid,getPackagesForUid,getNameForUid," +
                 "queryContentProviders,isInstantApp"
-        private const val DEFERRED_TO_LOCAL_WRAPPER_METHODS = ""
+        private const val DEFERRED_TO_LOCAL_WRAPPER_METHODS =
+            "getPermissionControllerPackageName,buildRequestPermissionsIntent,shouldShowRequestPermissionRationale"
         private const val UID_AGGREGATE_VIRTUALIZATION_MODE = "merge-packages-preserve-name"
     }
 }

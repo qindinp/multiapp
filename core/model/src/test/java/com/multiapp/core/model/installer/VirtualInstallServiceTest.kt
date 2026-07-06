@@ -114,6 +114,48 @@ class VirtualInstallServiceTest {
     }
 
     @Test
+    fun `ensureInstallRecord enriches picker metadata from resolver`() {
+        val originApk = File(tempDir, "origin-resolved.apk").apply { writeText("fake apk") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "installs_resolved"))
+        val service = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = File(tempDir, "artifacts_resolved"),
+            metadataResolver = InstallMetadataResolver { _, _ ->
+                InstallMetadata(
+                    permissions = listOf("android.permission.INTERNET"),
+                    activities = listOf(ComponentInfo("com.example.resolved.MainActivity", exported = true)),
+                    services = listOf(ComponentInfo("com.example.resolved.SyncService")),
+                    receivers = listOf(ComponentInfo("com.example.resolved.BootReceiver")),
+                    providers = listOf(ComponentInfo("com.example.resolved.DataProvider"))
+                )
+            }
+        )
+        val app = VirtualApp(
+            packageName = "com.example.resolved",
+            appName = "Resolved App",
+            versionName = "1.0",
+            versionCode = 1L,
+            apkPath = originApk.absolutePath,
+            instanceId = "",
+            minSdkVersion = 28,
+            targetSdkVersion = 36
+        )
+
+        val importResult = service.ensureInstallRecord(app)
+
+        assertTrue(importResult.isSuccess)
+        val record = installStore.load(app.packageName)!!
+        assertEquals(listOf("android.permission.INTERNET"), record.permissions)
+        assertEquals(
+            listOf(ComponentInfo("com.example.resolved.MainActivity", exported = true)),
+            record.activities
+        )
+        assertEquals(listOf(ComponentInfo("com.example.resolved.SyncService")), record.services)
+        assertEquals(listOf(ComponentInfo("com.example.resolved.BootReceiver")), record.receivers)
+        assertEquals(listOf(ComponentInfo("com.example.resolved.DataProvider")), record.providers)
+    }
+
+    @Test
     fun `importFromMetadata rejects unsafe packageName before store lookup`() {
         val originApk = File(tempDir, "origin.apk").apply { writeText("fake apk") }
         var loadCalled = false

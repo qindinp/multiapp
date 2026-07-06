@@ -154,13 +154,8 @@ open class VirtualContextWrapper(
         )
     }
 
-    private val guestTheme: Resources.Theme by lazy(LazyThreadSafetyMode.NONE) {
-        guestResources.newTheme().apply {
-            runCatching { base.theme }.getOrNull()?.let { baseTheme ->
-                runCatching { setTo(baseTheme) }
-            }
-        }
-    }
+    private var guestThemeResId: Int = config.packageSnapshot?.themeId ?: 0
+    private var guestTheme: Resources.Theme? = null
 
     private val defaultAmsDispatcher: VirtualAmsComponentDispatcher by lazy(LazyThreadSafetyMode.NONE) {
         DefaultVirtualAmsComponentDispatcher(
@@ -590,7 +585,24 @@ open class VirtualContextWrapper(
 
     override fun getAssets(): AssetManager = resources.assets
 
-    override fun getTheme(): Resources.Theme = guestTheme
+    override fun setTheme(resid: Int) {
+        guestThemeResId = resid
+        guestTheme = null
+    }
+
+    override fun getTheme(): Resources.Theme {
+        val existing = guestTheme
+        if (existing != null) return existing
+        return guestResources.newTheme().apply {
+            runCatching { base.theme }.getOrNull()?.let { baseTheme ->
+                runCatching { setTo(baseTheme) }
+            }
+            if (guestThemeResId != 0) {
+                applyStyle(guestThemeResId, true)
+            }
+            guestTheme = this
+        }
+    }
 
     override fun getDataDir(): File = recordStorage(StorageOperation.DATA_DIR, null, File(config.dataDir).apply { mkdirs() })
 

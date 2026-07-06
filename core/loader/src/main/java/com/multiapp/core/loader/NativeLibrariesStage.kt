@@ -1,9 +1,8 @@
 package com.multiapp.core.loader
 
-import java.io.File
-
-class NativeLibrariesStage(
-    private val nativeLibraryDirResolver: (String?) -> String? = ::resolveInstanceLibDir,
+internal class NativeLibrariesStage(
+    private val nativeLibraryResolver: (originApkPath: String?, dataRoot: String?) -> NativeLibraryResolution =
+        NativeLibraryPaths::resolveAndExtract,
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     fun execute(input: BootstrapStageInput): BootstrapStageOutput {
@@ -20,7 +19,24 @@ class NativeLibrariesStage(
             )
         }
 
-        val nativeLibraryDir = nativeLibraryDirResolver(instance.dataRoot)
+        val resolution = runCatching {
+            nativeLibraryResolver(input.originApkPath, instance.dataRoot)
+        }.getOrElse { error ->
+            return BootstrapStageOutput(
+                context = input.copy(nativeLibraryDir = null),
+                result = BootstrapResult.failed(
+                    stage = RuntimeStage.NATIVE_LIBS,
+                    message = "Native library resolution failed: ${error.message}",
+                    error = error,
+                    evidence = listOf(
+                        BootstrapEvidence("originApkPath", input.originApkPath.orEmpty()),
+                        BootstrapEvidence("dataRoot", instance.dataRoot)
+                    ),
+                    durationMs = clock() - startMs
+                )
+            )
+        }
+        val nativeLibraryDir = resolution.nativeLibraryDir
         val durationMs = clock() - startMs
         if (nativeLibraryDir.isNullOrBlank()) {
             return BootstrapStageOutput(
@@ -28,10 +44,7 @@ class NativeLibrariesStage(
                 result = BootstrapResult.skipped(
                     stage = RuntimeStage.NATIVE_LIBS,
                     message = "Instance native library directory not present",
-                    evidence = nativeEvidence(
-                        nativeLibraryDir = "",
-                        reason = "instance lib dir not present"
-                    )
+                    evidence = nativeEvidence(resolution)
                 ).copy(durationMs = durationMs)
             )
         }
@@ -41,33 +54,25 @@ class NativeLibrariesStage(
             result = BootstrapResult.success(
                 stage = RuntimeStage.NATIVE_LIBS,
                 message = "Native library directory resolved: $nativeLibraryDir",
-                evidence = nativeEvidence(nativeLibraryDir = nativeLibraryDir),
+                evidence = nativeEvidence(resolution),
                 durationMs = durationMs
             )
         )
     }
 
-    private fun nativeEvidence(
-        nativeLibraryDir: String,
-        reason: String? = null
-    ): List<BootstrapEvidence> {
-        val evidence = listOf(
-            BootstrapEvidence("nativeLibraryDir", nativeLibraryDir),
-            BootstrapEvidence("nativeLibrarySource", "INSTANCE_DATA_ROOT_LIB"),
-            BootstrapEvidence("nativeLibrariesExtraction", "DEFERRED")
+    private fun nativeEvidence(resolution: NativeLibraryResolution): List<BootstrapEvidence> {
+        val evidence = mutableListOf(
+            BootstrapEvidence("nativeLibraryDir", resolution.nativeLibraryDir.orEmpty()),
+            BootstrapEvidence("nativeLibraryRoot", resolution.nativeLibraryRoot.orEmpty()),
+            BootstrapEvidence("nativeLibrarySource", resolution.source),
+            BootstrapEvidence("nativeLibrariesExtraction", resolution.extractionStatus),
+            BootstrapEvidence("nativeLibrarySelectedAbi", resolution.selectedAbi.orEmpty()),
+            BootstrapEvidence("nativeLibraryAvailableAbis", resolution.availableAbis.joinToString(",")),
+            BootstrapEvidence("nativeLibraryCount", resolution.libraries.size.toString()),
+            BootstrapEvidence("nativeLibrariesCopiedCount", resolution.copiedCount.toString()),
+            BootstrapEvidence("nativeLibraries", resolution.libraries.joinToString(","))
         )
-        return if (reason == null) {
-            evidence
-        } else {
-            evidence + BootstrapEvidence("reason", reason)
-        }
-    }
-
-    companion object {
-        private fun resolveInstanceLibDir(dataRoot: String?): String? {
-            if (dataRoot.isNullOrBlank()) return null
-            val libDir = File(dataRoot, "lib")
-            return libDir.takeIf { it.isDirectory }?.absolutePath
-        }
+        resolution.reason?.let { evidence += BootstrapEvidence("reason", it) }
+        return evidence
     }
 }

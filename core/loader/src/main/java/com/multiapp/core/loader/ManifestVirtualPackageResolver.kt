@@ -4,6 +4,7 @@ import android.content.Context
 import com.multiapp.core.manifest.ComponentExtractor
 import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.ResolvedPackage
 import com.multiapp.core.model.virtual.VirtualPackageResolver
 import java.io.File
@@ -34,7 +35,7 @@ class ManifestVirtualPackageResolver(
                 themeId = manifest.applicationThemeId,
                 launcherActivityName = normalizeComponentName(
                     manifest.packageName,
-                    launcher?.name
+                    launcher?.targetActivityName ?: launcher?.name
                 ),
                 activities = manifest.activities.mapNotNull { component ->
                     normalizeComponentName(manifest.packageName, component.name)?.let { name ->
@@ -50,7 +51,17 @@ class ManifestVirtualPackageResolver(
                             themeId = component.themeId,
                             screenOrientation = component.screenOrientation,
                             configChanges = component.configChanges,
-                            permission = component.permission
+                            permission = component.permission,
+                            resolvedIntentFilters = component.intentFilters.map { filter ->
+                                ResolvedIntentFilter(
+                                    actions = filter.actions,
+                                    categories = filter.categories
+                                )
+                            },
+                            targetActivityName = normalizeComponentName(
+                                manifest.packageName,
+                                component.targetActivityName
+                            )
                         )
                     }
                 },

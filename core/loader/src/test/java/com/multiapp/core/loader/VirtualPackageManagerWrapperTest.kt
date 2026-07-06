@@ -1,7 +1,9 @@
 package com.multiapp.core.loader
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
@@ -66,6 +68,32 @@ class VirtualPackageManagerWrapperTest {
             pm.queryContentProviders("com.test.minimal:probe", runtimeUid, 0).map { it.name }
         )
         assertTrue(pm.queryContentProviders("com.other", runtimeUid, 0).isEmpty())
+    }
+
+    @Test
+    fun `permission controller runtime methods delegate or fall back without abstract PackageManager crash`() {
+        val base = mockk<PackageManager>(relaxed = true)
+        every { base.resolveActivity(any(), any<Int>()) } returns ResolveInfo().apply {
+            activityInfo = ActivityInfo().apply { packageName = "com.android.permissioncontroller" }
+        }
+        val pm = VirtualPackageManagerWrapper(base, snapshot())
+
+        val controller = pm.javaClass
+            .getMethod("getPermissionControllerPackageName")
+            .invoke(pm)
+        val requestIntentMethod = pm.javaClass
+            .getMethod("buildRequestPermissionsIntent", Array<String>::class.java)
+        val rationale = pm.javaClass
+            .getMethod("shouldShowRequestPermissionRationale", String::class.java)
+            .invoke(pm, "android.permission.BLUETOOTH_CONNECT")
+        val rationaleWithDeviceId = pm.javaClass
+            .getMethod("shouldShowRequestPermissionRationale", String::class.java, Integer.TYPE)
+            .invoke(pm, "android.permission.BLUETOOTH_CONNECT", 0)
+
+        assertEquals("com.android.permissioncontroller", controller)
+        assertNotNull(requestIntentMethod)
+        assertEquals(false, rationale)
+        assertEquals(false, rationaleWithDeviceId)
     }
 
     private fun snapshot() = VirtualPackageSnapshot(
