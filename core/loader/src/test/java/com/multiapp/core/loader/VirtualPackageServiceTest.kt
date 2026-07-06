@@ -11,6 +11,7 @@ import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -23,6 +24,7 @@ class VirtualPackageServiceTest {
         assertEquals("com.test.minimal", service.getPackageInfo("com.test.minimal")?.packageName)
         assertEquals("com.test.minimal", service.getPackageInfo("com.multiapp.instance.abc")?.packageName)
         assertEquals("MinimalTest", service.getApplicationInfo("com.test.minimal")?.nonLocalizedLabel)
+        assertNotNull(service.getApplicationInfo("com.multiapp.instance.abc")?.metaData)
         assertNull(service.getPackageInfo("com.other"))
     }
 

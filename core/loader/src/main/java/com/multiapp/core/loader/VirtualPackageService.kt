@@ -29,6 +29,16 @@ class VirtualPackageService(
     fun getApplicationInfo(packageName: String): ApplicationInfo? =
         if (snapshot.matchesPackageName(packageName)) VirtualPackageInfoFactory.applicationInfo(snapshot) else null
 
+    fun getApplicationInfoForResources(packageName: String): ApplicationInfo? =
+        getApplicationInfo(packageName)
+
+    fun getApplicationInfoForResources(appInfo: ApplicationInfo): ApplicationInfo? =
+        if (snapshot.matchesPackageName(appInfo.packageName)) {
+            VirtualPackageInfoFactory.applicationInfo(snapshot)
+        } else {
+            null
+        }
+
     fun getActivityInfo(component: ComponentName): ActivityInfo? =
         VirtualPackageInfoFactory.findActivity(snapshot, component)
 

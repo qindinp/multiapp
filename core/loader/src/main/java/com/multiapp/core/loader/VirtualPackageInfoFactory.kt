@@ -28,7 +28,7 @@ internal object VirtualPackageInfoFactory {
         processName = snapshot.processName
         taskAffinity = snapshot.taskAffinity
         theme = snapshot.themeId
-        metaData = snapshot.metaData.toBundleOrNull()
+        metaData = snapshot.metaData.toBundle()
         enabled = true
     }
 
@@ -58,7 +58,7 @@ internal object VirtualPackageInfoFactory {
             screenOrientation = toActivityInfoScreenOrientation(component.screenOrientation)
             configChanges = toActivityInfoConfigChanges(component.configChanges)
             permission = component.permission
-            metaData = component.metaData.toBundleOrNull()
+            metaData = component.metaData.toBundle()
             targetActivity = component.targetActivityName
         }
 
@@ -74,7 +74,7 @@ internal object VirtualPackageInfoFactory {
             enabled = true
             processName = component.processName
             permission = component.permission
-            metaData = component.metaData.toBundleOrNull()
+            metaData = component.metaData.toBundle()
         }
 
     fun providerInfo(snapshot: VirtualPackageSnapshot, component: ResolvedComponent): ProviderInfo? {
@@ -90,7 +90,7 @@ internal object VirtualPackageInfoFactory {
             readPermission = component.permission
             writePermission = component.permission
             grantUriPermissions = component.grantUriPermissions
-            metaData = component.metaData.toBundleOrNull()
+            metaData = component.metaData.toBundle()
         }
     }
 
@@ -186,10 +186,8 @@ internal object VirtualPackageInfoFactory {
         else -> 0
     }
 
-    private fun Map<String, String>.toBundleOrNull(): Bundle? =
-        takeIf { it.isNotEmpty() }?.let { values ->
-            Bundle(values.size).apply {
-                values.forEach { (key, value) -> putString(key, value) }
-            }
+    private fun Map<String, String>.toBundle(): Bundle =
+        Bundle(size).apply {
+            forEach { (key, value) -> putString(key, value) }
         }
 }

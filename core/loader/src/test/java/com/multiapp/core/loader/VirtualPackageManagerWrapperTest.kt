@@ -2,8 +2,10 @@ package com.multiapp.core.loader
 
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
+import android.content.res.Resources
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
@@ -82,6 +84,33 @@ class VirtualPackageManagerWrapperTest {
 
         verify(exactly = 0) { base.getComponentEnabledSetting(any()) }
         verify(exactly = 0) { base.setComponentEnabledSetting(any(), any(), any()) }
+    }
+
+    @Test
+    fun `resources for virtual package use snapshot application info before base package lookup`() {
+        val base = mockk<PackageManager>(relaxed = true)
+        val resources = mockk<Resources>(relaxed = true)
+        every { base.getResourcesForApplication(any<ApplicationInfo>()) } returns resources
+        val pm = VirtualPackageManagerWrapper(base, snapshot())
+
+        assertEquals(resources, pm.getResourcesForApplication("com.multiapp.instance.abc"))
+
+        verify(exactly = 1) {
+            base.getResourcesForApplication(
+                match<ApplicationInfo> {
+                    it.packageName == "com.test.minimal" &&
+                        it.sourceDir == "/data/apks/minimal.apk"
+                }
+            )
+        }
+        verify(exactly = 0) { base.getResourcesForApplication("com.multiapp.instance.abc") }
+    }
+
+    @Test
+    fun `virtual application info always exposes non-null metadata bundle`() {
+        val pm = VirtualPackageManagerWrapper(mockk<PackageManager>(relaxed = true), snapshot())
+
+        assertNotNull(pm.getApplicationInfo("com.multiapp.instance.abc", 0).metaData)
     }
 
     @Test

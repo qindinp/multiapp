@@ -209,8 +209,14 @@ class VirtualPackageManagerWrapper(
     override fun getPreferredActivities(outFilters: MutableList<IntentFilter>, outActivities: MutableList<ComponentName>, packageName: String?): Int = base.getPreferredActivities(outFilters, outActivities, packageName)
     override fun getPreferredPackages(flags: Int): List<PackageInfo> = base.getPreferredPackages(flags)
     override fun getResourcesForActivity(activityName: ComponentName): Resources = base.getResourcesForActivity(activityName)
-    override fun getResourcesForApplication(app: ApplicationInfo): Resources = base.getResourcesForApplication(app)
-    override fun getResourcesForApplication(appPackageName: String): Resources = base.getResourcesForApplication(appPackageName)
+    override fun getResourcesForApplication(app: ApplicationInfo): Resources {
+        service.getApplicationInfoForResources(app)?.let { return base.getResourcesForApplication(it) }
+        return base.getResourcesForApplication(app)
+    }
+    override fun getResourcesForApplication(appPackageName: String): Resources {
+        service.getApplicationInfoForResources(appPackageName)?.let { return base.getResourcesForApplication(it) }
+        return base.getResourcesForApplication(appPackageName)
+    }
     override fun getSharedLibraries(flags: Int): List<SharedLibraryInfo> = base.getSharedLibraries(flags)
     override fun getSystemAvailableFeatures(): Array<FeatureInfo> = base.systemAvailableFeatures
     override fun getSystemSharedLibraryNames(): Array<String>? = base.systemSharedLibraryNames
