@@ -248,10 +248,14 @@ internal object HostedActivityContextInjector {
         hostProxyThemeBaseline: HostProxyThemeBaseline
     ): ActivityThemeResult {
         return runCatching {
-            val requiresAppCompatTheme = isAppCompatActivity(activity)
             val hostProxyThemeId = resolveHostProxyTheme(hostContext)
-            val hostProxyBaselineApplied = requiresAppCompatTheme &&
-                (hostProxyThemeBaseline.applied || hostProxyThemeId != 0)
+            val hostProxyBaselineApplied = hostProxyThemeBaseline.applied || hostProxyThemeId != 0
+            val guestAppCompatBaselineId = resolveGuestAppCompatTheme(
+                guestContext = guestContext,
+                originPackageName = originPackageName,
+                virtualPackageName = virtualPackageName
+            )
+            val guestAppCompatBaselineApplied = guestAppCompatBaselineId != 0
             if (hostProxyBaselineApplied) {
                 if (!hostProxyThemeBaseline.applied) {
                     activity.setTheme(hostProxyThemeId)
@@ -262,13 +266,28 @@ internal object HostedActivityContextInjector {
 
             guestContext.setTheme(0)
             replaceFieldIfPresent(activity, "mResources", guestContext.resources)
-            val hostBridgeApplied = applyHostAppCompatBridge(
-                hostContext = hostContext,
-                targetTheme = guestContext.theme
-            )
+            if (guestAppCompatBaselineApplied) {
+                guestContext.theme.applyStyle(guestAppCompatBaselineId, true)
+            }
+            val hostBridgeApplied = if (guestAppCompatBaselineApplied) {
+                false
+            } else {
+                applyHostAppCompatBridge(
+                    hostContext = hostContext,
+                    targetTheme = guestContext.theme
+                )
+            }
             guestContext.theme.applyStyle(themeResourceId, true)
-            val themeFieldPatched = replaceFieldIfPresent(activity, "mTheme", guestContext.theme)
-            val runtimeThemeResourceId = if (hostProxyBaselineApplied) {
+            val preserveHostActivityTheme = hostProxyBaselineApplied && !guestAppCompatBaselineApplied
+            val themeFieldPatched = if (preserveHostActivityTheme) {
+                // AppCompat validates the Activity theme with host AppCompat styleable IDs.
+                // Keep the host proxy theme on Activity.mTheme and expose guest resources
+                // through the base context instead.
+                false
+            } else {
+                replaceFieldIfPresent(activity, "mTheme", guestContext.theme)
+            }
+            val runtimeThemeResourceId = if (preserveHostActivityTheme) {
                 hostProxyThemeBaseline.themeResourceId.takeIf { it != 0 } ?: hostProxyThemeId
             } else {
                 themeResourceId
@@ -297,19 +316,24 @@ internal object HostedActivityContextInjector {
                 themeResourceId = runtimeThemeResourceId,
                 themeVerdict = if (attrsProbe.verdict == "PASS") "PASS" else "PARTIAL",
                 appliedSource = when {
-                    hostProxyBaselineApplied && hostBridgeApplied -> "$appliedSource+HOST_PROXY_APPCOMPAT_BRIDGE"
+                    guestAppCompatBaselineApplied -> "$appliedSource+GUEST_APPCOMPAT_BASELINE"
+                    preserveHostActivityTheme && hostBridgeApplied -> "$appliedSource+HOST_PROXY_APPCOMPAT_BRIDGE"
                     hostBridgeApplied -> "$appliedSource+HOST_APPCOMPAT_BRIDGE"
-                    hostProxyBaselineApplied -> "$appliedSource+HOST_PROXY_APPCOMPAT_BASELINE"
+                    preserveHostActivityTheme -> "$appliedSource+HOST_PROXY_APPCOMPAT_BASELINE"
                     else -> appliedSource
                 },
                 appCompatAttrsVerdict = attrsProbe.verdict,
                 hostAppCompatBridgeApplied = hostBridgeApplied,
-                hostAppCompatFallbackApplied = hostProxyBaselineApplied,
+                hostAppCompatFallbackApplied = preserveHostActivityTheme,
                 appCompatAttrsProbe = listOf(
                     "activity=${attrsProbe.detail}",
                     "context=${contextProbe.detail}"
                 ).joinToString(";"),
-                runtimeOwner = "GUEST_RUNTIME",
+                runtimeOwner = if (preserveHostActivityTheme) {
+                    "HOST_APPCOMPAT_ACTIVITY_THEME"
+                } else {
+                    "GUEST_RUNTIME"
+                },
                 activityThemeProbe = attrsProbe.detail,
                 contextThemeProbe = contextProbe.detail,
                 themeFieldPatched = themeFieldPatched,
@@ -368,13 +392,23 @@ internal object HostedActivityContextInjector {
         virtualPackageName: String,
         allowHostStyleablePass: Boolean
     ): AppCompatAttrsProbe {
+        val attempts = mutableListOf<String>()
+        var sawFail = false
+        var sawGuestAttrFail = false
+
+        val guestAttrProbe = probeGuestAppCompatAttrs(context, originPackageName, virtualPackageName)
+        if (guestAttrProbe.verdict == "PASS") return guestAttrProbe
+        if (guestAttrProbe.verdict == "FAIL") {
+            sawFail = true
+            sawGuestAttrFail = true
+        }
+        attempts += guestAttrProbe.detail
+
         val styleableCandidates = listOf(
             "androidx.appcompat.R\$styleable",
             "$originPackageName.R\$styleable",
             "$virtualPackageName.R\$styleable"
         )
-        val attempts = mutableListOf<String>()
-        var sawFail = false
         for (className in styleableCandidates) {
             val styleableClass = runCatching {
                 Class.forName(className, false, guestClassLoader)
@@ -396,7 +430,7 @@ internal object HostedActivityContextInjector {
             val hostProbe = probeStyleableClass(context, hostStyleableClass, "host:androidx.appcompat.R\$styleable")
             attempts += hostProbe.detail
             if (hostProbe.verdict == "PASS") {
-                return if (allowHostStyleablePass) {
+                return if (allowHostStyleablePass && !sawGuestAttrFail) {
                     hostProbe
                 } else {
                     AppCompatAttrsProbe("HOST_ONLY", hostProbe.detail)
@@ -406,6 +440,54 @@ internal object HostedActivityContextInjector {
         }
         return AppCompatAttrsProbe(
             verdict = if (sawFail) "FAIL" else "UNKNOWN",
+            detail = attempts.joinToString(";")
+        )
+    }
+
+    private fun probeGuestAppCompatAttrs(
+        context: Context,
+        originPackageName: String,
+        virtualPackageName: String
+    ): AppCompatAttrsProbe {
+        val resources = context.resources
+        val packages = listOf(originPackageName, virtualPackageName, context.packageName)
+            .filter { it.isNotBlank() }
+            .distinct()
+        val attempts = mutableListOf<String>()
+        for (packageName in packages) {
+            val windowActionBarAttr = runCatching {
+                resources.getIdentifier("windowActionBar", "attr", packageName)
+            }.getOrDefault(0)
+            val windowNoTitleAttr = runCatching {
+                resources.getIdentifier("windowNoTitle", "attr", packageName)
+            }.getOrDefault(0)
+            if (windowActionBarAttr == 0 && windowNoTitleAttr == 0) {
+                attempts += "guest-attrs:$packageName:ATTRS_NOT_FOUND"
+                continue
+            }
+            val attrs = intArrayOf(windowActionBarAttr, windowNoTitleAttr).filter { it != 0 }.toIntArray()
+            val typedArray = runCatching { context.obtainStyledAttributes(attrs) }
+                .onFailure { error ->
+                    attempts += "guest-attrs:$packageName:${error.javaClass.simpleName}"
+                }
+                .getOrNull() ?: continue
+            try {
+                val hasWindowActionBar = windowActionBarAttr != 0 && typedArray.hasValue(attrs.indexOf(windowActionBarAttr))
+                val hasWindowNoTitle = windowNoTitleAttr != 0 && typedArray.hasValue(attrs.indexOf(windowNoTitleAttr))
+                val hasRequiredValue = hasWindowActionBar || hasWindowNoTitle
+                val detail = "guest-attrs:$packageName:" +
+                    "windowActionBar=0x${Integer.toHexString(windowActionBarAttr)}:hasValue=$hasWindowActionBar," +
+                    "windowNoTitle=0x${Integer.toHexString(windowNoTitleAttr)}:hasValue=$hasWindowNoTitle"
+                return AppCompatAttrsProbe(
+                    verdict = if (hasRequiredValue) "PASS" else "FAIL",
+                    detail = detail
+                )
+            } finally {
+                typedArray.recycle()
+            }
+        }
+        return AppCompatAttrsProbe(
+            verdict = "UNKNOWN",
             detail = attempts.joinToString(";")
         )
     }
@@ -472,6 +554,38 @@ internal object HostedActivityContextInjector {
                 .getField("Theme_AppCompat_Light_NoActionBar")
                 .getInt(null)
         }.getOrDefault(0)
+    }
+
+    private fun resolveGuestAppCompatTheme(
+        guestContext: Context,
+        originPackageName: String,
+        virtualPackageName: String
+    ): Int {
+        val resources = guestContext.resources
+        val packages = listOf(originPackageName, virtualPackageName, guestContext.packageName)
+            .filter { it.isNotBlank() }
+            .distinct()
+        val names = listOf(
+            "Theme.AppCompat.Light.NoActionBar",
+            "Theme_AppCompat_Light_NoActionBar",
+            "Theme.AppCompat.DayNight.NoActionBar",
+            "Theme_AppCompat_DayNight_NoActionBar",
+            "Theme.AppCompat.NoActionBar",
+            "Theme_AppCompat_NoActionBar",
+            "Theme.AppCompat.Light",
+            "Theme_AppCompat_Light",
+            "Theme.AppCompat",
+            "Theme_AppCompat"
+        )
+        for (packageName in packages) {
+            for (name in names) {
+                val id = runCatching {
+                    resources.getIdentifier(name, "style", packageName)
+                }.getOrDefault(0)
+                if (id != 0) return id
+            }
+        }
+        return 0
     }
 
     private fun isAppCompatActivity(activity: Activity): Boolean {
