@@ -1,6 +1,8 @@
 package com.multiapp.core.loader
 
 enum class VirtualAmsApiEvidenceComponent(val componentName: String) {
+    START_ACTIVITY_OVERLOAD("ams-start-activity-overload"),
+    START_ACTIVITIES_OVERLOAD("ams-start-activities-overload"),
     REGISTER_RECEIVER("ams-register-receiver"),
     STICKY_ORDERED_BROADCAST("ams-sticky-ordered-broadcast"),
     BIND_SERVICE_OVERLOAD("ams-bind-service-overload")

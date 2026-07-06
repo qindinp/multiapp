@@ -1031,6 +1031,74 @@ class VirtualContextWrapperTest {
     }
 
     @Test
+    fun `startActivity records remap evidence without host fallback`() {
+        val records = mutableListOf<VirtualAmsApiEvidenceRecord>()
+        VirtualAmsApiEvidenceRecorders.install { record -> records += record }
+        try {
+            val base = baseContext()
+            val sourceIntent = explicitActivityIntent("com.test.minimal.MainActivity")
+            val proxyIntent = explicitActivityIntent(
+                className = "com.multiapp.app.container.ProxyActivity0",
+                packageName = "com.multiapp.app"
+            )
+            val dispatcher = FakeAmsDispatcher(startActivityIntent = proxyIntent)
+            val wrapper = wrapper(base = base, amsDispatcher = dispatcher)
+
+            wrapper.startActivity(sourceIntent)
+
+            val record = records.single { it.component == VirtualAmsApiEvidenceComponent.START_ACTIVITY_OVERLOAD }
+            assertEquals("startActivity", record.api)
+            assertEquals("ACTIVITY_REMAP_READY", record.status)
+            assertEquals(false, record.hostFallback)
+            assertEquals(true, record.fields["remapped"])
+            assertEquals("", record.fields["reason"])
+            assertEquals("com.test.minimal/com.test.minimal.MainActivity", record.fields["sourceComponent"])
+            assertEquals("com.multiapp.app/com.multiapp.app.container.ProxyActivity0", record.fields["proxyComponent"])
+            verify(exactly = 1) { base.startActivity(proxyIntent) }
+            verify(exactly = 0) { base.startActivity(sourceIntent) }
+        } finally {
+            VirtualAmsApiEvidenceRecorders.reset()
+        }
+    }
+
+    @Test
+    fun `startActivities records blocked batch evidence without host fallback`() {
+        val records = mutableListOf<VirtualAmsApiEvidenceRecord>()
+        VirtualAmsApiEvidenceRecorders.install { record -> records += record }
+        try {
+            val base = baseContext()
+            val first = explicitActivityIntent("com.test.minimal.MainActivity")
+            val second = explicitActivityIntent("com.test.minimal.MissingActivity")
+            val proxyIntent = explicitActivityIntent(
+                className = "com.multiapp.app.container.ProxyActivity0",
+                packageName = "com.multiapp.app"
+            )
+            val dispatcher = SequencedAmsDispatcher(
+                activityResults = listOf(
+                    VirtualContextWrapper.StartActivityMappingResult.Remapped(first, proxyIntent),
+                    VirtualContextWrapper.StartActivityMappingResult.Blocked(second, "unsupportedActivityIntent")
+                )
+            )
+            val wrapper = wrapper(base = base, amsDispatcher = dispatcher)
+
+            wrapper.startActivities(arrayOf(first, second))
+
+            val record = records.single { it.component == VirtualAmsApiEvidenceComponent.START_ACTIVITIES_OVERLOAD }
+            assertEquals("startActivities", record.api)
+            assertEquals("ACTIVITY_BATCH_BLOCKED", record.status)
+            assertEquals(false, record.hostFallback)
+            assertEquals(2, record.fields["batchSize"])
+            assertEquals(1, record.fields["remappedCount"])
+            assertEquals("unsupportedActivityIntent", record.fields["reason"])
+            assertEquals("com.test.minimal/com.test.minimal.MissingActivity", record.fields["blockedSourceComponent"])
+            verify(exactly = 0) { base.startActivities(any<Array<Intent>>(), any()) }
+            verify(exactly = 0) { base.startActivity(any<Intent>()) }
+        } finally {
+            VirtualAmsApiEvidenceRecorders.reset()
+        }
+    }
+
+    @Test
     fun `registerReceiver permission or scheduler unsupported records rejected evidence`() {
         val records = mutableListOf<VirtualAmsApiEvidenceRecord>()
         VirtualAmsApiEvidenceRecorders.install { record -> records += record }

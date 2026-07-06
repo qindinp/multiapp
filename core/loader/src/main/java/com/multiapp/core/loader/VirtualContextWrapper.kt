@@ -195,9 +195,13 @@ open class VirtualContextWrapper(
         when (val result = componentDispatcher().resolveStartActivityIntent(intent)) {
             is StartActivityMappingResult.Remapped -> {
                 lastStartActivityMappingResult = result
+                recordStartActivityEvidence("startActivity", result)
                 base.startActivity(result.proxyIntent)
             }
-            is StartActivityMappingResult.Blocked -> lastStartActivityMappingResult = result
+            is StartActivityMappingResult.Blocked -> {
+                lastStartActivityMappingResult = result
+                recordStartActivityEvidence("startActivity", result)
+            }
         }
     }
 
@@ -205,9 +209,13 @@ open class VirtualContextWrapper(
         when (val result = componentDispatcher().resolveStartActivityIntent(intent)) {
             is StartActivityMappingResult.Remapped -> {
                 lastStartActivityMappingResult = result
+                recordStartActivityEvidence("startActivity:options", result)
                 base.startActivity(result.proxyIntent, options)
             }
-            is StartActivityMappingResult.Blocked -> lastStartActivityMappingResult = result
+            is StartActivityMappingResult.Blocked -> {
+                lastStartActivityMappingResult = result
+                recordStartActivityEvidence("startActivity:options", result)
+            }
         }
     }
 
@@ -217,27 +225,33 @@ open class VirtualContextWrapper(
 
     override fun startActivities(intents: Array<Intent>, options: Bundle?) {
         if (intents.isEmpty()) {
-            lastStartActivityMappingResult = StartActivityMappingResult.Blocked(
+            val blocked = StartActivityMappingResult.Blocked(
                 sourceIntent = Intent(),
                 reason = "emptyActivityLaunchUnsupported"
             )
+            lastStartActivityMappingResult = blocked
+            recordStartActivitiesEvidence("startActivities", emptyList(), blocked)
             return
         }
         val results = componentDispatcher().resolveStartActivityIntents(intents.toList())
         val blocked = results.filterIsInstance<StartActivityMappingResult.Blocked>().firstOrNull()
         if (blocked != null) {
             lastStartActivityMappingResult = blocked
+            recordStartActivitiesEvidence("startActivities", results, blocked)
             return
         }
         val remapped = results.mapNotNull { it as? StartActivityMappingResult.Remapped }
         if (remapped.size != intents.size) {
-            lastStartActivityMappingResult = StartActivityMappingResult.Blocked(
+            val incomplete = StartActivityMappingResult.Blocked(
                 sourceIntent = intents.first(),
                 reason = "incompleteActivityBatchMapping"
             )
+            lastStartActivityMappingResult = incomplete
+            recordStartActivitiesEvidence("startActivities", results, incomplete)
             return
         }
         lastStartActivityMappingResult = remapped.last()
+        recordStartActivitiesEvidence("startActivities", results, null)
         base.startActivities(remapped.map { it.proxyIntent }.toTypedArray(), options)
     }
 
@@ -739,6 +753,57 @@ open class VirtualContextWrapper(
 
     internal fun lastStorageEvidence(): VirtualStorageEvidence? = lastStorageEvidence
 
+    private fun recordStartActivityEvidence(api: String, result: StartActivityMappingResult) {
+        val remapped = result as? StartActivityMappingResult.Remapped
+        val blocked = result as? StartActivityMappingResult.Blocked
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.START_ACTIVITY_OVERLOAD,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = api,
+                status = if (remapped != null) "ACTIVITY_REMAP_READY" else "ACTIVITY_START_BLOCKED",
+                hostFallback = false,
+                fields = linkedMapOf(
+                    "remapped" to (remapped != null),
+                    "reason" to (blocked?.reason ?: ""),
+                    "sourceComponent" to result.sourceIntent.componentNameForEvidence(),
+                    "sourceAction" to result.sourceIntent.actionForEvidence(),
+                    "sourceFlags" to result.sourceIntent.flagsForEvidence(),
+                    "proxyComponent" to remapped?.proxyIntent?.componentNameForEvidence().orEmpty()
+                )
+            )
+        )
+    }
+
+    private fun recordStartActivitiesEvidence(
+        api: String,
+        results: List<StartActivityMappingResult>,
+        blocked: StartActivityMappingResult.Blocked?
+    ) {
+        val remapped = results.filterIsInstance<StartActivityMappingResult.Remapped>()
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.START_ACTIVITIES_OVERLOAD,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = api,
+                status = if (blocked == null) "ACTIVITY_BATCH_REMAP_READY" else "ACTIVITY_BATCH_BLOCKED",
+                hostFallback = false,
+                fields = linkedMapOf(
+                    "batchSize" to results.size,
+                    "remappedCount" to remapped.size,
+                    "reason" to (blocked?.reason ?: ""),
+                    "blockedSourceComponent" to blocked?.sourceIntent?.componentNameForEvidence().orEmpty(),
+                    "sourceComponents" to results.joinToString(";") { it.sourceIntent.componentNameForEvidence() },
+                    "proxyComponents" to remapped.joinToString(";") { it.proxyIntent.componentNameForEvidence() }
+                )
+            )
+        )
+    }
+
     private fun recordRegisterReceiverEvidence(registered: Boolean, reason: String) {
         GlobalVirtualAmsApiEvidenceRecorder.record(
             VirtualAmsApiEvidenceRecord(
@@ -829,6 +894,14 @@ open class VirtualContextWrapper(
             theme = config.packageSnapshot?.themeId?.takeIf { it != 0 } ?: baseInfo.theme
         }
     }
+
+    private fun Intent.componentNameForEvidence(): String = runCatching {
+        component?.let { componentName -> "${componentName.packageName}/${componentName.className}" }
+    }.getOrNull().orEmpty()
+
+    private fun Intent.actionForEvidence(): String = runCatching { action }.getOrNull().orEmpty()
+
+    private fun Intent.flagsForEvidence(): Int = runCatching { flags }.getOrDefault(0)
 
 
     private fun IntentFilter.toVirtualDynamicReceiverFilter(): VirtualDynamicReceiverFilter {
