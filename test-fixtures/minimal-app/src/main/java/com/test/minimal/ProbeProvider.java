@@ -88,6 +88,12 @@ public class ProbeProvider extends ContentProvider {
         return new AssetFileDescriptor(openFile(uri, mode), 0, AssetFileDescriptor.UNKNOWN_LENGTH);
     }
 
+    @Override
+    public AssetFileDescriptor openTypedAssetFile(Uri uri, String mimeTypeFilter, Bundle opts) throws FileNotFoundException {
+        Log.d(TAG, "=== provider probe === status=OPEN_TYPED_ASSET_FILE_OK mimeTypeFilter=" + mimeTypeFilter + " uri=" + uri);
+        return openAssetFile(uri, "r");
+    }
+
     private File providerPayloadFile() throws FileNotFoundException {
         if (getContext() == null) {
             throw new FileNotFoundException("provider context missing");

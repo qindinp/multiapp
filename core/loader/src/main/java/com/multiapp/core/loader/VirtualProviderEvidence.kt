@@ -20,6 +20,7 @@ data class VirtualProviderEvidence(
         CALL,
         OPEN_FILE,
         OPEN_ASSET_FILE,
+        OPEN_TYPED_ASSET_FILE,
         BULK_INSERT,
         NOTIFY_CHANGE,
         UNKNOWN
@@ -184,6 +185,7 @@ data class VirtualProviderEvidence(
             "call" -> Operation.CALL
             "openFile" -> Operation.OPEN_FILE
             "openAssetFile" -> Operation.OPEN_ASSET_FILE
+            "openTypedAssetFile" -> Operation.OPEN_TYPED_ASSET_FILE
             "bulkInsert" -> Operation.BULK_INSERT
             else -> Operation.UNKNOWN
         }

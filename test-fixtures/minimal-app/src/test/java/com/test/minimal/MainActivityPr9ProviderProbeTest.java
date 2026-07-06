@@ -25,5 +25,6 @@ class MainActivityPr9ProviderProbeTest {
         assertTrue(source.contains("getContentResolver().call(uri, \"probeCall\", uri.toString(), new Bundle())"));
         assertTrue(source.contains("client.openFile(uri, \"r\")"));
         assertTrue(source.contains("getContentResolver().openAssetFileDescriptor(uri, \"r\")"));
+        assertTrue(source.contains("getContentResolver().openTypedAssetFileDescriptor(uri, \"*/*\", null)"));
     }
 }

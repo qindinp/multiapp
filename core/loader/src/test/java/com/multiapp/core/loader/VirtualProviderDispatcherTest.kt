@@ -165,6 +165,7 @@ class VirtualProviderDispatcherTest {
         mapOf(
             "openFile:r" to VirtualProviderEvidence.Operation.OPEN_FILE,
             "openAssetFile:r" to VirtualProviderEvidence.Operation.OPEN_ASSET_FILE,
+            "openTypedAssetFile:*/*" to VirtualProviderEvidence.Operation.OPEN_TYPED_ASSET_FILE,
             "bulkInsert" to VirtualProviderEvidence.Operation.BULK_INSERT,
             "call:probeCall" to VirtualProviderEvidence.Operation.CALL
         ).forEach { (operationName, operation) ->

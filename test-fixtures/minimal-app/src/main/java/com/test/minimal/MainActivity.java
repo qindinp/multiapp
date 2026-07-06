@@ -298,6 +298,11 @@ public class MainActivity extends Activity {
                 } catch (Exception e) {
                     out.append("provider.openAssetFileFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
                 }
+                try (AssetFileDescriptor descriptor = getContentResolver().openTypedAssetFileDescriptor(uri, "*/*", null)) {
+                    out.append("provider.openTypedAssetFile: ").append(descriptor != null).append("\n");
+                } catch (Exception e) {
+                    out.append("provider.openTypedAssetFileFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
+                }
             }
         } catch (Exception e) {
             out.append("provider failed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");

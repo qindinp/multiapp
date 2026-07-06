@@ -9,6 +9,7 @@ object ProviderMethodEvidenceComponents {
         "call" to "provider-call",
         "openFile" to "provider-open-file",
         "openAssetFile" to "provider-open-asset-file",
+        "openTypedAssetFile" to "provider-open-typed-asset-file",
         "bulkInsert" to "provider-bulk-insert",
         "getType" to "provider-get-type"
     )

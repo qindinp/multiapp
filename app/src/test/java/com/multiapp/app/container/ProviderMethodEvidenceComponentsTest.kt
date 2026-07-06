@@ -15,6 +15,7 @@ class ProviderMethodEvidenceComponentsTest {
             "call:probeCall" to "provider-call",
             "openFile:r" to "provider-open-file",
             "openAssetFile:r" to "provider-open-asset-file",
+            "openTypedAssetFile:*/*" to "provider-open-typed-asset-file",
             "bulkInsert" to "provider-bulk-insert",
             "getType" to "provider-get-type"
         ).forEach { (operationName, component) ->

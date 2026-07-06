@@ -6,6 +6,7 @@ import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
@@ -174,6 +175,54 @@ class StubContentProvider : ContentProvider() {
         }
     }
 
+    @Throws(FileNotFoundException::class)
+    override fun openTypedAssetFile(
+        uri: Uri,
+        mimeTypeFilter: String,
+        opts: Bundle?
+    ): AssetFileDescriptor? = openTypedAssetFileInternal(
+        uri = uri,
+        mimeTypeFilter = mimeTypeFilter,
+        opts = opts,
+        signal = null
+    )
+
+    @Throws(FileNotFoundException::class)
+    override fun openTypedAssetFile(
+        uri: Uri,
+        mimeTypeFilter: String,
+        opts: Bundle?,
+        signal: CancellationSignal?
+    ): AssetFileDescriptor? = openTypedAssetFileInternal(
+        uri = uri,
+        mimeTypeFilter = mimeTypeFilter,
+        opts = opts,
+        signal = signal
+    )
+
+    @Throws(FileNotFoundException::class)
+    private fun openTypedAssetFileInternal(
+        uri: Uri,
+        mimeTypeFilter: String,
+        opts: Bundle?,
+        signal: CancellationSignal?
+    ): AssetFileDescriptor? {
+        val result = dispatch(uri)
+        writeProviderEvidence("openTypedAssetFile:$mimeTypeFilter", uri, result)
+        Log.w(TAG, "openTypedAssetFile dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
+        return when (result) {
+            is VirtualProviderDispatchResult.ProviderReady -> {
+                val guestUri = uri.toGuestUri(result.resolution.guestAuthority)
+                if (signal != null) {
+                    result.provider.openTypedAssetFile(guestUri, mimeTypeFilter, opts, signal)
+                } else {
+                    result.provider.openTypedAssetFile(guestUri, mimeTypeFilter, opts)
+                }
+            }
+            else -> throw FileNotFoundException(result.statusForLog())
+        }
+    }
+
     private fun dispatch(uri: Uri): VirtualProviderDispatchResult {
         val hostPackageName = context?.packageName ?: return VirtualProviderDispatchResult.InvalidProxyUri("missing host context")
         return VirtualProviderDispatcher(
@@ -303,11 +352,16 @@ class StubContentProvider : ContentProvider() {
         uri: Uri
     ): Map<String, Any?> {
         val methodEvidence = VirtualProviderEvidence.methodDispatch(this, operationName)
+        val rewrittenGuestUri = guestAuthorityForEvidence()
+            ?.takeIf { it.isNotBlank() }
+            ?.let { guestAuthority -> uri.toGuestUri(guestAuthority).toString() }
         return linkedMapOf(
             "status" to statusName(),
             "stage" to "PROVIDER_PROXY",
             "operationName" to operationName,
             "uri" to uri.toString(),
+            "proxyUri" to uri.toString(),
+            "rewrittenGuestUri" to rewrittenGuestUri.orEmpty(),
             "instanceId" to instanceIdForEvidence().orEmpty(),
             "originPackageName" to originPackageNameForEvidence().orEmpty(),
             "virtualPackageName" to virtualPackageNameForEvidence().orEmpty(),

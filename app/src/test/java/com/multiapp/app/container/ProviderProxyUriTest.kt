@@ -37,4 +37,17 @@ class ProviderProxyUriTest {
 
         assertEquals("empty=&=value&plain", rewritten)
     }
+
+    @Test
+    fun `rewrite encoded query removes only exact proxy parameter names`() {
+        val rewritten = ProviderProxyUri.rewriteEncodedQuery(
+            "multiapp_instanceIdExtra=keep" +
+                "&multiapp_instanceId" +
+                "&multiapp_guestAuthority=" +
+                "&multiapp_guestAuthorityExtra=keep" +
+                "&token=a%26b"
+        )
+
+        assertEquals("multiapp_instanceIdExtra=keep&multiapp_guestAuthorityExtra=keep&token=a%26b", rewritten)
+    }
 }
