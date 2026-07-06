@@ -105,6 +105,37 @@ class LauncherViewModelTest {
 
         verify { installedAppRepository.listInstalledApps(false) }
         assertEquals(apps, viewModel.allApps.value)
+        assertEquals(false, viewModel.uiState.value.allAppsLoading)
+        assertEquals(true, viewModel.uiState.value.allAppsLoaded)
+        assertNull(viewModel.uiState.value.allAppsError)
+    }
+
+    @Test
+    fun `loadAllApps marks empty result as loaded`() = runTest {
+        every { installedAppRepository.listInstalledApps(false) } returns emptyList()
+        val viewModel = createViewModel()
+
+        viewModel.loadAllApps()
+
+        verify { installedAppRepository.listInstalledApps(false) }
+        assertEquals(emptyList<VirtualApp>(), viewModel.allApps.value)
+        assertEquals(false, viewModel.uiState.value.allAppsLoading)
+        assertEquals(true, viewModel.uiState.value.allAppsLoaded)
+        assertNull(viewModel.uiState.value.allAppsError)
+    }
+
+    @Test
+    fun `loadAllApps exposes repository failure`() = runTest {
+        every { installedAppRepository.listInstalledApps(false) } throws IllegalStateException("package query failed")
+        val viewModel = createViewModel()
+
+        viewModel.loadAllApps()
+
+        verify { installedAppRepository.listInstalledApps(false) }
+        assertEquals(emptyList<VirtualApp>(), viewModel.allApps.value)
+        assertEquals(false, viewModel.uiState.value.allAppsLoading)
+        assertEquals(false, viewModel.uiState.value.allAppsLoaded)
+        assertEquals("package query failed", viewModel.uiState.value.allAppsError)
     }
 
     @Test

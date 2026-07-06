@@ -51,7 +51,10 @@ data class LauncherUiState(
     val creationStep: String? = null,
     val lastCreatedInstanceId: String? = null,
     val importedApkCandidate: VirtualApp? = null,
-    val lastCreateLatencyMs: Long? = null
+    val lastCreateLatencyMs: Long? = null,
+    val allAppsLoading: Boolean = false,
+    val allAppsLoaded: Boolean = false,
+    val allAppsError: String? = null
 )
 
 @HiltViewModel
@@ -205,14 +208,35 @@ class LauncherViewModel @Inject constructor(
     }
 
     fun loadAllApps(forceRefresh: Boolean = false) {
-        if (!forceRefresh && _allApps.value.isNotEmpty()) return
+        val currentState = _uiState.value
+        if (!forceRefresh && currentState.allAppsLoaded) return
         viewModelScope.launch(launcherIoDispatcher) {
+            _uiState.update {
+                it.copy(
+                    allAppsLoading = true,
+                    allAppsError = null
+                )
+            }
             try {
                 val apps = installedAppRepository.listInstalledApps(forceRefresh)
                 _allApps.value = apps
+                _uiState.update {
+                    it.copy(
+                        allAppsLoading = false,
+                        allAppsLoaded = true,
+                        allAppsError = null
+                    )
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to load all apps")
+                _uiState.update {
+                    it.copy(
+                        allAppsLoading = false,
+                        allAppsLoaded = _allApps.value.isNotEmpty(),
+                        allAppsError = e.message ?: "Failed to load app list"
+                    )
+                }
             }
         }
     }

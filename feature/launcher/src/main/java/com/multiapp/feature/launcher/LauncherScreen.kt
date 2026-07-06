@@ -547,6 +547,7 @@ private fun AppPickerSheet(
             }
         }
     }
+    val appListError = uiState.allAppsError
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -643,8 +644,19 @@ private fun AppPickerSheet(
                 )
             )
 
-            if (allApps.isEmpty()) {
+            if (uiState.allAppsLoading) {
                 LoadingState(message = "读取应用列表...")
+            } else if (appListError != null) {
+                ErrorState(
+                    error = appListError,
+                    onRetry = { viewModel.loadAllApps(forceRefresh = true) }
+                )
+            } else if (allApps.isEmpty()) {
+                EmptyState(
+                    icon = Icons.Default.Apps,
+                    title = "未找到可添加的应用",
+                    subtitle = "可以导入 APK 文件，或重试刷新已安装应用列表。"
+                )
             } else if (filteredApps.isEmpty()) {
                 EmptyState(
                     icon = Icons.Default.SearchOff,
