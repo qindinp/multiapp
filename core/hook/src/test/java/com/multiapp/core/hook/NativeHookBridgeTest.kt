@@ -218,6 +218,81 @@ class NativeHookBridgeTest {
         assertEquals(telegramPath, bridge.translatePath(telegramPath))
     }
 
+    // ===== setupGuestPrivatePathRedirections tests =====
+
+    @Test
+    fun `setupGuestPrivatePathRedirections redirects data data path`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+
+        assertEquals(
+            "/sandbox/example/files/config.json",
+            bridge.translatePath("/data/data/com.example.app/files/config.json")
+        )
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections redirects data user zero path`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+
+        assertEquals(
+            "/sandbox/example/shared_prefs/settings.xml",
+            bridge.translatePath("/data/user/0/com.example.app/shared_prefs/settings.xml")
+        )
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections creates only private path rules`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+
+        assertEquals(2, bridge.getRedirectionCount())
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections leaves external and obb paths unchanged`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+
+        val externalStorage = "/storage/emulated/0/Android/data/com.example.app/files/photo.jpg"
+        val sdcard = "/sdcard/Android/data/com.example.app/files/photo.jpg"
+        val obb = "/storage/emulated/0/Android/obb/com.example.app/main.obb"
+
+        assertEquals(externalStorage, bridge.translatePath(externalStorage))
+        assertEquals(sdcard, bridge.translatePath(sdcard))
+        assertEquals(obb, bridge.translatePath(obb))
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections leaves proc paths and spoof content untouched`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+
+        assertEquals("/proc/self/maps", bridge.translatePath("/proc/self/maps"))
+        assertFalse(bridge.hasFakeContent("/proc/self/maps"))
+        assertFalse(bridge.hasFakeContent("/proc/self/cmdline"))
+        assertFalse(bridge.hasFakeContent("/proc/self/status"))
+        assertFalse(bridge.isPathHidden("/proc/self/maps"))
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections normalizes target trailing slash`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example/")
+
+        assertEquals(
+            "/sandbox/example/files/config.json",
+            bridge.translatePath("/data/data/com.example.app/files/config.json")
+        )
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections ignores incomplete input`() {
+        bridge.setupGuestPrivatePathRedirections("", "inst_001", "/sandbox/example")
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "")
+
+        assertEquals(0, bridge.getRedirectionCount())
+        assertEquals(
+            "/data/data/com.example.app/files/config.json",
+            bridge.translatePath("/data/data/com.example.app/files/config.json")
+        )
+    }
+
     // ===== setupExternalStorageRedirections tests =====
 
     @Test

@@ -819,6 +819,19 @@ class NativeHookBridge {
         Timber.tag(TAG).d("App redirections set for $guestPackageName ($instanceId)")
     }
 
+    fun setupGuestPrivatePathRedirections(guestPackageName: String, instanceId: String, dataRoot: String) {
+        if (guestPackageName.isBlank() || dataRoot.isBlank()) {
+            Timber.tag(TAG).w(
+                "Guest private path redirections skipped for instanceId=$instanceId: incomplete input"
+            )
+            return
+        }
+        val targetRoot = dataRoot.trimEnd('/') + "/"
+        addPathRedirection("/data/data/$guestPackageName/", targetRoot)
+        addPathRedirection("/data/user/0/$guestPackageName/", targetRoot)
+        Timber.tag(TAG).d("Guest private path redirections set for $guestPackageName ($instanceId)")
+    }
+
     fun setupExternalStorageRedirections(instanceId: String, virtualSdcardDir: String) {
         addPathRedirection("/sdcard/", "$virtualSdcardDir/")
         addPathRedirection("/storage/emulated/0/", "$virtualSdcardDir/")
