@@ -1,16 +1,22 @@
 package com.multiapp.app
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.content.pm.ProviderInfo
 import android.content.pm.ServiceInfo
 import android.os.Build
+import com.multiapp.app.container.ContainerActivity
 import com.multiapp.app.container.ContainerRuntimePaths
+import com.multiapp.core.engine.DefaultHostedRuntimeEngine
 import com.multiapp.core.engine.DefaultVirtualizationEngine
+import com.multiapp.core.engine.EngineActivityLauncher
+import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.manifest.ManifestParser
+import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.InstanceManager
@@ -42,6 +48,30 @@ object AppModule {
     @Provides
     @Singleton
     fun provideVirtualizationEngine(engine: DefaultVirtualizationEngine): VirtualizationEngine = engine
+
+    @Provides
+    @Singleton
+    fun provideHostedRuntimeEngine(engine: DefaultHostedRuntimeEngine): HostedRuntimeEngine = engine
+
+    @Provides
+    @Singleton
+    fun provideEngineActivityLauncher(@ApplicationContext context: Context): EngineActivityLauncher {
+        val appContext = context.applicationContext ?: context
+        return EngineActivityLauncher { spec ->
+            val intent = ContainerActivity.createIntent(
+                context = appContext,
+                instanceId = spec.instanceId,
+                providerHookEnabled = spec.providerRoutingEnabled
+            ).apply {
+                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROFILE, spec.profile.name)
+                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROCESS_SLOT, spec.processSlot)
+                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT, spec.proxySlot)
+                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_EVIDENCE_SESSION_ID, spec.evidenceSessionId)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            appContext.startActivity(intent)
+        }
+    }
 
     @Provides
     @Singleton

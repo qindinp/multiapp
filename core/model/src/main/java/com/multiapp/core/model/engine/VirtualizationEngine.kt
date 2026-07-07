@@ -158,7 +158,6 @@ data class EngineEvidenceReport(
 }
 
 object EngineLaunchIntentContract {
-    const val CONTAINER_ACTIVITY_CLASS_NAME = "com.multiapp.app.container.ContainerActivity"
     const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
     const val EXTRA_ENABLE_PROVIDER_HOOK = "multiapp.profile.providerHookEnabled"
     const val EXTRA_ENGINE_PROFILE = "multiapp.engine.profile"

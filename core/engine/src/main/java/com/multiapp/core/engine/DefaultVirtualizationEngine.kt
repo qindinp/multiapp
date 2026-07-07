@@ -1,11 +1,8 @@
 package com.multiapp.core.engine
 
-import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
 import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.model.engine.EngineEvidenceReport
-import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResult
 import com.multiapp.core.model.engine.LaunchInstanceRequest
@@ -28,12 +25,13 @@ import javax.inject.Singleton
 class DefaultVirtualizationEngine @Inject constructor(
     @ApplicationContext context: Context,
     instanceManager: InstanceManager,
-    virtualInstallService: VirtualInstallService
+    virtualInstallService: VirtualInstallService,
+    activityLauncher: EngineActivityLauncher
 ) : VirtualizationEngine by DefaultVirtualizationEngineCore(
     hostPackageName = context.packageName,
     instanceManager = instanceManager,
     virtualInstallService = virtualInstallService,
-    activityLauncher = ContextEngineActivityLauncher(context),
+    activityLauncher = activityLauncher,
     runtimeRegistry = EngineRuntimeRegistry.global,
     profilePolicy = CompatibilityProfilePolicy(),
     evidenceSessionFactory = { UUID.randomUUID().toString() }
@@ -127,8 +125,6 @@ internal class DefaultVirtualizationEngineCore(
         runtimeRegistry.register(runtime)
         activityLauncher.launch(
             EngineLaunchSpec(
-                hostPackageName = hostPackageName,
-                componentClassName = EngineLaunchIntentContract.CONTAINER_ACTIVITY_CLASS_NAME,
                 instanceId = instance.instanceId,
                 profile = request.profile,
                 processSlot = runtime.processSlot,
@@ -246,9 +242,7 @@ internal class DefaultVirtualizationEngineCore(
     }
 }
 
-internal data class EngineLaunchSpec(
-    val hostPackageName: String,
-    val componentClassName: String,
+data class EngineLaunchSpec(
     val instanceId: String,
     val profile: EngineProfile,
     val processSlot: String,
@@ -257,24 +251,6 @@ internal data class EngineLaunchSpec(
     val providerRoutingEnabled: Boolean
 )
 
-internal fun interface EngineActivityLauncher {
+fun interface EngineActivityLauncher {
     fun launch(spec: EngineLaunchSpec)
-}
-
-private class ContextEngineActivityLauncher(
-    private val context: Context
-) : EngineActivityLauncher {
-    override fun launch(spec: EngineLaunchSpec) {
-        val intent = Intent().apply {
-            component = ComponentName(spec.hostPackageName, spec.componentClassName)
-            putExtra(EngineLaunchIntentContract.EXTRA_INSTANCE_ID, spec.instanceId)
-            putExtra(EngineLaunchIntentContract.EXTRA_ENABLE_PROVIDER_HOOK, spec.providerRoutingEnabled)
-            putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROFILE, spec.profile.name)
-            putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROCESS_SLOT, spec.processSlot)
-            putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT, spec.proxySlot)
-            putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_EVIDENCE_SESSION_ID, spec.evidenceSessionId)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-        context.startActivity(intent)
-    }
 }

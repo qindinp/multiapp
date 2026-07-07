@@ -3,14 +3,9 @@ package com.multiapp.app.container
 import android.content.Context
 import android.content.Intent
 import com.multiapp.core.loader.HostedBootstrapResult
-import com.multiapp.core.loader.HostedRuntimeBootstrap
 import com.multiapp.core.loader.VirtualProcessRuntime
 import com.multiapp.core.loader.VirtualServiceManager
 import com.multiapp.core.loader.VirtualServiceStartRequest
-import com.multiapp.core.model.instance.DefaultInstanceManager
-import com.multiapp.core.model.instance.InstanceManager
-import com.multiapp.core.model.instance.JsonInstanceRecordStore
-import com.multiapp.core.model.installer.JsonInstallRecordStore
 
 class HostedServiceRuntimeBinder(
     private val runtime: VirtualProcessRuntime = VirtualProcessRuntime.global,
@@ -20,21 +15,7 @@ class HostedServiceRuntimeBinder(
     private val requestDecoder: (String, Intent) -> VirtualServiceStartRequest? = { hostPackageName, intent ->
         serviceManagerFactory(hostPackageName).requestFromProxyIntent(intent)
     },
-    private val bootstrapRunner: (Context, String) -> HostedBootstrapResult = { hostContext, instanceId ->
-        val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(hostContext))
-        val instanceManager: InstanceManager = DefaultInstanceManager(
-            store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(hostContext)),
-            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(hostContext),
-            installRecordStore = installStore
-        )
-        val bootstrap = HostedRuntimeBootstrap(
-            instanceManager = instanceManager,
-            installRecordStore = installStore,
-            hostContext = hostContext,
-            providerHookInstallEnabled = true
-        )
-        bootstrap.run(instanceId)
-    }
+    private val bootstrapRunner: (Context, String) -> HostedBootstrapResult = ::runHostedRuntimeBootstrap
 ) {
     fun ensureBound(hostContext: Context, proxyIntent: Intent?): HostedServiceRuntimeBindResult {
         val request = proxyIntent

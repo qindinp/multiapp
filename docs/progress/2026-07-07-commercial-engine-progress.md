@@ -92,6 +92,21 @@ Current decision:
 - Provider authority map generation keeps stable
   `provider.clone<instanceId>` / `fileprovider.clone<instanceId>` aliases.
 
+### Hosted Runtime Binding
+
+- Added `HostedRuntimeEngine` in `:core:engine`.
+- `ContainerActivity` now obtains hosted runtime bootstrap through the engine
+  using an app-side Hilt EntryPoint, instead of constructing
+  `JsonInstanceRecordStore`, `JsonInstallRecordStore`,
+  `DefaultInstanceManager`, and `HostedRuntimeBootstrap` directly.
+- `HostedActivityRuntimeBinder`, `HostedProviderRuntimeBinder`, and
+  `HostedServiceRuntimeBinder` now use the same engine bootstrap path by
+  default while keeping their test injection seams.
+- `DefaultVirtualizationEngine` no longer hardcodes
+  `com.multiapp.app.container.ContainerActivity`. The app layer provides
+  `EngineActivityLauncher` through DI and owns the real Android component
+  selection.
+
 ## Verification
 
 The full all-in-one gate exceeded the local 180 second tool timeout, so the same
@@ -103,6 +118,15 @@ scope was run in smaller chunks with the same Gradle settings:
 .\gradlew.bat :core:identity:testDebugUnitTest :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
 .\gradlew.bat :core:hook:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
 .\gradlew.bat :feature:launcher:testDebugUnitTest :feature:appmanager:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+```
+
+Additional verification after hosted-runtime binding was moved behind
+`:core:engine`:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
 .\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
 .\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
 ```
@@ -120,9 +144,9 @@ The following items from the plan are still open and must not be marked `DONE`:
 
 - Full split APK / dynamic feature / multidex import and runtime loading.
 - Full `LoadedApk.makeApplication()`-equivalent application creation model.
-- Engine-owned hosted runtime binding for `ContainerActivity` and
-  `Hosted*RuntimeBinder`; current container bootstrap still creates parts of the
-  runtime directly.
+- Device-proven engine-owned hosted runtime binding. Local code now routes
+  `ContainerActivity` and `Hosted*RuntimeBinder` through `:core:engine`, but
+  device evidence is still required before marking this runtime path `PASS`.
 - Real Android process-slot/proxy-slot allocation for simultaneous same-origin
   multi-instance recents.
 - Full PMS signatures/SigningInfo, typed metadata, provider read/write
@@ -140,12 +164,9 @@ The following items from the plan are still open and must not be marked `DONE`:
 
 Recommended next slice:
 
-1. Move hosted runtime binding behind `:core:engine` for `ContainerActivity`,
-   `HostedActivityRuntimeBinder`, `HostedProviderRuntimeBinder`, and
-   `HostedServiceRuntimeBinder`.
-2. Make process/proxy slot assignment persistent per instance and feed it into
+1. Make process/proxy slot assignment persistent per instance and feed it into
    actual stub/proxy component selection.
-3. Start split APK metadata support in install records and
+2. Start split APK metadata support in install records and
    `VirtualPackageSnapshot`.
-4. Add behavior tests for forged provider URI rejection and same-origin
+3. Add behavior tests for forged provider URI rejection and same-origin
    dual-instance isolation.

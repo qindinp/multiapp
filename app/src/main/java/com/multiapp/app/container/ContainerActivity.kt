@@ -8,19 +8,14 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.loader.BootstrapResult
-import com.multiapp.core.loader.HostedBootstrapPreparation
 import com.multiapp.core.loader.HostedBootstrapResult
-import com.multiapp.core.loader.HostedRuntimeBootstrap
 import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.loader.VirtualActivityManager
 import com.multiapp.core.loader.VirtualActivityRecordManager
-import com.multiapp.core.loader.VirtualProcessRuntime
-import com.multiapp.core.model.instance.DefaultInstanceManager
-import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
-import com.multiapp.core.model.installer.JsonInstallRecordStore
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.VirtualContextConfig
@@ -42,12 +37,6 @@ internal sealed class BootstrapCompletionAction {
     ) : BootstrapCompletionAction()
 }
 
-private data class PreparedBootstrapRun(
-    val hostContext: Context,
-    val bootstrap: HostedRuntimeBootstrap,
-    val preparation: HostedBootstrapPreparation
-)
-
 /**
  * Fixed host entry point for v2 hosted containers.
  *
@@ -55,7 +44,7 @@ private data class PreparedBootstrapRun(
  * which app-instance to host. Does NOT generate stub APKs, does NOT run a
  * full Virtual AMS, and does NOT touch QQ-Reader hooks or LSPlant/Xposed.
  *
- * On launch, bootstraps the hosted runtime via [HostedRuntimeBootstrap]
+ * On launch, bootstraps the hosted runtime via [HostedRuntimeEngine]
  * which creates a [VirtualContextWrapper][com.multiapp.core.loader.VirtualContextWrapper]
  * for the guest app and attempts to instantiate the guest
  * [android.app.Application] class.
@@ -65,6 +54,10 @@ private data class PreparedBootstrapRun(
  * ProxyActivity + Instrumentation/ActivityThread virtualization.
  */
 class ContainerActivity : Activity() {
+
+    private val hostedRuntimeEngine: HostedRuntimeEngine by lazy(LazyThreadSafetyMode.NONE) {
+        hostedRuntimeEngineFrom(this)
+    }
 
     companion object {
         private const val TAG = "ContainerActivity"
@@ -267,7 +260,7 @@ class ContainerActivity : Activity() {
         providerHookEnabled: Boolean
     ) {
         val hostContext = applicationContext ?: this
-        VirtualProcessRuntime.global.reusableResult(instanceId)?.let { cached ->
+        hostedRuntimeEngine.reusableResult(instanceId)?.let { cached ->
             writeBootstrapEvidence(hostContext, instanceId, cached)
             handleBootstrapOutcome(instanceId, Result.success(cached))
             return
@@ -276,17 +269,15 @@ class ContainerActivity : Activity() {
         Thread(
             {
                 prepareBackgroundLooperIfNeeded()
-                var ranBootstrapOnThisThread = false
                 val outcome = runCatching {
-                    VirtualProcessRuntime.global.bindApplication(instanceId) {
-                        ranBootstrapOnThisThread = true
-                        completeBackgroundBootstrap(hostContext, instanceId, providerHookEnabled)
-                    }
+                    hostedRuntimeEngine.bindApplication(instanceId, providerHookEnabled)
                 }
+                val resultOutcome = outcome.map { it.result }
                 Handler(Looper.getMainLooper()).post {
-                    handleBootstrapOutcome(instanceId, outcome)
+                    handleBootstrapOutcome(instanceId, resultOutcome)
                 }
-                if (ranBootstrapOnThisThread && outcome.getOrNull()?.guestApplication != null) {
+                val bindOutcome = outcome.getOrNull()
+                if (bindOutcome?.ranBootstrapOnThisThread == true && bindOutcome.result.guestApplication != null) {
                     Looper.loop()
                 }
             },
@@ -298,55 +289,6 @@ class ContainerActivity : Activity() {
         if (Looper.myLooper() == null) {
             Looper.prepare()
         }
-    }
-
-    private fun completeBackgroundBootstrap(
-        hostContext: Context,
-        instanceId: String,
-        providerHookEnabled: Boolean
-    ): HostedBootstrapResult {
-        val preClassLoaderRun = prepareHostedBootstrap(hostContext, instanceId, providerHookEnabled)
-        val preparedRun = if (preClassLoaderRun.preparation.isTerminal) {
-            preClassLoaderRun
-        } else {
-            preClassLoaderRun.copy(
-                preparation = preClassLoaderRun.bootstrap.createClassLoader(preClassLoaderRun.preparation)
-            )
-        }
-        return completePreparedBootstrap(preparedRun)
-    }
-
-    private fun prepareHostedBootstrap(
-        hostContext: Context,
-        instanceId: String,
-        providerHookEnabled: Boolean
-    ): PreparedBootstrapRun {
-        val instanceStore = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(hostContext))
-        val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(hostContext))
-        val instanceManager: InstanceManager = DefaultInstanceManager(
-            store = instanceStore,
-            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(hostContext),
-            installRecordStore = installStore
-        )
-
-        val bootstrap = HostedRuntimeBootstrap(
-            instanceManager = instanceManager,
-            installRecordStore = installStore,
-            hostContext = hostContext,
-            providerHookInstallEnabled = providerHookEnabled
-        )
-        return PreparedBootstrapRun(
-            hostContext = hostContext,
-            bootstrap = bootstrap,
-            preparation = bootstrap.prepareBeforeClassLoader(instanceId)
-        )
-    }
-
-    private fun completePreparedBootstrap(preparedRun: PreparedBootstrapRun): HostedBootstrapResult {
-        val result = preparedRun.bootstrap.attachAndLaunch(preparedRun.preparation)
-        VirtualProcessRuntime.global.rememberApplication(preparedRun.preparation.instanceId, result)
-        writeBootstrapEvidence(preparedRun.hostContext, preparedRun.preparation.instanceId, result)
-        return result
     }
 
     private fun writeBootstrapEvidence(
