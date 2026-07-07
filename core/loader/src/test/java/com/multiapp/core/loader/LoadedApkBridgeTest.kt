@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.app.Application
 import android.content.pm.ApplicationInfo
 import android.content.res.Resources
 import io.mockk.mockk
@@ -37,6 +38,7 @@ class LoadedApkBridgeTest {
         }
         val resources = mockk<Resources>(relaxed = true)
         val classLoader = ClassLoader.getSystemClassLoader()
+        val application = mockk<Application>(relaxed = true)
 
         val result = LoadedApkBridge.patch(
             target = target,
@@ -44,11 +46,13 @@ class LoadedApkBridgeTest {
                 packageName = "com.test.minimal",
                 applicationInfo = appInfo,
                 resources = resources,
-                classLoader = classLoader
+                classLoader = classLoader,
+                application = application
             )
         )
 
         assertTrue("mApplicationInfo" in result.patchedFields)
+        assertTrue("mApplication" in result.patchedFields)
         assertTrue("mResources" in result.patchedFields)
         assertTrue("mClassLoader" in result.patchedFields)
         assertTrue("mBaseClassLoader" in result.patchedFields)
@@ -57,6 +61,7 @@ class LoadedApkBridgeTest {
         assertTrue("mDataDir" in result.patchedFields)
         assertTrue("mDataDirFile" in result.patchedFields)
         assertSame(appInfo, target.applicationInfo())
+        assertSame(application, target.application())
         assertSame(resources, target.resources())
         assertSame(classLoader, target.classLoader())
         assertSame(classLoader, target.baseClassLoader())
@@ -165,6 +170,30 @@ class LoadedApkBridgeTest {
     }
 
     @Test
+    fun `patch records skipped application reason when target has no application field`() {
+        val target = FakePartialLoadedApk()
+        val appInfo = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            sourceDir = "/data/app/minimal.apk"
+            publicSourceDir = "/data/app/minimal.apk"
+            dataDir = "/data/user/0/com.multiapp/instance/minimal"
+        }
+
+        val result = LoadedApkBridge.patch(
+            target = target,
+            state = LoadedApkRuntimeState(
+                packageName = "com.test.minimal",
+                applicationInfo = appInfo,
+                resources = mockk(relaxed = true),
+                classLoader = ClassLoader.getSystemClassLoader(),
+                application = mockk<Application>(relaxed = true)
+            )
+        )
+
+        assertTrue("mApplication:FIELD_NOT_FOUND" in result.skippedFieldReasons)
+    }
+
+    @Test
     fun `frameworkSafeNativeLibraryDir falls back to instance lib path when missing`() {
         val nativeLibraryDir = ApplicationInfoNativePathCompat.frameworkSafeNativeLibraryDir(
             dataDir = "/data/user/0/com.multiapp.app/files/instance_data/inst-001",
@@ -185,6 +214,7 @@ class LoadedApkBridgeTest {
     @Suppress("unused")
     private class FakeLoadedApk {
         private var mApplicationInfo: ApplicationInfo? = null
+        private var mApplication: Application? = null
         private var mResources: Resources? = null
         private var mClassLoader: ClassLoader? = null
         private var mBaseClassLoader: ClassLoader? = null
@@ -200,6 +230,7 @@ class LoadedApkBridgeTest {
         private var mDeviceProtectedDataDirFile: File? = null
 
         fun applicationInfo(): ApplicationInfo? = mApplicationInfo
+        fun application(): Application? = mApplication
         fun resources(): Resources? = mResources
         fun classLoader(): ClassLoader? = mClassLoader
         fun baseClassLoader(): ClassLoader? = mBaseClassLoader

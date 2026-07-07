@@ -21,6 +21,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.io.TempDir
 
 class DefaultVirtualizationEngineTest {
 
@@ -71,7 +72,7 @@ class DefaultVirtualizationEngineTest {
     }
 
     @Test
-    fun `launch uses persistent runtime slot store for same-origin instances`() {
+    fun `same-origin instance launches keep isolated runtime state and distinct slots`() {
         val first = instance(instanceId = "instance-1")
         val second = instance(instanceId = "instance-2")
         val instances = FakeInstanceManager(first, second)
@@ -90,12 +91,72 @@ class DefaultVirtualizationEngineTest {
 
         assertEquals(EngineResultStatus.PASS, firstLaunch.status)
         assertEquals(EngineResultStatus.PASS, secondLaunch.status)
-        assertNotNull(firstLaunch.runtime)
-        assertNotNull(secondLaunch.runtime)
-        assertNotEquals(firstLaunch.runtime?.processSlot, secondLaunch.runtime?.processSlot)
-        assertNotEquals(firstLaunch.runtime?.proxySlot, secondLaunch.runtime?.proxySlot)
-        assertEquals(firstLaunch.runtime?.proxySlot, slotStore.get("instance-1")?.proxySlot)
-        assertEquals(secondLaunch.runtime?.proxySlot, slotStore.get("instance-2")?.proxySlot)
+        val firstRuntime = assertNotNull(firstLaunch.runtime)
+        val secondRuntime = assertNotNull(secondLaunch.runtime)
+
+        assertEquals(first.instanceId, firstRuntime.instanceId)
+        assertEquals(second.instanceId, secondRuntime.instanceId)
+        assertEquals(first.virtualPackageName, firstRuntime.virtualPackageName)
+        assertEquals(second.virtualPackageName, secondRuntime.virtualPackageName)
+        assertEquals(first.dataRoot, firstRuntime.dataRoot)
+        assertEquals(second.dataRoot, secondRuntime.dataRoot)
+        assertNotEquals(firstRuntime.virtualPackageName, secondRuntime.virtualPackageName)
+        assertNotEquals(firstRuntime.dataRoot, secondRuntime.dataRoot)
+        assertEquals(firstRuntime, engine.queryRuntimeState(first.instanceId))
+        assertEquals(secondRuntime, engine.queryRuntimeState(second.instanceId))
+
+        assertNotEquals(firstRuntime.processSlot, secondRuntime.processSlot)
+        assertNotEquals(firstRuntime.proxySlot, secondRuntime.proxySlot)
+        assertEquals(firstRuntime.processSlot, slotStore.get(first.instanceId)?.processSlot)
+        assertEquals(secondRuntime.processSlot, slotStore.get(second.instanceId)?.processSlot)
+        assertEquals(firstRuntime.proxySlot, slotStore.get(first.instanceId)?.proxySlot)
+        assertEquals(secondRuntime.proxySlot, slotStore.get(second.instanceId)?.proxySlot)
+    }
+
+    @Test
+    fun `same-origin runtime slots survive engine rebuild`(@TempDir tempDir: File) {
+        val first = instance(instanceId = "instance-1")
+        val second = instance(instanceId = "instance-2")
+        val instances = FakeInstanceManager(first, second)
+        val slotFile = File(tempDir, "engine_runtime_slots.properties")
+        fun newEngine() = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = instances,
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { },
+            slotStore = FileBackedEngineRuntimeSlotStore(slotFile),
+            runtimeRegistry = EngineRuntimeRegistry(),
+            evidenceSessionFactory = { "evidence" }
+        )
+
+        val firstEngine = newEngine()
+        val firstInitialRuntime = assertNotNull(
+            firstEngine.launchInstance(LaunchInstanceRequest(instanceId = first.instanceId)).runtime
+        )
+        val secondInitialRuntime = assertNotNull(
+            firstEngine.launchInstance(LaunchInstanceRequest(instanceId = second.instanceId)).runtime
+        )
+
+        val rebuiltEngine = newEngine()
+        val firstRebuiltRuntime = assertNotNull(
+            rebuiltEngine.launchInstance(LaunchInstanceRequest(instanceId = first.instanceId)).runtime
+        )
+        val secondRebuiltRuntime = assertNotNull(
+            rebuiltEngine.launchInstance(LaunchInstanceRequest(instanceId = second.instanceId)).runtime
+        )
+
+        assertEquals(firstInitialRuntime.processSlot, firstRebuiltRuntime.processSlot)
+        assertEquals(firstInitialRuntime.proxySlot, firstRebuiltRuntime.proxySlot)
+        assertEquals(secondInitialRuntime.processSlot, secondRebuiltRuntime.processSlot)
+        assertEquals(secondInitialRuntime.proxySlot, secondRebuiltRuntime.proxySlot)
+        assertNotEquals(firstRebuiltRuntime.processSlot, secondRebuiltRuntime.processSlot)
+        assertNotEquals(firstRebuiltRuntime.proxySlot, secondRebuiltRuntime.proxySlot)
+        assertEquals(first.instanceId, firstRebuiltRuntime.instanceId)
+        assertEquals(second.instanceId, secondRebuiltRuntime.instanceId)
+        assertEquals(first.virtualPackageName, firstRebuiltRuntime.virtualPackageName)
+        assertEquals(second.virtualPackageName, secondRebuiltRuntime.virtualPackageName)
+        assertEquals(first.dataRoot, firstRebuiltRuntime.dataRoot)
+        assertEquals(second.dataRoot, secondRebuiltRuntime.dataRoot)
     }
 
     private fun instance(instanceId: String = "instance-1") = VirtualInstanceRecord(
@@ -149,7 +210,7 @@ class DefaultVirtualizationEngineTest {
 
         override fun updateLaunchState(instanceId: String): VirtualInstanceRecord? {
             launchUpdates += 1
-            return instance.takeIf { it.instanceId == instanceId }
+            return instances.firstOrNull { it.instanceId == instanceId }
         }
 
         override fun getDataRoot(instanceId: String): InstanceDataRoot? = null

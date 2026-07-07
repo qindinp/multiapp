@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.app.Application
 import android.content.pm.ApplicationInfo
 import android.content.res.Resources
 import java.io.File
@@ -37,6 +38,9 @@ object LoadedApkBridge {
         val deviceProtectedDataDir = readStringField(appInfo, "deviceProtectedDataDir") ?: dataDir
 
         patchField(target, "mApplicationInfo", appInfo, patched, skipped)
+        state.application?.let { application ->
+            patchField(target, "mApplication", application, patched, skipped)
+        }
         patchField(target, "mResources", state.resources, patched, skipped)
         patchField(target, "mClassLoader", state.classLoader, patched, skipped)
         patchField(target, "mBaseClassLoader", state.classLoader, patched, skipped)
@@ -156,7 +160,8 @@ data class LoadedApkRuntimeState(
     val packageName: String,
     val applicationInfo: ApplicationInfo,
     val resources: Resources,
-    val classLoader: ClassLoader
+    val classLoader: ClassLoader,
+    val application: Application? = null
 )
 
 data class LoadedApkSkippedField(

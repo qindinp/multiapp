@@ -24,10 +24,20 @@ import kotlin.test.assertTrue
 class ApplicationStageTest {
 
     @Test
-    fun `execute skips when resolver returns null`() {
+    fun `execute creates default Application when resolver returns null`() {
+        DefaultApplicationFallback.reset()
+        var createRequest: GuestApplicationCreateRequest? = null
         val stage = ApplicationStage(
-            hostContext = null,
+            hostContext = mockk(relaxed = true),
             applicationClassNameResolver = { _, _ -> null },
+            guestApplicationCreator = GuestApplicationCreator { request ->
+                createRequest = request
+                GuestApplicationCreateResult(
+                    application = DefaultApplicationFallback(),
+                    attachedContextPackageName = request.virtualContextConfig.originPackageName,
+                    evidence = listOf(BootstrapEvidence("applicationCreator", "TEST_CREATOR"))
+                )
+            },
             clock = fixedClock(100L, 104L)
         )
         val input = stageInput()
@@ -35,10 +45,17 @@ class ApplicationStageTest {
         val output = stage.execute(input)
 
         assertEquals(RuntimeStage.APPLICATION, output.result.stage)
-        assertEquals(BootstrapStatus.SKIPPED, output.result.status)
-        assertEquals("No Application class name resolved", output.result.message)
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals("Guest Application created: ${Application::class.java.name}", output.result.message)
         assertEquals(4L, output.result.durationMs)
-        assertNull(output.context.guestApplication)
+        assertEquals(Application::class.java.name, createRequest?.applicationClassName)
+        assertEquals("DEFAULT_APPLICATION", createRequest?.applicationClassSource)
+        assertTrue(DefaultApplicationFallback.onCreateCalled)
+        assertSame(output.context.guestApplication, DefaultApplicationFallback.lastInstance)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals(Application::class.java.name, evidence["applicationClass"])
+        assertEquals("DEFAULT_APPLICATION", evidence["applicationClassSource"])
+        assertEquals("TEST_CREATOR", evidence["applicationCreator"])
         assertFalse(output.isTerminalFailure)
     }
 
@@ -101,6 +118,8 @@ class ApplicationStageTest {
         assertSame(output.context.guestApplication, TestApplicationWithOnCreate.lastInstance)
         val evidence = output.result.evidence.associate { it.key to it.value }
         assertEquals(TestApplicationWithOnCreate::class.java.name, evidence["applicationClass"])
+        assertEquals("MANIFEST", evidence["applicationClassSource"])
+        assertEquals("REFLECTIVE_ATTACH", evidence["applicationCreator"])
         assertEquals("true", evidence["attached"])
         assertEquals("true", evidence["onCreate"])
         assertEquals("true", evidence["runtimePublishedBeforeOnCreate"])
@@ -268,6 +287,27 @@ class StageProbeProvider : ContentProvider() {
 class TestApplication : Application() {
     override fun attachBaseContext(base: Context?) {
         // no-op for JVM tests
+    }
+}
+
+class DefaultApplicationFallback : Application() {
+    override fun attachBaseContext(base: Context?) {
+        // no-op for JVM tests
+    }
+
+    override fun onCreate() {
+        onCreateCalled = true
+        lastInstance = this
+    }
+
+    companion object {
+        var onCreateCalled: Boolean = false
+        var lastInstance: DefaultApplicationFallback? = null
+
+        fun reset() {
+            onCreateCalled = false
+            lastInstance = null
+        }
     }
 }
 

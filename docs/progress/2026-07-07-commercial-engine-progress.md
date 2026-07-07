@@ -160,6 +160,35 @@ Limit:
   manifest component merging, isolated split classloader graphs, and dynamic
   feature on-demand loading are still open.
 
+### Application / LoadedApk Binding Foundation
+
+- Added `GuestApplicationCreator` as the single Application creation seam used
+  by `ApplicationStage` and `HostedRuntimeBootstrap`.
+- `ApplicationStage` now creates a default `android.app.Application` path when
+  the manifest does not declare a custom Application and a host context is
+  available.
+- Local JVM bootstrap paths without a host context now record an explicit
+  skipped default-Application reason instead of failing the whole bootstrap.
+- `LoadedApkRuntimeState` can carry the created guest `Application`.
+- `LoadedApkBridge` patches `mApplication` when a guest Application is present.
+- `ActivityThreadLoadedApkInstaller` exposes a `bindApplication(...)` helper so
+  the already-installed hosted LoadedApk can be updated after Application
+  creation without scattering reflection.
+- This is still not a full framework `LoadedApk.makeApplication()` replacement.
+  It creates the swappable seam and binds evidence first; the real
+  ActivityThread/LoadedApk makeApplication-equivalent path remains open.
+
+### Same-Origin Dual-Instance Engine Tests
+
+- Strengthened engine tests for launching two instances of the same origin
+  package.
+- Tests now assert `instanceId`, `virtualPackageName`, and `dataRoot` do not
+  cross between runtimes.
+- Tests now assert `processSlot` and `proxySlot` are distinct per instance and
+  persisted in the runtime slot store.
+- Added engine rebuild coverage using `FileBackedEngineRuntimeSlotStore` to
+  prove slot assignments survive process-style engine recreation.
+
 ## Verification
 
 The full all-in-one gate exceeded the local 180 second tool timeout, so the same
@@ -221,6 +250,26 @@ Result:
 - Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
   the project uses `compileSdk=36`.
 
+Additional verification after Application / LoadedApk binding foundation and
+same-origin dual-instance engine tests:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --tests "com.multiapp.core.loader.LoadedApkBridgeTest" --tests "com.multiapp.core.loader.ActivityThreadLoadedApkInstallerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --tests "com.multiapp.core.loader.HostedRuntimeBootstrapTest" --tests "com.multiapp.core.loader.DualInstanceBaselineTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+git diff --check
+```
+
+Result:
+
+- All commands above passed.
+- `git diff --check` passed with only existing CRLF normalization warnings.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
 ## Not Complete Yet
 
 The following items from the plan are still open and must not be marked `DONE`:
@@ -229,6 +278,8 @@ The following items from the plan are still open and must not be marked `DONE`:
   feature on-demand loading, and device-proven split APK launches.
 - Multidex fixture validation on device.
 - Full `LoadedApk.makeApplication()`-equivalent application creation model.
+  The swappable creator/binding seam exists, but device evidence and real
+  ActivityThread-backed creation are not complete.
 - Device-proven engine-owned hosted runtime binding. Local code now routes
   `ContainerActivity` and `Hosted*RuntimeBinder` through `:core:engine`, but
   device evidence is still required before marking this runtime path `PASS`.
@@ -253,5 +304,6 @@ Recommended next slice:
    resources, provider, service, and native library loading from splits.
 2. Add behavior tests for same-origin dual-instance isolation across storage,
    provider, service, and native redirect.
-3. Start `LoadedApk.makeApplication()`-equivalent application creation so guest
-   `Application` identity is installed through one framework-like path.
+3. Replace the reflective Application creator with a device-tested
+   `LoadedApk.makeApplication()`-equivalent creator behind the new
+   `GuestApplicationCreator` seam.

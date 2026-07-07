@@ -8,6 +8,7 @@ import com.multiapp.core.model.virtual.VirtualContextConfig
 class ApplicationStage(
     private val hostContext: Context?,
     private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String?,
+    private val guestApplicationCreator: GuestApplicationCreator = ReflectiveGuestApplicationCreator(),
     private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
@@ -34,13 +35,21 @@ class ApplicationStage(
             message = "Package snapshot is required before Application creation"
         )
 
-        val appClassName = applicationClassNameResolver(guestClassLoader, originApkPath)
-        if (appClassName == null) {
+        val resolvedAppClassName = applicationClassNameResolver(guestClassLoader, originApkPath)
+        val appClassName = resolvedAppClassName ?: Application::class.java.name
+        val appClassSource = if (resolvedAppClassName == null) "DEFAULT_APPLICATION" else "MANIFEST"
+        if (hostContext == null && resolvedAppClassName == null) {
             return BootstrapStageOutput(
                 context = input,
                 result = BootstrapResult.skipped(
                     stage = RuntimeStage.APPLICATION,
-                    message = "No Application class name resolved"
+                    message = "Default Application creation skipped because hostContext is missing",
+                    evidence = listOf(
+                        BootstrapEvidence("applicationClass", appClassName),
+                        BootstrapEvidence("applicationClassSource", appClassSource),
+                        BootstrapEvidence("applicationCreator", "SKIPPED"),
+                        BootstrapEvidence("applicationCreatorSkippedReason", "HOST_CONTEXT_MISSING")
+                    )
                 ).copy(durationMs = clock() - startMs),
                 terminalFailure = false
             )
@@ -49,50 +58,48 @@ class ApplicationStage(
         val applicationThread = currentApplicationThreadEvidence()
 
         var runtimePublishedBeforeOnCreate = false
-        var attachedContextPackageName: String? = null
 
         return runCatching {
-            val appClass = guestClassLoader.loadClass(appClassName)
-            val guestApplication = appClass.getDeclaredConstructor().newInstance() as Application
             val context = hostContext
                 ?: throw IllegalStateException("hostContext is required for Application creation")
-            val guestContext = VirtualContextWrappers.create(
-                base = context,
-                config = VirtualContextConfig(
-                    instanceId = input.instanceId,
-                    originPackageName = instance.originPackageName,
-                    virtualPackageName = instance.virtualPackageName,
-                    dataDir = instance.dataRoot,
-                    sourceDir = originApkPath,
-                    nativeLibraryDir = input.nativeLibraryDir,
-                    classLoader = guestClassLoader,
-                    applicationLabel = packageSnapshot.applicationLabel,
-                    packageSnapshot = packageSnapshot,
-                    splitSourceDirs = packageSnapshot.splitSourceDirs,
-                    splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
-                    splitNames = packageSnapshot.splitNames,
-                    isolatedSplits = packageSnapshot.isolatedSplits
-                ),
-                guestClassLoader = guestClassLoader
+            val virtualContextConfig = VirtualContextConfig(
+                instanceId = input.instanceId,
+                originPackageName = instance.originPackageName,
+                virtualPackageName = instance.virtualPackageName,
+                dataDir = instance.dataRoot,
+                sourceDir = originApkPath,
+                nativeLibraryDir = input.nativeLibraryDir,
+                classLoader = guestClassLoader,
+                applicationLabel = packageSnapshot.applicationLabel,
+                packageSnapshot = packageSnapshot,
+                splitSourceDirs = packageSnapshot.splitSourceDirs,
+                splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
+                splitNames = packageSnapshot.splitNames,
+                isolatedSplits = packageSnapshot.isolatedSplits
             )
-            attachedContextPackageName = guestContext.packageName
-
-            val attachMethod = findAttachBaseContextMethod(guestApplication.javaClass)
-            attachMethod.isAccessible = true
-            attachMethod.invoke(guestApplication, guestContext)
-            publishRuntimeBeforeOnCreate(input, guestApplication)
+            val creation = guestApplicationCreator.create(
+                GuestApplicationCreateRequest(
+                    applicationClassName = appClassName,
+                    applicationClassSource = appClassSource,
+                    hostContext = context,
+                    virtualContextConfig = virtualContextConfig,
+                    guestClassLoader = guestClassLoader
+                )
+            )
+            publishRuntimeBeforeOnCreate(input, creation.application)
             runtimePublishedBeforeOnCreate = true
-            guestApplication.onCreate()
-            guestApplication
+            creation.application.onCreate()
+            creation
         }.fold(
-            onSuccess = { guestApplication ->
+            onSuccess = { creation ->
                 BootstrapStageOutput(
-                    context = input.copy(guestApplication = guestApplication),
+                    context = input.copy(guestApplication = creation.application),
                     result = BootstrapResult.success(
                         stage = RuntimeStage.APPLICATION,
                         message = "Guest Application created: $appClassName",
                         evidence = listOf(
                             BootstrapEvidence("applicationClass", appClassName),
+                            BootstrapEvidence("applicationClassSource", appClassSource),
                             BootstrapEvidence("applicationThreadName", applicationThread.name),
                             BootstrapEvidence("applicationThreadHasLooper", applicationThread.hasLooper.toString()),
                             BootstrapEvidence("applicationThreadIsMain", applicationThread.isMain.toString()),
@@ -106,10 +113,10 @@ class ApplicationStage(
                                 "runtimePublishedBeforeOnCreate",
                                 runtimePublishedBeforeOnCreate.toString()
                             ),
-                            BootstrapEvidence("contextPackageName", attachedContextPackageName.orEmpty()),
+                            BootstrapEvidence("contextPackageName", creation.attachedContextPackageName.orEmpty()),
                             BootstrapEvidence("originPackageName", instance.originPackageName),
                             BootstrapEvidence("virtualPackageName", instance.virtualPackageName)
-                        ),
+                        ) + creation.evidence,
                         durationMs = clock() - startMs
                     ),
                     terminalFailure = false
@@ -163,21 +170,6 @@ class ApplicationStage(
         terminalFailure = false
     )
 
-    private fun findAttachBaseContextMethod(startClass: Class<*>): java.lang.reflect.Method {
-        var clazz: Class<*>? = startClass
-        while (clazz != null) {
-            try {
-                return clazz.getDeclaredMethod(
-                    "attachBaseContext",
-                    Context::class.java
-                )
-            } catch (_: NoSuchMethodException) {
-                clazz = clazz.superclass
-            }
-        }
-        throw NoSuchMethodException("attachBaseContext(Context) not found in Application hierarchy")
-    }
-
     private fun publishRuntimeBeforeOnCreate(input: BootstrapStageInput, guestApplication: Application) {
         val snapshot = requireNotNull(input.packageSnapshot) {
             "Package snapshot is required before publishing Application runtime"
@@ -217,4 +209,60 @@ class ApplicationStage(
         val isMain: Boolean,
         val looperProbeSkippedReason: String?
     )
+}
+
+fun interface GuestApplicationCreator {
+    fun create(request: GuestApplicationCreateRequest): GuestApplicationCreateResult
+}
+
+data class GuestApplicationCreateRequest(
+    val applicationClassName: String,
+    val applicationClassSource: String,
+    val hostContext: Context,
+    val virtualContextConfig: VirtualContextConfig,
+    val guestClassLoader: ClassLoader
+)
+
+data class GuestApplicationCreateResult(
+    val application: Application,
+    val attachedContextPackageName: String?,
+    val evidence: List<BootstrapEvidence> = emptyList()
+)
+
+class ReflectiveGuestApplicationCreator : GuestApplicationCreator {
+    override fun create(request: GuestApplicationCreateRequest): GuestApplicationCreateResult {
+        val appClass = request.guestClassLoader.loadClass(request.applicationClassName)
+        val guestApplication = appClass.getDeclaredConstructor().newInstance() as Application
+        val guestContext = VirtualContextWrappers.create(
+            base = request.hostContext,
+            config = request.virtualContextConfig,
+            guestClassLoader = request.guestClassLoader
+        )
+        val attachMethod = findAttachBaseContextMethod(guestApplication.javaClass)
+        attachMethod.isAccessible = true
+        attachMethod.invoke(guestApplication, guestContext)
+        return GuestApplicationCreateResult(
+            application = guestApplication,
+            attachedContextPackageName = guestContext.packageName,
+            evidence = listOf(
+                BootstrapEvidence("applicationCreator", "REFLECTIVE_ATTACH"),
+                BootstrapEvidence("applicationRequestedClassSource", request.applicationClassSource)
+            )
+        )
+    }
+
+    private fun findAttachBaseContextMethod(startClass: Class<*>): java.lang.reflect.Method {
+        var clazz: Class<*>? = startClass
+        while (clazz != null) {
+            try {
+                return clazz.getDeclaredMethod(
+                    "attachBaseContext",
+                    Context::class.java
+                )
+            } catch (_: NoSuchMethodException) {
+                clazz = clazz.superclass
+            }
+        }
+        throw NoSuchMethodException("attachBaseContext(Context) not found in Application hierarchy")
+    }
 }

@@ -38,6 +38,10 @@ class FakeTestApplication : Application() {
     override fun attachBaseContext(base: Context?) {
         // no-op for JVM testing
     }
+
+    override fun onCreate() {
+        // no-op for JVM testing
+    }
 }
 
 /**
@@ -182,6 +186,14 @@ class HostedRuntimeBootstrapTest {
             sPackageManagerRead = false,
             sPackageManagerPatched = false,
             degradedReasons = listOf(reason)
+        )
+    }
+
+    private fun jvmDefaultApplicationCreator() = GuestApplicationCreator { request ->
+        GuestApplicationCreateResult(
+            application = FakeTestApplication(),
+            attachedContextPackageName = request.virtualContextConfig.originPackageName,
+            evidence = listOf(BootstrapEvidence("applicationCreator", "TEST_DEFAULT_APPLICATION"))
         )
     }
 
@@ -631,6 +643,7 @@ class HostedRuntimeBootstrapTest {
             installRecordStore = FakeInstallRecordStore(mapOf("com.example.app" to installRecord)),
             classLoaderFactory = { _, _ -> ClassLoader.getSystemClassLoader() },
             applicationClassNameResolver = { _, _ -> null },
+            guestApplicationCreator = jvmDefaultApplicationCreator(),
             packageResolver = packageResolver
         )
 
@@ -761,6 +774,7 @@ class HostedRuntimeBootstrapTest {
             hostContext = mockContext,
             classLoaderFactory = { _, _ -> ClassLoader.getSystemClassLoader() },
             applicationClassNameResolver = { _, _ -> null },
+            guestApplicationCreator = jvmDefaultApplicationCreator(),
             packageResolver = packageResolver
         )
 
@@ -827,6 +841,7 @@ class HostedRuntimeBootstrapTest {
             hostContext = mockContext,
             classLoaderFactory = { _, _ -> ClassLoader.getSystemClassLoader() },
             applicationClassNameResolver = { _, _ -> null },
+            guestApplicationCreator = jvmDefaultApplicationCreator(),
             packageResolver = packageResolver
         )
 
@@ -925,6 +940,7 @@ class HostedRuntimeBootstrapTest {
             hostContext = mockContext,
             classLoaderFactory = { _, _ -> ClassLoader.getSystemClassLoader() },
             applicationClassNameResolver = { _, _ -> null },
+            guestApplicationCreator = jvmDefaultApplicationCreator(),
             packageResolver = packageResolver,
             providerHookInstallEnabled = true,
             providerHookInstaller = VirtualProviderHookInstaller(hookEngineProvider = { hookEngine })

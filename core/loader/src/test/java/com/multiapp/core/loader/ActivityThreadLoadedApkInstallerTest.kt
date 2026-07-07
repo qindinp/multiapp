@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.app.Application
 import android.content.pm.ApplicationInfo
 import android.content.res.Resources
 import io.mockk.mockk
@@ -50,6 +51,41 @@ class ActivityThreadLoadedApkInstallerTest {
         assertSame(loadedApk, activityThread.loadedApkFrom("mPackages", "com.multiapp.instance.abc"))
         assertSame(loadedApk, activityThread.loadedApkFrom("mResourcePackages", "com.test.minimal"))
         assertSame(loadedApk, activityThread.loadedApkFrom("mResourcePackages", "com.multiapp.instance.abc"))
+    }
+
+    @Test
+    fun `bindApplication patches installed loaded apk application through bridge`() {
+        val activityThread = FakeActivityThread()
+        val loadedApk = FakeLoadedApk()
+        val appInfo = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            sourceDir = "/data/app/minimal.apk"
+            publicSourceDir = "/data/app/minimal.apk"
+            dataDir = "/data/user/0/com.multiapp/instance/minimal"
+            nativeLibraryDir = "/data/user/0/com.multiapp/instance/minimal/lib"
+        }
+        val state = LoadedApkRuntimeState(
+            packageName = "com.test.minimal",
+            applicationInfo = appInfo,
+            resources = mockk(relaxed = true),
+            classLoader = ClassLoader.getSystemClassLoader()
+        )
+        val installResult = ActivityThreadLoadedApkInstaller.install(
+            activityThread = activityThread,
+            loadedApk = loadedApk,
+            state = state,
+            packageAliases = listOf("com.test.minimal")
+        )
+        val application = mockk<Application>(relaxed = true)
+
+        val bindResult = ActivityThreadLoadedApkInstaller.bindApplication(
+            installResult = installResult,
+            state = state,
+            application = application
+        )
+
+        assertTrue("mApplication" in bindResult.patchedFields)
+        assertSame(application, loadedApk.application())
     }
 
     @Test
@@ -226,6 +262,7 @@ class ActivityThreadLoadedApkInstallerTest {
     @Suppress("unused")
     private class FakeLoadedApk {
         private var mApplicationInfo: ApplicationInfo? = null
+        private var mApplication: Application? = null
         private var mResources: Resources? = null
         private var mClassLoader: ClassLoader? = null
         private var mBaseClassLoader: ClassLoader? = null
@@ -239,6 +276,7 @@ class ActivityThreadLoadedApkInstallerTest {
         private var mDeviceProtectedDataDirFile: File? = null
 
         fun applicationInfo(): ApplicationInfo? = mApplicationInfo
+        fun application(): Application? = mApplication
         fun resources(): Resources? = mResources
         fun classLoader(): ClassLoader? = mClassLoader
         fun packageName(): String? = mPackageName

@@ -1,5 +1,7 @@
 package com.multiapp.core.loader
 
+import android.app.Application
+
 /**
  * Installs hosted LoadedApk aliases into ActivityThread package maps.
  *
@@ -108,6 +110,35 @@ object ActivityThreadLoadedApkInstaller {
             loadedApk = loadedApk
         )
     }
+
+    fun bindApplication(
+        installResult: ActivityThreadLoadedApkInstallResult,
+        state: LoadedApkRuntimeState,
+        application: Application
+    ): LoadedApkPatchResult {
+        val loadedApk = installResult.loadedApk
+            ?: return LoadedApkPatchResult(
+                targetClassName = installResult.targetClassName,
+                patchedFields = emptyList(),
+                skippedFields = listOf("mApplication"),
+                skippedFieldReasons = listOf("mApplication:LOADED_APK_UNAVAILABLE")
+            )
+        return bindApplication(
+            loadedApk = loadedApk,
+            state = state,
+            application = application
+        )
+    }
+
+    fun bindApplication(
+        loadedApk: Any,
+        state: LoadedApkRuntimeState,
+        application: Application
+    ): LoadedApkPatchResult =
+        LoadedApkBridge.patch(
+            target = loadedApk,
+            state = state.copy(application = application)
+        )
 }
 
 enum class LoadedApkInstallSource {
