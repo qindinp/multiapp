@@ -135,6 +135,31 @@ Limit:
   components still run in the current app process, so this is not yet real
   Android process-slot isolation for native multi-instance execution.
 
+### Non-Isolated Split APK Runtime Paths
+
+- Added split APK metadata to installed app discovery, install records,
+  artifact manifests, package snapshots, and engine runtime snapshots.
+- Imported installed base + split APK artifacts into the app-owned artifact
+  directory and persisted split names, copied paths, and split SHA-256 values.
+- Normalized old install-record JSON that does not contain split fields so
+  existing installations keep loading without null-list crashes.
+- Propagated `splitSourceDirs`, `splitPublicSourceDirs`, and `splitNames`
+  through `VirtualContextConfig`, `ApplicationInfo`, `LoadedApk` patching,
+  Activity/Provider/Service dispatch contexts, and hosted Activity identity.
+- Built guest `PathClassLoader` dex paths from base APK plus split APKs.
+- Added all split asset paths to fallback `AssetManager` resource loading.
+- Scanned base + split APKs for native libraries and included split APK ABI
+  entries in the classloader native search path.
+- Marked `isolatedSplits=true` as an explicit hosted baseline
+  `UNSUPPORTED` classloader failure instead of pretending that dynamic feature
+  isolation is supported.
+
+Limit:
+
+- This is the minimal commercial slice for non-isolated split APK paths. Split
+  manifest component merging, isolated split classloader graphs, and dynamic
+  feature on-demand loading are still open.
+
 ## Verification
 
 The full all-in-one gate exceeded the local 180 second tool timeout, so the same
@@ -176,11 +201,33 @@ Result:
 - Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
   the project uses `compileSdk=36`.
 
+Additional verification after non-isolated split APK runtime paths:
+
+```powershell
+.\gradlew.bat :core:model:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :core:instance:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :core:manifest:testDebugUnitTest :core:hook:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+git diff --check
+```
+
+Result:
+
+- All commands above passed.
+- `git diff --check` passed with only existing CRLF normalization warnings.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
 ## Not Complete Yet
 
 The following items from the plan are still open and must not be marked `DONE`:
 
-- Full split APK / dynamic feature / multidex import and runtime loading.
+- Split manifest component merging, isolated split classloader graphs, dynamic
+  feature on-demand loading, and device-proven split APK launches.
+- Multidex fixture validation on device.
 - Full `LoadedApk.makeApplication()`-equivalent application creation model.
 - Device-proven engine-owned hosted runtime binding. Local code now routes
   `ContainerActivity` and `Hosted*RuntimeBinder` through `:core:engine`, but
@@ -202,9 +249,9 @@ The following items from the plan are still open and must not be marked `DONE`:
 
 Recommended next slice:
 
-1. Start split APK metadata support in install records and
-   `VirtualPackageSnapshot`.
-2. Add behavior tests for forged provider URI rejection and same-origin
-   dual-instance isolation.
-3. Add device evidence for same-origin dual-instance recents before marking
-   this slot work `PASS`.
+1. Add a split/multidex fixture and device evidence for launcher Activity,
+   resources, provider, service, and native library loading from splits.
+2. Add behavior tests for same-origin dual-instance isolation across storage,
+   provider, service, and native redirect.
+3. Start `LoadedApk.makeApplication()`-equivalent application creation so guest
+   `Application` identity is installed through one framework-like path.

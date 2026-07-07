@@ -25,6 +25,14 @@ internal object VirtualPackageSnapshotFactory {
             targetSdk = resolvedPackage?.targetSdk ?: installRecord.targetSdk,
             minSdk = resolvedPackage?.minSdk ?: installRecord.minSdk,
             sourceDir = installRecord.originApkPath,
+            publicSourceDir = installRecord.originApkPath,
+            splitSourceDirs = resolvedPackage?.splitSourceDirs?.takeIf { it.isNotEmpty() }
+                ?: installRecord.splitApkPaths,
+            splitPublicSourceDirs = resolvedPackage?.splitPublicSourceDirs?.takeIf { it.isNotEmpty() }
+                ?: installRecord.splitPublicSourceDirs.ifEmpty { installRecord.splitApkPaths },
+            splitNames = resolvedPackage?.splitNames?.takeIf { it.isNotEmpty() }
+                ?: installRecord.splitNames,
+            isolatedSplits = resolvedPackage?.isolatedSplits ?: installRecord.isolatedSplits,
             dataDir = instance.dataRoot,
             nativeLibraryDir = nativeLibraryDir ?: resolvedPackage?.nativeLibDir,
             applicationClassName = resolvedPackage?.applicationClassName ?: installRecord.applicationClassName,

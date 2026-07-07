@@ -107,6 +107,54 @@ class InstalledAppRepositoryTest {
     }
 
     @Test
+    fun `listInstalledApps maps split apk metadata from application info`() {
+        every { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) } returns listOf(
+            packageInfo(
+                packageName = "com.split.app",
+                label = "Split",
+                launcher = true,
+                splitSourceDirs = arrayOf(
+                    "/data/app/com.split.app/split_config.arm64.apk",
+                    "/data/app/com.split.app/split_config.xxhdpi.apk"
+                ),
+                splitPublicSourceDirs = arrayOf(
+                    "/mnt/asec/com.split.app/split_config.arm64.apk",
+                    "/mnt/asec/com.split.app/split_config.xxhdpi.apk"
+                ),
+                splitNames = arrayOf("config.arm64", "config.xxhdpi")
+            )
+        )
+        every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
+            launcherResolveInfo("com.split.app")
+        )
+
+        val repository = InstalledAppRepository(
+            packageManagerProvider = { packageManager },
+            hostPackageName = "com.multiapp.app",
+            launcherIntentFactory = { launcherQueryIntent() }
+        )
+
+        val app = repository.listInstalledApps().single()
+
+        assertEquals(
+            listOf(
+                "/data/app/com.split.app/split_config.arm64.apk",
+                "/data/app/com.split.app/split_config.xxhdpi.apk"
+            ),
+            app.splitApkPaths
+        )
+        assertEquals(
+            listOf(
+                "/mnt/asec/com.split.app/split_config.arm64.apk",
+                "/mnt/asec/com.split.app/split_config.xxhdpi.apk"
+            ),
+            app.splitPublicSourceDirs
+        )
+        assertEquals(listOf("config.arm64", "config.xxhdpi"), app.splitNames)
+        assertTrue(app.hasSplitApks)
+    }
+
+    @Test
     fun `isCloneCandidate rejects system or no launcher apps`() {
         assertTrue(virtualApp(mainActivity = "Main", system = false).isCloneCandidate())
         assertFalse(virtualApp(mainActivity = null, system = false).isCloneCandidate())
@@ -117,7 +165,10 @@ class InstalledAppRepositoryTest {
         packageName: String,
         label: String,
         launcher: Boolean,
-        system: Boolean = false
+        system: Boolean = false,
+        splitSourceDirs: Array<String>? = null,
+        splitPublicSourceDirs: Array<String>? = null,
+        splitNames: Array<String>? = null
     ): PackageInfo {
         val appInfo = ApplicationInfo().apply {
             this.packageName = packageName
@@ -126,6 +177,9 @@ class InstalledAppRepositoryTest {
             targetSdkVersion = 36
             minSdkVersion = 28
             flags = if (system) ApplicationInfo.FLAG_SYSTEM else 0
+            this.splitSourceDirs = splitSourceDirs
+            this.splitPublicSourceDirs = splitPublicSourceDirs
+            this.splitNames = splitNames
         }
         return PackageInfo().apply {
             this.packageName = packageName

@@ -26,7 +26,9 @@ class VirtualResourcesManager(
             return VirtualResourceBundle(appInfo, packageManagerResources, ResourceSource.PACKAGE_MANAGER)
         }
 
-        val archiveResources = runCatching { createArchiveResources(config.sourceDir) }.getOrNull()
+        val archiveResources = runCatching {
+            createArchiveResources(config.resourceAssetPaths())
+        }.getOrNull()
         if (archiveResources != null) {
             return VirtualResourceBundle(appInfo, archiveResources, ResourceSource.ASSET_MANAGER)
         }
@@ -42,6 +44,7 @@ class VirtualResourcesManager(
                 name = null
                 sourceDir = config.sourceDir
                 publicSourceDir = config.sourceDir
+                applySplitPaths(config)
                 dataDir = config.dataDir
                 ApplicationInfoNativePathCompat.applyTo(this, config.dataDir, config.nativeLibraryDir)
                 nonLocalizedLabel = config.applicationLabel ?: config.originPackageName
@@ -50,13 +53,34 @@ class VirtualResourcesManager(
     }
 
     @Suppress("DEPRECATION")
-    private fun createArchiveResources(sourceDir: String): Resources? {
+    private fun VirtualContextConfig.resourceAssetPaths(): List<String> =
+        listOf(sourceDir) + splitPublicSourceDirs.ifEmpty { splitSourceDirs }
+
+    private fun ApplicationInfo.applySplitPaths(config: VirtualContextConfig) {
+        if (config.splitSourceDirs.isNotEmpty()) {
+            splitSourceDirs = config.splitSourceDirs.toTypedArray()
+        }
+        val publicDirs = config.splitPublicSourceDirs.ifEmpty { config.splitSourceDirs }
+        if (publicDirs.isNotEmpty()) {
+            splitPublicSourceDirs = publicDirs.toTypedArray()
+        }
+        if (config.splitNames.isNotEmpty()) {
+            splitNames = config.splitNames.toTypedArray()
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun createArchiveResources(assetPaths: List<String>): Resources? {
         val hostResources = hostContext.resources
         val assetManager = AssetManager::class.java.getDeclaredConstructor().newInstance()
         val addAssetPath = AssetManager::class.java.getDeclaredMethod("addAssetPath", String::class.java)
             .apply { isAccessible = true }
-        val cookie = addAssetPath.invoke(assetManager, sourceDir) as? Int ?: 0
-        if (cookie == 0) return null
+        var added = 0
+        assetPaths.distinct().forEach { path ->
+            val cookie = addAssetPath.invoke(assetManager, path) as? Int ?: 0
+            if (cookie != 0) added += 1
+        }
+        if (added == 0) return null
         return Resources(assetManager, hostResources.displayMetrics, hostResources.configuration)
     }
 }

@@ -106,7 +106,12 @@ internal fun PackageInfo.toVirtualApp(
         isSystemApp = isSystemApp,
         targetSdkVersion = appInfo.targetSdkVersion,
         minSdkVersion = appInfo.minSdkVersion,
-        applicationClassName = appInfo.className
+        applicationClassName = appInfo.className,
+        splitApkPaths = appInfo.splitSourceDirs?.filterNotBlank().orEmpty(),
+        splitPublicSourceDirs = appInfo.splitPublicSourceDirs?.filterNotBlank().orEmpty(),
+        splitNames = appInfo.splitNames?.filterNotBlank().orEmpty(),
+        hasSplitApks = !appInfo.splitSourceDirs.isNullOrEmpty(),
+        isolatedSplits = appInfo.safeRequestsIsolatedSplitLoading()
     )
 }
 
@@ -129,6 +134,14 @@ private fun PackageInfo.safeVersionCode(): Long {
         ?: versionCode.toLong().takeIf { it > 0L }
         ?: 1L
 }
+
+private fun Array<String>?.filterNotBlank(): List<String> =
+    this?.filter { it.isNotBlank() }.orEmpty()
+
+private fun ApplicationInfo.safeRequestsIsolatedSplitLoading(): Boolean =
+    runCatching {
+        javaClass.getMethod("requestsIsolatedSplitLoading").invoke(this) as? Boolean ?: false
+    }.getOrDefault(false)
 
 fun VirtualApp.isCloneCandidate(): Boolean {
     return mainActivity != null && !isSystemApp

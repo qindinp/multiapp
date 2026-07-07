@@ -15,6 +15,16 @@ internal object HostedActivityIdentity {
         name = source.name
         sourceDir = config.sourceDir
         publicSourceDir = config.sourceDir
+        if (config.splitSourceDirs.isNotEmpty()) {
+            splitSourceDirs = config.splitSourceDirs.toTypedArray()
+        }
+        val publicDirs = config.splitPublicSourceDirs.ifEmpty { config.splitSourceDirs }
+        if (publicDirs.isNotEmpty()) {
+            splitPublicSourceDirs = publicDirs.toTypedArray()
+        }
+        if (config.splitNames.isNotEmpty()) {
+            splitNames = config.splitNames.toTypedArray()
+        }
         dataDir = config.dataDir
         ApplicationInfoNativePathCompat.applyTo(this, config.dataDir, config.nativeLibraryDir)
         writeStringField(this, "credentialProtectedDataDir", config.dataDir)

@@ -1272,6 +1272,7 @@ open class VirtualContextWrapper(
             packageName = config.originPackageName
             sourceDir = config.sourceDir
             publicSourceDir = config.sourceDir
+            applySplitPaths(config)
             dataDir = config.dataDir
             nonLocalizedLabel = config.applicationLabel ?: config.originPackageName
             nativeLibraryDir = config.nativeLibraryDir
@@ -1284,11 +1285,25 @@ open class VirtualContextWrapper(
             packageName = config.originPackageName
             sourceDir = config.sourceDir
             publicSourceDir = config.sourceDir
+            applySplitPaths(config)
             dataDir = config.dataDir
             nativeLibraryDir = config.nativeLibraryDir
             if (theme == 0) {
                 theme = config.packageSnapshot?.themeId ?: 0
             }
+        }
+    }
+
+    private fun ApplicationInfo.applySplitPaths(config: VirtualContextConfig) {
+        if (config.splitSourceDirs.isNotEmpty()) {
+            splitSourceDirs = config.splitSourceDirs.toTypedArray()
+        }
+        val publicDirs = config.splitPublicSourceDirs.ifEmpty { config.splitSourceDirs }
+        if (publicDirs.isNotEmpty()) {
+            splitPublicSourceDirs = publicDirs.toTypedArray()
+        }
+        if (config.splitNames.isNotEmpty()) {
+            splitNames = config.splitNames.toTypedArray()
         }
     }
 

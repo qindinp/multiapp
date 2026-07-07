@@ -76,7 +76,7 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
                 return null
             }
 
-            record
+            record.normalized()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -91,7 +91,7 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
                 try {
                     val json = file.readText()
                     val record = gson.fromJson(json, InstallRecord::class.java)
-                    if (record.schemaVersion == 1) record else null
+                    if (record.schemaVersion == 1) record.normalized() else null
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -106,4 +106,19 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
         val file = File(baseDir, "$packageName.json")
         return file.exists() && file.delete()
     }
+
+    private fun InstallRecord.normalized(): InstallRecord =
+        copy(
+            splitApkPaths = splitApkPaths.orEmpty(),
+            splitPublicSourceDirs = splitPublicSourceDirs.orEmpty(),
+            splitNames = splitNames.orEmpty(),
+            splitApkSha256s = splitApkSha256s.orEmpty(),
+            nativeLibraries = nativeLibraries.orEmpty(),
+            abiList = abiList.orEmpty(),
+            permissions = permissions.orEmpty(),
+            activities = activities.orEmpty(),
+            services = services.orEmpty(),
+            receivers = receivers.orEmpty(),
+            providers = providers.orEmpty()
+        )
 }

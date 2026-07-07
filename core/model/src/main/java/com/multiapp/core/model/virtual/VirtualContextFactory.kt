@@ -24,8 +24,32 @@ data class VirtualContextConfig(
     /** Human-readable label resolved from the origin APK manifest, if available. */
     val applicationLabel: String? = null,
     /** Runtime package snapshot used by virtual PMS/AMS query layers. */
-    val packageSnapshot: VirtualPackageSnapshot? = null
-)
+    val packageSnapshot: VirtualPackageSnapshot? = null,
+    /** Split APK code paths available to this guest context. */
+    val splitSourceDirs: List<String> = packageSnapshot?.splitSourceDirs.orEmpty(),
+    /** Split APK resource paths available to this guest context. */
+    val splitPublicSourceDirs: List<String> = packageSnapshot?.splitPublicSourceDirs.orEmpty().ifEmpty {
+        splitSourceDirs
+    },
+    /** Android split names corresponding to split APK paths. */
+    val splitNames: List<String> = packageSnapshot?.splitNames.orEmpty(),
+    /** Whether the package requests isolated split loading. */
+    val isolatedSplits: Boolean = packageSnapshot?.isolatedSplits ?: false
+) {
+    init {
+        require(splitSourceDirs.none { it.isBlank() }) { "splitSourceDirs must not contain blank entries" }
+        require(splitPublicSourceDirs.none { it.isBlank() }) {
+            "splitPublicSourceDirs must not contain blank entries"
+        }
+        require(splitNames.none { it.isBlank() }) { "splitNames must not contain blank entries" }
+        require(splitPublicSourceDirs.isEmpty() || splitPublicSourceDirs.size == splitSourceDirs.size) {
+            "splitPublicSourceDirs size must match splitSourceDirs size"
+        }
+        require(splitNames.isEmpty() || splitNames.size == splitSourceDirs.size) {
+            "splitNames size must match splitSourceDirs size"
+        }
+    }
+}
 
 /**
  * Factory for creating virtual Context objects that wrap the host Context

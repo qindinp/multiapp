@@ -108,6 +108,45 @@ class InstallRecordStoreTest {
     }
 
     @Test
+    fun `load normalizes legacy v1 json missing split native and component fields`() {
+        File(tempDir, "com.example.legacy.json").writeText(
+            """
+            {
+              "schemaVersion": 1,
+              "packageName": "com.example.legacy",
+              "originApkPath": "/data/app/com.example.legacy/base.apk",
+              "originApkSha256": "sha256abc123",
+              "originCertSha256": "cert123",
+              "versionCode": 7,
+              "versionName": "7.0",
+              "targetSdk": 33,
+              "minSdk": 23,
+              "applicationClassName": null,
+              "packageLabel": "Legacy",
+              "installTimeMs": 1000,
+              "updatedAtMs": 1000
+            }
+            """.trimIndent()
+        )
+        val store = JsonInstallRecordStore(tempDir)
+
+        val loaded = store.load("com.example.legacy")
+
+        assertNotNull(loaded)
+        assertEquals(emptyList(), loaded.splitApkPaths)
+        assertEquals(emptyList(), loaded.splitPublicSourceDirs)
+        assertEquals(emptyList(), loaded.splitNames)
+        assertEquals(emptyList(), loaded.splitApkSha256s)
+        assertEquals(emptyList(), loaded.nativeLibraries)
+        assertEquals(emptyList(), loaded.abiList)
+        assertEquals(emptyList(), loaded.permissions)
+        assertEquals(emptyList(), loaded.activities)
+        assertEquals(emptyList(), loaded.services)
+        assertEquals(emptyList(), loaded.receivers)
+        assertEquals(emptyList(), loaded.providers)
+    }
+
+    @Test
     fun `save overwrites existing record for same package`() {
         val store = JsonInstallRecordStore(tempDir)
 

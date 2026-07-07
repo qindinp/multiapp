@@ -3,8 +3,11 @@ package com.multiapp.core.loader
 import android.content.Context
 
 internal class NativeLibrariesStage(
-    private val nativeLibraryResolver: (originApkPath: String?, dataRoot: String?) -> NativeLibraryResolution =
-        NativeLibraryPaths::resolveAndExtract,
+    private val nativeLibraryResolver: (
+        originApkPath: String?,
+        splitApkPaths: List<String>,
+        dataRoot: String?
+    ) -> NativeLibraryResolution = NativeLibraryPaths::resolveAndExtract,
     private val hostContext: Context? = null,
     private val nativePrivatePathRedirectInstaller: NativePrivatePathRedirectInstaller =
         NativePrivatePathRedirectInstallers.bridge(),
@@ -25,7 +28,11 @@ internal class NativeLibrariesStage(
         }
 
         val resolution = runCatching {
-            nativeLibraryResolver(input.originApkPath, instance.dataRoot)
+            nativeLibraryResolver(
+                input.originApkPath,
+                input.installRecord?.splitApkPaths.orEmpty(),
+                instance.dataRoot
+            )
         }.getOrElse { error ->
             return BootstrapStageOutput(
                 context = input.copy(nativeLibraryDir = null),
@@ -35,6 +42,7 @@ internal class NativeLibrariesStage(
                     error = error,
                     evidence = listOf(
                         BootstrapEvidence("originApkPath", input.originApkPath.orEmpty()),
+                        BootstrapEvidence("splitApkPaths", input.installRecord?.splitApkPaths.orEmpty().joinToString(",")),
                         BootstrapEvidence("dataRoot", instance.dataRoot)
                     ),
                     durationMs = clock() - startMs

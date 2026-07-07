@@ -87,6 +87,8 @@ data class VirtualApp(
 
     /** Paths to split APK files (if any) */
     val splitApkPaths: List<String> = emptyList(),
+    /** Public/resource paths to split APK files; defaults to [splitApkPaths] when empty */
+    val splitPublicSourceDirs: List<String> = emptyList(),
     /** Names of each split */
     val splitNames: List<String> = emptyList(),
     /** Whether this app uses split APK architecture */

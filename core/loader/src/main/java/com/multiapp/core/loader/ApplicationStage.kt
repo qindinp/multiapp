@@ -67,7 +67,11 @@ class ApplicationStage(
                     nativeLibraryDir = input.nativeLibraryDir,
                     classLoader = guestClassLoader,
                     applicationLabel = packageSnapshot.applicationLabel,
-                    packageSnapshot = packageSnapshot
+                    packageSnapshot = packageSnapshot,
+                    splitSourceDirs = packageSnapshot.splitSourceDirs,
+                    splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
+                    splitNames = packageSnapshot.splitNames,
+                    isolatedSplits = packageSnapshot.isolatedSplits
                 ),
                 guestClassLoader = guestClassLoader
             )

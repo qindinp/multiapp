@@ -133,7 +133,11 @@ object AppModule {
                 activities = packageInfo.activities.toComponentInfos(),
                 services = packageInfo.services.toComponentInfos(),
                 receivers = packageInfo.receivers.toComponentInfos(),
-                providers = packageInfo.providers.toComponentInfos()
+                providers = packageInfo.providers.toComponentInfos(),
+                splitApkPaths = packageInfo.applicationInfo?.splitSourceDirs?.filterNotBlank().orEmpty(),
+                splitPublicSourceDirs = packageInfo.applicationInfo?.splitPublicSourceDirs?.filterNotBlank().orEmpty(),
+                splitNames = packageInfo.applicationInfo?.splitNames?.filterNotBlank().orEmpty(),
+                isolatedSplits = packageInfo.applicationInfo?.safeRequestsIsolatedSplitLoading() ?: false
             )
         }
     }
@@ -194,6 +198,14 @@ object AppModule {
             }
         }.orEmpty()
     }
+
+    private fun Array<String>?.filterNotBlank(): List<String> =
+        this?.filter { it.isNotBlank() }.orEmpty()
+
+    private fun android.content.pm.ApplicationInfo.safeRequestsIsolatedSplitLoading(): Boolean =
+        runCatching {
+            javaClass.getMethod("requestsIsolatedSplitLoading").invoke(this) as? Boolean ?: false
+        }.getOrDefault(false)
 
     private fun List<ManifestParser.ComponentInfo>.toInstallComponentInfos(packageName: String): List<ComponentInfo> {
         return mapNotNull { component ->

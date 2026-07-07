@@ -22,7 +22,11 @@ data class ResolvedPackage(
     val providers: List<ResolvedComponent> = emptyList(),
     val permissions: List<String> = emptyList(),
     val nativeLibDir: String? = null,
-    val applicationLabel: String? = null
+    val applicationLabel: String? = null,
+    val splitSourceDirs: List<String> = emptyList(),
+    val splitPublicSourceDirs: List<String> = emptyList(),
+    val splitNames: List<String> = emptyList(),
+    val isolatedSplits: Boolean = false
 )
 
 /**

@@ -72,7 +72,11 @@ class VirtualProviderDispatcher(
             nativeLibraryDir = snapshot.nativeLibraryDir,
             classLoader = guestClassLoader,
             applicationLabel = snapshot.applicationLabel,
-            packageSnapshot = snapshot
+            packageSnapshot = snapshot,
+            splitSourceDirs = snapshot.splitSourceDirs,
+            splitPublicSourceDirs = snapshot.splitPublicSourceDirs,
+            splitNames = snapshot.splitNames,
+            isolatedSplits = snapshot.isolatedSplits
         )
         val guestContext = VirtualContextWrappers.create(
             base = context,

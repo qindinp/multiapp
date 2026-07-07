@@ -18,6 +18,10 @@ data class VirtualPackageSnapshot(
     val minSdk: Int,
     val sourceDir: String,
     val publicSourceDir: String = sourceDir,
+    val splitSourceDirs: List<String> = emptyList(),
+    val splitPublicSourceDirs: List<String> = splitSourceDirs,
+    val splitNames: List<String> = emptyList(),
+    val isolatedSplits: Boolean = false,
     val dataDir: String,
     val nativeLibraryDir: String? = null,
     val applicationClassName: String? = null,
@@ -38,6 +42,17 @@ data class VirtualPackageSnapshot(
         require(originPackageName.isNotBlank()) { "originPackageName must not be blank" }
         require(virtualPackageName.isNotBlank()) { "virtualPackageName must not be blank" }
         require(sourceDir.isNotBlank()) { "sourceDir must not be blank" }
+        require(splitSourceDirs.none { it.isBlank() }) { "splitSourceDirs must not contain blank entries" }
+        require(splitPublicSourceDirs.none { it.isBlank() }) {
+            "splitPublicSourceDirs must not contain blank entries"
+        }
+        require(splitNames.none { it.isBlank() }) { "splitNames must not contain blank entries" }
+        require(splitPublicSourceDirs.isEmpty() || splitPublicSourceDirs.size == splitSourceDirs.size) {
+            "splitPublicSourceDirs size must match splitSourceDirs size"
+        }
+        require(splitNames.isEmpty() || splitNames.size == splitSourceDirs.size) {
+            "splitNames size must match splitSourceDirs size"
+        }
         require(dataDir.isNotBlank()) { "dataDir must not be blank" }
         require(versionCode > 0) { "versionCode must be positive" }
         require(versionName.isNotBlank()) { "versionName must not be blank" }

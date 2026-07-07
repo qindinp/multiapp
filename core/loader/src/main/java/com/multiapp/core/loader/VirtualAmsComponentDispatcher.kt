@@ -423,7 +423,11 @@ class DefaultVirtualAmsComponentDispatcher(
             nativeLibraryDir = nativeLibraryDir,
             classLoader = classLoader,
             applicationLabel = applicationLabel,
-            packageSnapshot = this
+            packageSnapshot = this,
+            splitSourceDirs = splitSourceDirs,
+            splitPublicSourceDirs = splitPublicSourceDirs,
+            splitNames = splitNames,
+            isolatedSplits = isolatedSplits
         )
 
     private data class VirtualServiceBoundConnection(

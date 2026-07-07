@@ -45,7 +45,11 @@ class InstalledPackageImporter(
         services: List<ComponentInfo> = emptyList(),
         receivers: List<ComponentInfo> = emptyList(),
         providers: List<ComponentInfo> = emptyList(),
-        originCertSha256: String = ""
+        originCertSha256: String = "",
+        splitApkPaths: List<String> = emptyList(),
+        splitPublicSourceDirs: List<String> = emptyList(),
+        splitNames: List<String> = emptyList(),
+        isolatedSplits: Boolean = false
     ): Result<ImportResult> {
         return try {
             requireSafeInstallPackageName(packageName)
@@ -58,6 +62,14 @@ class InstalledPackageImporter(
 
             val destFile = artifactFileFor(packageName)
             copyAsReadOnlyArtifact(originFile, destFile)
+            val splitArtifacts = copySplitArtifacts(
+                packageName = packageName,
+                splitApkPaths = splitApkPaths,
+                splitNames = splitNames
+            )
+            val copiedSplitApkPaths = splitArtifacts.map { it.file.absolutePath }
+            val copiedSplitPublicSourceDirs = copiedSplitApkPaths.takeIf { splitPublicSourceDirs.isNotEmpty() }
+                ?: copiedSplitApkPaths
 
             val now = System.currentTimeMillis()
             val record = InstallRecord(
@@ -65,6 +77,11 @@ class InstalledPackageImporter(
                 originApkPath = destFile.absolutePath,
                 originApkSha256 = originApkSha256,
                 originCertSha256 = originCertSha256,
+                splitApkPaths = copiedSplitApkPaths,
+                splitPublicSourceDirs = copiedSplitPublicSourceDirs,
+                splitNames = splitArtifacts.map { it.splitName },
+                splitApkSha256s = splitArtifacts.map { it.sha256 },
+                isolatedSplits = isolatedSplits,
                 versionCode = versionCode,
                 versionName = versionName,
                 targetSdk = targetSdk,
@@ -124,6 +141,51 @@ class InstalledPackageImporter(
         return destFile
     }
 
+    private fun splitArtifactFileFor(packageName: String, splitName: String, index: Int): File {
+        val artifactRoot = artifactDir.canonicalFile
+        if (!artifactRoot.exists() && !artifactRoot.mkdirs()) {
+            throw IllegalStateException("Unable to create artifact dir: ${artifactRoot.absolutePath}")
+        }
+        val safeSplitName = safeArtifactSegment(splitName.ifBlank { "split$index" })
+        val destFile = File(artifactRoot, "$packageName-$safeSplitName-split.apk").canonicalFile
+        require(destFile.parentFile == artifactRoot) {
+            "Split artifact path escapes artifactDir"
+        }
+        return destFile
+    }
+
+    private fun copySplitArtifacts(
+        packageName: String,
+        splitApkPaths: List<String>,
+        splitNames: List<String>
+    ): List<CopiedSplitArtifact> {
+        if (splitApkPaths.isEmpty()) return emptyList()
+        return splitApkPaths.mapIndexed { index, splitApkPath ->
+            val splitFile = File(splitApkPath).canonicalFile
+            if (!splitFile.isFile) {
+                throw IllegalArgumentException("Split APK file not found: $splitApkPath")
+            }
+            val splitName = splitNames.getOrNull(index)
+                ?.takeIf { it.isNotBlank() }
+                ?: splitFile.nameWithoutExtension.ifBlank { "split$index" }
+            val destFile = splitArtifactFileFor(packageName, splitName, index)
+            copyAsReadOnlyArtifact(splitFile, destFile)
+            CopiedSplitArtifact(
+                splitName = splitName,
+                file = destFile,
+                sha256 = computeSha256(splitFile)
+            )
+        }
+    }
+
+    private fun safeArtifactSegment(value: String): String =
+        value.map { char ->
+            when {
+                char.isLetterOrDigit() || char == '_' || char == '-' -> char
+                else -> '_'
+            }
+        }.joinToString("").ifBlank { "split" }
+
     private fun copyAsReadOnlyArtifact(originFile: File, destFile: File) {
         if (!artifactDir.exists() && !artifactDir.mkdirs()) {
             throw IllegalStateException("Unable to create artifact dir: ${artifactDir.absolutePath}")
@@ -151,12 +213,22 @@ class InstalledPackageImporter(
             sha256 = record.originApkSha256,
             sizeBytes = File(record.originApkPath).length()
         )
+        val splitApks = record.splitApkPaths.mapIndexed { index, path ->
+            InstallArtifact(
+                type = InstallArtifactType.SPLIT_APK,
+                path = path,
+                sha256 = record.splitApkSha256s.getOrNull(index).orEmpty(),
+                sizeBytes = File(path).length(),
+                splitName = record.splitNames.getOrNull(index)
+            )
+        }
 
         return InstallArtifactManifest(
             packageName = record.packageName,
             versionName = record.versionName,
             versionCode = record.versionCode,
             baseApk = baseApk,
+            splitApks = splitApks,
             requestedPermissions = record.permissions,
             installedAt = record.installTimeMs,
             originPackageName = record.packageName,
@@ -200,4 +272,10 @@ class InstalledPackageImporter(
             updatedAt = record.updatedAtMs
         )
     }
+
+    private data class CopiedSplitArtifact(
+        val splitName: String,
+        val file: File,
+        val sha256: String
+    )
 }

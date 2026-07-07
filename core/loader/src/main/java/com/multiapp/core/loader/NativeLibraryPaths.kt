@@ -25,6 +25,12 @@ internal object NativeLibraryPaths {
     fun resolveAndExtract(
         originApkPath: String?,
         dataRoot: String?
+    ): NativeLibraryResolution = resolveAndExtract(originApkPath, emptyList(), dataRoot)
+
+    fun resolveAndExtract(
+        originApkPath: String?,
+        splitApkPaths: List<String>,
+        dataRoot: String?
     ): NativeLibraryResolution {
         if (dataRoot.isNullOrBlank()) {
             return NativeLibraryResolution(
@@ -37,16 +43,13 @@ internal object NativeLibraryPaths {
         }
 
         val libRoot = File(dataRoot, "lib")
-        val apkFile = originApkPath?.takeIf { it.isNotBlank() }?.let(::File)
-        val availableAbis = apkFile
-            ?.takeIf { it.isFile }
-            ?.let { findAvailableNativeAbis(it) }
-            .orEmpty()
+        val apkFiles = apkFiles(originApkPath, splitApkPaths)
+        val availableAbis = findAvailableNativeAbis(apkFiles)
         val selectedAbi = selectAbi(availableAbis)
 
-        if (apkFile?.isFile == true && selectedAbi != null) {
+        if (apkFiles.isNotEmpty() && selectedAbi != null) {
             val abiDir = File(libRoot, selectedAbi)
-            val extraction = extractAbiLibraries(apkFile, selectedAbi, abiDir)
+            val extraction = extractAbiLibraries(apkFiles, selectedAbi, abiDir)
             return NativeLibraryResolution(
                 nativeLibraryDir = abiDir.absolutePath,
                 nativeLibraryRoot = libRoot.absolutePath,
@@ -84,7 +87,7 @@ internal object NativeLibraryPaths {
 
         val reason = when {
             availableAbis.isNotEmpty() -> "no supported native ABI found"
-            apkFile?.isFile == true -> "apk contains no native libraries"
+            apkFiles.isNotEmpty() -> "apk contains no native libraries"
             else -> "instance lib dir not present"
         }
         return NativeLibraryResolution(
@@ -99,14 +102,16 @@ internal object NativeLibraryPaths {
 
     fun buildClassLoaderSearchPath(
         apkPath: String,
+        splitApkPaths: List<String> = emptyList(),
         nativeLibraryDir: String?
     ): String? {
         val entries = linkedSetOf<String>()
         if (!nativeLibraryDir.isNullOrBlank()) {
             entries += nativeLibraryDir
         }
+        val apkPaths = (listOf(apkPath) + splitApkPaths).filter { it.isNotBlank() }.distinct()
         currentProcessSupportedAbis().forEach { abi ->
-            entries += "$apkPath!/lib/$abi"
+            apkPaths.forEach { path -> entries += "$path!/lib/$abi" }
         }
         return entries.joinToString(File.pathSeparator).ifBlank { null }
     }
@@ -137,54 +142,66 @@ internal object NativeLibraryPaths {
         return currentProcessSupportedAbis().firstOrNull { it in availableAbis }
     }
 
-    private fun findAvailableNativeAbis(apkFile: File): List<String> =
-        runCatching {
-            ZipFile(apkFile).use { zip ->
-                zip.entries().asSequence()
-                    .mapNotNull { entry ->
-                        val name = entry.name
-                        if (!entry.isDirectory && name.startsWith("lib/") && name.endsWith(".so")) {
-                            name.removePrefix("lib/").substringBefore('/')
-                        } else {
-                            null
-                        }
+    private fun apkFiles(originApkPath: String?, splitApkPaths: List<String>): List<File> =
+        (listOfNotNull(originApkPath?.takeIf { it.isNotBlank() }) + splitApkPaths)
+            .distinct()
+            .map(::File)
+            .filter { it.isFile }
+
+    private fun findAvailableNativeAbis(apkFiles: List<File>): List<String> =
+        apkFiles
+            .flatMap { apkFile ->
+                runCatching {
+                    ZipFile(apkFile).use { zip ->
+                        zip.entries().asSequence()
+                            .mapNotNull { entry ->
+                                val name = entry.name
+                                if (!entry.isDirectory && name.startsWith("lib/") && name.endsWith(".so")) {
+                                    name.removePrefix("lib/").substringBefore('/')
+                                } else {
+                                    null
+                                }
+                            }
+                            .toList()
                     }
-                    .distinct()
-                    .toList()
+                }.getOrDefault(emptyList())
             }
-        }.getOrDefault(emptyList())
+            .distinct()
+            .sorted()
 
     private fun extractAbiLibraries(
-        apkFile: File,
+        apkFiles: List<File>,
         abi: String,
         targetDir: File
     ): ExtractionResult {
         targetDir.mkdirs()
         val prefix = "lib/$abi/"
-        val libraries = mutableListOf<String>()
+        val libraries = linkedSetOf<String>()
         var copiedCount = 0
 
-        ZipFile(apkFile).use { zip ->
-            zip.entries().asSequence()
-                .filter { entry ->
-                    !entry.isDirectory && entry.name.startsWith(prefix) && entry.name.endsWith(".so")
-                }
-                .forEach { entry ->
-                    val soName = entry.name.substringAfterLast('/')
-                    libraries += soName
-                    val outFile = File(targetDir, soName)
-                    if (outFile.isFile && outFile.length() == entry.size) {
-                        return@forEach
+        apkFiles.forEach { apkFile ->
+            ZipFile(apkFile).use { zip ->
+                zip.entries().asSequence()
+                    .filter { entry ->
+                        !entry.isDirectory && entry.name.startsWith(prefix) && entry.name.endsWith(".so")
                     }
-                    zip.getInputStream(entry).use { input ->
-                        outFile.outputStream().use { output ->
-                            input.copyTo(output)
+                    .forEach { entry ->
+                        val soName = entry.name.substringAfterLast('/')
+                        libraries += soName
+                        val outFile = File(targetDir, soName)
+                        if (outFile.isFile && outFile.length() == entry.size) {
+                            return@forEach
                         }
+                        zip.getInputStream(entry).use { input ->
+                            outFile.outputStream().use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        outFile.setReadable(true, false)
+                        outFile.setExecutable(true, false)
+                        copiedCount++
                     }
-                    outFile.setReadable(true, false)
-                    outFile.setExecutable(true, false)
-                    copiedCount++
-                }
+            }
         }
 
         return ExtractionResult(

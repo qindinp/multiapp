@@ -14,6 +14,7 @@ import com.multiapp.core.model.virtual.ResolvedPackage
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageResolver
+import java.io.File
 
 /**
  * Result of a hosted runtime bootstrap attempt.
@@ -551,7 +552,14 @@ class HostedRuntimeBootstrap(
             apkPath: String,
             nativeLibDir: String?
         ): ClassLoader {
-            val librarySearchPath = NativeLibraryPaths.buildClassLoaderSearchPath(apkPath, nativeLibDir)
+            val apkPaths = apkPath
+                .split(File.pathSeparatorChar)
+                .filter { it.isNotBlank() }
+            val librarySearchPath = NativeLibraryPaths.buildClassLoaderSearchPath(
+                apkPath = apkPaths.firstOrNull() ?: apkPath,
+                splitApkPaths = apkPaths.drop(1),
+                nativeLibraryDir = nativeLibDir
+            )
             val classLoader = if (librarySearchPath.isNullOrBlank()) {
                 PathClassLoader(apkPath, ClassLoader.getSystemClassLoader())
             } else {

@@ -998,7 +998,11 @@ open class VirtualInstrumentation(
                 ?: result.dataRoot?.let { NativeLibraryPaths.resolveAndExtract(null, it).nativeLibraryDir },
             classLoader = requireNotNull(result.guestClassLoader),
             applicationLabel = result.packageSnapshot?.applicationLabel ?: result.applicationLabel,
-            packageSnapshot = result.packageSnapshot
+            packageSnapshot = result.packageSnapshot,
+            splitSourceDirs = result.packageSnapshot?.splitSourceDirs.orEmpty(),
+            splitPublicSourceDirs = result.packageSnapshot?.splitPublicSourceDirs.orEmpty(),
+            splitNames = result.packageSnapshot?.splitNames.orEmpty(),
+            isolatedSplits = result.packageSnapshot?.isolatedSplits ?: false
         )
     }
 

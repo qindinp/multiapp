@@ -29,6 +29,8 @@ object LoadedApkBridge {
         val appInfo = state.applicationInfo
         val sourceDir = appInfo.sourceDir
         val publicSourceDir = appInfo.publicSourceDir ?: appInfo.sourceDir
+        val splitSourceDirs = appInfo.splitSourceDirs ?: emptyArray()
+        val splitPublicSourceDirs = appInfo.splitPublicSourceDirs ?: splitSourceDirs
         val nativeLibraryDir = appInfo.nativeLibraryDir
         val dataDir = appInfo.dataDir
         val credentialProtectedDataDir = readStringField(appInfo, "credentialProtectedDataDir") ?: dataDir
@@ -41,6 +43,8 @@ object LoadedApkBridge {
         patchField(target, "mPackageName", state.packageName, patched, skipped)
         patchField(target, "mAppDir", sourceDir, patched, skipped)
         patchField(target, "mResDir", publicSourceDir, patched, skipped)
+        patchField(target, "mSplitAppDirs", splitSourceDirs, patched, skipped)
+        patchField(target, "mSplitResDirs", splitPublicSourceDirs, patched, skipped)
         patchField(target, "mLibDir", nativeLibraryDir, patched, skipped)
         patchPathField(target, "mDataDir", dataDir, patched, skipped)
         patchPathField(target, "mDataDirFile", dataDir, patched, skipped)

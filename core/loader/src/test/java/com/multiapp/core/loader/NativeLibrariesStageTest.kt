@@ -3,6 +3,7 @@ package com.multiapp.core.loader
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
+import com.multiapp.core.model.installer.InstallRecord
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -106,6 +107,62 @@ class NativeLibrariesStageTest {
     }
 
     @Test
+    fun `execute extracts supported native libraries from split apk when base has none`(
+        @TempDir tempDir: File
+    ) {
+        val dataRoot = File(tempDir, "instance-data").apply { mkdirs() }
+        val selectedAbi = NativeLibraryPaths.currentProcessSupportedAbis().first()
+        val baseApk = File(tempDir, "base.apk").also { apk ->
+            ZipOutputStream(apk.outputStream()).use { zip ->
+                zip.putNextEntry(ZipEntry("classes.dex"))
+                zip.write(byteArrayOf(0))
+                zip.closeEntry()
+            }
+        }
+        val splitApk = File(tempDir, "split_feature.apk").also { apk ->
+            ZipOutputStream(apk.outputStream()).use { zip ->
+                zip.putNextEntry(ZipEntry("lib/$selectedAbi/libsplit_feature.so"))
+                zip.write(byteArrayOf(9, 8, 7, 6))
+                zip.closeEntry()
+            }
+        }
+        val instance = instanceRecord(dataRoot = dataRoot.absolutePath)
+        val installRecord = installRecord(
+            originApkPath = baseApk.absolutePath,
+            splitApkPaths = listOf(splitApk.absolutePath)
+        )
+        val stage = NativeLibrariesStage(clock = fixedClock(450L, 462L))
+
+        val output = stage.execute(
+            BootstrapStageInput(
+                instanceId = instance.instanceId,
+                instance = instance,
+                installRecord = installRecord,
+                originApkPath = baseApk.absolutePath
+            )
+        )
+
+        val abiDir = File(dataRoot, "lib/$selectedAbi")
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(abiDir.absolutePath, output.context.nativeLibraryDir)
+        assertTrue(File(abiDir, "libsplit_feature.so").isFile)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("APK_EXTRACTED_ABI_DIR", evidence["nativeLibrarySource"])
+        assertEquals("EXTRACTED", evidence["nativeLibrariesExtraction"])
+        assertEquals(selectedAbi, evidence["nativeLibrarySelectedAbi"])
+        assertEquals("1", evidence["nativeLibraryCount"])
+        assertEquals("1", evidence["nativeLibrariesCopiedCount"])
+        assertEquals("libsplit_feature.so", evidence["nativeLibraries"])
+
+        val searchPath = NativeLibraryPaths.buildClassLoaderSearchPath(
+            apkPath = baseApk.absolutePath,
+            splitApkPaths = installRecord.splitApkPaths,
+            nativeLibraryDir = output.context.nativeLibraryDir
+        )
+        assertTrue(searchPath?.contains("${splitApk.absolutePath}!/lib/$selectedAbi") == true)
+    }
+
+    @Test
     fun `execute records native private path redirect evidence without changing stage status`(
         @TempDir tempDir: File
     ) {
@@ -167,6 +224,22 @@ class NativeLibrariesStageTest {
         createdAtMs = 1000L,
         updatedAtMs = 1000L,
         state = InstanceState.READY
+    )
+
+    private fun installRecord(
+        originApkPath: String,
+        splitApkPaths: List<String> = emptyList()
+    ) = InstallRecord(
+        packageName = "com.example.app",
+        originApkPath = originApkPath,
+        originApkSha256 = "abc123",
+        originCertSha256 = "def456",
+        splitApkPaths = splitApkPaths,
+        versionCode = 1,
+        versionName = "1.0",
+        targetSdk = 35,
+        minSdk = 28,
+        installTimeMs = 500L
     )
 
     private fun fixedClock(vararg values: Long): () -> Long {

@@ -122,7 +122,11 @@ class ContainerActivity : Activity() {
                 nativeLibraryDir = packageSnapshot?.nativeLibraryDir ?: resolveNativeLibraryDir(resolvedDataRoot),
                 classLoader = guestClassLoader,
                 applicationLabel = packageSnapshot?.applicationLabel ?: applicationLabel,
-                packageSnapshot = packageSnapshot
+                packageSnapshot = packageSnapshot,
+                splitSourceDirs = packageSnapshot?.splitSourceDirs.orEmpty(),
+                splitPublicSourceDirs = packageSnapshot?.splitPublicSourceDirs.orEmpty(),
+                splitNames = packageSnapshot?.splitNames.orEmpty(),
+                isolatedSplits = packageSnapshot?.isolatedSplits ?: false
             )
         }
 

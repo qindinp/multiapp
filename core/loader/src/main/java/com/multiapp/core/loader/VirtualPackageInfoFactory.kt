@@ -20,6 +20,16 @@ internal object VirtualPackageInfoFactory {
         name = snapshot.applicationClassName
         sourceDir = snapshot.sourceDir
         publicSourceDir = snapshot.publicSourceDir
+        if (snapshot.splitSourceDirs.isNotEmpty()) {
+            splitSourceDirs = snapshot.splitSourceDirs.toTypedArray()
+        }
+        val splitPublicDirs = snapshot.splitPublicSourceDirs.ifEmpty { snapshot.splitSourceDirs }
+        if (splitPublicDirs.isNotEmpty()) {
+            splitPublicSourceDirs = splitPublicDirs.toTypedArray()
+        }
+        if (snapshot.splitNames.isNotEmpty()) {
+            splitNames = snapshot.splitNames.toTypedArray()
+        }
         dataDir = snapshot.dataDir
         ApplicationInfoNativePathCompat.applyTo(this, snapshot.dataDir, snapshot.nativeLibraryDir)
         minSdkVersion = snapshot.minSdk

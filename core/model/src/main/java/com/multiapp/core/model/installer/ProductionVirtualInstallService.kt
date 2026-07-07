@@ -39,7 +39,8 @@ class ProductionVirtualInstallService(
             val resolvedMetadata = resolveInstallMetadata(app.packageName, app.apkPath)
             val importMetadata = appMetadata.withResolvedFallback(resolvedMetadata)
             val appApkSha256 = computeSha256OrNull(app.apkPath)
-            if (existing != null && !existing.needsAppRefresh(app, importMetadata, appApkSha256)) {
+            val appSplitSha256s = computeSha256sOrNull(importMetadata.splitApkPaths)
+            if (existing != null && !existing.needsAppRefresh(app, importMetadata, appApkSha256, appSplitSha256s)) {
                 return Result.success(ImportResult(
                     packageRecord = buildPackageRecord(existing),
                     manifest = buildManifest(existing),
@@ -62,7 +63,11 @@ class ProductionVirtualInstallService(
                 receivers = importMetadata.receivers,
                 providers = importMetadata.providers,
                 nativeLibraries = importMetadata.nativeLibraries,
-                abiList = importMetadata.abiList
+                abiList = importMetadata.abiList,
+                splitApkPaths = importMetadata.splitApkPaths,
+                splitPublicSourceDirs = importMetadata.splitPublicSourceDirs,
+                splitNames = importMetadata.splitNames,
+                isolatedSplits = importMetadata.isolatedSplits
             )
         } catch (e: CancellationException) {
             throw e
@@ -120,7 +125,11 @@ class ProductionVirtualInstallService(
                 receivers = resolvedMetadata.receivers,
                 providers = resolvedMetadata.providers,
                 nativeLibraries = resolvedMetadata.nativeLibraries,
-                abiList = resolvedMetadata.abiList
+                abiList = resolvedMetadata.abiList,
+                splitApkPaths = resolvedMetadata.splitApkPaths,
+                splitPublicSourceDirs = resolvedMetadata.splitPublicSourceDirs,
+                splitNames = resolvedMetadata.splitNames,
+                isolatedSplits = resolvedMetadata.isolatedSplits
             )
         } catch (e: CancellationException) {
             throw e
@@ -143,7 +152,11 @@ class ProductionVirtualInstallService(
             receivers = receivers.map { ComponentInfo(it) },
             providers = providers.map { ComponentInfo(it) },
             nativeLibraries = emptyList(),
-            abiList = nativeAbis
+            abiList = nativeAbis,
+            splitApkPaths = splitApkPaths,
+            splitPublicSourceDirs = splitPublicSourceDirs.ifEmpty { splitApkPaths },
+            splitNames = splitNames,
+            isolatedSplits = isolatedSplits
         )
     }
 
@@ -155,7 +168,11 @@ class ProductionVirtualInstallService(
             receivers = resolved.receivers.ifEmpty { receivers },
             providers = resolved.providers.ifEmpty { providers },
             nativeLibraries = resolved.nativeLibraries.ifEmpty { nativeLibraries },
-            abiList = resolved.abiList.ifEmpty { abiList }
+            abiList = resolved.abiList.ifEmpty { abiList },
+            splitApkPaths = resolved.splitApkPaths.ifEmpty { splitApkPaths },
+            splitPublicSourceDirs = resolved.splitPublicSourceDirs.ifEmpty { splitPublicSourceDirs },
+            splitNames = resolved.splitNames.ifEmpty { splitNames },
+            isolatedSplits = resolved.isolatedSplits || isolatedSplits
         )
     }
 
@@ -168,13 +185,17 @@ class ProductionVirtualInstallService(
             providers.isEmpty() && metadata.providers.isNotEmpty() ||
             permissions.isEmpty() && metadata.permissions.isNotEmpty() ||
             nativeLibraries.isEmpty() && metadata.nativeLibraries.isNotEmpty() ||
-            abiList.isEmpty() && metadata.abiList.isNotEmpty()
+            abiList.isEmpty() && metadata.abiList.isNotEmpty() ||
+            splitApkPaths.isEmpty() && metadata.splitApkPaths.isNotEmpty() ||
+            splitNames != metadata.splitNames ||
+            isolatedSplits != metadata.isolatedSplits
     }
 
     private fun InstallRecord.needsAppRefresh(
         app: VirtualApp,
         metadata: InstallMetadata,
-        appApkSha256: String?
+        appApkSha256: String?,
+        appSplitSha256s: List<String>?
     ): Boolean {
         return versionCode != app.versionCode ||
             versionName != app.versionName ||
@@ -184,11 +205,16 @@ class ProductionVirtualInstallService(
             packageLabel != app.appName ||
             appApkSha256 == null ||
             originApkSha256 != appApkSha256 ||
+            appSplitSha256s == null ||
+            splitApkSha256s != appSplitSha256s ||
             needsMetadataRefresh(metadata)
     }
 
     private fun InstallRecord.matchesInstallMetadata(metadata: InstallMetadata): Boolean {
-        return nativeLibraries == metadata.nativeLibraries && abiList == metadata.abiList
+        return nativeLibraries == metadata.nativeLibraries &&
+            abiList == metadata.abiList &&
+            splitNames == metadata.splitNames &&
+            isolatedSplits == metadata.isolatedSplits
     }
 
     private fun computeSha256OrNull(path: String): String? {
@@ -205,6 +231,12 @@ class ProductionVirtualInstallService(
             }
             digest.digest().joinToString("") { "%02x".format(it) }
         }.getOrNull()
+    }
+
+    private fun computeSha256sOrNull(paths: List<String>): List<String>? {
+        if (paths.isEmpty()) return emptyList()
+        val hashes = paths.map { path -> computeSha256OrNull(path) ?: return null }
+        return hashes
     }
 
     override fun getInstallRecord(packageName: String): InstallRecord? {
@@ -240,11 +272,21 @@ class ProductionVirtualInstallService(
             sha256 = record.originApkSha256,
             sizeBytes = File(record.originApkPath).length()
         )
+        val splitApks = record.splitApkPaths.mapIndexed { index, path ->
+            com.multiapp.core.model.InstallArtifact(
+                type = com.multiapp.core.model.InstallArtifactType.SPLIT_APK,
+                path = path,
+                sha256 = record.splitApkSha256s.getOrNull(index).orEmpty(),
+                sizeBytes = File(path).length(),
+                splitName = record.splitNames.getOrNull(index)
+            )
+        }
         return com.multiapp.core.model.InstallArtifactManifest(
             packageName = record.packageName,
             versionName = record.versionName,
             versionCode = record.versionCode,
             baseApk = baseApk,
+            splitApks = splitApks,
             requestedPermissions = record.permissions,
             installedAt = record.installTimeMs,
             originPackageName = record.packageName,

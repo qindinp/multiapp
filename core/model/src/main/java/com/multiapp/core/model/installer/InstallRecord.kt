@@ -18,7 +18,11 @@ data class InstallMetadata(
     val receivers: List<ComponentInfo> = emptyList(),
     val providers: List<ComponentInfo> = emptyList(),
     val nativeLibraries: List<String> = emptyList(),
-    val abiList: List<String> = emptyList()
+    val abiList: List<String> = emptyList(),
+    val splitApkPaths: List<String> = emptyList(),
+    val splitPublicSourceDirs: List<String> = emptyList(),
+    val splitNames: List<String> = emptyList(),
+    val isolatedSplits: Boolean = false
 )
 
 fun interface InstallMetadataResolver {
@@ -38,6 +42,11 @@ data class InstallRecord(
     val originApkPath: String,
     val originApkSha256: String,
     val originCertSha256: String,
+    val splitApkPaths: List<String> = emptyList(),
+    val splitPublicSourceDirs: List<String> = emptyList(),
+    val splitNames: List<String> = emptyList(),
+    val splitApkSha256s: List<String> = emptyList(),
+    val isolatedSplits: Boolean = false,
     val versionCode: Long,
     val versionName: String,
     val targetSdk: Int,
@@ -58,6 +67,21 @@ data class InstallRecord(
         requireSafeInstallPackageName(packageName)
         require(originApkPath.isNotBlank()) { "originApkPath must not be blank" }
         require(originApkSha256.isNotBlank()) { "originApkSha256 must not be blank" }
+        require(splitApkPaths.none { it.isBlank() }) { "splitApkPaths must not contain blank entries" }
+        require(splitPublicSourceDirs.none { it.isBlank() }) {
+            "splitPublicSourceDirs must not contain blank entries"
+        }
+        require(splitNames.none { it.isBlank() }) { "splitNames must not contain blank entries" }
+        require(splitApkSha256s.none { it.isBlank() }) { "splitApkSha256s must not contain blank entries" }
+        require(splitPublicSourceDirs.isEmpty() || splitPublicSourceDirs.size == splitApkPaths.size) {
+            "splitPublicSourceDirs size must match splitApkPaths size"
+        }
+        require(splitNames.isEmpty() || splitNames.size == splitApkPaths.size) {
+            "splitNames size must match splitApkPaths size"
+        }
+        require(splitApkSha256s.isEmpty() || splitApkSha256s.size == splitApkPaths.size) {
+            "splitApkSha256s size must match splitApkPaths size"
+        }
         require(versionCode > 0) { "versionCode must be positive" }
         require(versionName.isNotBlank()) { "versionName must not be blank" }
         require(targetSdk > 0) { "targetSdk must be positive" }

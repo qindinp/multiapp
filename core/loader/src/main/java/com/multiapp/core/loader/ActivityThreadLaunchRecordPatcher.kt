@@ -114,7 +114,11 @@ object ActivityThreadLaunchRecordPatcher {
             nativeLibraryDir = snapshot?.nativeLibraryDir,
             classLoader = classLoader ?: hostApplication?.classLoader ?: ActivityThreadLaunchRecordPatcher::class.java.classLoader!!,
             applicationLabel = snapshot?.applicationLabel,
-            packageSnapshot = snapshot
+            packageSnapshot = snapshot,
+            splitSourceDirs = snapshot?.splitSourceDirs.orEmpty(),
+            splitPublicSourceDirs = snapshot?.splitPublicSourceDirs.orEmpty(),
+            splitNames = snapshot?.splitNames.orEmpty(),
+            isolatedSplits = snapshot?.isolatedSplits ?: false
         )
         val resourceBundle = hostApplication?.let { VirtualResourcesManager(it).create(config) }
         val applicationInfo = resourceBundle
@@ -123,6 +127,16 @@ object ActivityThreadLaunchRecordPatcher {
                 packageName = config.virtualPackageName
                 sourceDir = config.sourceDir
                 publicSourceDir = config.sourceDir
+                if (config.splitSourceDirs.isNotEmpty()) {
+                    splitSourceDirs = config.splitSourceDirs.toTypedArray()
+                }
+                val publicDirs = config.splitPublicSourceDirs.ifEmpty { config.splitSourceDirs }
+                if (publicDirs.isNotEmpty()) {
+                    splitPublicSourceDirs = publicDirs.toTypedArray()
+                }
+                if (config.splitNames.isNotEmpty()) {
+                    splitNames = config.splitNames.toTypedArray()
+                }
                 dataDir = config.dataDir
                 ApplicationInfoNativePathCompat.applyTo(this, config.dataDir, config.nativeLibraryDir)
                 enabled = true

@@ -5,6 +5,7 @@ import android.content.res.Resources
 import io.mockk.mockk
 import java.io.File
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -101,6 +102,44 @@ class LoadedApkBridgeTest {
     }
 
     @Test
+    fun `patch replaces LoadedApk split application and resource dirs`() {
+        val target = FakeLoadedApk()
+        val appInfo = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            sourceDir = "/data/app/base.apk"
+            publicSourceDir = "/data/app/base.apk"
+            splitSourceDirs = arrayOf("/data/app/split_config.en.apk", "/data/app/split_feature.apk")
+            splitPublicSourceDirs = arrayOf(
+                "/data/app/public_split_config.en.apk",
+                "/data/app/public_split_feature.apk"
+            )
+            dataDir = "/data/user/0/com.multiapp/instance/minimal"
+            nativeLibraryDir = "/data/user/0/com.multiapp/instance/minimal/lib"
+        }
+
+        val result = LoadedApkBridge.patch(
+            target = target,
+            state = LoadedApkRuntimeState(
+                packageName = "com.test.minimal",
+                applicationInfo = appInfo,
+                resources = mockk(relaxed = true),
+                classLoader = ClassLoader.getSystemClassLoader()
+            )
+        )
+
+        assertTrue("mSplitAppDirs" in result.patchedFields)
+        assertTrue("mSplitResDirs" in result.patchedFields)
+        assertContentEquals(
+            arrayOf("/data/app/split_config.en.apk", "/data/app/split_feature.apk"),
+            target.splitAppDirs()
+        )
+        assertContentEquals(
+            arrayOf("/data/app/public_split_config.en.apk", "/data/app/public_split_feature.apk"),
+            target.splitResDirs()
+        )
+    }
+
+    @Test
     fun `patch records skipped field reasons`() {
         val target = FakePartialLoadedApk()
         val appInfo = ApplicationInfo().apply {
@@ -152,6 +191,8 @@ class LoadedApkBridgeTest {
         private var mPackageName: String? = null
         private var mAppDir: String? = null
         private var mResDir: String? = null
+        private var mSplitAppDirs: Array<String>? = null
+        private var mSplitResDirs: Array<String>? = null
         private var mLibDir: String? = null
         private var mDataDir: String? = null
         private var mDataDirFile: File? = null
@@ -165,6 +206,8 @@ class LoadedApkBridgeTest {
         fun packageName(): String? = mPackageName
         fun appDir(): String? = mAppDir
         fun resDir(): String? = mResDir
+        fun splitAppDirs(): Array<String>? = mSplitAppDirs
+        fun splitResDirs(): Array<String>? = mSplitResDirs
         fun libDir(): String? = mLibDir
         fun dataDir(): String? = mDataDir
         fun dataDirFile(): File? = mDataDirFile

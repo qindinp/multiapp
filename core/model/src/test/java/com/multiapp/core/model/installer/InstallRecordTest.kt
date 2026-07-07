@@ -2,6 +2,7 @@ package com.multiapp.core.model.installer
 
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
@@ -45,6 +46,58 @@ class InstallRecordTest {
         assertTrue(record.services.isEmpty())
         assertTrue(record.receivers.isEmpty())
         assertTrue(record.providers.isEmpty())
+    }
+
+    @Test
+    fun `default values - empty lists for split metadata`() {
+        val record = createRecord()
+
+        assertTrue(record.splitApkPaths.isEmpty())
+        assertTrue(record.splitPublicSourceDirs.isEmpty())
+        assertTrue(record.splitNames.isEmpty())
+        assertTrue(record.splitApkSha256s.isEmpty())
+    }
+
+    @Test
+    fun `split public source dirs size must match split apk paths`() {
+        assertFailsWith<IllegalArgumentException> {
+            createRecord(
+                splitApkPaths = listOf("/data/app/com.example.app/base.apk", "/data/app/com.example.app/config.arm64.apk"),
+                splitPublicSourceDirs = listOf("/data/app/com.example.app/base.apk"),
+                splitNames = listOf("base", "config.arm64"),
+                splitApkSha256s = listOf("basehash", "splithash")
+            )
+        }
+    }
+
+    @Test
+    fun `split names size must match split apk paths`() {
+        assertFailsWith<IllegalArgumentException> {
+            createRecord(
+                splitApkPaths = listOf("/data/app/com.example.app/base.apk", "/data/app/com.example.app/config.en.apk"),
+                splitPublicSourceDirs = listOf(
+                    "/data/app/com.example.app/base.apk",
+                    "/data/app/com.example.app/config.en.apk"
+                ),
+                splitNames = listOf("base"),
+                splitApkSha256s = listOf("basehash", "splithash")
+            )
+        }
+    }
+
+    @Test
+    fun `split apk sha256s size must match split apk paths`() {
+        assertFailsWith<IllegalArgumentException> {
+            createRecord(
+                splitApkPaths = listOf("/data/app/com.example.app/base.apk", "/data/app/com.example.app/config.xhdpi.apk"),
+                splitPublicSourceDirs = listOf(
+                    "/data/app/com.example.app/base.apk",
+                    "/data/app/com.example.app/config.xhdpi.apk"
+                ),
+                splitNames = listOf("base", "config.xhdpi"),
+                splitApkSha256s = listOf("basehash")
+            )
+        }
     }
 
     @Test
@@ -109,6 +162,10 @@ class InstallRecordTest {
         versionName: String = "1.0",
         targetSdk: Int = 33,
         minSdk: Int = 21,
+        splitApkPaths: List<String> = emptyList(),
+        splitPublicSourceDirs: List<String> = emptyList(),
+        splitNames: List<String> = emptyList(),
+        splitApkSha256s: List<String> = emptyList(),
         installTimeMs: Long = 1000L,
         updatedAtMs: Long = 1000L
     ) = InstallRecord(
@@ -116,6 +173,10 @@ class InstallRecordTest {
         originApkPath = originApkPath,
         originApkSha256 = originApkSha256,
         originCertSha256 = originCertSha256,
+        splitApkPaths = splitApkPaths,
+        splitPublicSourceDirs = splitPublicSourceDirs,
+        splitNames = splitNames,
+        splitApkSha256s = splitApkSha256s,
         versionCode = versionCode,
         versionName = versionName,
         targetSdk = targetSdk,

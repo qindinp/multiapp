@@ -6,6 +6,7 @@ import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.security.MessageDigest
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
@@ -153,6 +154,56 @@ class VirtualInstallServiceTest {
         assertEquals(listOf(ComponentInfo("com.example.resolved.SyncService")), record.services)
         assertEquals(listOf(ComponentInfo("com.example.resolved.BootReceiver")), record.receivers)
         assertEquals(listOf(ComponentInfo("com.example.resolved.DataProvider")), record.providers)
+    }
+
+    @Test
+    fun `ensureInstallRecord copies split apks into record and manifest`() {
+        val originApk = File(tempDir, "origin-split.apk").apply { writeText("base apk") }
+        val featureSplit = File(tempDir, "feature.apk").apply { writeText("feature split") }
+        val densitySplit = File(tempDir, "density.apk").apply { writeText("density split") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "installs_split"))
+        val service = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = File(tempDir, "artifacts_split")
+        )
+        val splitNames = listOf("config.feature", "config.xxhdpi")
+        val app = VirtualApp(
+            packageName = "com.example.split",
+            appName = "Split App",
+            versionName = "3.4.5",
+            versionCode = 345L,
+            apkPath = originApk.absolutePath,
+            instanceId = "",
+            minSdkVersion = 28,
+            targetSdkVersion = 36,
+            splitApkPaths = listOf(featureSplit.absolutePath, densitySplit.absolutePath),
+            splitPublicSourceDirs = listOf(featureSplit.absolutePath, densitySplit.absolutePath),
+            splitNames = splitNames,
+            hasSplitApks = true,
+            isolatedSplits = true
+        )
+
+        val importResult = service.ensureInstallRecord(app)
+
+        assertTrue(importResult.isSuccess)
+        val result = importResult.getOrThrow()
+        val record = installStore.load(app.packageName)!!
+        val expectedSplitSha256s = listOf(sha256(featureSplit), sha256(densitySplit))
+        assertEquals(2, record.splitApkPaths.size)
+        assertEquals(record.splitApkPaths, record.splitPublicSourceDirs)
+        assertEquals(splitNames, record.splitNames)
+        assertEquals(expectedSplitSha256s, record.splitApkSha256s)
+        assertEquals(true, record.isolatedSplits)
+        record.splitApkPaths.forEachIndexed { index, copiedPath ->
+            val copiedSplit = File(copiedPath)
+            assertTrue(copiedSplit.exists())
+            assertNotEquals(app.splitApkPaths[index], copiedPath)
+        }
+
+        assertEquals(record.splitApkPaths, result.manifest.splitApks.map { it.path })
+        assertEquals(expectedSplitSha256s, result.manifest.splitApks.map { it.sha256 })
+        assertEquals(splitNames, result.manifest.splitApks.map { it.splitName })
+        assertEquals(record.splitApkPaths, result.packageRecord.installManifest!!.splitApks.map { it.path })
     }
 
     @Test
@@ -351,5 +402,17 @@ class VirtualInstallServiceTest {
             listOf(ComponentInfo("com.example.MainActivity", exported = true)),
             installStore.load("com.example.app")!!.activities
         )
+    }
+
+    private fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(8192)
+            var read: Int
+            while (input.read(buffer).also { read = it } != -1) {
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 }
