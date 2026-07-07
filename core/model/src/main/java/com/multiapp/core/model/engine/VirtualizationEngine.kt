@@ -175,6 +175,19 @@ data class EngineEvidenceReport(
 
     fun operationEntries(component: String, operation: String): List<EngineOperationEvidence> =
         operationEvidence[component]?.get(operation).orEmpty()
+
+    fun flattenedOperationEvidence(): List<EngineOperationEvidence> =
+        operationEvidence
+            .toSortedMap()
+            .flatMap { (_, operations) ->
+                operations
+                    .toSortedMap()
+                    .flatMap { (_, evidences) ->
+                        evidences.map { evidence ->
+                            evidence.copy(entries = evidence.entries.toSortedMap().toMap())
+                        }
+                    }
+            }
 }
 
 data class EngineOperationEvidence(

@@ -96,6 +96,7 @@ class DefaultVirtualizationEngineTest {
         )
 
         val report = engine.exportEvidence(instance.instanceId)
+        val flattenedEvidence = report.flattenedOperationEvidence()
 
         assertEquals(EngineResultStatus.PASS, launch.status)
         assertTrue(providerAccepted)
@@ -108,8 +109,26 @@ class DefaultVirtualizationEngineTest {
             report.operationEntries("native", "path-redirect").single().entries["redirectedPath"]
         )
         assertEquals(EngineResultStatus.PARTIAL, report.status)
+        assertEquals(
+            listOf(
+                "native:path-redirect:PARTIAL",
+                "provider:route-token:PASS"
+            ),
+            flattenedEvidence.map { evidence -> "${evidence.component}:${evidence.operation}:${evidence.verdict}" }
+        )
+        assertEquals(flattenedEvidence, report.flattenedOperationEvidence())
+
+        val missingReport = engine.exportEvidence("missing-instance")
+        assertEquals(EngineResultStatus.FAIL, missingReport.status)
+        assertEquals("runtime_not_found", missingReport.entries["reason"])
+        assertTrue(missingReport.operationEvidence.isEmpty())
+        assertTrue(missingReport.flattenedOperationEvidence().isEmpty())
 
         assertEquals(EngineResultStatus.PASS, engine.stopInstance(instance.instanceId).status)
+        val stoppedReport = engine.exportEvidence(instance.instanceId)
+        assertEquals(EngineResultStatus.FAIL, stoppedReport.status)
+        assertEquals("runtime_not_found", stoppedReport.entries["reason"])
+        assertTrue(stoppedReport.operationEvidence.isEmpty())
         assertFalse(
             registry.registerOperationEvidence(
                 instance.instanceId,

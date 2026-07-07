@@ -92,6 +92,71 @@ class VirtualizationEngineModelTest {
         assertEquals(EngineResultStatus.FAIL, failed.status)
     }
 
+    @Test
+    fun `flattened operation evidence is deterministic for exporters`() {
+        val report = EngineEvidenceReport(
+            instanceId = "instance-1",
+            evidenceSessionId = "evidence-1",
+            status = EngineResultStatus.PASS,
+            profile = EngineProfile.BASELINE,
+            entries = mapOf("hostPackageName" to "com.multiapp.app"),
+            operationEvidence = hashMapOf(
+                "provider" to hashMapOf(
+                    "route-token" to listOf(
+                        EngineOperationEvidence(
+                            component = "provider",
+                            operation = "route-token",
+                            verdict = EngineResultStatus.PASS,
+                            entries = hashMapOf("z" to "last", "a" to "first")
+                        ),
+                        EngineOperationEvidence(
+                            component = "provider",
+                            operation = "route-token",
+                            verdict = EngineResultStatus.PASS,
+                            entries = mapOf("attempt" to "2")
+                        )
+                    ),
+                    "query" to listOf(
+                        EngineOperationEvidence(
+                            component = "provider",
+                            operation = "query",
+                            verdict = EngineResultStatus.PASS,
+                            entries = mapOf("attempt" to "1")
+                        )
+                    )
+                ),
+                "native" to hashMapOf(
+                    "path-redirect" to listOf(
+                        EngineOperationEvidence(
+                            component = "native",
+                            operation = "path-redirect",
+                            verdict = EngineResultStatus.PARTIAL,
+                            entries = mapOf("attempt" to "1")
+                        )
+                    )
+                )
+            )
+        )
+
+        val firstRead = report.flattenedOperationEvidence()
+        val secondRead = report.flattenedOperationEvidence()
+
+        assertEquals(firstRead, secondRead)
+        assertEquals(
+            listOf(
+                "native:path-redirect:1",
+                "provider:query:1",
+                "provider:route-token:first",
+                "provider:route-token:2"
+            ),
+            firstRead.map { evidence ->
+                "${evidence.component}:${evidence.operation}:${evidence.entries["attempt"] ?: evidence.entries["a"]}"
+            }
+        )
+        assertEquals(listOf("a", "z"), firstRead[2].entries.keys.toList())
+        assertEquals("com.multiapp.app", report.entries["hostPackageName"])
+    }
+
     private fun evidence(verdict: EngineResultStatus) = EngineOperationEvidence(
         component = "provider",
         operation = "route-token",

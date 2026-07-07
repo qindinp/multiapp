@@ -240,6 +240,28 @@ Limit:
   that exported engine reports include the expected provider/native entries for
   real launches.
 
+### Engine Evidence Export
+
+- Added a deterministic `EngineEvidenceReport.flattenedOperationEvidence()`
+  helper for report exporters. It sorts component/operation groups while
+  preserving append order inside each operation group.
+- Added an app-container engine report exporter that writes accepted active
+  runtime reports to
+  `files/hosted_launch_evidence/<instanceId>.engine-report.properties`.
+- Provider and native operation evidence now trigger an engine report export
+  after `EngineRuntimeRegistry` accepts the evidence.
+- Exported reports include `status`, `profile`, `evidenceSessionId`, runtime
+  entries, grouped operation counts, indexed operation entries, and grep-friendly
+  provider/native verdict fields.
+- Export is skipped when the registry rejects evidence, so missing/stopped
+  runtime updates do not create stale `PASS` report files.
+- Exporter output reuses the shared evidence sanitizer and also sanitizes
+  component/operation labels, so route token and password-like suffixes cannot
+  leak even if an unsanitized report is passed directly to the exporter.
+- This creates a device-readable evidence file path, but it is not yet
+  device-proven. A real launch still needs `run-as com.multiapp.app cat
+  files/hosted_launch_evidence/*.engine-report.properties`.
+
 ## Verification
 
 The full all-in-one gate exceeded the local 180 second tool timeout, so the same
@@ -369,6 +391,21 @@ Result:
 - Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
   the project uses `compileSdk=36`.
 
+Additional verification after engine evidence export:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.container.ContainerEngineEvidenceBridgeTest" --tests "com.multiapp.app.container.ContainerRuntimePathsTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Targeted app engine-report export tests passed.
+- `:core:model:testDebugUnitTest` and `:core:engine:testDebugUnitTest` passed.
+- `git diff --check` passed with only existing CRLF normalization warnings.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
 ## Not Complete Yet
 
 The following items from the plan are still open and must not be marked `DONE`:
@@ -386,8 +423,8 @@ The following items from the plan are still open and must not be marked `DONE`:
 - Real Android process-slot isolation for native multi-instance execution. JVM
   decision tests exist, but native syscall evidence is not complete.
 - Device-proven exported `EngineEvidenceReport` for provider/native operation
-  evidence. Local in-process aggregation exists, but real launch reports still
-  need device evidence.
+  evidence. Local export to `hosted_launch_evidence` exists, but real launch
+  reports still need device evidence.
 - Full PMS signatures/SigningInfo, typed metadata, provider read/write
   permissions, and `IntentFilter.match()` fidelity.
 - Complete AMS/ATM activity stack semantics:
@@ -403,8 +440,8 @@ The following items from the plan are still open and must not be marked `DONE`:
 
 Recommended next slice:
 
-1. Add device evidence export for engine operation reports and verify provider
-   route-token/native verdicts after real launches.
+1. Install the current debug APK on device, run provider/native sample launches,
+   and capture `*.engine-report.properties` with `run-as` to prove real export.
 2. Add a split/multidex fixture and device evidence for launcher Activity,
    resources, provider, service, and native library loading from splits.
 3. Add behavior tests for same-origin dual-instance isolation across storage,

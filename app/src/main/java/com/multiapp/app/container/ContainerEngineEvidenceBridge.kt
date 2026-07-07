@@ -1,5 +1,6 @@
 package com.multiapp.app.container
 
+import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.engine.EngineRuntimeRegistry
 import com.multiapp.core.loader.VirtualStorageDiagnosticKind
@@ -16,7 +17,8 @@ internal object ContainerEngineEvidenceBridge {
         registry: EngineRuntimeRegistry = EngineRuntimeRegistry.global
     ): Boolean {
         if (instanceId.isBlank()) return false
-        return registry.registerOperationEvidence(
+        return registerOperationEvidence(
+            registry = registry,
             instanceId = instanceId,
             evidence = EngineOperationEvidence(
                 component = COMPONENT_PROVIDER,
@@ -34,7 +36,8 @@ internal object ContainerEngineEvidenceBridge {
     ): Boolean {
         if (diagnostic.kind != VirtualStorageDiagnosticKind.NATIVE_IO) return false
         if (diagnostic.instanceId.isBlank()) return false
-        return registry.registerOperationEvidence(
+        return registerOperationEvidence(
+            registry = registry,
             instanceId = diagnostic.instanceId,
             evidence = EngineOperationEvidence(
                 component = COMPONENT_NATIVE,
@@ -51,7 +54,8 @@ internal object ContainerEngineEvidenceBridge {
         registry: EngineRuntimeRegistry = EngineRuntimeRegistry.global
     ): Boolean {
         if (instanceId.isBlank()) return false
-        return registry.registerOperationEvidence(
+        return registerOperationEvidence(
+            registry = registry,
             instanceId = instanceId,
             evidence = EngineOperationEvidence(
                 component = COMPONENT_NATIVE,
@@ -60,6 +64,25 @@ internal object ContainerEngineEvidenceBridge {
                 entries = sanitizeEntries(fields)
             )
         )
+    }
+
+    private fun registerOperationEvidence(
+        registry: EngineRuntimeRegistry,
+        instanceId: String,
+        evidence: EngineOperationEvidence
+    ): Boolean {
+        val accepted = registry.registerOperationEvidence(
+            instanceId = instanceId,
+            evidence = evidence
+        )
+        if (accepted) {
+            runCatching {
+                ContainerEngineEvidenceReportExporter.write(registry.evidence(instanceId))
+            }.onFailure { error ->
+                Log.w(TAG, "Unable to export engine evidence report for instanceId=$instanceId", error)
+            }
+        }
+        return accepted
     }
 
     private fun providerVerdict(fields: Map<String, Any?>): EngineResultStatus {
@@ -114,4 +137,5 @@ internal object ContainerEngineEvidenceBridge {
 
     private const val COMPONENT_PROVIDER = "provider"
     private const val COMPONENT_NATIVE = "native"
+    private const val TAG = "ContainerEngineEvidence"
 }

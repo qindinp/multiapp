@@ -68,13 +68,14 @@ class EngineRuntimeRegistryTest {
         val accepted = registry.registerOperationEvidence(
             instanceId = runtime.instanceId,
             evidence = EngineOperationEvidence(
-                component = "provider",
+                component = "provider:password=component-secret",
                 operation = "query:password=method-secret",
                 verdict = EngineResultStatus.PASS,
                 entries = mapOf(
                     "uri" to "content://com.multiapp.app.stub/items?multiapp_routeToken=secret-token",
                     "callback" to "dispatch content://com.multiapp.app.stub/items?multiapp_routeToken=secret-token",
                     "routeToken" to "secret-token",
+                    "password" to "plain-password",
                     "detail" to "credential=plain-credential"
                 )
             )
@@ -85,7 +86,85 @@ class EngineRuntimeRegistryTest {
         assertEquals("content://com.multiapp.app.stub/<redacted>", evidence.entries["uri"])
         assertEquals("dispatch content://com.multiapp.app.stub/<redacted>", evidence.entries["callback"])
         assertEquals("<redacted>", evidence.entries["routeToken"])
+        assertEquals("<redacted>", evidence.entries["password"])
         assertEquals("<redacted>", evidence.entries["detail"])
+    }
+
+    @Test
+    fun `same component operation evidence is appended in registration order`() {
+        val registry = EngineRuntimeRegistry()
+        val runtime = runtime()
+        registry.register(runtime)
+
+        val firstAccepted = registry.registerOperationEvidence(
+            instanceId = runtime.instanceId,
+            evidence = EngineOperationEvidence(
+                component = "provider",
+                operation = "route-token",
+                verdict = EngineResultStatus.PASS,
+                entries = mapOf("attempt" to "1", "state" to "started")
+            )
+        )
+        val secondAccepted = registry.registerOperationEvidence(
+            instanceId = runtime.instanceId,
+            evidence = EngineOperationEvidence(
+                component = "provider",
+                operation = "route-token",
+                verdict = EngineResultStatus.PASS,
+                entries = mapOf("attempt" to "2", "state" to "confirmed")
+            )
+        )
+
+        val report = registry.evidence(runtime.instanceId)
+        val groupedAttempts = report.operationEntries("provider", "route-token")
+            .map { evidence -> evidence.entries["attempt"] }
+        val flattenedAttempts = report.flattenedOperationEvidence()
+            .map { evidence -> evidence.entries["attempt"] }
+
+        assertTrue(firstAccepted)
+        assertTrue(secondAccepted)
+        assertEquals(listOf("1", "2"), groupedAttempts)
+        assertEquals(listOf("1", "2"), flattenedAttempts)
+        assertEquals(report.flattenedOperationEvidence(), report.flattenedOperationEvidence())
+    }
+
+    @Test
+    fun `registry evidence verdict keeps highest severity across append order`() {
+        val registry = EngineRuntimeRegistry()
+        val runtime = runtime()
+        registry.register(runtime)
+
+        assertTrue(
+            registry.registerOperationEvidence(
+                instanceId = runtime.instanceId,
+                evidence = operationEvidence(verdict = EngineResultStatus.PARTIAL)
+            )
+        )
+        assertEquals(EngineResultStatus.PARTIAL, registry.evidence(runtime.instanceId).status)
+
+        assertTrue(
+            registry.registerOperationEvidence(
+                instanceId = runtime.instanceId,
+                evidence = operationEvidence(verdict = EngineResultStatus.PASS)
+            )
+        )
+        assertEquals(EngineResultStatus.PARTIAL, registry.evidence(runtime.instanceId).status)
+
+        assertTrue(
+            registry.registerOperationEvidence(
+                instanceId = runtime.instanceId,
+                evidence = operationEvidence(verdict = EngineResultStatus.FAIL)
+            )
+        )
+        assertEquals(EngineResultStatus.FAIL, registry.evidence(runtime.instanceId).status)
+
+        assertTrue(
+            registry.registerOperationEvidence(
+                instanceId = runtime.instanceId,
+                evidence = operationEvidence(verdict = EngineResultStatus.UNSUPPORTED)
+            )
+        )
+        assertEquals(EngineResultStatus.FAIL, registry.evidence(runtime.instanceId).status)
     }
 
     private fun operationEvidence(verdict: EngineResultStatus) = EngineOperationEvidence(
