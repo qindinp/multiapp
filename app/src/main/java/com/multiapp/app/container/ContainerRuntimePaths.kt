@@ -2,6 +2,7 @@ package com.multiapp.app.container
 
 import android.content.Context
 import com.multiapp.core.common.EvidenceSanitizer
+import com.multiapp.core.loader.ProxyActivitySlots
 import java.io.File
 
 /** Shared filesystem layout for v2 hosted container runtime state. */
@@ -12,7 +13,8 @@ object ContainerRuntimePaths {
     const val INSTANCE_DATA_DIR = "instance_data"
     const val INSTANCE_LIB_DIR = "lib"
     const val HOSTED_LAUNCH_EVIDENCE_DIR = "hosted_launch_evidence"
-    const val PROXY_ACTIVITY_SLOTS_FILE = "proxy_activity_slots.properties"
+    const val PROXY_ACTIVITY_SLOTS_FILE = ProxyActivitySlots.SLOT_ASSIGNMENT_FILE
+    const val ENGINE_RUNTIME_SLOTS_FILE = "engine_runtime_slots.properties"
 
     fun instanceStoreDir(context: Context): File = instanceStoreDir(context.filesDir)
 
@@ -49,6 +51,12 @@ object ContainerRuntimePaths {
 
     fun proxyActivitySlotsFile(filesDir: File): File =
         File(filesDir, PROXY_ACTIVITY_SLOTS_FILE)
+
+    fun engineRuntimeSlotsFile(context: Context): File =
+        engineRuntimeSlotsFile(context.filesDir)
+
+    fun engineRuntimeSlotsFile(filesDir: File): File =
+        File(filesDir, ENGINE_RUNTIME_SLOTS_FILE)
 
     fun hostedLaunchEvidenceFile(context: Context, instanceId: String): File =
         hostedLaunchEvidenceFile(context.filesDir, instanceId)

@@ -45,6 +45,30 @@ class FileBackedProxyActivitySlotAssignmentStoreTest {
     }
 
     @Test
+    fun `reserve does not overwrite proxy slot owned by another store instance`(@TempDir tempDir: File) {
+        val file = File(tempDir, "proxy_activity_slots.properties")
+        val firstStore = FileBackedProxyActivitySlotAssignmentStore(file)
+        val secondStore = FileBackedProxyActivitySlotAssignmentStore(file)
+        val firstKey = ProxyActivitySlotKey(
+            instanceId = "inst-001",
+            launchMode = null,
+            taskKey = "com.test:inst-001"
+        )
+        val secondKey = ProxyActivitySlotKey(
+            instanceId = "inst-002",
+            launchMode = null,
+            taskKey = "com.test:inst-002"
+        )
+        val proxyClassName = "com.multiapp.app.container.ProxyActivity0"
+
+        assertEquals(proxyClassName, firstStore.reserve(firstKey, listOf(proxyClassName)))
+        assertNull(secondStore.reserve(secondKey, listOf(proxyClassName)))
+
+        assertEquals(firstKey, secondStore.ownerOf(proxyClassName))
+        assertNull(secondStore.find(secondKey))
+    }
+
+    @Test
     fun `store prunes deleted instances and inactive proxy tasks`(@TempDir tempDir: File) {
         val store = FileBackedProxyActivitySlotAssignmentStore(File(tempDir, "proxy_activity_slots.properties"))
         val activeKey = ProxyActivitySlotKey(

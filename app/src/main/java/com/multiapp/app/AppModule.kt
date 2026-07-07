@@ -13,6 +13,8 @@ import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.core.engine.DefaultHostedRuntimeEngine
 import com.multiapp.core.engine.DefaultVirtualizationEngine
 import com.multiapp.core.engine.EngineActivityLauncher
+import com.multiapp.core.engine.EngineRuntimeSlotStore
+import com.multiapp.core.engine.FileBackedEngineRuntimeSlotStore
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.manifest.ManifestParser
@@ -71,6 +73,12 @@ object AppModule {
             }
             appContext.startActivity(intent)
         }
+    }
+
+    @Provides
+    @Singleton
+    fun provideEngineRuntimeSlotStore(@ApplicationContext context: Context): EngineRuntimeSlotStore {
+        return FileBackedEngineRuntimeSlotStore(ContainerRuntimePaths.engineRuntimeSlotsFile(context))
     }
 
     @Provides

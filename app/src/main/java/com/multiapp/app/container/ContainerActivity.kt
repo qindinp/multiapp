@@ -15,9 +15,11 @@ import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.loader.VirtualActivityManager
 import com.multiapp.core.loader.VirtualActivityRecordManager
+import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
@@ -244,10 +246,13 @@ class ContainerActivity : Activity() {
 
         val installOrigin = intent.getStringExtra(EXTRA_INSTALL_ORIGIN)
         val providerHookEnabled = intent.getBooleanExtra(EXTRA_ENABLE_PROVIDER_HOOK, true)
+        val engineProcessSlot = intent.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROCESS_SLOT)
+        val engineProxySlot = intent.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT)
         Log.i(
             TAG,
             "Container launch started: instanceId=$instanceId, " +
-                "installOrigin=$installOrigin, providerHookEnabled=$providerHookEnabled"
+                "installOrigin=$installOrigin, providerHookEnabled=$providerHookEnabled, " +
+                "engineProcessSlot=$engineProcessSlot, engineProxySlot=$engineProxySlot"
         )
 
         startBootstrap(instanceId, providerHookEnabled)
@@ -389,6 +394,13 @@ class ContainerActivity : Activity() {
             instanceId = instanceId,
             slotAssignmentStore = slotAssignmentStore
         )
+        bindEngineProxySlotIfPresent(
+            slotAssignmentStore = slotAssignmentStore,
+            instanceId = instanceId,
+            originPackageName = originPackageName,
+            launchMode = launchMode,
+            taskAffinity = taskAffinity
+        )
         val manager = VirtualActivityManager(
             context = applicationContext ?: this,
             proxyActivityRegistry = ProxyActivityRegistry(
@@ -404,6 +416,45 @@ class ContainerActivity : Activity() {
             launchMode = launchMode,
             taskAffinity = taskAffinity
         )
+    }
+
+    private fun bindEngineProxySlotIfPresent(
+        slotAssignmentStore: FileBackedProxyActivitySlotAssignmentStore,
+        instanceId: String,
+        originPackageName: String,
+        launchMode: String?,
+        taskAffinity: String?
+    ) {
+        val engineProxySlot = intent
+            ?.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT)
+            ?.takeIf { it.isNotBlank() }
+            ?: return
+        if (engineProxySlot !in proxyActivityClassNames) {
+            Log.w(TAG, "Ignoring unknown engine proxy slot: $engineProxySlot")
+            return
+        }
+        val normalizedLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(launchMode)
+        val proxyLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(proxyLaunchModeByClassName[engineProxySlot])
+        if (proxyLaunchMode != normalizedLaunchMode) {
+            Log.w(
+                TAG,
+                "Ignoring engine proxy slot with incompatible launchMode: slot=$engineProxySlot, " +
+                    "slotMode=${proxyLaunchMode ?: "standard"}, requested=${normalizedLaunchMode ?: "standard"}"
+            )
+            return
+        }
+        val taskKey = taskAffinity ?: "$originPackageName:$instanceId"
+        val reserved = slotAssignmentStore.reserve(
+            key = ProxyActivitySlotKey(
+                instanceId = instanceId,
+                launchMode = normalizedLaunchMode,
+                taskKey = taskKey
+            ),
+            candidateProxyActivityClassNames = listOf(engineProxySlot)
+        )
+        if (reserved == null) {
+            Log.w(TAG, "Engine proxy slot is already owned by another task: $engineProxySlot")
+        }
     }
 
     private fun pruneProxyActivitySlotAssignments(

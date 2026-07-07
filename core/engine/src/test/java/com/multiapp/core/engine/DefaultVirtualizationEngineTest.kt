@@ -18,6 +18,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -69,12 +70,40 @@ class DefaultVirtualizationEngineTest {
         assertNull(engine.queryRuntimeState("instance-1"))
     }
 
-    private fun instance() = VirtualInstanceRecord(
-        instanceId = "instance-1",
+    @Test
+    fun `launch uses persistent runtime slot store for same-origin instances`() {
+        val first = instance(instanceId = "instance-1")
+        val second = instance(instanceId = "instance-2")
+        val instances = FakeInstanceManager(first, second)
+        val slotStore = InMemoryEngineRuntimeSlotStore()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = instances,
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { },
+            slotStore = slotStore,
+            evidenceSessionFactory = { "evidence" }
+        )
+
+        val firstLaunch = engine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1"))
+        val secondLaunch = engine.launchInstance(LaunchInstanceRequest(instanceId = "instance-2"))
+
+        assertEquals(EngineResultStatus.PASS, firstLaunch.status)
+        assertEquals(EngineResultStatus.PASS, secondLaunch.status)
+        assertNotNull(firstLaunch.runtime)
+        assertNotNull(secondLaunch.runtime)
+        assertNotEquals(firstLaunch.runtime?.processSlot, secondLaunch.runtime?.processSlot)
+        assertNotEquals(firstLaunch.runtime?.proxySlot, secondLaunch.runtime?.proxySlot)
+        assertEquals(firstLaunch.runtime?.proxySlot, slotStore.get("instance-1")?.proxySlot)
+        assertEquals(secondLaunch.runtime?.proxySlot, slotStore.get("instance-2")?.proxySlot)
+    }
+
+    private fun instance(instanceId: String = "instance-1") = VirtualInstanceRecord(
+        instanceId = instanceId,
         originPackageName = "com.test.app",
-        virtualPackageName = "com.multiapp.virtual.instance1",
+        virtualPackageName = "com.multiapp.virtual.$instanceId",
         displayName = "Test",
-        dataRoot = File("build/tmp/instance-1").absolutePath,
+        dataRoot = File("build/tmp/$instanceId").absolutePath,
         compatibilityMode = CompatibilityMode.DEFAULT,
         createdAtMs = 1L,
         updatedAtMs = 1L
@@ -96,9 +125,11 @@ class DefaultVirtualizationEngineTest {
     )
 
     private class FakeInstanceManager(
-        private val instance: VirtualInstanceRecord
+        private vararg val instances: VirtualInstanceRecord
     ) : InstanceManager {
         var launchUpdates = 0
+
+        private val instance: VirtualInstanceRecord = instances.first()
 
         override fun createInstance(
             originPackageName: String,
@@ -107,12 +138,12 @@ class DefaultVirtualizationEngineTest {
         ): Result<VirtualInstanceRecord> = Result.success(instance)
 
         override fun getInstance(instanceId: String): VirtualInstanceRecord? =
-            instance.takeIf { it.instanceId == instanceId }
+            instances.firstOrNull { it.instanceId == instanceId }
 
         override fun getInstanceByOrigin(originPackageName: String): List<VirtualInstanceRecord> =
-            listOf(instance).filter { it.originPackageName == originPackageName }
+            instances.filter { it.originPackageName == originPackageName }
 
-        override fun listInstances(): List<VirtualInstanceRecord> = listOf(instance)
+        override fun listInstances(): List<VirtualInstanceRecord> = instances.toList()
 
         override fun deleteInstance(instanceId: String): Boolean = instance.instanceId == instanceId
 

@@ -14,6 +14,18 @@ data class ProxyActivitySlotKey(
 interface ProxyActivitySlotAssignmentStore {
     fun find(key: ProxyActivitySlotKey): String?
     fun save(key: ProxyActivitySlotKey, proxyActivityClassName: String)
+    fun reserve(key: ProxyActivitySlotKey, candidateProxyActivityClassNames: List<String>): String? {
+        val assigned = find(key)
+        if (assigned != null && assigned in candidateProxyActivityClassNames) {
+            return assigned
+        }
+        val selected = candidateProxyActivityClassNames.firstOrNull { candidate ->
+            val owner = ownerOf(candidate)
+            owner == null || owner == key
+        } ?: return null
+        save(key, selected)
+        return selected
+    }
     fun ownerOf(proxyActivityClassName: String): ProxyActivitySlotKey? = null
     fun pruneStaleAssignments(
         validInstanceIds: Set<String>,

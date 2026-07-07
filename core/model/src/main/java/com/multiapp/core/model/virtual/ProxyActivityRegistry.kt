@@ -74,36 +74,30 @@ class ProxyActivityRegistry(
             launchMode = launchMode,
             taskKey = taskKey
         )
-        val assigned = slotAssignmentStore?.find(assignmentKey)
-        if (assigned != null && assigned in candidates && isProxyAvailableFor(assigned, assignmentKey, activeByProxy)) {
-            return assigned
+        val orderedCandidates = orderedCandidates(candidates, taskKey)
+        val activeAvailableCandidates = orderedCandidates.filter { candidate ->
+            isProxyActiveSlotAvailableFor(candidate, assignmentKey, activeByProxy)
         }
-
-        val preferred = candidates[stableSlotIndex(taskKey, candidates.size)]
-        val selected = if (isProxyAvailableFor(preferred, assignmentKey, activeByProxy)) {
-            preferred
+        val selected = if (slotAssignmentStore != null) {
+            slotAssignmentStore.reserve(assignmentKey, activeAvailableCandidates)
         } else {
-            candidates.firstOrNull { candidate -> isProxyAvailableFor(candidate, assignmentKey, activeByProxy) }
-                ?: throw ProxyActivitySlotExhaustedException(
-                    instanceId = instanceId,
-                    launchMode = launchMode,
-                    taskKey = taskKey,
-                    candidateCount = candidates.size
-                )
-        }
-        slotAssignmentStore?.save(assignmentKey, selected)
+            activeAvailableCandidates.firstOrNull()
+        } ?: throw ProxyActivitySlotExhaustedException(
+            instanceId = instanceId,
+            launchMode = launchMode,
+            taskKey = taskKey,
+            candidateCount = candidates.size
+        )
         return selected
     }
 
-    private fun isProxyAvailableFor(
+    private fun isProxyActiveSlotAvailableFor(
         proxyActivityClassName: String,
         assignmentKey: ProxyActivitySlotKey,
         activeByProxy: Map<String, VirtualActivityRecord>
     ): Boolean {
         val active = activeByProxy[proxyActivityClassName]
-        if (active != null && !active.matchesSlotOwner(assignmentKey)) return false
-        val persistedOwner = slotAssignmentStore?.ownerOf(proxyActivityClassName)
-        return persistedOwner == null || persistedOwner == assignmentKey
+        return active == null || active.matchesSlotOwner(assignmentKey)
     }
 
     private fun VirtualActivityRecord.matchesSlotOwner(key: ProxyActivitySlotKey): Boolean =
@@ -122,6 +116,11 @@ class ProxyActivityRegistry(
         internal fun stableSlotIndex(instanceId: String, slotCount: Int): Int {
             require(slotCount > 0) { "slotCount must be positive" }
             return Math.floorMod(instanceId.hashCode(), slotCount)
+        }
+
+        private fun orderedCandidates(candidates: List<String>, taskKey: String): List<String> {
+            val start = stableSlotIndex(taskKey, candidates.size)
+            return candidates.indices.map { offset -> candidates[(start + offset) % candidates.size] }
         }
     }
 }

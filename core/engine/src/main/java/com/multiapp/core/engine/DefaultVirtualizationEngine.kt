@@ -26,12 +26,14 @@ class DefaultVirtualizationEngine @Inject constructor(
     @ApplicationContext context: Context,
     instanceManager: InstanceManager,
     virtualInstallService: VirtualInstallService,
-    activityLauncher: EngineActivityLauncher
+    activityLauncher: EngineActivityLauncher,
+    slotStore: EngineRuntimeSlotStore
 ) : VirtualizationEngine by DefaultVirtualizationEngineCore(
     hostPackageName = context.packageName,
     instanceManager = instanceManager,
     virtualInstallService = virtualInstallService,
     activityLauncher = activityLauncher,
+    slotStore = slotStore,
     runtimeRegistry = EngineRuntimeRegistry.global,
     profilePolicy = CompatibilityProfilePolicy(),
     evidenceSessionFactory = { UUID.randomUUID().toString() }
@@ -42,6 +44,7 @@ internal class DefaultVirtualizationEngineCore(
     private val instanceManager: InstanceManager,
     private val virtualInstallService: VirtualInstallService,
     private val activityLauncher: EngineActivityLauncher,
+    private val slotStore: EngineRuntimeSlotStore = InMemoryEngineRuntimeSlotStore(),
     private val runtimeRegistry: EngineRuntimeRegistry = EngineRuntimeRegistry(),
     private val profilePolicy: CompatibilityProfilePolicy = CompatibilityProfilePolicy(),
     private val evidenceSessionFactory: () -> String = { UUID.randomUUID().toString() }
@@ -121,7 +124,25 @@ internal class DefaultVirtualizationEngineCore(
             )
         }
 
-        val runtime = buildRuntime(instance, installRecord, request.profile)
+        val runtime = runCatching {
+            pruneRuntimeSlots()
+            buildRuntime(instance, installRecord, request.profile)
+        }.getOrElse { error ->
+            if (error is EngineRuntimeSlotExhaustedException) {
+                return EngineResult.unsupported(
+                    operation = OP_LAUNCH,
+                    instanceId = instance.instanceId,
+                    originPackageName = instance.originPackageName,
+                    message = error.message ?: "runtime slot exhausted"
+                )
+            }
+            return EngineResult.fail(
+                operation = OP_LAUNCH,
+                instanceId = instance.instanceId,
+                originPackageName = instance.originPackageName,
+                message = error.message ?: "runtime slot assignment failed"
+            )
+        }
         runtimeRegistry.register(runtime)
         activityLauncher.launch(
             EngineLaunchSpec(
@@ -164,8 +185,12 @@ internal class DefaultVirtualizationEngineCore(
         installRecord: InstallRecord,
         profile: EngineProfile
     ): VirtualInstanceRuntime {
-        val processSlot = processSlotFor(instance)
-        val proxySlot = proxySlotFor(instance)
+        val slots = slotStore.assign(
+            instanceId = instance.instanceId,
+            originPackageName = instance.originPackageName,
+            processCandidates = processSlotCandidates(),
+            proxyCandidates = standardProxySlotCandidates()
+        )
         return VirtualInstanceRuntime(
             instanceId = instance.instanceId,
             hostPackageName = hostPackageName,
@@ -174,8 +199,8 @@ internal class DefaultVirtualizationEngineCore(
             dataRoot = instance.dataRoot,
             packageSnapshot = buildSnapshot(instance, installRecord),
             profile = profile,
-            processSlot = processSlot,
-            proxySlot = proxySlot,
+            processSlot = slots.processSlot,
+            proxySlot = slots.proxySlot,
             evidenceSessionId = evidenceSessionFactory()
         )
     }
@@ -218,20 +243,17 @@ internal class DefaultVirtualizationEngineCore(
             )
         }
 
-    private fun processSlotFor(instance: VirtualInstanceRecord): String {
-        val stable = stableSlotIndex("${instance.originPackageName}:${instance.instanceId}", PROCESS_SLOT_COUNT)
-        return "${hostPackageName}:v$stable:${instance.instanceId}"
+    private fun pruneRuntimeSlots() {
+        val validInstanceIds = instanceManager.listInstances().mapTo(linkedSetOf()) { it.instanceId }
+        slotStore.prune(validInstanceIds)
     }
 
-    private fun proxySlotFor(instance: VirtualInstanceRecord): String {
-        val candidates = ProxyActivitySlots.classNames(hostPackageName)
-        return candidates[stableSlotIndex(instance.instanceId, candidates.size)]
-    }
+    private fun processSlotCandidates(): List<String> =
+        (0 until PROCESS_SLOT_COUNT).map { index -> "${hostPackageName}:v$index" }
 
-    private fun stableSlotIndex(key: String, slotCount: Int): Int {
-        require(slotCount > 0) { "slotCount must be positive" }
-        return Math.floorMod(key.hashCode(), slotCount)
-    }
+    private fun standardProxySlotCandidates(): List<String> =
+        ProxyActivitySlots.classNames(hostPackageName)
+            .filter { className -> ProxyActivitySlots.launchModeByClassName(hostPackageName)[className] == null }
 
     companion object {
         private const val OP_INSTALL = "installOrRefreshPackage"

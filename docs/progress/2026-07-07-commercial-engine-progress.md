@@ -107,6 +107,34 @@ Current decision:
   `EngineActivityLauncher` through DI and owns the real Android component
   selection.
 
+### Runtime Slot Assignment
+
+- Added `EngineRuntimeSlotStore` and file-backed persistence for
+  `processSlot` / launcher `proxySlot` assignment.
+- `DefaultVirtualizationEngine` now allocates stable runtime slots before
+  dispatching a launch and returns `UNSUPPORTED` on slot exhaustion instead of
+  silently reusing a slot.
+- Same-origin instances are assigned different logical `processSlot` values in
+  the current engine layer.
+- App DI stores engine runtime slots under
+  `files/engine_runtime_slots.properties`.
+- `ContainerActivity` consumes the engine `proxySlot` launch extra and binds it
+  into the shared proxy assignment store before launching the guest proxy.
+- `ProxyActivitySlotAssignmentStore` now has a `reserve(...)` API so registry
+  selection does not overwrite a proxy slot already owned by another instance
+  task.
+- `FileBackedProxyActivitySlotAssignmentStore` now uses a shared in-process
+  file lock per assignment file and reserves a candidate slot atomically inside
+  one load/select/store operation.
+- `ContainerRuntimePaths` now reuses `ProxyActivitySlots.SLOT_ASSIGNMENT_FILE`
+  for the proxy slot file name to avoid app/loader path drift.
+
+Limit:
+
+- This is a persistent slot and recents-foundation slice. The manifest proxy
+  components still run in the current app process, so this is not yet real
+  Android process-slot isolation for native multi-instance execution.
+
 ## Verification
 
 The full all-in-one gate exceeded the local 180 second tool timeout, so the same
@@ -131,6 +159,16 @@ Additional verification after hosted-runtime binding was moved behind
 .\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
 ```
 
+Additional verification after persistent runtime slots and proxy slot
+reservation:
+
+```powershell
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false"
+git diff --check
+```
+
 Result:
 
 - All commands above passed.
@@ -147,8 +185,8 @@ The following items from the plan are still open and must not be marked `DONE`:
 - Device-proven engine-owned hosted runtime binding. Local code now routes
   `ContainerActivity` and `Hosted*RuntimeBinder` through `:core:engine`, but
   device evidence is still required before marking this runtime path `PASS`.
-- Real Android process-slot/proxy-slot allocation for simultaneous same-origin
-  multi-instance recents.
+- Device-proven simultaneous same-origin multi-instance recents.
+- Real Android process-slot isolation for native multi-instance execution.
 - Full PMS signatures/SigningInfo, typed metadata, provider read/write
   permissions, and `IntentFilter.match()` fidelity.
 - Complete AMS/ATM activity stack semantics:
@@ -164,9 +202,9 @@ The following items from the plan are still open and must not be marked `DONE`:
 
 Recommended next slice:
 
-1. Make process/proxy slot assignment persistent per instance and feed it into
-   actual stub/proxy component selection.
-2. Start split APK metadata support in install records and
+1. Start split APK metadata support in install records and
    `VirtualPackageSnapshot`.
-3. Add behavior tests for forged provider URI rejection and same-origin
+2. Add behavior tests for forged provider URI rejection and same-origin
    dual-instance isolation.
+3. Add device evidence for same-origin dual-instance recents before marking
+   this slot work `PASS`.
