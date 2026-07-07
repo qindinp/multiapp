@@ -18,6 +18,7 @@ data class BootstrapStageInput(
     val installRecord: InstallRecord? = null,
     val originApkPath: String? = null,
     val nativeLibraryDir: String? = null,
+    val processSlot: String? = null,
     val resolvedPackage: ResolvedPackage? = null,
     val packageSnapshot: VirtualPackageSnapshot? = null,
     val providerRoutingPlan: VirtualProviderRoutingPlan? = null,

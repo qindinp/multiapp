@@ -54,6 +54,7 @@ internal class NativeLibrariesStage(
             instanceId = instance.instanceId,
             originPackageName = instance.originPackageName,
             dataRoot = instance.dataRoot,
+            processSlot = input.processSlot.orEmpty(),
             hostContext = hostContext
         )
         val evidence = nativeEvidence(resolution, redirectInstallResult)

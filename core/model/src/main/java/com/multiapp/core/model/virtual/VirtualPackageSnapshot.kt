@@ -37,11 +37,20 @@ data class VirtualPackageSnapshot(
     val permissions: List<String> = emptyList(),
     val originCertSha256: String? = null
 ) {
+    /** Code paths for class loading: base APK first, then split APKs. */
+    val codeSourceDirs: List<String>
+        get() = listOf(sourceDir) + splitSourceDirs
+
+    /** Public/resource paths for Resources/AssetManager: base APK first, then split resource paths. */
+    val publicResourceDirs: List<String>
+        get() = listOf(publicSourceDir) + splitPublicSourceDirs
+
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
         require(originPackageName.isNotBlank()) { "originPackageName must not be blank" }
         require(virtualPackageName.isNotBlank()) { "virtualPackageName must not be blank" }
         require(sourceDir.isNotBlank()) { "sourceDir must not be blank" }
+        require(publicSourceDir.isNotBlank()) { "publicSourceDir must not be blank" }
         require(splitSourceDirs.none { it.isBlank() }) { "splitSourceDirs must not contain blank entries" }
         require(splitPublicSourceDirs.none { it.isBlank() }) {
             "splitPublicSourceDirs must not contain blank entries"

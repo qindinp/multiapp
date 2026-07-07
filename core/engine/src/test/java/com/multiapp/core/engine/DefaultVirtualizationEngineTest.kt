@@ -57,6 +57,46 @@ class DefaultVirtualizationEngineTest {
     }
 
     @Test
+    fun `launch snapshot preserves base split and native library runtime paths`() {
+        val instance = instance()
+        val baseApk = File("build/tmp/base.apk").absolutePath
+        val splitArm64 = File("build/tmp/split_config.arm64_v8a.apk").absolutePath
+        val splitFeature = File("build/tmp/split_feature.reader.apk").absolutePath
+        val publicSplitArm64 = File("build/tmp/public/split_config.arm64_v8a.apk").absolutePath
+        val publicSplitFeature = File("build/tmp/public/split_feature.reader.apk").absolutePath
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(
+                installRecord(
+                    originApkPath = baseApk,
+                    splitApkPaths = listOf(splitArm64, splitFeature),
+                    splitPublicSourceDirs = listOf(publicSplitArm64, publicSplitFeature),
+                    splitNames = listOf("config.arm64_v8a", "feature.reader"),
+                    isolatedSplits = true
+                )
+            ),
+            activityLauncher = EngineActivityLauncher { },
+            evidenceSessionFactory = { "evidence-splits" }
+        )
+
+        val runtime = assertNotNull(
+            engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId)).runtime
+        )
+        val snapshot = runtime.packageSnapshot
+
+        assertEquals(baseApk, snapshot.sourceDir)
+        assertEquals(baseApk, snapshot.publicSourceDir)
+        assertEquals(listOf(splitArm64, splitFeature), snapshot.splitSourceDirs)
+        assertEquals(listOf(publicSplitArm64, publicSplitFeature), snapshot.splitPublicSourceDirs)
+        assertEquals(listOf("config.arm64_v8a", "feature.reader"), snapshot.splitNames)
+        assertTrue(snapshot.isolatedSplits)
+        assertEquals(listOf(baseApk, splitArm64, splitFeature), snapshot.codeSourceDirs)
+        assertEquals(listOf(baseApk, publicSplitArm64, publicSplitFeature), snapshot.publicResourceDirs)
+        assertEquals(File(instance.dataRoot, "lib").absolutePath, snapshot.nativeLibraryDir)
+    }
+
+    @Test
     fun `launch report merges provider and native operation evidence`() {
         val instance = instance()
         val registry = EngineRuntimeRegistry()
@@ -258,11 +298,22 @@ class DefaultVirtualizationEngineTest {
         updatedAtMs = 1L
     )
 
-    private fun installRecord() = InstallRecord(
+    private fun installRecord(
+        originApkPath: String = File("build/tmp/test.apk").absolutePath,
+        splitApkPaths: List<String> = emptyList(),
+        splitPublicSourceDirs: List<String> = emptyList(),
+        splitNames: List<String> = emptyList(),
+        isolatedSplits: Boolean = false
+    ) = InstallRecord(
         packageName = "com.test.app",
-        originApkPath = File("build/tmp/test.apk").absolutePath,
+        originApkPath = originApkPath,
         originApkSha256 = "sha256",
         originCertSha256 = "cert",
+        splitApkPaths = splitApkPaths,
+        splitPublicSourceDirs = splitPublicSourceDirs,
+        splitNames = splitNames,
+        splitApkSha256s = splitApkPaths.mapIndexed { index, _ -> "split-sha-$index" },
+        isolatedSplits = isolatedSplits,
         versionCode = 1L,
         versionName = "1.0",
         targetSdk = 35,

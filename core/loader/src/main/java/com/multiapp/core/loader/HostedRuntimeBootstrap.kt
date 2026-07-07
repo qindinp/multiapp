@@ -115,8 +115,8 @@ class HostedRuntimeBootstrap(
      * Returns a [HostedBootstrapResult] with per-stage results and overall status.
      * Stops at the first terminal failure.
      */
-    fun run(instanceId: String): HostedBootstrapResult =
-        attachAndLaunch(prepare(instanceId))
+    fun run(instanceId: String, processSlot: String? = null): HostedBootstrapResult =
+        attachAndLaunch(prepare(instanceId, processSlot))
 
     /**
      * Prepare the hosted runtime up to and including ClassLoader creation.
@@ -127,15 +127,15 @@ class HostedRuntimeBootstrap(
      * a prewarm thread, then consume the cached result on the UI thread.
      * It intentionally does not create the guest Application.
      */
-    fun prepare(instanceId: String): HostedBootstrapPreparation =
-        createClassLoader(prepareBeforeClassLoader(instanceId))
+    fun prepare(instanceId: String, processSlot: String? = null): HostedBootstrapPreparation =
+        createClassLoader(prepareBeforeClassLoader(instanceId, processSlot))
 
     /**
      * Prepare all pre-ClassLoader state. Callers may keep this on the main
      * thread for conservative diagnostics, or move it to a prewarm thread when
      * foreground launch responsiveness is the priority.
      */
-    fun prepareBeforeClassLoader(instanceId: String): HostedBootstrapPreparation {
+    fun prepareBeforeClassLoader(instanceId: String, processSlot: String? = null): HostedBootstrapPreparation {
         val stageResults = mutableListOf<BootstrapResult>()
 
         if (instanceId.isBlank()) {
@@ -156,7 +156,7 @@ class HostedRuntimeBootstrap(
         }
 
         val configOutput = ConfigStage(instanceManager, clock)
-            .execute(BootstrapStageInput(instanceId = instanceId))
+            .execute(BootstrapStageInput(instanceId = instanceId, processSlot = processSlot))
         stageResults.add(configOutput.result)
         if (configOutput.isTerminalFailure) {
             return terminalPreparation(

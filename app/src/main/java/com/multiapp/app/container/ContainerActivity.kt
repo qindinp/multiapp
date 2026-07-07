@@ -259,14 +259,15 @@ class ContainerActivity : Activity() {
                 "engineProcessSlot=$engineProcessSlot, engineProxySlot=$engineProxySlot"
         )
 
-        startBootstrap(instanceId, providerHookEnabled)
+        startBootstrap(instanceId, providerHookEnabled, engineProcessSlot)
         finish()
         overridePendingTransition(0, 0)
     }
 
     private fun startBootstrap(
         instanceId: String,
-        providerHookEnabled: Boolean
+        providerHookEnabled: Boolean,
+        engineProcessSlot: String?
     ) {
         val hostContext = applicationContext ?: this
         hostedRuntimeEngine.reusableResult(instanceId)?.let { cached ->
@@ -279,7 +280,11 @@ class ContainerActivity : Activity() {
             {
                 prepareBackgroundLooperIfNeeded()
                 val outcome = runCatching {
-                    hostedRuntimeEngine.bindApplication(instanceId, providerHookEnabled)
+                    hostedRuntimeEngine.bindApplication(
+                        instanceId = instanceId,
+                        providerHookEnabled = providerHookEnabled,
+                        processSlot = engineProcessSlot
+                    )
                 }
                 val resultOutcome = outcome.map { it.result }
                 Handler(Looper.getMainLooper()).post {

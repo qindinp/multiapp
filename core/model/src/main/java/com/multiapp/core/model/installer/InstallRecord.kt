@@ -63,6 +63,14 @@ data class InstallRecord(
     val installTimeMs: Long,
     val updatedAtMs: Long = installTimeMs
 ) {
+    /** Code paths for runtime class loading: base APK first, then split APKs. */
+    val codeSourceDirs: List<String>
+        get() = listOf(originApkPath) + splitApkPaths
+
+    /** Public/resource paths for runtime resource loading: base APK first, then split public paths. */
+    val publicResourceDirs: List<String>
+        get() = listOf(originApkPath) + splitPublicSourceDirs.ifEmpty { splitApkPaths }
+
     init {
         requireSafeInstallPackageName(packageName)
         require(originApkPath.isNotBlank()) { "originApkPath must not be blank" }

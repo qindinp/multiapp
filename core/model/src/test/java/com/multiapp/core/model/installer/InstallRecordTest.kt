@@ -101,6 +101,55 @@ class InstallRecordTest {
     }
 
     @Test
+    fun `runtime path contract exposes base apk before split apks`() {
+        val record = createRecord(
+            originApkPath = "/virtual/apks/base.apk",
+            splitApkPaths = listOf(
+                "/virtual/apks/split_config.arm64_v8a.apk",
+                "/virtual/apks/split_feature.reader.apk"
+            ),
+            splitPublicSourceDirs = listOf(
+                "/public/apks/split_config.arm64_v8a.apk",
+                "/public/apks/split_feature.reader.apk"
+            ),
+            splitNames = listOf("config.arm64_v8a", "feature.reader"),
+            splitApkSha256s = listOf("arm64hash", "featurehash")
+        )
+
+        assertEquals(
+            listOf(
+                "/virtual/apks/base.apk",
+                "/virtual/apks/split_config.arm64_v8a.apk",
+                "/virtual/apks/split_feature.reader.apk"
+            ),
+            record.codeSourceDirs
+        )
+        assertEquals(
+            listOf(
+                "/virtual/apks/base.apk",
+                "/public/apks/split_config.arm64_v8a.apk",
+                "/public/apks/split_feature.reader.apk"
+            ),
+            record.publicResourceDirs
+        )
+    }
+
+    @Test
+    fun `runtime resource paths fall back to split apk paths`() {
+        val record = createRecord(
+            originApkPath = "/virtual/apks/base.apk",
+            splitApkPaths = listOf("/virtual/apks/split_config.en.apk"),
+            splitNames = listOf("config.en"),
+            splitApkSha256s = listOf("enhash")
+        )
+
+        assertEquals(
+            listOf("/virtual/apks/base.apk", "/virtual/apks/split_config.en.apk"),
+            record.publicResourceDirs
+        )
+    }
+
+    @Test
     fun `equal instances with same values`() {
         val record1 = createRecord()
         val record2 = createRecord()

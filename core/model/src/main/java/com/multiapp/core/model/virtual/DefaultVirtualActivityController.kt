@@ -154,7 +154,10 @@ private class VirtualContextDelegator(
         return android.content.pm.ApplicationInfo(baseInfo).apply {
             packageName = config.originPackageName
             sourceDir = config.sourceDir
-            publicSourceDir = config.sourceDir
+            publicSourceDir = config.publicSourceDir
+            splitSourceDirs = config.splitSourceDirs.toTypedArray()
+            splitPublicSourceDirs = config.splitPublicSourceDirs.toTypedArray()
+            splitNames = config.splitNames.toTypedArray()
             dataDir = config.dataDir
             config.nativeLibraryDir?.let { nativeLibraryDir = it }
         }

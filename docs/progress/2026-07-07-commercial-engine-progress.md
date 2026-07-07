@@ -262,6 +262,29 @@ Limit:
   device-proven. A real launch still needs `run-as com.multiapp.app cat
   files/hosted_launch_evidence/*.engine-report.properties`.
 
+### Runtime Path And Process Slot Contract
+
+- Added explicit runtime path helpers for base-first class/resource loading:
+  `InstallRecord.codeSourceDirs`, `InstallRecord.publicResourceDirs`,
+  `VirtualPackageSnapshot.codeSourceDirs`, and
+  `VirtualPackageSnapshot.publicResourceDirs`.
+- `VirtualContextConfig` now carries `publicSourceDir` and exposes matching
+  base-first `codeSourceDirs` / `publicResourceDirs` while still allowing
+  snapshotless pre-launch patch contexts to remain partial instead of crashing.
+- Virtual activity ApplicationInfo delegation now preserves
+  `publicSourceDir`, `splitSourceDirs`, `splitPublicSourceDirs`, and
+  `splitNames`.
+- Native private-path redirect installation now accepts the engine-selected
+  `processSlot` instead of silently deriving `process:<instanceId>`.
+- `HostedRuntimeBootstrap`, `HostedRuntimeEngine`, app launch bootstrap, and
+  `ContainerActivity` now pass the engine `processSlot` into native redirect
+  setup. If an old caller omits it, `DefaultHostedRuntimeEngine` falls back to
+  `EngineRuntimeRegistry.global` for the active instance runtime.
+- Added JVM behavior coverage for same-origin provider/native evidence
+  isolation, stopped-runtime evidence rejection without clearing sibling
+  runtimes, provider cache isolation by instance id, and base/split path
+  ordering.
+
 ## Verification
 
 The full all-in-one gate exceeded the local 180 second tool timeout, so the same
@@ -403,6 +426,24 @@ Result:
 - Targeted app engine-report export tests passed.
 - `:core:model:testDebugUnitTest` and `:core:engine:testDebugUnitTest` passed.
 - `git diff --check` passed with only existing CRLF normalization warnings.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
+Additional verification after runtime path and engine process-slot contract:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ActivityThreadLaunchRecordPatcherTest" --tests "com.multiapp.core.loader.NativeLibrariesStageTest" --tests "com.multiapp.core.loader.NativePrivatePathRedirectInstallerTest" --tests "com.multiapp.core.loader.VirtualProviderRuntimeTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Targeted loader launch-record/native/provider runtime tests passed.
+- `:core:model:testDebugUnitTest`, `:core:engine:testDebugUnitTest`,
+  `:app:testDebugUnitTest`, and `:app:assembleDebug` passed.
+- A broader combined gate including full `:core:loader:testDebugUnitTest`
+  exceeded the local 180 second tool timeout, so the failing loader scope was
+  rerun as targeted tests and passed.
 - Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
   the project uses `compileSdk=36`.
 

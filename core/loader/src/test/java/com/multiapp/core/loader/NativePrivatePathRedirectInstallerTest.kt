@@ -31,6 +31,7 @@ class NativePrivatePathRedirectInstallerTest {
             instanceId = "inst-001",
             originPackageName = "com.example.app",
             dataRoot = dataRoot.absolutePath,
+            processSlot = "com.multiapp.app:v0",
             hostContext = null
         )
 
@@ -43,7 +44,7 @@ class NativePrivatePathRedirectInstallerTest {
         )
         val evidence = result.evidence().associate { it.key to it.value }
         assertEquals("inst-001", evidence["nativeRedirectInstanceId"])
-        assertEquals("process:inst-001", evidence["nativeRedirectProcessSlot"])
+        assertEquals("com.multiapp.app:v0", evidence["nativeRedirectProcessSlot"])
         assertEquals(dataRoot.canonicalPath, evidence["nativeRedirectDataRoot"])
         assertEquals("true", evidence["nativeRedirectProcessSlotBound"])
         assertEquals("/proc/self/maps", bridge.translatePath("/proc/self/maps"))
@@ -62,22 +63,24 @@ class NativePrivatePathRedirectInstallerTest {
             instanceId = "inst-a",
             originPackageName = originPackageName,
             dataRoot = firstRoot.absolutePath,
+            processSlot = "com.multiapp.app:v0",
             hostContext = null
         )
         installer.install(
             instanceId = "inst-b",
             originPackageName = originPackageName,
             dataRoot = secondRoot.absolutePath,
+            processSlot = "com.multiapp.app:v1",
             hostContext = null
         )
 
-        bridge.setNativeRedirectScope("process:inst-a", "inst-a")
+        bridge.setNativeRedirectScope("com.multiapp.app:v0", "inst-a")
         assertEquals(
             File(firstRoot, "files/config.json").canonicalPath,
             File(bridge.translatePath("/data/data/com.example.app/files/config.json")).canonicalPath
         )
 
-        bridge.setNativeRedirectScope("process:inst-b", "inst-b")
+        bridge.setNativeRedirectScope("com.multiapp.app:v1", "inst-b")
         assertEquals(
             File(secondRoot, "files/config.json").canonicalPath,
             File(bridge.translatePath("/data/data/com.example.app/files/config.json")).canonicalPath
@@ -92,6 +95,7 @@ class NativePrivatePathRedirectInstallerTest {
             instanceId = "inst-001",
             originPackageName = "",
             dataRoot = "/sandbox/example",
+            processSlot = "com.multiapp.app:v0",
             hostContext = null
         )
 
@@ -109,6 +113,7 @@ class NativePrivatePathRedirectInstallerTest {
             instanceId = "inst-001",
             originPackageName = "com.example.app",
             dataRoot = "/sandbox/../escape",
+            processSlot = "com.multiapp.app:v0",
             hostContext = null
         )
 

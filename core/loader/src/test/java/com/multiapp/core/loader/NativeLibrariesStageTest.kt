@@ -170,18 +170,29 @@ class NativeLibrariesStageTest {
         val libDir = File(dataRoot, "lib").apply { mkdirs() }
         val instance = instanceRecord(dataRoot = dataRoot.absolutePath)
         val stage = NativeLibrariesStage(
-            nativePrivatePathRedirectInstaller = NativePrivatePathRedirectInstaller { _, _, _, _ ->
+            nativePrivatePathRedirectInstaller = NativePrivatePathRedirectInstaller { _, _, _, processSlot, _ ->
                 NativePrivatePathRedirectInstallResult(
                     hookInstalled = true,
                     ruleCount = 2,
                     reason = "PATH_HOOK_INSTALLED_NEEDS_DEVICE_IO_PROBE"
+                ).copy(
+                    config = NativePrivatePathRedirectConfig.create(
+                        instanceId = instance.instanceId,
+                        originPackageName = instance.originPackageName,
+                        dataRoot = instance.dataRoot,
+                        processSlot = processSlot
+                    ).config
                 )
             },
             clock = fixedClock(500L, 505L)
         )
 
         val output = stage.execute(
-            BootstrapStageInput(instanceId = instance.instanceId, instance = instance)
+            BootstrapStageInput(
+                instanceId = instance.instanceId,
+                instance = instance,
+                processSlot = "com.multiapp.app:v3"
+            )
         )
 
         assertEquals(BootstrapStatus.SUCCESS, output.result.status)
@@ -192,6 +203,8 @@ class NativeLibrariesStageTest {
         assertEquals("PARTIAL", evidence["nativeIoRedirectVerdict"])
         assertEquals("2", evidence["nativePrivatePathRedirectRuleCount"])
         assertEquals("GUEST_PRIVATE_PATHS_ONLY", evidence["nativeRedirectScope"])
+        assertEquals("com.multiapp.app:v3", evidence["nativeRedirectProcessSlot"])
+        assertEquals("processSlot+instanceId+dataRoot", evidence["nativeRedirectBindingScope"])
         assertEquals("PARTIAL", evidence["nativeRealpathRedirectVerdict"])
         assertEquals("false", evidence["procMapsSpoofEnabled"])
         assertEquals("false", evidence["procStatusSpoofEnabled"])

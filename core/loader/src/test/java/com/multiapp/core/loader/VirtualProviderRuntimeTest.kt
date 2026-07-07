@@ -13,6 +13,7 @@ import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNotSame
 import kotlin.test.assertSame
 
 class VirtualProviderRuntimeTest {
@@ -66,8 +67,34 @@ class VirtualProviderRuntimeTest {
         assertEquals(null, runtime.get(request().resolution))
     }
 
-    private fun request(): VirtualProviderCreateRequest {
-        val snapshot = snapshot()
+    @Test
+    fun `same origin provider cache is scoped by instance id`() {
+        val createdProviders = mutableListOf<FakeProvider>()
+        val runtime = VirtualProviderRuntime(
+            providerFactory = ProviderFactory { _, _ ->
+                FakeProvider().also { createdProviders += it }
+            },
+            providerAttacher = ProviderAttacher { _, _, _ -> }
+        )
+        val firstRequest = request(snapshot(instanceId = "inst-a", dataDir = "/data/inst-a"))
+        val secondRequest = request(snapshot(instanceId = "inst-b", dataDir = "/data/inst-b"))
+
+        val first = assertIs<VirtualProviderRuntimeResult.Created>(runtime.getOrCreate(firstRequest))
+        val second = assertIs<VirtualProviderRuntimeResult.Created>(runtime.getOrCreate(secondRequest))
+        val firstCached = assertIs<VirtualProviderRuntimeResult.Cached>(runtime.getOrCreate(firstRequest))
+        val secondCached = assertIs<VirtualProviderRuntimeResult.Cached>(runtime.getOrCreate(secondRequest))
+
+        assertEquals(2, createdProviders.size)
+        assertNotSame(first.provider, second.provider)
+        assertSame(first.provider, firstCached.provider)
+        assertSame(second.provider, secondCached.provider)
+        assertEquals("inst-a", first.resolution.instanceId)
+        assertEquals("inst-b", second.resolution.instanceId)
+        assertEquals("com.test.minimal.probe", first.resolution.guestAuthority)
+        assertEquals("com.test.minimal.probe", second.resolution.guestAuthority)
+    }
+
+    private fun request(snapshot: VirtualPackageSnapshot = snapshot()): VirtualProviderCreateRequest {
         val resolution = VirtualProviderManager("com.multiapp.app")
             .resolve(snapshot, "com.test.minimal.probe")!!
         val config = VirtualContextConfig(
@@ -89,17 +116,20 @@ class VirtualProviderRuntimeTest {
         )
     }
 
-    private fun snapshot() = VirtualPackageSnapshot(
-        instanceId = "inst-001",
+    private fun snapshot(
+        instanceId: String = "inst-001",
+        dataDir: String = "/data/inst"
+    ) = VirtualPackageSnapshot(
+        instanceId = instanceId,
         originPackageName = "com.test.minimal",
-        virtualPackageName = "com.multiapp.instance.abc",
+        virtualPackageName = "com.multiapp.instance.$instanceId",
         applicationLabel = "MinimalTest",
         versionCode = 42,
         versionName = "4.2",
         targetSdk = 36,
         minSdk = 28,
         sourceDir = "/data/apks/minimal.apk",
-        dataDir = "/data/inst",
+        dataDir = dataDir,
         providers = listOf(
             ResolvedComponent(
                 name = "com.test.minimal.ProbeProvider",

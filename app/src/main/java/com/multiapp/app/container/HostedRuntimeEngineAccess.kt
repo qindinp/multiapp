@@ -25,6 +25,7 @@ internal fun hostedRuntimeEngineFrom(context: Context): HostedRuntimeEngine {
 internal fun runHostedRuntimeBootstrap(
     hostContext: Context,
     instanceId: String,
-    providerHookEnabled: Boolean = true
+    providerHookEnabled: Boolean = true,
+    processSlot: String? = null
 ): HostedBootstrapResult =
-    hostedRuntimeEngineFrom(hostContext).runBootstrap(instanceId, providerHookEnabled)
+    hostedRuntimeEngineFrom(hostContext).runBootstrap(instanceId, providerHookEnabled, processSlot)

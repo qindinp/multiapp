@@ -25,6 +25,8 @@ data class VirtualContextConfig(
     val applicationLabel: String? = null,
     /** Runtime package snapshot used by virtual PMS/AMS query layers. */
     val packageSnapshot: VirtualPackageSnapshot? = null,
+    /** Public/resource path to the base APK. */
+    val publicSourceDir: String = packageSnapshot?.publicSourceDir ?: sourceDir,
     /** Split APK code paths available to this guest context. */
     val splitSourceDirs: List<String> = packageSnapshot?.splitSourceDirs.orEmpty(),
     /** Split APK resource paths available to this guest context. */
@@ -36,6 +38,14 @@ data class VirtualContextConfig(
     /** Whether the package requests isolated split loading. */
     val isolatedSplits: Boolean = packageSnapshot?.isolatedSplits ?: false
 ) {
+    /** Code paths for class loading: base APK first, then split APKs. */
+    val codeSourceDirs: List<String>
+        get() = listOf(sourceDir) + splitSourceDirs
+
+    /** Public/resource paths for Resources/AssetManager: base APK first, then split resource paths. */
+    val publicResourceDirs: List<String>
+        get() = listOf(publicSourceDir) + splitPublicSourceDirs
+
     init {
         require(splitSourceDirs.none { it.isBlank() }) { "splitSourceDirs must not contain blank entries" }
         require(splitPublicSourceDirs.none { it.isBlank() }) {

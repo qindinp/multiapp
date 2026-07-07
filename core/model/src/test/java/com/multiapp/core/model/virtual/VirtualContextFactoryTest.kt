@@ -45,6 +45,47 @@ class VirtualContextFactoryTest {
     }
 
     @Test
+    fun `VirtualContextConfig inherits base and split paths from package snapshot`() {
+        val snapshot = VirtualPackageSnapshot(
+            instanceId = "test-instance-003",
+            originPackageName = "com.example.origin",
+            virtualPackageName = "com.example.virtual",
+            applicationLabel = "Example",
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 35,
+            minSdk = 23,
+            sourceDir = "/runtime/base.apk",
+            publicSourceDir = "/public/base.apk",
+            splitSourceDirs = listOf("/runtime/split_config.arm64_v8a.apk"),
+            splitPublicSourceDirs = listOf("/public/split_config.arm64_v8a.apk"),
+            splitNames = listOf("config.arm64_v8a"),
+            dataDir = "/data/data/com.example.virtual/test-instance-003"
+        )
+        val config = VirtualContextConfig(
+            instanceId = snapshot.instanceId,
+            originPackageName = snapshot.originPackageName,
+            virtualPackageName = snapshot.virtualPackageName,
+            dataDir = snapshot.dataDir,
+            sourceDir = snapshot.sourceDir,
+            nativeLibraryDir = snapshot.nativeLibraryDir,
+            classLoader = ClassLoader.getSystemClassLoader(),
+            packageSnapshot = snapshot
+        )
+
+        assertEquals("/public/base.apk", config.publicSourceDir)
+        assertEquals(
+            listOf("/runtime/base.apk", "/runtime/split_config.arm64_v8a.apk"),
+            config.codeSourceDirs
+        )
+        assertEquals(
+            listOf("/public/base.apk", "/public/split_config.arm64_v8a.apk"),
+            config.publicResourceDirs
+        )
+        assertEquals(listOf("config.arm64_v8a"), config.splitNames)
+    }
+
+    @Test
     fun `VirtualContextConfig immutable copy creates new instance`() {
         val original = VirtualContextConfig(
             instanceId = "instance-1",

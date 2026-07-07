@@ -10,6 +10,7 @@ internal fun interface NativePrivatePathRedirectInstaller {
         instanceId: String,
         originPackageName: String,
         dataRoot: String,
+        processSlot: String,
         hostContext: Context?
     ): NativePrivatePathRedirectInstallResult
 }
@@ -184,11 +185,12 @@ internal object NativePrivatePathRedirectInstallers {
     fun bridge(
         bridgeProvider: () -> NativeHookBridge = { NativeHookBridge.getInstance() },
         policy: NativeHookPolicy = NativeHookPolicy.baseline()
-    ): NativePrivatePathRedirectInstaller = NativePrivatePathRedirectInstaller { instanceId, originPackageName, dataRoot, hostContext ->
+    ): NativePrivatePathRedirectInstaller = NativePrivatePathRedirectInstaller { instanceId, originPackageName, dataRoot, processSlot, hostContext ->
         val configDecision = NativePrivatePathRedirectConfig.create(
             instanceId = instanceId,
             originPackageName = originPackageName,
-            dataRoot = dataRoot
+            dataRoot = dataRoot,
+            processSlot = processSlot
         )
         val config = configDecision.config
         if (config == null) {

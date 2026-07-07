@@ -12,8 +12,17 @@ import javax.inject.Singleton
 
 interface HostedRuntimeEngine {
     fun reusableResult(instanceId: String): HostedBootstrapResult?
-    fun runBootstrap(instanceId: String, providerHookEnabled: Boolean = true): HostedBootstrapResult
-    fun bindApplication(instanceId: String, providerHookEnabled: Boolean = true): HostedRuntimeBindOutcome
+    fun runBootstrap(
+        instanceId: String,
+        providerHookEnabled: Boolean = true,
+        processSlot: String? = null
+    ): HostedBootstrapResult
+
+    fun bindApplication(
+        instanceId: String,
+        providerHookEnabled: Boolean = true,
+        processSlot: String? = null
+    ): HostedRuntimeBindOutcome
 }
 
 data class HostedRuntimeBindOutcome(
@@ -34,20 +43,31 @@ class DefaultHostedRuntimeEngine @Inject constructor(
     override fun reusableResult(instanceId: String): HostedBootstrapResult? =
         runtime.reusableResult(instanceId)
 
-    override fun runBootstrap(instanceId: String, providerHookEnabled: Boolean): HostedBootstrapResult {
+    override fun runBootstrap(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?
+    ): HostedBootstrapResult {
+        val resolvedProcessSlot = processSlot
+            ?.takeIf { it.isNotBlank() }
+            ?: EngineRuntimeRegistry.global.get(instanceId)?.processSlot
         return HostedRuntimeBootstrap(
             instanceManager = instanceManager,
             installRecordStore = installRecordStore,
             hostContext = hostContext,
             providerHookInstallEnabled = providerHookEnabled
-        ).run(instanceId)
+        ).run(instanceId, resolvedProcessSlot)
     }
 
-    override fun bindApplication(instanceId: String, providerHookEnabled: Boolean): HostedRuntimeBindOutcome {
+    override fun bindApplication(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?
+    ): HostedRuntimeBindOutcome {
         var ranBootstrapOnThisThread = false
         val result = runtime.bindApplication(instanceId) {
             ranBootstrapOnThisThread = true
-            runBootstrap(instanceId, providerHookEnabled)
+            runBootstrap(instanceId, providerHookEnabled, processSlot)
         }
         return HostedRuntimeBindOutcome(
             result = result,

@@ -167,6 +167,90 @@ class EngineRuntimeRegistryTest {
         assertEquals(EngineResultStatus.FAIL, registry.evidence(runtime.instanceId).status)
     }
 
+    @Test
+    fun `same-origin provider and native evidence stays isolated per process slot and instance`() {
+        val registry = EngineRuntimeRegistry()
+        val first = runtime(
+            instanceId = "instance-1",
+            processSlot = "com.multiapp.app:v0",
+            proxySlot = "com.multiapp.app.ProxyActivity0"
+        )
+        val second = runtime(
+            instanceId = "instance-2",
+            processSlot = "com.multiapp.app:v1",
+            proxySlot = "com.multiapp.app.ProxyActivity1"
+        )
+        registry.register(first)
+        registry.register(second)
+
+        assertTrue(
+            registry.registerOperationEvidence(
+                instanceId = first.instanceId,
+                evidence = EngineOperationEvidence(
+                    component = "provider",
+                    operation = "query",
+                    verdict = EngineResultStatus.PASS,
+                    entries = mapOf(
+                        "authority" to "com.test.app.provider",
+                        "processSlot" to first.processSlot,
+                        "instanceId" to first.instanceId
+                    )
+                )
+            )
+        )
+        assertTrue(
+            registry.registerOperationEvidence(
+                instanceId = second.instanceId,
+                evidence = EngineOperationEvidence(
+                    component = "native",
+                    operation = "path-redirect",
+                    verdict = EngineResultStatus.PARTIAL,
+                    entries = mapOf(
+                        "requestedPath" to "/data/data/com.test.app/files/db",
+                        "processSlot" to second.processSlot,
+                        "instanceId" to second.instanceId
+                    )
+                )
+            )
+        )
+
+        val firstReport = registry.evidence(first.instanceId)
+        val secondReport = registry.evidence(second.instanceId)
+
+        assertEquals(first.processSlot, firstReport.entries["processSlot"])
+        assertEquals(second.processSlot, secondReport.entries["processSlot"])
+        assertEquals(listOf("provider"), firstReport.flattenedOperationEvidence().map { it.component })
+        assertEquals(listOf("native"), secondReport.flattenedOperationEvidence().map { it.component })
+        assertEquals(first.instanceId, firstReport.operationEntries("provider", "query").single().entries["instanceId"])
+        assertEquals(second.instanceId, secondReport.operationEntries("native", "path-redirect").single().entries["instanceId"])
+    }
+
+    @Test
+    fun `stopping one same-origin runtime rejects later evidence without clearing sibling runtime`() {
+        val registry = EngineRuntimeRegistry()
+        val first = runtime(instanceId = "instance-1", processSlot = "com.multiapp.app:v0")
+        val second = runtime(instanceId = "instance-2", processSlot = "com.multiapp.app:v1")
+        registry.register(first)
+        registry.register(second)
+
+        assertTrue(registry.stop(first.instanceId))
+        val stoppedAccepted = registry.registerOperationEvidence(
+            instanceId = first.instanceId,
+            evidence = operationEvidence(verdict = EngineResultStatus.PASS)
+        )
+        val siblingAccepted = registry.registerOperationEvidence(
+            instanceId = second.instanceId,
+            evidence = operationEvidence(verdict = EngineResultStatus.PASS)
+        )
+
+        assertFalse(stoppedAccepted)
+        assertTrue(siblingAccepted)
+        assertEquals(EngineResultStatus.FAIL, registry.evidence(first.instanceId).status)
+        assertTrue(registry.evidence(first.instanceId).operationEvidence.isEmpty())
+        assertEquals(EngineResultStatus.PASS, registry.evidence(second.instanceId).status)
+        assertEquals(second, registry.get(second.instanceId))
+    }
+
     private fun operationEvidence(verdict: EngineResultStatus) = EngineOperationEvidence(
         component = "provider",
         operation = "route-token",
@@ -174,7 +258,11 @@ class EngineRuntimeRegistryTest {
         entries = mapOf("routeToken" to "token-1")
     )
 
-    private fun runtime(instanceId: String = "instance-1") = VirtualInstanceRuntime(
+    private fun runtime(
+        instanceId: String = "instance-1",
+        processSlot: String = "com.multiapp.app:v0",
+        proxySlot: String = "com.multiapp.app.ProxyActivity0"
+    ) = VirtualInstanceRuntime(
         instanceId = instanceId,
         hostPackageName = "com.multiapp.app",
         originPackageName = "com.test.app",
@@ -182,8 +270,8 @@ class EngineRuntimeRegistryTest {
         dataRoot = "build/tmp/$instanceId",
         packageSnapshot = packageSnapshot(instanceId),
         profile = EngineProfile.BASELINE,
-        processSlot = "com.multiapp.app:v0",
-        proxySlot = "com.multiapp.app.ProxyActivity0",
+        processSlot = processSlot,
+        proxySlot = proxySlot,
         evidenceSessionId = "evidence-1"
     )
 
