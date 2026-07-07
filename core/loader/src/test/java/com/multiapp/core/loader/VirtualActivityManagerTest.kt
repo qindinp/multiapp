@@ -7,13 +7,22 @@ import com.multiapp.core.model.virtual.VirtualActivityStack
 import com.multiapp.core.model.virtual.VirtualActivityState
 import io.mockk.every
 import io.mockk.mockk
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class VirtualActivityManagerTest {
+
+    @AfterTest
+    fun tearDown() {
+        VirtualActivityIntentStore.clearAll()
+        VirtualActivityIntentStore.resetIntentCopierForTest()
+    }
 
     @Test
     fun `original guest intent extra key is stable`() {
@@ -42,6 +51,7 @@ class VirtualActivityManagerTest {
         assertEquals("com.test.minimal", spec.originPackageName)
         assertEquals("com.test.minimal.MainActivity", spec.guestActivityClassName)
         assertEquals(null, spec.launchMode)
+        assertEquals(null, spec.taskAffinity)
     }
 
     @Test
@@ -82,8 +92,49 @@ class VirtualActivityManagerTest {
         assertEquals(1, record.taskId)
         assertEquals(0, record.intentFlags)
         assertEquals(VirtualActivityState.RESUMED, record.state)
-        assertEquals("com.test.minimal", record.taskAffinity)
+        assertEquals("com.test.minimal:inst-001", record.taskAffinity)
         assertSame(record, recordManager.resolve(record.token))
+    }
+
+    @Test
+    fun `same origin package instances use instance scoped task affinity`() {
+        val context = mockk<Context>(relaxed = true)
+        every { context.packageName } returns "com.multiapp.app"
+        val registry = ProxyActivityRegistry(
+            listOf(
+                "com.multiapp.app.container.ProxyActivity0",
+                "com.multiapp.app.container.ProxyActivity1"
+            )
+        )
+        val recordManager = VirtualActivityRecordManager()
+        val manager = VirtualActivityManager(context, registry, activityRecordManager = recordManager)
+
+        val first = manager.allocateGuestActivity(
+            VirtualActivityLaunchRequest(
+                instanceId = "inst-001",
+                originPackageName = "com.test.minimal",
+                guestActivityClassName = "com.test.minimal.MainActivity",
+                sourceIntent = intentWithFlags(VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK),
+                reason = "launcher"
+            )
+        )
+        val second = manager.allocateGuestActivity(
+            VirtualActivityLaunchRequest(
+                instanceId = "inst-002",
+                originPackageName = "com.test.minimal",
+                guestActivityClassName = "com.test.minimal.MainActivity",
+                sourceIntent = intentWithFlags(VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK),
+                reason = "launcher"
+            )
+        )
+
+        assertNotEquals(first.taskId, second.taskId)
+        assertEquals("com.test.minimal:inst-001", first.taskAffinity)
+        assertEquals("com.test.minimal:inst-002", second.taskAffinity)
+        assertEquals(
+            listOf("com.test.minimal:inst-001", "com.test.minimal:inst-002"),
+            recordManager.listTasks().map { it.affinity }
+        )
     }
 
     @Test
@@ -116,6 +167,7 @@ class VirtualActivityManagerTest {
         assertEquals("singleTop", record.launchMode)
         assertEquals("com.multiapp.app.container.ProxyActivitySingleTop0", record.proxyActivityClassName)
         assertEquals("singleTop", spec.launchMode)
+        assertEquals("com.test.minimal:inst-001", spec.taskAffinity)
     }
 
     @Test

@@ -97,6 +97,14 @@ class VirtualContextWrapperTest {
     }
 
     @Test
+    fun `guest package identity exposes origin package while virtual package remains internal alias`() {
+        val wrapper = wrapper()
+
+        assertEquals("com.test.minimal", wrapper.packageName)
+        assertEquals("com.test.minimal", wrapper.applicationInfo.packageName)
+    }
+
+    @Test
     fun `api34 context escape hatch returns virtual context`() {
         val wrapper = api34Wrapper()
 
@@ -163,6 +171,51 @@ class VirtualContextWrapperTest {
         assertEquals(path.canonicalPath, evidence?.redirectedPath?.let { File(it).canonicalPath })
         assertTrue(evidence?.withinDataRoot == true)
         assertTrue(evidence?.nativeLibraryRedirected == true)
+    }
+
+    @Test
+    fun `openFileOutput creates parent directories for safe relative paths`(@TempDir dataRoot: File) {
+        val wrapper = wrapper(
+            snapshot = snapshot().copy(dataDir = dataRoot.absolutePath)
+        )
+
+        wrapper.openFileOutput("nested/probe.txt", Context.MODE_PRIVATE).use { stream ->
+            stream.write("ok".toByteArray())
+        }
+
+        val file = File(dataRoot, "files/nested/probe.txt")
+        assertEquals("ok", file.readText())
+        assertEquals(StorageOperation.OPEN_FILE_OUTPUT, wrapper.lastStorageEvidence()?.operation)
+        assertEquals("nested/probe.txt", wrapper.lastStorageEvidence()?.logicalName)
+    }
+
+    @Test
+    fun `getDatabasePath redirects origin private absolute paths`(@TempDir dataRoot: File) {
+        val wrapper = wrapper(
+            snapshot = snapshot().copy(dataDir = dataRoot.absolutePath)
+        )
+
+        val path = wrapper.getDatabasePath("/data/user/0/com.test.minimal/databases/gkd/main.db")
+
+        assertEquals(File(dataRoot, "databases/gkd/main.db").canonicalFile, path)
+        assertEquals(StorageOperation.DATABASE_PATH, wrapper.lastStorageEvidence()?.operation)
+        assertEquals(
+            "/data/user/0/com.test.minimal/databases/gkd/main.db",
+            wrapper.lastStorageEvidence()?.logicalName
+        )
+        assertTrue(wrapper.lastStorageEvidence()?.withinDataRoot == true)
+    }
+
+    @Test
+    fun `getDatabasePath redirects virtual private absolute paths`(@TempDir dataRoot: File) {
+        val wrapper = wrapper(
+            snapshot = snapshot().copy(dataDir = dataRoot.absolutePath)
+        )
+
+        val path = wrapper.getDatabasePath("/data/data/com.multiapp.instance.abc/databases/virtual.db")
+
+        assertEquals(File(dataRoot, "databases/virtual.db").canonicalFile, path)
+        assertTrue(wrapper.lastStorageEvidence()?.withinDataRoot == true)
     }
 
     @Test
@@ -411,65 +464,82 @@ class VirtualContextWrapperTest {
     }
 
     @Test
-    fun `bindService explicit guest service is blocked after virtual resolution without host fallback`() {
+    fun `bindService explicit guest service binds through virtual runtime without host fallback`() {
+        VirtualServiceIntentStore.clearAll()
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
         val connection = mockk<ServiceConnection>(relaxed = true)
-        val wrapper = wrapper(base = base)
+        val binder = mockk<IBinder>(relaxed = true)
+        val service = FakeService(binder = binder)
+        val wrapper = wrapper(
+            base = base,
+            serviceRuntime = bindingRuntime(service)
+        )
 
         val result = wrapper.bindService(sourceIntent, connection, Context.BIND_AUTO_CREATE)
 
-        assertFalse(result)
+        assertTrue(result)
         val evidence = assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(
             wrapper.lastStartServiceMappingResult()
         )
         assertSame(sourceIntent, evidence.sourceIntent)
         assertEquals("com.test.minimal.SyncService", evidence.startRequest.guestServiceClassName)
+        val bound = assertIs<VirtualServiceBindDispatchResult.Bound>(wrapper.lastBindServiceDispatchResult())
+        assertSame(binder, bound.binder)
+        assertEquals(1, service.onCreateCalls)
+        assertEquals(1, service.onBindCalls)
+        assertEquals(0, VirtualServiceIntentStore.size())
+        verify(exactly = 1) {
+            connection.onServiceConnected(
+                any<ComponentName>(),
+                binder
+            )
+        }
         verify(exactly = 0) { base.bindService(any<Intent>(), any<ServiceConnection>(), any<Int>()) }
     }
 
     @Test
-    fun `bindService executor overload blocks explicit guest service without host fallback`() {
+    fun `bindService executor overload binds explicit guest service without host fallback`() {
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
         val connection = mockk<ServiceConnection>(relaxed = true)
         val executor = directExecutor()
-        val wrapper = wrapper(base = base)
+        val wrapper = wrapper(base = base, serviceRuntime = bindingRuntime(FakeService()))
 
         val result = wrapper.bindService(sourceIntent, Context.BIND_AUTO_CREATE, executor, connection)
 
-        assertFalse(result)
+        assertTrue(result)
         assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(wrapper.lastStartServiceMappingResult())
         verify(exactly = 0) { base.bindService(any<Intent>(), any<Int>(), any<Executor>(), any<ServiceConnection>()) }
     }
 
     @Test
-    fun `bindService BindServiceFlags overload blocks explicit guest service without host fallback`() {
+    fun `bindService BindServiceFlags overload binds explicit guest service without host fallback`() {
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
         val connection = mockk<ServiceConnection>(relaxed = true)
         val flags = bindServiceFlags()
-        val wrapper = api34Wrapper(base = base)
+        val wrapper = api34Wrapper(base = base, serviceRuntime = bindingRuntime(FakeService()))
 
         val result = wrapper.bindService(sourceIntent, connection, flags)
 
-        assertFalse(result)
+        assertTrue(result)
         assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(wrapper.lastStartServiceMappingResult())
         verify(exactly = 0) { base.bindService(any<Intent>(), any<ServiceConnection>(), any<Context.BindServiceFlags>()) }
     }
 
     @Test
-    fun `bindService BindServiceFlags executor overload blocks explicit guest service without host fallback`() {
+    fun `bindService BindServiceFlags executor overload binds explicit guest service without host fallback`() {
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
         val connection = mockk<ServiceConnection>(relaxed = true)
         val flags = bindServiceFlags()
         val executor = directExecutor()
-        val wrapper = api34Wrapper(base = base)
+        val wrapper = api34Wrapper(base = base, serviceRuntime = bindingRuntime(FakeService()))
 
         val result = wrapper.bindService(sourceIntent, flags, executor, connection)
 
-        assertFalse(result)
+        assertTrue(result)
         assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(wrapper.lastStartServiceMappingResult())
         verify(exactly = 0) {
             base.bindService(any<Intent>(), any<Context.BindServiceFlags>(), any<Executor>(), any<ServiceConnection>())
@@ -477,17 +547,17 @@ class VirtualContextWrapperTest {
     }
 
     @Test
-    fun `bindServiceAsUser overloads block explicit guest service without host fallback`() {
+    fun `bindServiceAsUser overloads bind explicit guest service without host fallback`() {
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
         val connection = mockk<ServiceConnection>(relaxed = true)
         val user = mockk<UserHandle>(relaxed = true)
         val flags = bindServiceFlags()
-        val wrapper = api34Wrapper(base = base)
+        val wrapper = api34Wrapper(base = base, serviceRuntime = bindingRuntime(FakeService()))
 
-        assertFalse(wrapper.bindServiceAsUser(sourceIntent, connection, Context.BIND_AUTO_CREATE, user))
+        assertTrue(wrapper.bindServiceAsUser(sourceIntent, connection, Context.BIND_AUTO_CREATE, user))
         assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(wrapper.lastStartServiceMappingResult())
-        assertFalse(wrapper.bindServiceAsUser(sourceIntent, connection, flags, user))
+        assertTrue(wrapper.bindServiceAsUser(sourceIntent, connection, flags, user))
         assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(wrapper.lastStartServiceMappingResult())
         verify(exactly = 0) { base.bindServiceAsUser(any<Intent>(), any<ServiceConnection>(), any<Int>(), any<UserHandle>()) }
         verify(exactly = 0) {
@@ -496,17 +566,17 @@ class VirtualContextWrapperTest {
     }
 
     @Test
-    fun `bindIsolatedService overloads block explicit guest service without host fallback`() {
+    fun `bindIsolatedService overloads bind explicit guest service without host fallback`() {
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
         val connection = mockk<ServiceConnection>(relaxed = true)
         val executor = directExecutor()
         val flags = bindServiceFlags()
-        val wrapper = api34Wrapper(base = base)
+        val wrapper = api34Wrapper(base = base, serviceRuntime = bindingRuntime(FakeService()))
 
-        assertFalse(wrapper.bindIsolatedService(sourceIntent, Context.BIND_AUTO_CREATE, "guest", executor, connection))
+        assertTrue(wrapper.bindIsolatedService(sourceIntent, Context.BIND_AUTO_CREATE, "guest", executor, connection))
         assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(wrapper.lastStartServiceMappingResult())
-        assertFalse(wrapper.bindIsolatedService(sourceIntent, flags, "guest", executor, connection))
+        assertTrue(wrapper.bindIsolatedService(sourceIntent, flags, "guest", executor, connection))
         assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(wrapper.lastStartServiceMappingResult())
         verify(exactly = 0) {
             base.bindIsolatedService(any<Intent>(), any<Int>(), any<String>(), any<Executor>(), any<ServiceConnection>())
@@ -555,6 +625,27 @@ class VirtualContextWrapperTest {
     }
 
     @Test
+    fun `unbindService dispatches tracked virtual service lifecycle without host fallback`() {
+        val base = baseContext()
+        val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
+        val connection = mockk<ServiceConnection>(relaxed = true)
+        val service = FakeService()
+        val wrapper = wrapper(
+            base = base,
+            serviceRuntime = bindingRuntime(service)
+        )
+
+        assertTrue(wrapper.bindService(sourceIntent, connection, Context.BIND_AUTO_CREATE))
+        wrapper.unbindService(connection)
+
+        val unbound = assertIs<VirtualServiceUnbindDispatchResult.Unbound>(wrapper.lastUnbindServiceDispatchResult())
+        assertEquals(true, unbound.destroyed)
+        assertEquals(1, service.onUnbindCalls)
+        assertEquals(1, service.onDestroyCalls)
+        verify(exactly = 0) { base.unbindService(connection) }
+    }
+
+    @Test
     fun `startService remaps explicit guest service and records evidence without changing return value`() {
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
@@ -583,21 +674,66 @@ class VirtualContextWrapperTest {
     }
 
     @Test
-    fun `startForegroundService blocks explicit guest service as unsupported without host fallback`() {
+    fun `startService records proxy-started AMS API evidence`() {
+        val records = mutableListOf<VirtualAmsApiEvidenceRecord>()
+        VirtualAmsApiEvidenceRecorders.install { record -> records += record }
+        try {
+            val base = baseContext()
+            val proxyIntent = mockk<Intent>(relaxed = true)
+            val proxyComponent = componentName("com.multiapp.app", "com.multiapp.app.container.StubService")
+            every { proxyIntent.component } returns proxyComponent
+            every { base.startService(proxyIntent) } returns proxyComponent
+            val wrapper = wrapper(
+                base = base,
+                serviceProxyIntentFactory = { _, _ -> proxyIntent }
+            )
+            val service = explicitServiceIntent("com.test.minimal.SyncService")
+
+            val result = wrapper.startService(service)
+
+            assertSame(proxyComponent, result)
+            val record = records.single { it.component == VirtualAmsApiEvidenceComponent.START_SERVICE }
+            assertEquals("startService", record.api)
+            assertEquals("SERVICE_PROXY_STARTED", record.status)
+            assertEquals(false, record.hostFallback)
+            assertEquals("com.multiapp.app/com.multiapp.app.container.StubService", record.fields["returnValue"])
+            assertEquals(true, record.fields["proxyStarted"])
+            assertEquals(true, record.fields["serviceResolved"])
+            assertEquals("explicit", record.fields["reason"])
+            assertEquals(false, record.fields["foreground"])
+            assertEquals("com.test.minimal.SyncService", record.fields["guestServiceClassName"])
+            assertEquals("PARTIAL", record.fields["capabilityVerdict"])
+        } finally {
+            VirtualAmsApiEvidenceRecorders.reset()
+        }
+    }
+
+    @Test
+    fun `startForegroundService remaps explicit guest service to foreground proxy`() {
         val base = baseContext()
         val sourceIntent = explicitServiceIntent("com.test.minimal.SyncService")
-        val wrapper = wrapper(base = base)
+        val startedIntent = slot<Intent>()
+        val proxyIntent = mockk<Intent>(relaxed = true)
+        val returnedComponent = componentName("com.multiapp.app", "com.multiapp.app.container.StubService")
+        every { base.startForegroundService(capture(startedIntent)) } returns returnedComponent
+        val wrapper = wrapper(
+            base = base,
+            serviceProxyIntentFactory = { _, _ -> proxyIntent }
+        )
 
         val result = wrapper.startForegroundService(sourceIntent)
 
-        assertNull(result)
-        assertBlockedEvidence(
-            wrapper.lastStartServiceMappingResult(),
-            sourceIntent = sourceIntent,
-            reason = FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON,
-            foreground = true
+        assertSame(returnedComponent, result)
+        val evidence = assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(
+            wrapper.lastStartServiceMappingResult()
         )
-        verify(exactly = 0) { base.startForegroundService(any()) }
+        assertSame(sourceIntent, evidence.sourceIntent)
+        assertSame(proxyIntent, evidence.proxyIntent)
+        assertSame(evidence.proxyIntent, startedIntent.captured)
+        assertTrue(evidence.foreground)
+        assertTrue(evidence.startRequest.foreground)
+        assertEquals("explicitForeground", evidence.startRequest.reason)
+        assertEquals("com.test.minimal.SyncService", evidence.startRequest.guestServiceClassName)
     }
 
     @Test
@@ -611,7 +747,7 @@ class VirtualContextWrapperTest {
         assertBlockedEvidence(
             wrapper.lastStartServiceMappingResult(),
             sourceIntent = implicit,
-            reason = "implicitServiceIntent",
+            reason = "unsupportedServiceIntent",
             foreground = false
         )
 
@@ -765,6 +901,42 @@ class VirtualContextWrapperTest {
         val unsupported = assertIs<VirtualBroadcastResult.UnsupportedImplicit>(wrapper.lastBroadcastDispatchResult())
         assertEquals(VirtualBroadcastResultCode.UnsupportedImplicit, unsupported.record.result)
         assertEquals("com.test.ACTION_IMPLICIT", unsupported.record.action)
+        verify(exactly = 0) { base.sendBroadcast(intent) }
+    }
+
+    @Test
+    fun `sendBroadcast delivers implicit manifest receiver without host fallback`() {
+        val base = baseContext()
+        val receiver = RecordingReceiver()
+        val runtime = VirtualReceiverRuntime(
+            receiverFactory = ReceiverFactory { _, _ -> receiver }
+        )
+        val wrapper = wrapper(
+            base = base,
+            snapshot = snapshot().copy(
+                receivers = listOf(
+                    ResolvedComponent(
+                        name = "com.test.minimal.SyncReceiver",
+                        exported = false,
+                        intentFilters = listOf("com.test.ACTION_SYNC")
+                    )
+                )
+            ),
+            broadcastManager = VirtualBroadcastManager(runtime = runtime)
+        )
+        val intent = implicitIntent()
+        every { intent.action } returns "com.test.ACTION_SYNC"
+        every { intent.`package` } returns null
+        every { intent.categories } returns emptySet()
+        every { intent.data } returns null
+
+        wrapper.sendBroadcast(intent)
+
+        val delivered = assertIs<VirtualBroadcastResult.Delivered>(wrapper.lastBroadcastDispatchResult())
+        assertEquals("implicit", delivered.request.reason)
+        assertEquals("com.test.minimal.SyncReceiver", delivered.request.receiverClassName)
+        assertSame(wrapper, receiver.context)
+        assertSame(intent, receiver.intent)
         verify(exactly = 0) { base.sendBroadcast(intent) }
     }
 
@@ -1147,30 +1319,34 @@ class VirtualContextWrapperTest {
     }
 
     @Test
-    fun `bindService records AMS API evidence while returning false`() {
+    fun `bindService records AMS API evidence when connected`() {
         val records = mutableListOf<VirtualAmsApiEvidenceRecord>()
         VirtualAmsApiEvidenceRecorders.install { record -> records += record }
         try {
             val base = baseContext()
+            val binder = mockk<IBinder>(relaxed = true)
             val wrapper = wrapper(
                 base = base,
                 snapshot = snapshot().copy(
                     services = listOf(ResolvedComponent(name = "com.test.minimal.ProbeService", exported = false))
-                )
+                ),
+                serviceRuntime = bindingRuntime(FakeService(binder = binder))
             )
             val service = explicitServiceIntent("com.test.minimal.ProbeService")
             val connection = mockk<ServiceConnection>(relaxed = true)
 
             val result = wrapper.bindService(service, connection, Context.BIND_AUTO_CREATE)
 
-            assertFalse(result)
+            assertTrue(result)
             val record = records.single { it.component == VirtualAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD }
             assertEquals("bindService:int", record.api)
-            assertEquals("BIND_BLOCKED", record.status)
+            assertEquals("BIND_CONNECTED", record.status)
             assertEquals(false, record.hostFallback)
-            assertEquals(false, record.fields["returnValue"])
+            assertEquals(true, record.fields["returnValue"])
             assertEquals(true, record.fields["serviceResolved"])
             assertEquals("explicit", record.fields["reason"])
+            assertEquals(true, record.fields["binderPresent"])
+            assertEquals("PASS", record.fields["capabilityVerdict"])
             verify(exactly = 0) { base.bindService(any<Intent>(), any<ServiceConnection>(), any<Int>()) }
         } finally {
             VirtualAmsApiEvidenceRecorders.reset()
@@ -1178,33 +1354,82 @@ class VirtualContextWrapperTest {
     }
 
     @Test
-    fun `startForegroundService records unsupported AMS API evidence while returning null`() {
+    fun `bindService records auto create blocked AMS API evidence`() {
         val records = mutableListOf<VirtualAmsApiEvidenceRecord>()
         VirtualAmsApiEvidenceRecorders.install { record -> records += record }
         try {
             val base = baseContext()
+            val service = FakeService()
             val wrapper = wrapper(
                 base = base,
                 snapshot = snapshot().copy(
                     services = listOf(ResolvedComponent(name = "com.test.minimal.ProbeService", exported = false))
-                )
+                ),
+                serviceRuntime = bindingRuntime(service)
+            )
+            val sourceIntent = explicitServiceIntent("com.test.minimal.ProbeService")
+            val connection = mockk<ServiceConnection>(relaxed = true)
+
+            val result = wrapper.bindService(sourceIntent, connection, 0)
+
+            assertFalse(result)
+            assertEquals(0, service.onCreateCalls)
+            assertEquals(0, service.onBindCalls)
+            val record = records.single { it.component == VirtualAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD }
+            assertEquals("bindService:int", record.api)
+            assertEquals("BIND_BLOCKED", record.status)
+            assertEquals(false, record.hostFallback)
+            assertEquals(false, record.fields["returnValue"])
+            assertEquals(true, record.fields["serviceResolved"])
+            assertEquals("explicit", record.fields["reason"])
+            assertEquals(0, record.fields["bindFlags"])
+            assertEquals(false, record.fields["autoCreate"])
+            assertEquals("bindAutoCreateNotRequested", record.fields["blockedReason"])
+            assertEquals(false, record.fields["serviceAlreadyRunning"])
+            assertEquals("PARTIAL", record.fields["capabilityVerdict"])
+            verify(exactly = 0) { base.bindService(any<Intent>(), any<ServiceConnection>(), any<Int>()) }
+            verify(exactly = 0) { connection.onServiceConnected(any<ComponentName>(), any()) }
+            verify(exactly = 0) { connection.onNullBinding(any<ComponentName>()) }
+        } finally {
+            VirtualAmsApiEvidenceRecorders.reset()
+        }
+    }
+
+    @Test
+    fun `startForegroundService records proxy-started AMS API evidence`() {
+        val records = mutableListOf<VirtualAmsApiEvidenceRecord>()
+        VirtualAmsApiEvidenceRecorders.install { record -> records += record }
+        try {
+            val base = baseContext()
+            val proxyIntent = mockk<Intent>(relaxed = true)
+            val proxyComponent = componentName("com.multiapp.app", "com.multiapp.app.container.StubService")
+            every { proxyIntent.component } returns proxyComponent
+            every { base.startForegroundService(proxyIntent) } returns proxyComponent
+            val wrapper = wrapper(
+                base = base,
+                snapshot = snapshot().copy(
+                    services = listOf(ResolvedComponent(name = "com.test.minimal.ProbeService", exported = false))
+                ),
+                serviceProxyIntentFactory = { _, _ -> proxyIntent }
             )
             val service = explicitServiceIntent("com.test.minimal.ProbeService")
 
             val result = wrapper.startForegroundService(service)
 
-            assertNull(result)
+            assertSame(proxyComponent, result)
             val record = records.single { it.component == VirtualAmsApiEvidenceComponent.START_FOREGROUND_SERVICE }
             assertEquals("startForegroundService", record.api)
-            assertEquals("FOREGROUND_SERVICE_UNSUPPORTED", record.status)
+            assertEquals("FOREGROUND_SERVICE_PROXY_STARTED", record.status)
             assertEquals(false, record.hostFallback)
-            assertEquals("null", record.fields["returnValue"])
+            assertEquals("com.multiapp.app/com.multiapp.app.container.StubService", record.fields["returnValue"])
+            assertEquals(true, record.fields["proxyStarted"])
             assertEquals(true, record.fields["serviceResolved"])
-            assertEquals(FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON, record.fields["reason"])
+            assertEquals("explicitForeground", record.fields["reason"])
             assertEquals(true, record.fields["foreground"])
-            assertEquals(false, record.fields["lifecycleImplemented"])
-            assertEquals("UNSUPPORTED", record.fields["capabilityVerdict"])
-            verify(exactly = 0) { base.startForegroundService(any()) }
+            assertEquals(true, record.fields["lifecycleImplemented"])
+            assertEquals(false, record.fields["guestForegroundLifecycleImplemented"])
+            assertEquals("PARTIAL", record.fields["capabilityVerdict"])
+            verify(exactly = 1) { base.startForegroundService(proxyIntent) }
         } finally {
             VirtualAmsApiEvidenceRecorders.reset()
         }
@@ -1248,7 +1473,8 @@ class VirtualContextWrapperTest {
         serviceProxyIntentFactory: (VirtualServiceManager, VirtualServiceStartRequest) -> Intent = { _, _ ->
             mockk(relaxed = true)
         },
-        amsDispatcher: VirtualAmsComponentDispatcher? = null
+        amsDispatcher: VirtualAmsComponentDispatcher? = null,
+        bindServiceFlagsReader: (Context.BindServiceFlags) -> Int = { Context.BIND_AUTO_CREATE }
     ): VirtualContextWrapperApi34 {
         return VirtualContextWrapperApi34(
             base = base,
@@ -1260,7 +1486,8 @@ class VirtualContextWrapperTest {
             broadcastManager = broadcastManager,
             dynamicReceiverRegistry = dynamicReceiverRegistry,
             serviceProxyIntentFactory = serviceProxyIntentFactory,
-            amsDispatcher = amsDispatcher
+            amsDispatcher = amsDispatcher,
+            bindServiceFlagsReader = bindServiceFlagsReader
         )
     }
 
@@ -1336,7 +1563,18 @@ class VirtualContextWrapperTest {
     private fun implicitIntent(): Intent {
         val intent = mockk<Intent>(relaxed = true)
         every { intent.component } returns null
+        every { intent.`package` } returns null
+        every { intent.action } returns null
+        every { intent.categories } returns emptySet()
+        every { intent.scheme } returns null
         return intent
+    }
+
+    private fun componentName(packageName: String, className: String): ComponentName {
+        val component = mockk<ComponentName>(relaxed = true)
+        every { component.packageName } returns packageName
+        every { component.className } returns className
+        return component
     }
 
     private fun explicitReceiverIntent(
@@ -1421,7 +1659,11 @@ class VirtualContextWrapperTest {
         sourceDir = "/data/minimal.apk",
         dataDir = "/data/inst",
         services = listOf(
-            ResolvedComponent(name = "com.test.minimal.SyncService", exported = false)
+            ResolvedComponent(
+                name = "com.test.minimal.SyncService",
+                exported = false,
+                intentFilters = listOf("com.test.SYNC")
+            )
         ),
         receivers = listOf(
             ResolvedComponent(name = "com.test.minimal.BootReceiver", exported = false)
@@ -1434,6 +1676,12 @@ class VirtualContextWrapperTest {
         guestServiceClassName = "com.test.minimal.SyncService",
         service = service,
         createdAtMs = 100L
+    )
+
+    private fun bindingRuntime(service: Service): VirtualServiceRuntime = VirtualServiceRuntime(
+        serviceFactory = ServiceFactory { _, _ -> service },
+        serviceAttacher = ServiceAttacher { _, _, _, _ -> },
+        recordManager = VirtualServiceRecordManager()
     )
 
     private class SequencedAmsDispatcher(
@@ -1459,6 +1707,22 @@ class VirtualContextWrapperTest {
         }
 
         override fun dispatchStopService(intent: Intent): VirtualServiceStopDispatchResult? = null
+
+        override fun dispatchBindService(
+            intent: Intent,
+            virtualContext: Context,
+            guestClassLoader: ClassLoader,
+            connection: ServiceConnection,
+            flags: Int,
+            executor: Executor?
+        ): VirtualServiceBindDispatchResult = VirtualServiceBindDispatchResult.Blocked(
+            sourceIntent = intent,
+            reason = "fakeBlocked",
+            serviceResolved = false
+        )
+
+        override fun dispatchUnbindService(connection: ServiceConnection): VirtualServiceUnbindDispatchResult =
+            VirtualServiceUnbindDispatchResult.NotFound
 
         override fun dispatchBroadcast(
             intent: Intent,
@@ -1506,6 +1770,33 @@ class VirtualContextWrapperTest {
 
         override fun dispatchStopService(intent: Intent): VirtualServiceStopDispatchResult? = null
 
+        override fun dispatchBindService(
+            intent: Intent,
+            virtualContext: Context,
+            guestClassLoader: ClassLoader,
+            connection: ServiceConnection,
+            flags: Int,
+            executor: Executor?
+        ): VirtualServiceBindDispatchResult {
+            val result = startServiceResult
+            return if (result is VirtualContextWrapper.StartServiceMappingResult.Remapped) {
+                VirtualServiceBindDispatchResult.Failed(
+                    startRequest = result.startRequest,
+                    stage = "fake",
+                    error = IllegalStateException("fakeBlocked")
+                )
+            } else {
+                VirtualServiceBindDispatchResult.Blocked(
+                    sourceIntent = intent,
+                    reason = "fakeBlocked",
+                    serviceResolved = false
+                )
+            }
+        }
+
+        override fun dispatchUnbindService(connection: ServiceConnection): VirtualServiceUnbindDispatchResult =
+            VirtualServiceUnbindDispatchResult.NotFound
+
         override fun dispatchBroadcast(
             intent: Intent,
             virtualContext: Context,
@@ -1518,16 +1809,32 @@ class VirtualContextWrapperTest {
     }
 
     private class FakeService(
-        private val failOnDestroy: Boolean = false
+        private val failOnDestroy: Boolean = false,
+        private val binder: IBinder? = null
     ) : Service() {
+        var onCreateCalls = 0
+        var onBindCalls = 0
+        var onUnbindCalls = 0
         var onDestroyCalls = 0
+
+        override fun onCreate() {
+            onCreateCalls += 1
+        }
 
         override fun onDestroy() {
             onDestroyCalls += 1
             if (failOnDestroy) error("destroy failed")
         }
 
-        override fun onBind(intent: Intent?): IBinder? = null
+        override fun onBind(intent: Intent?): IBinder? {
+            onBindCalls += 1
+            return binder
+        }
+
+        override fun onUnbind(intent: Intent?): Boolean {
+            onUnbindCalls += 1
+            return false
+        }
     }
 
     private class RecordingReceiver : BroadcastReceiver() {

@@ -110,16 +110,21 @@ class VirtualProviderRoutingPlanTest {
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationUpdateStatus"])
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationDeleteStatus"])
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationCallStatus"])
+        assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationGetTypeStatus"])
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationBulkInsertStatus"])
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenFileStatus"])
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenAssetFileStatus"])
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenTypedAssetFileStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationNotifyChangeStatus"])
-        assertEquals("CONTENT_RESOLVER_NOTIFY_CHANGE_NOT_VIRTUALIZED", evidence["providerOperationNotifyChangeReason"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationContentObserverStatus"])
-        assertEquals("CONTENT_OBSERVER_REGISTRATION_NOT_VIRTUALIZED", evidence["providerOperationContentObserverReason"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationGrantUriPermissionStatus"])
-        assertEquals("URI_PERMISSION_GRANT_NOT_VIRTUALIZED", evidence["providerOperationGrantUriPermissionReason"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationOpenFileDescriptorStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationOpenAssetFileDescriptorStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationOpenTypedAssetFileDescriptorStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationRegisterContentObserverStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationUnregisterContentObserverStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationGrantUriPermissionStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationRevokeUriPermissionStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationCanonicalizeStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationUncanonicalizeStatus"])
     }
 
     @Test
@@ -133,9 +138,43 @@ class VirtualProviderRoutingPlanTest {
         assertEquals("false", evidence["providerRoutingEnabled"])
         assertEquals("ROUTING_DISABLED", evidence["providerOperationQueryStatus"])
         assertEquals("ROUTING_DISABLED", evidence["providerOperationOpenTypedAssetFileStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationNotifyChangeStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationContentObserverStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationGrantUriPermissionStatus"])
+        assertEquals("ROUTING_DISABLED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("ROUTING_DISABLED", evidence["providerOperationRegisterContentObserverStatus"])
+        assertEquals("ROUTING_DISABLED", evidence["providerOperationUnregisterContentObserverStatus"])
+        assertEquals("ROUTING_DISABLED", evidence["providerOperationGrantUriPermissionStatus"])
+    }
+
+    @Test
+    fun `toEvidence marks ContentResolver hook operations pending when pass-through hook is primary but not installed`() {
+        val plan = VirtualProviderRoutingPlanFactory().create(
+            snapshot = snapshot(),
+            hostPackageName = "com.multiapp.app",
+            passThroughHookAllowed = true
+        )
+        val evidence = plan.toEvidence().associate { it.key to it.value }
+
+        assertEquals("CONTENT_RESOLVER_HOOK_NOT_INSTALLED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_NOT_INSTALLED", evidence["providerOperationRegisterContentObserverStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_NOT_INSTALLED", evidence["providerOperationUnregisterContentObserverStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_NOT_INSTALLED", evidence["providerOperationGrantUriPermissionStatus"])
+    }
+
+    @Test
+    fun `toEvidence marks ContentResolver hook operations routed after hook install succeeds`() {
+        val plan = VirtualProviderRoutingPlanFactory().create(
+            snapshot = snapshot(),
+            hostPackageName = "com.multiapp.app",
+            passThroughHookAllowed = true
+        )
+        val evidence = plan.toEvidence(contentResolverHookInstalled = true).associate { it.key to it.value }
+
+        assertEquals("ROUTED_BY_CONTENT_RESOLVER_HOOK", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("ROUTED_BY_CONTENT_RESOLVER_HOOK", evidence["providerOperationRegisterContentObserverStatus"])
+        assertEquals("NO_URI_REWRITE_REQUIRED", evidence["providerOperationUnregisterContentObserverStatus"])
+        assertEquals("ROUTED_BY_CONTENT_RESOLVER_HOOK", evidence["providerOperationGrantUriPermissionStatus"])
+        assertEquals("ROUTED_BY_CONTENT_RESOLVER_HOOK", evidence["providerOperationRevokeUriPermissionStatus"])
+        assertEquals("ROUTED_BY_CONTENT_RESOLVER_HOOK", evidence["providerOperationCanonicalizeStatus"])
+        assertEquals("ROUTED_BY_CONTENT_RESOLVER_HOOK", evidence["providerOperationUncanonicalizeStatus"])
     }
 
     private fun snapshot(

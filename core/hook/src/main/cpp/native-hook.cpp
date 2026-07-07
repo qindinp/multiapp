@@ -38,6 +38,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <link.h>
+#include <limits.h>
 
 #include <cstdio>
 #include <cstring>
@@ -119,6 +120,7 @@ typedef int (*orig_access_t)(const char*, int);
 typedef int (*orig_stat_t)(const char*, struct stat*);
 typedef int (*orig_lstat_t)(const char*, struct stat*);
 typedef ssize_t (*orig_readlink_t)(const char*, char*, size_t);
+typedef char* (*orig_realpath_t)(const char*, char*);
 typedef FILE* (*orig_fopen_t)(const char*, const char*);
 typedef int (*orig_mkdir_t)(const char*, mode_t);
 typedef int (*orig_unlink_t)(const char*);
@@ -138,6 +140,7 @@ static orig_access_t real_access = nullptr;
 static orig_stat_t real_stat = nullptr;
 static orig_lstat_t real_lstat = nullptr;
 static orig_readlink_t real_readlink = nullptr;
+static orig_realpath_t real_realpath = nullptr;
 
 // 完整性校验重定向：壳的 JNI_OnLoad 读 APK 校验 DEX 时，重定向到原始 APK
 static thread_local bool g_integrity_redirect_active = false;
@@ -370,6 +373,22 @@ static ssize_t hooked_readlink(const char* path, char* buf, size_t bufsiz) {
 /**
  * Hooked fopen() — redirects file paths to sandbox, hides paths.
  */
+static char* hooked_realpath(const char* path, char* resolved_path) {
+    if (is_path_hidden(path)) {
+        errno = ENOENT;
+        return nullptr;
+    }
+
+    std::string redirected = redirect_path(path);
+    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+
+    if (!redirected.empty()) {
+        LOGD("realpath: %s -> %s", path, actual_path);
+    }
+
+    return real_realpath(actual_path, resolved_path);
+}
+
 static FILE* hooked_fopen(const char* path, const char* mode) {
     if (is_path_hidden(path)) {
         errno = ENOENT;
@@ -657,6 +676,7 @@ static HookEntry g_hook_entries[] = {
     {nullptr,       "stat",                    (void*)hooked_stat,                 (void**)&real_stat,                    HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
     {nullptr,       "lstat",                   (void*)hooked_lstat,                (void**)&real_lstat,                   HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
     {nullptr,       "readlink",                (void*)hooked_readlink,             (void**)&real_readlink,                HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
+    {nullptr,       "realpath",                (void*)hooked_realpath,             (void**)&real_realpath,                HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
     {nullptr,       "fopen",                   (void*)hooked_fopen,                (void**)&real_fopen,                   HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
     {nullptr,       "mkdir",                   (void*)hooked_mkdir,                (void**)&real_mkdir,                   HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
     {nullptr,       "unlink",                  (void*)hooked_unlink,               (void**)&real_unlink,                  HOOK_PROFILE_PATH_REDIRECT | HOOK_PROFILE_FULL},
@@ -894,6 +914,103 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeAddPathRedirection(
 
     if (src) env->ReleaseStringUTFChars(sourcePath, src);
     if (tgt) env->ReleaseStringUTFChars(targetPath, tgt);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeProbePrivatePathRedirect(
+    JNIEnv* env,
+    jobject thiz,
+    jstring operation,
+    jstring originalPath,
+    jstring expectedRedirectedPath)
+{
+    (void)thiz;
+    const char* op_chars = env->GetStringUTFChars(operation, nullptr);
+    const char* original_chars = env->GetStringUTFChars(originalPath, nullptr);
+    const char* expected_chars = env->GetStringUTFChars(expectedRedirectedPath, nullptr);
+
+    std::string op = op_chars ? op_chars : "";
+    std::string original = original_chars ? original_chars : "";
+    std::string expected = expected_chars ? expected_chars : "";
+    int result_code = -1;
+    int saved_errno = 0;
+    std::string resolved_path;
+    std::string reason;
+
+    errno = 0;
+    if (op == "open") {
+        int fd = open(original.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            const char* marker = "multiapp-native-open";
+            (void)write(fd, marker, strlen(marker));
+            close(fd);
+            result_code = 0;
+        }
+    } else if (op == "openat") {
+        int fd = openat(AT_FDCWD, original.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            const char* marker = "multiapp-native-openat";
+            (void)write(fd, marker, strlen(marker));
+            close(fd);
+            result_code = 0;
+        }
+    } else if (op == "stat") {
+        struct stat st {};
+        result_code = stat(original.c_str(), &st);
+    } else if (op == "access") {
+        result_code = access(original.c_str(), F_OK);
+    } else if (op == "fopen") {
+        FILE* file = fopen(original.c_str(), "wb");
+        if (file != nullptr) {
+            const char* marker = "multiapp-native-fopen";
+            fwrite(marker, 1, strlen(marker), file);
+            fclose(file);
+            result_code = 0;
+        }
+    } else if (op == "realpath") {
+        char buffer[PATH_MAX] = {};
+        char* resolved = realpath(original.c_str(), buffer);
+        if (resolved != nullptr) {
+            resolved_path = resolved;
+            result_code = 0;
+        }
+    } else {
+        errno = EINVAL;
+        reason = "UNKNOWN_OPERATION";
+    }
+
+    saved_errno = errno;
+    bool candidate_exists = !expected.empty() && access(expected.c_str(), F_OK) == 0;
+    bool success = result_code == 0 && candidate_exists;
+    if (reason.empty()) {
+        if (success) {
+            reason = "NATIVE_IO_REDIRECT_VERIFIED";
+        } else if (result_code != 0) {
+            reason = "NATIVE_IO_PROBE_CALL_FAILED";
+        } else {
+            reason = "NATIVE_IO_CANDIDATE_NOT_OBSERVED";
+        }
+    }
+
+    auto sanitize = [](std::string value) {
+        for (char& ch : value) {
+            if (ch == ';' || ch == '\n' || ch == '\r') ch = '_';
+        }
+        return value;
+    };
+    std::string report =
+        "operation=" + sanitize(op) +
+        ";success=" + std::string(success ? "true" : "false") +
+        ";resultCode=" + std::to_string(result_code) +
+        ";errno=" + std::to_string(saved_errno) +
+        ";candidateExists=" + std::string(candidate_exists ? "true" : "false") +
+        ";resolvedPath=" + sanitize(resolved_path) +
+        ";reason=" + sanitize(reason);
+
+    if (op_chars) env->ReleaseStringUTFChars(operation, op_chars);
+    if (original_chars) env->ReleaseStringUTFChars(originalPath, original_chars);
+    if (expected_chars) env->ReleaseStringUTFChars(expectedRedirectedPath, expected_chars);
+    return env->NewStringUTF(report.c_str());
 }
 
 /**

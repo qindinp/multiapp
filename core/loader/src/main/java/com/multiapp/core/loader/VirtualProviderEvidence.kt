@@ -23,6 +23,8 @@ data class VirtualProviderEvidence(
         OPEN_TYPED_ASSET_FILE,
         BULK_INSERT,
         NOTIFY_CHANGE,
+        CANONICALIZE,
+        UNCANONICALIZE,
         UNKNOWN
     }
 
@@ -187,6 +189,9 @@ data class VirtualProviderEvidence(
             "openAssetFile" -> Operation.OPEN_ASSET_FILE
             "openTypedAssetFile" -> Operation.OPEN_TYPED_ASSET_FILE
             "bulkInsert" -> Operation.BULK_INSERT
+            "notifyChange" -> Operation.NOTIFY_CHANGE
+            "canonicalize" -> Operation.CANONICALIZE
+            "uncanonicalize" -> Operation.UNCANONICALIZE
             else -> Operation.UNKNOWN
         }
 

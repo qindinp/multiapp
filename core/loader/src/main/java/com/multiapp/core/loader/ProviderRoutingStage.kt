@@ -38,7 +38,9 @@ class ProviderRoutingStage(
             result = BootstrapResult.success(
                 stage = RuntimeStage.GUEST_CONTEXT,
                 message = "Provider routing prepared: ${providerRoutingPlan.reason}",
-                evidence = providerRoutingPlan.toEvidence() + providerHookInstallResult.toEvidence(),
+                evidence = providerRoutingPlan.toEvidence(
+                    contentResolverHookInstalled = providerHookInstallResult is VirtualProviderHookInstallResult.Installed
+                ) + providerHookInstallResult.toEvidence(),
                 durationMs = durationMs
             )
         )

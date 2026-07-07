@@ -3,9 +3,11 @@ package com.multiapp.core.loader
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.os.IBinder
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import java.util.UUID
 
 data class VirtualServiceStartRequest(
     val instanceId: String,
@@ -13,7 +15,8 @@ data class VirtualServiceStartRequest(
     val guestServiceClassName: String,
     val sourceIntent: Intent,
     val reason: String,
-    val foreground: Boolean = false
+    val foreground: Boolean = false,
+    val proxyToken: String? = null
 )
 
 data class VirtualServiceStopRequest(
@@ -27,6 +30,7 @@ data class VirtualServiceStopRequest(
 data class VirtualServiceProxySpec(
     val hostPackageName: String,
     val stubServiceClassName: String,
+    val token: String,
     val instanceId: String,
     val originPackageName: String,
     val guestServiceClassName: String,
@@ -48,6 +52,7 @@ class VirtualServiceManager(
 ) {
     companion object {
         const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
+        const val EXTRA_VIRTUAL_SERVICE_TOKEN = "multiapp.virtualServiceToken"
         const val EXTRA_ORIGIN_PACKAGE_NAME = "multiapp.originPackageName"
         const val EXTRA_GUEST_SERVICE_CLASS_NAME = "multiapp.guestServiceClassName"
         const val EXTRA_SERVICE_START_REASON = "multiapp.serviceStartReason"
@@ -56,13 +61,21 @@ class VirtualServiceManager(
     }
 
     fun resolveStartService(snapshot: VirtualPackageSnapshot, intent: Intent): VirtualServiceStartRequest? {
-        val component = intent.component ?: return null
-        return resolveExplicitService(snapshot, component.packageName, component.className, intent, foreground = false)
+        val component = intent.component
+        return if (component != null) {
+            resolveExplicitService(snapshot, component.packageName, component.className, intent, foreground = false)
+        } else {
+            resolveImplicitService(snapshot, intent, foreground = false)
+        }
     }
 
     fun resolveStartForegroundService(snapshot: VirtualPackageSnapshot, intent: Intent): VirtualServiceStartRequest? {
-        val component = intent.component ?: return null
-        return resolveExplicitService(snapshot, component.packageName, component.className, intent, foreground = true)
+        val component = intent.component
+        return if (component != null) {
+            resolveExplicitService(snapshot, component.packageName, component.className, intent, foreground = true)
+        } else {
+            resolveImplicitService(snapshot, intent, foreground = true)
+        }
     }
 
     fun resolveStopService(snapshot: VirtualPackageSnapshot, intent: Intent): VirtualServiceStopRequest? {
@@ -110,16 +123,35 @@ class VirtualServiceManager(
         )
     }
 
+    internal fun resolveImplicitService(
+        snapshot: VirtualPackageSnapshot,
+        sourceIntent: Intent,
+        foreground: Boolean = false
+    ): VirtualServiceStartRequest? {
+        val serviceInfo = VirtualPackageService(snapshot).resolveService(sourceIntent)?.serviceInfo
+            ?: return null
+        val serviceName = serviceInfo.name?.takeIf { it.isNotBlank() } ?: return null
+        return VirtualServiceStartRequest(
+            instanceId = snapshot.instanceId,
+            originPackageName = snapshot.originPackageName,
+            guestServiceClassName = serviceName,
+            sourceIntent = sourceIntent,
+            reason = if (foreground) "implicitForeground" else "implicit",
+            foreground = foreground
+        )
+    }
+
     fun createProxyIntent(request: VirtualServiceStartRequest): Intent {
         val spec = createProxySpec(request)
         return Intent().apply {
             setClassName(spec.hostPackageName, spec.stubServiceClassName)
+            putExtra(EXTRA_VIRTUAL_SERVICE_TOKEN, spec.token)
             putExtra(EXTRA_INSTANCE_ID, spec.instanceId)
             putExtra(EXTRA_ORIGIN_PACKAGE_NAME, spec.originPackageName)
             putExtra(EXTRA_GUEST_SERVICE_CLASS_NAME, spec.guestServiceClassName)
             putExtra(EXTRA_SERVICE_START_REASON, spec.reason)
             putExtra(EXTRA_FOREGROUND_SERVICE, spec.foreground)
-            putExtra(EXTRA_ORIGINAL_GUEST_INTENT, Intent(request.sourceIntent))
+            VirtualServiceIntentStore.remember(spec.token, request.sourceIntent)
         }
     }
 
@@ -129,7 +161,9 @@ class VirtualServiceManager(
         val guestServiceClassName = proxyIntent.getStringExtra(EXTRA_GUEST_SERVICE_CLASS_NAME).orEmpty()
         if (instanceId.isBlank() || originPackageName.isBlank() || guestServiceClassName.isBlank()) return null
         val reason = proxyIntent.getStringExtra(EXTRA_SERVICE_START_REASON).orEmpty().ifBlank { "explicit" }
-        val sourceIntent = proxyIntent.getParcelableExtra<Intent>(EXTRA_ORIGINAL_GUEST_INTENT)
+        val proxyToken = proxyIntent.getStringExtra(EXTRA_VIRTUAL_SERVICE_TOKEN)
+        val sourceIntent = VirtualServiceIntentStore.find(proxyToken)
+            ?: legacyOriginalGuestIntent(proxyIntent)
             ?: Intent().setComponent(ComponentName(originPackageName, guestServiceClassName))
         return VirtualServiceStartRequest(
             instanceId = instanceId,
@@ -137,13 +171,15 @@ class VirtualServiceManager(
             guestServiceClassName = guestServiceClassName,
             sourceIntent = sourceIntent,
             reason = reason,
-            foreground = proxyIntent.getBooleanExtra(EXTRA_FOREGROUND_SERVICE, false)
+            foreground = proxyIntent.getBooleanExtra(EXTRA_FOREGROUND_SERVICE, false),
+            proxyToken = proxyToken
         )
     }
 
     fun createProxySpec(request: VirtualServiceStartRequest): VirtualServiceProxySpec = VirtualServiceProxySpec(
         hostPackageName = hostPackageName,
         stubServiceClassName = stubServiceClassName,
+        token = UUID.randomUUID().toString(),
         instanceId = request.instanceId,
         originPackageName = request.originPackageName,
         guestServiceClassName = request.guestServiceClassName,
@@ -156,6 +192,12 @@ class VirtualServiceManager(
         '.' !in className -> "$packageName.$className"
         else -> className
     }
+
+    @Suppress("DEPRECATION")
+    private fun legacyOriginalGuestIntent(proxyIntent: Intent): Intent? =
+        runCatching {
+            proxyIntent.getParcelableExtra<Intent>(EXTRA_ORIGINAL_GUEST_INTENT)
+        }.getOrNull()
 }
 
 class VirtualServiceDispatcher(
@@ -351,6 +393,63 @@ sealed class VirtualServiceStopDispatchResult {
     data class InstanceNotFound(
         override val stopRequest: VirtualServiceStopRequest
     ) : VirtualServiceStopDispatchResult()
+}
+
+sealed class VirtualServiceBindDispatchResult {
+    abstract val startRequest: VirtualServiceStartRequest?
+
+    data class Bound(
+        override val startRequest: VirtualServiceStartRequest,
+        val componentName: ComponentName,
+        val binder: IBinder?,
+        val cached: Boolean,
+        val bindKey: String,
+        val flags: Int,
+        val bindCount: Int,
+        val activeConnectionCount: Int,
+        val reusedBinder: Boolean,
+        val rebindDelivered: Boolean,
+        val connectionReused: Boolean = false,
+        val nullBinding: Boolean = false
+    ) : VirtualServiceBindDispatchResult()
+
+    data class Blocked(
+        val sourceIntent: Intent,
+        val reason: String,
+        val serviceResolved: Boolean,
+        val flags: Int? = null,
+        val autoCreate: Boolean? = null,
+        val serviceAlreadyRunning: Boolean? = null
+    ) : VirtualServiceBindDispatchResult() {
+        override val startRequest: VirtualServiceStartRequest? = null
+    }
+
+    data class Failed(
+        override val startRequest: VirtualServiceStartRequest,
+        val stage: String,
+        val error: Throwable
+    ) : VirtualServiceBindDispatchResult()
+}
+
+sealed class VirtualServiceUnbindDispatchResult {
+    data class Unbound(
+        val startRequest: VirtualServiceStartRequest,
+        val destroyed: Boolean,
+        val onUnbindResult: Boolean,
+        val onUnbindCalled: Boolean,
+        val bindKey: String,
+        val activeConnectionCount: Int,
+        val activeBindCount: Int,
+        val idleStopResult: HostServiceIdleStopResult = HostServiceIdleStopResult.notRequested("serviceStillActive")
+    ) : VirtualServiceUnbindDispatchResult()
+
+    data object NotFound : VirtualServiceUnbindDispatchResult()
+
+    data class Failed(
+        val startRequest: VirtualServiceStartRequest,
+        val stage: String,
+        val error: Throwable
+    ) : VirtualServiceUnbindDispatchResult()
 }
 
 fun Context.startHostedServiceProxy(snapshot: VirtualPackageSnapshot, intent: Intent): ComponentName? {

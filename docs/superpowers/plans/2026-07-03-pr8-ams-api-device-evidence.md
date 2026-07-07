@@ -1388,7 +1388,7 @@ BUILD SUCCESSFUL
 Use this wording if verification passes:
 
 ```text
-PR-8 AMS API专项 device evidence 已补：registerReceiver、sticky ordered broadcast、bindService overload blocking 均从 hosted guest production path 写入 files/hosted_launch_evidence，并在 SDK36 设备 192.168.2.42:36339 上通过 targeted androidTest 验证。Virtual AMS 仍不声明 complete；全局 IActivityManager/IActivityTaskManager proxy、完整 sticky semantics 和真实 bound-service lifecycle 仍在范围外。
+PR-8 AMS API专项 device evidence 已补：registerReceiver、sticky ordered broadcast、startService/startForegroundService proxy-started evidence、bind/unbind service overload evidence 均从 hosted guest production path 写入 files/hosted_launch_evidence，并在 SDK36 设备 192.168.2.42:36339 上通过 targeted androidTest 验证。Foreground service 口径为 proxy/partial：宿主 service proxy 已启动并进入 foreground 路径，但 guest foreground-service lifecycle 仍未声明完整。Virtual AMS 仍不声明 complete；全局 IActivityManager/IActivityTaskManager proxy、完整 sticky semantics 和真实 bound-service lifecycle 仍在范围外。
 ```
 
 Use this wording if device test fails:
@@ -1400,7 +1400,7 @@ PR-8 AMS API专项实现/测试已推进，但设备验证未通过；当前状�
 Actual 2026-07-03 device result:
 
 ```text
-PR-8 AMS API专项 device evidence 已补：registerReceiver、sticky ordered broadcast、bindService overload blocking 均从 hosted guest production path 写入 files/hosted_launch_evidence，并在 SDK36 设备 192.168.2.42:44113 上通过用户手动启动路径验证。connectedDebugAndroidTest 未通过自动化验收，失败点是 MIUI/HyperOS 对 instrumentation 启动 ContainerActivity 的权限拦截；该失败不代表 runtime probe 失败。Virtual AMS 仍不声明 complete；全局 IActivityManager/IActivityTaskManager proxy、完整 sticky semantics 和真实 bound-service lifecycle 仍在范围外。
+PR-8 AMS API专项 device evidence 已补：registerReceiver、sticky ordered broadcast、startService/startForegroundService proxy-started evidence、bind/unbind service overload evidence 均从 hosted guest production path 写入 files/hosted_launch_evidence，并在 SDK36 设备 192.168.2.42:44113 上通过用户手动启动路径验证。Foreground service 口径为 proxy/partial：宿主 service proxy 已启动并进入 foreground 路径，但 guest foreground-service lifecycle 仍未声明完整。connectedDebugAndroidTest 未通过自动化验收，失败点是 MIUI/HyperOS 对 instrumentation 启动 ContainerActivity 的权限拦截；该失败不代表 runtime probe 失败。Virtual AMS 仍不声明 complete；全局 IActivityManager/IActivityTaskManager proxy、完整 sticky semantics 和真实 bound-service lifecycle 仍在范围外。
 evidenceDir=.tmp/pr8-after-manual-20260703-202959
 fixedDump=.tmp/pr8-after-manual-20260703-202959/evidence-dump-fixed-20260703-203204.txt
 stickyOrderedStatus=STICKY_ORDERED_INTERCEPTED
@@ -1415,7 +1415,8 @@ stickyOrderedDispatchStatus=UnsupportedImplicit
 
 - `registerReceiver(...)` evidence: Task 1 asserts, Task 4 emits, Task 5 triggers, Task 6 captures.
 - `sendStickyOrderedBroadcast(...)` evidence: Task 1 asserts, Task 4 emits, Task 5 triggers, Task 6 captures.
-- `bindService(...)` overload blocking evidence: Task 1 asserts, Task 4 emits, Task 5 triggers int/executor overload, Task 6 captures.
+- `startForegroundService(...)` proxy/partial evidence: Task 1 asserts `FOREGROUND_SERVICE_PROXY_STARTED`, `proxyStarted=true`, `foreground=true`, `guestForegroundLifecycleImplemented=false`, and `capabilityVerdict=PARTIAL`.
+- `bindService(...)` and `unbindService(...)` overload evidence: Task 1 asserts proxy/connection result fields, Task 5 triggers the hosted guest overload path, Task 6 captures.
 - Hosted guest production path: Task 5 invokes APIs from minimal guest `MainActivity`, Task 1 launches `ContainerActivity` hosted instance.
 - Device evidence: Task 6 captures from `192.168.2.42:44113` without clearing logcat.
 - Anti-overclaim: Task 7 gives explicit allowed wording and out-of-scope wording.

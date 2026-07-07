@@ -17,11 +17,13 @@ object VirtualInstrumentationInstaller {
         return runCatching {
             val current = ActivityThreadCompat.getInstrumentation()
             if (current is VirtualInstrumentation) {
+                ActivityThreadLaunchCallbackInstaller.install().getOrThrow()
                 Log.i(TAG, "VirtualInstrumentation already installed")
                 return@runCatching
             }
             originalInstrumentation = current
             ActivityThreadCompat.setInstrumentation(createVirtualInstrumentation(current))
+            ActivityThreadLaunchCallbackInstaller.install().getOrThrow()
             Log.i(TAG, "VirtualInstrumentation installed: base=${current.javaClass.name}")
         }
     }
@@ -41,6 +43,7 @@ object VirtualInstrumentationInstaller {
 
     fun restore(): Result<Unit> {
         return runCatching {
+            ActivityThreadLaunchCallbackInstaller.restore()
             val original = originalInstrumentation ?: return@runCatching
             ActivityThreadCompat.setInstrumentation(original)
             originalInstrumentation = null

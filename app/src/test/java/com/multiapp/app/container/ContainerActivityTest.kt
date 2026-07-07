@@ -5,6 +5,7 @@ import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.loader.toSummary
+import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -106,6 +107,90 @@ class ContainerActivityTest {
     }
 
     @Test
+    @DisplayName("Bootstrap completion chooses finish evidence for failed bootstrap")
+    fun bootstrapCompletionActionFinishesFailedBootstrap() {
+        val failedStage = BootstrapResult.failed(
+            stage = RuntimeStage.APPLICATION,
+            message = "Application stage failed"
+        )
+        val result = bootstrapResult(
+            success = false,
+            guestClassLoader = null,
+            stageResults = listOf(failedStage)
+        )
+
+        val action = ContainerActivity.bootstrapCompletionAction(result)
+
+        val finish = action as BootstrapCompletionAction.FinishWithEvidence
+        assertEquals("FAIL", finish.status)
+        assertEquals("BOOTSTRAP", finish.stage)
+        assertEquals("Application stage failed", finish.detail)
+    }
+
+    @Test
+    @DisplayName("Bootstrap completion chooses proxy launch for successful launcher")
+    fun bootstrapCompletionActionLaunchesProxy() {
+        val result = bootstrapResult(
+            success = true,
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            launcherActivityClassName = "com.example.app.MainActivity",
+            packageSnapshot = VirtualPackageSnapshot(
+                instanceId = "inst-001",
+                originPackageName = "com.example.app",
+                virtualPackageName = "com.multiapp.instance.abc123",
+                applicationLabel = "Example",
+                versionCode = 1L,
+                versionName = "1.0",
+                targetSdk = 35,
+                minSdk = 28,
+                sourceDir = "/tmp/base.apk",
+                dataDir = "/tmp/inst-001",
+                activities = listOf(
+                    ResolvedComponent(
+                        name = "com.example.app.MainActivity",
+                        launchMode = "singleTop",
+                        taskAffinity = "com.example.app.reader"
+                    )
+                )
+            )
+        )
+
+        val action = ContainerActivity.bootstrapCompletionAction(result)
+
+        val launch = action as BootstrapCompletionAction.LaunchProxy
+        assertEquals("com.example.app", launch.originPackageName)
+        assertEquals("com.example.app.MainActivity", launch.guestActivityClassName)
+        assertEquals("singleTop", launch.launchMode)
+        assertEquals("com.example.app.reader:inst-001", launch.taskAffinity)
+    }
+
+    @Test
+    @DisplayName("Launcher task affinity falls back to package affinity")
+    fun launcherTaskAffinityFallsBackToPackageAffinity() {
+        val snapshot = VirtualPackageSnapshot(
+            instanceId = "inst-002",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.def456",
+            applicationLabel = "Example",
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 35,
+            minSdk = 28,
+            sourceDir = "/tmp/base.apk",
+            dataDir = "/tmp/inst-002",
+            taskAffinity = "com.example.custom",
+            activities = listOf(ResolvedComponent(name = "com.example.app.MainActivity"))
+        )
+
+        val affinity = ContainerActivity.launcherTaskAffinity(
+            snapshot,
+            "com.example.app.MainActivity"
+        )
+
+        assertEquals("com.example.custom:inst-002", affinity)
+    }
+
+    @Test
     @DisplayName("Package manager proxy stage evidence is converted to runtime evidence fields")
     fun packageManagerProxyEvidenceFields() {
         val result = BootstrapResult.success(
@@ -143,6 +228,76 @@ class ContainerActivityTest {
         )
 
         assertNull(ContainerActivity.packageManagerProxyStageResult(result))
+    }
+
+    @Test
+    @DisplayName("Launcher Activity stage evidence is exposed for hosted launch reports")
+    fun launcherActivityStageEvidenceFields() {
+        val launcherStage = BootstrapResult.success(
+            stage = RuntimeStage.LAUNCHER_ACTIVITY,
+            message = "Launcher Activity resolved: com.qq.reader.activity.launch.SplashActivity",
+            evidence = listOf(
+                BootstrapEvidence("launcherActivityClass", "com.qq.reader.activity.launch.SplashActivity"),
+                BootstrapEvidence(
+                    "requestedLauncherActivityClass",
+                    "com.qq.reader.activity.launch.DefaultAliasSplashActivity"
+                ),
+                BootstrapEvidence("resolver", "VirtualPackageResolverClassNameFallback"),
+                BootstrapEvidence("loadable", "true"),
+                BootstrapEvidence(
+                    "attemptedLauncherActivities",
+                    "VirtualPackageResolver:com.qq.reader.activity.launch.DefaultAliasSplashActivity," +
+                        "VirtualPackageResolverClassNameFallback:com.qq.reader.activity.launch.SplashActivity"
+                )
+            ),
+            durationMs = 9L
+        )
+        val result = bootstrapResult(
+            success = true,
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            stageResults = listOf(BootstrapResult.success(RuntimeStage.APPLICATION), launcherStage)
+        )
+
+        val fields = ContainerActivity.packageManagerProxyEvidenceFields(
+            ContainerActivity.launcherActivityStageResult(result)!!
+        )
+
+        assertEquals("LAUNCHER_ACTIVITY", fields["stage"])
+        assertEquals("SUCCESS", fields["status"])
+        assertEquals("com.qq.reader.activity.launch.SplashActivity", fields["launcherActivityClass"])
+        assertEquals(
+            "com.qq.reader.activity.launch.DefaultAliasSplashActivity",
+            fields["requestedLauncherActivityClass"]
+        )
+        assertEquals("VirtualPackageResolverClassNameFallback", fields["resolver"])
+        assertEquals("true", fields["loadable"])
+        assertTrue(fields["attemptedLauncherActivities"].orEmpty().contains("SplashActivity"))
+    }
+
+    @Test
+    @DisplayName("Launcher failure detail includes resolver evidence")
+    fun launcherActivityFailureDetailIncludesResolverEvidence() {
+        val launcherStage = BootstrapResult.failed(
+            stage = RuntimeStage.LAUNCHER_ACTIVITY,
+            message = "Launcher Activity class not loadable: com.example.Alias",
+            evidence = listOf(
+                BootstrapEvidence("resolver", "InstallRecordFallback"),
+                BootstrapEvidence("candidateCount", "2"),
+                BootstrapEvidence("candidateLauncherActivities", "InstallRecordFallback:com.example.Alias,InstallRecordFallback:java.lang.String")
+            )
+        )
+        val result = bootstrapResult(
+            success = true,
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            stageResults = listOf(launcherStage)
+        )
+
+        val detail = ContainerActivity.launcherActivityFailureDetail(result)
+
+        assertTrue(detail.contains("Launcher Activity class not loadable: com.example.Alias"))
+        assertTrue(detail.contains("resolver=InstallRecordFallback"))
+        assertTrue(detail.contains("candidateCount=2"))
+        assertTrue(detail.contains("java.lang.String"))
     }
 
     @Test
@@ -220,7 +375,9 @@ class ContainerActivityTest {
     private fun bootstrapResult(
         success: Boolean,
         guestClassLoader: ClassLoader?,
-        stageResults: List<BootstrapResult> = emptyList()
+        stageResults: List<BootstrapResult> = emptyList(),
+        packageSnapshot: VirtualPackageSnapshot? = null,
+        launcherActivityClassName: String? = null
     ) = HostedBootstrapResult(
         instanceId = "inst-001",
         installId = "com.example.app",
@@ -231,7 +388,8 @@ class ContainerActivityTest {
         guestClassLoader = guestClassLoader,
         guestApplication = null,
         installRecord = null,
-        launcherActivityClassName = null,
+        packageSnapshot = packageSnapshot,
+        launcherActivityClassName = launcherActivityClassName,
         stageResults = stageResults,
         summary = stageResults.toSummary(),
         success = success,

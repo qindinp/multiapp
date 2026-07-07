@@ -3,6 +3,7 @@ package com.multiapp.core.loader
 import android.app.Application
 import android.app.Instrumentation
 import android.content.pm.ApplicationInfo
+import android.os.Handler
 import java.lang.ref.WeakReference
 
 object ActivityThreadCompat {
@@ -37,6 +38,26 @@ object ActivityThreadCompat {
         val previous = field.get(activityThread) as Instrumentation
         field.set(activityThread, instrumentation)
         return previous
+    }
+
+    fun mainHandler(activityThread: Any = currentActivityThread()): Handler {
+        val field = activityThread.javaClass.getDeclaredField("mH")
+        field.isAccessible = true
+        return field.get(activityThread) as Handler
+    }
+
+    fun getHandlerCallback(handler: Handler): Handler.Callback? {
+        val field = findFieldInHierarchy(Handler::class.java, "mCallback")
+            ?: throw NoSuchFieldException("Handler.mCallback")
+        field.isAccessible = true
+        return field.get(handler) as? Handler.Callback
+    }
+
+    fun setHandlerCallback(handler: Handler, callback: Handler.Callback?) {
+        val field = findFieldInHierarchy(Handler::class.java, "mCallback")
+            ?: throw NoSuchFieldException("Handler.mCallback")
+        field.isAccessible = true
+        field.set(handler, callback)
     }
 
     @Suppress("UNCHECKED_CAST")

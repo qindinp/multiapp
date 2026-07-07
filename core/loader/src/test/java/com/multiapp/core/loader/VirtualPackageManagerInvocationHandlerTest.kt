@@ -1,6 +1,7 @@
 package com.multiapp.core.loader
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
@@ -77,7 +78,7 @@ class VirtualPackageManagerInvocationHandlerTest {
     }
 
     @Test
-    fun `intent query methods return snapshot results before original PMS`() {
+    fun `intent query methods return snapshot results and merge launcher aggregate PMS`() {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
@@ -110,7 +111,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         assertEquals(listOf("com.test.minimal.SyncService"), services.map { it.serviceInfo.name })
         assertEquals(listOf("com.test.minimal.BootReceiver"), receivers.map { it.activityInfo.name })
         assertEquals(listOf("com.test.minimal.ProbeProvider"), providers.map { it.providerInfo.name })
-        assertTrue(original.calls.isEmpty())
+        assertEquals(listOf("queryIntentActivities:${Intent.ACTION_MAIN}"), original.calls)
     }
 
     @Test
@@ -143,11 +144,57 @@ class VirtualPackageManagerInvocationHandlerTest {
             args = arrayOf("com.test.minimal:probe", RUNTIME_UID, 0)
         ) as List<ProviderInfo>
 
-        assertEquals(listOf("com.test.minimal"), packages.map { it.packageName })
-        assertEquals(listOf("com.test.minimal"), applications.map { it.packageName })
+        assertEquals(listOf("base.package", "com.test.minimal"), packages.map { it.packageName })
+        assertEquals(listOf("base.package", "com.test.minimal"), applications.map { it.packageName })
         assertEquals(listOf("com.test.minimal"), holdingPermission.map { it.packageName })
         assertEquals(listOf("com.test.minimal.ProbeProvider"), providers.map { it.name })
-        assertTrue(original.calls.isEmpty())
+        assertEquals(listOf("getInstalledPackages:0", "getInstalledApplications:0"), original.calls)
+    }
+
+    @Test
+    fun `unscoped launcher query preserves base apps while adding virtual launcher`() {
+        val original = FakePackageManagerApiImpl(
+            launcherActivities = listOf(resolveInfo("base.package", "base.package.MainActivity"))
+        )
+        val handler = VirtualPackageManagerInvocationHandler(
+            originalPackageManager = original,
+            service = VirtualPackageService(snapshot()),
+            runtimeUid = RUNTIME_UID
+        )
+
+        val activities = handler.invoke(
+            proxy = Any(),
+            method = apiMethod("queryIntentActivities", Intent::class.java, Int::class.javaPrimitiveType!!),
+            args = arrayOf(launcherIntent(), 0)
+        ) as List<ResolveInfo>
+
+        assertEquals(
+            listOf("base.package/base.package.MainActivity", "com.test.minimal/com.test.minimal.MainActivity"),
+            activities.map { "${it.activityInfo.packageName}/${it.activityInfo.name}" }
+        )
+        assertEquals(listOf("queryIntentActivities:${Intent.ACTION_MAIN}"), original.calls)
+    }
+
+    @Test
+    fun `aggregate PMS methods preserve list container shape when original returns slice-like result`() {
+        val original = FakePackageManagerSliceApiImpl()
+        val handler = VirtualPackageManagerInvocationHandler(
+            originalPackageManager = original,
+            service = VirtualPackageService(snapshot()),
+            runtimeUid = RUNTIME_UID
+        )
+
+        val result = handler.invoke(
+            proxy = Any(),
+            method = FakePackageManagerSliceApi::class.java.getMethod(
+                "getInstalledPackages",
+                Int::class.javaPrimitiveType!!
+            ),
+            args = arrayOf(0)
+        ) as FakePackageInfoSlice
+
+        assertEquals(listOf("base.package", "com.test.minimal"), result.getList().map { it.packageName })
+        assertEquals(listOf("getInstalledPackages:0"), original.calls)
     }
 
     @Test
@@ -400,7 +447,8 @@ class VirtualPackageManagerInvocationHandlerTest {
 
     private class FakePackageManagerApiImpl(
         private val packagesForUid: (Int) -> Array<String>? = { uid -> arrayOf("base.uid.$uid") },
-        private val nameForUid: (Int) -> String? = { uid -> "base.name.$uid" }
+        private val nameForUid: (Int) -> String? = { uid -> "base.name.$uid" },
+        private val launcherActivities: List<ResolveInfo> = emptyList()
     ) : FakePackageManagerApi {
         val calls = mutableListOf<String>()
 
@@ -441,7 +489,7 @@ class VirtualPackageManagerInvocationHandlerTest {
 
         override fun queryIntentActivities(intent: Intent, flags: Int): List<ResolveInfo> {
             calls += "queryIntentActivities:${intent.action}"
-            return emptyList()
+            return launcherActivities
         }
 
         override fun queryIntentServices(intent: Intent, flags: Int): List<ResolveInfo> {
@@ -503,6 +551,23 @@ class VirtualPackageManagerInvocationHandlerTest {
         }
     }
 
+    private interface FakePackageManagerSliceApi {
+        fun getInstalledPackages(flags: Int): FakePackageInfoSlice
+    }
+
+    private class FakePackageManagerSliceApiImpl : FakePackageManagerSliceApi {
+        val calls = mutableListOf<String>()
+
+        override fun getInstalledPackages(flags: Int): FakePackageInfoSlice {
+            calls += "getInstalledPackages:$flags"
+            return FakePackageInfoSlice(listOf(PackageInfo().apply { packageName = "base.package" }))
+        }
+    }
+
+    private class FakePackageInfoSlice(private var mList: List<PackageInfo>) {
+        fun getList(): List<PackageInfo> = mList
+    }
+
     private class FakeResolver(snapshots: List<VirtualPackageSnapshot>) : VirtualPackageManagerServiceResolver {
         private val services = snapshots.associate { snapshot ->
             snapshot.originPackageName to VirtualPackageService(snapshot)
@@ -544,6 +609,13 @@ class VirtualPackageManagerInvocationHandlerTest {
     ) = mockk<android.content.ComponentName> {
         every { this@mockk.packageName } returns packageName
         every { this@mockk.className } returns className
+    }
+
+    private fun resolveInfo(packageName: String, className: String) = ResolveInfo().apply {
+        activityInfo = ActivityInfo().apply {
+            this.packageName = packageName
+            name = className
+        }
     }
 
     private fun snapshot(

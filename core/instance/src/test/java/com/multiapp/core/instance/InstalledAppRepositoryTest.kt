@@ -1,10 +1,12 @@
 package com.multiapp.core.instance
 
-import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
+import android.graphics.drawable.Drawable
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
@@ -37,12 +39,15 @@ class InstalledAppRepositoryTest {
             packageInfo("com.zeta.app", "Zeta", launcher = true),
             packageInfo("com.alpha.app", "Alpha", launcher = true)
         )
-        every { packageManager.getLaunchIntentForPackage("com.zeta.app") } returns launcherIntent("com.zeta.app")
-        every { packageManager.getLaunchIntentForPackage("com.alpha.app") } returns launcherIntent("com.alpha.app")
+        every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
+            launcherResolveInfo("com.zeta.app"),
+            launcherResolveInfo("com.alpha.app")
+        )
 
         val repository = InstalledAppRepository(
             packageManagerProvider = { packageManager },
-            hostPackageName = "com.multiapp.app"
+            hostPackageName = "com.multiapp.app",
+            launcherIntentFactory = { launcherQueryIntent() }
         )
 
         val first = repository.listInstalledApps()
@@ -51,6 +56,8 @@ class InstalledAppRepositoryTest {
         assertEquals(listOf("Alpha", "Zeta"), first.map { it.appName })
         assertEquals(first, second)
         verify(exactly = 1) { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) }
+        verify(exactly = 1) { packageManager.queryIntentActivities(any(), 0) }
+        verify(exactly = 0) { packageManager.getLaunchIntentForPackage(any()) }
     }
 
     @Test
@@ -60,19 +67,43 @@ class InstalledAppRepositoryTest {
             packageInfo("com.no.launcher", "No Launcher", launcher = false),
             packageInfo("com.system.app", "System", launcher = true, system = true)
         )
-        every { packageManager.getLaunchIntentForPackage("com.user.app") } returns launcherIntent("com.user.app")
-        every { packageManager.getLaunchIntentForPackage("com.no.launcher") } returns null
-        every { packageManager.getLaunchIntentForPackage("com.system.app") } returns launcherIntent("com.system.app")
+        every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
+            launcherResolveInfo("com.user.app"),
+            launcherResolveInfo("com.system.app")
+        )
 
         val repository = InstalledAppRepository(
             packageManagerProvider = { packageManager },
-            hostPackageName = "com.multiapp.app"
+            hostPackageName = "com.multiapp.app",
+            launcherIntentFactory = { launcherQueryIntent() }
         )
 
         val recommended = repository.recommendedCloneTargets()
 
         assertEquals(listOf("com.user.app"), recommended.map { it.packageName })
         assertTrue(recommended.single().isCloneCandidate())
+    }
+
+    @Test
+    fun `listInstalledApps preserves application icons`() {
+        val appIcon = mockk<Drawable>(relaxed = true)
+        every { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) } returns listOf(
+            packageInfo("com.alpha.app", "Alpha", launcher = true)
+        )
+        every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
+            launcherResolveInfo("com.alpha.app")
+        )
+        every { packageManager.getApplicationIcon("com.alpha.app") } returns appIcon
+
+        val repository = InstalledAppRepository(
+            packageManagerProvider = { packageManager },
+            hostPackageName = "com.multiapp.app",
+            launcherIntentFactory = { launcherQueryIntent() }
+        )
+
+        val apps = repository.listInstalledApps()
+
+        assertEquals(appIcon, apps.single().icon)
     }
 
     @Test
@@ -107,14 +138,16 @@ class InstalledAppRepositoryTest {
         }
     }
 
-    private fun launcherIntent(packageName: String): Intent {
-        val resolvedComponent = mockk<ComponentName> {
-            every { className } returns "$packageName.MainActivity"
-        }
-        return mockk<Intent> {
-            every { component } returns resolvedComponent
+    private fun launcherResolveInfo(packageName: String): ResolveInfo {
+        return ResolveInfo().apply {
+            activityInfo = ActivityInfo().apply {
+                this.packageName = packageName
+                name = "$packageName.MainActivity"
+            }
         }
     }
+
+    private fun launcherQueryIntent(): Intent = mockk(relaxed = true)
 
     private fun virtualApp(mainActivity: String?, system: Boolean): com.multiapp.core.model.VirtualApp {
         return com.multiapp.core.model.VirtualApp(

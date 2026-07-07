@@ -7,6 +7,15 @@ data class VirtualServiceLifecycleEvidence(
     val success: Boolean,
     val cached: Boolean = false,
     val startCommandResult: Int? = null,
+    val activeStartCount: Int = 0,
+    val activeBindCount: Int = 0,
+    val foreground: Boolean = false,
+    val foregroundNotificationId: Int? = null,
+    val foregroundServiceType: Int = 0,
+    val idleStopRequested: Boolean = false,
+    val idleStopReason: String = "",
+    val hostStopServiceReturnValue: Boolean? = null,
+    val idleStopDetail: String = "",
     val errorClassName: String? = null,
     val errorMessage: String? = null
 ) {
@@ -30,14 +39,24 @@ data class VirtualServiceLifecycleEvidence(
                     request = request,
                     event = Event.CREATED_AND_STARTED,
                     success = true,
-                    startCommandResult = result.startCommandResult
+                    startCommandResult = result.startCommandResult,
+                    activeStartCount = result.activeStartCount,
+                    activeBindCount = result.activeBindCount,
+                    foreground = result.foreground,
+                    foregroundNotificationId = result.foregroundNotificationId,
+                    foregroundServiceType = result.foregroundServiceType
                 )
                 is VirtualServiceRuntimeResult.StartedCached -> base(
                     request = request,
                     event = Event.STARTED_CACHED,
                     success = true,
                     cached = true,
-                    startCommandResult = result.startCommandResult
+                    startCommandResult = result.startCommandResult,
+                    activeStartCount = result.activeStartCount,
+                    activeBindCount = result.activeBindCount,
+                    foreground = result.foreground,
+                    foregroundNotificationId = result.foregroundNotificationId,
+                    foregroundServiceType = result.foregroundServiceType
                 )
                 is VirtualServiceRuntimeResult.CreateFailed -> base(
                     request = request,
@@ -73,7 +92,8 @@ data class VirtualServiceLifecycleEvidence(
                 is VirtualServiceRuntimeStopResult.Stopped -> base(
                     request = request,
                     event = Event.STOPPED,
-                    success = true
+                    success = true,
+                    idleStopResult = result.idleStopResult
                 )
                 is VirtualServiceRuntimeStopResult.NotFound -> base(
                     request = request,
@@ -95,6 +115,12 @@ data class VirtualServiceLifecycleEvidence(
             success: Boolean,
             cached: Boolean = false,
             startCommandResult: Int? = null,
+            activeStartCount: Int = 0,
+            activeBindCount: Int = 0,
+            foreground: Boolean = false,
+            foregroundNotificationId: Int? = null,
+            foregroundServiceType: Int = 0,
+            idleStopResult: HostServiceIdleStopResult = HostServiceIdleStopResult.notRequested("notStopped"),
             error: Throwable? = null
         ): VirtualServiceLifecycleEvidence = VirtualServiceLifecycleEvidence(
             instanceId = request.instanceId,
@@ -103,6 +129,15 @@ data class VirtualServiceLifecycleEvidence(
             success = success,
             cached = cached,
             startCommandResult = startCommandResult,
+            activeStartCount = activeStartCount,
+            activeBindCount = activeBindCount,
+            foreground = foreground,
+            foregroundNotificationId = foregroundNotificationId,
+            foregroundServiceType = foregroundServiceType,
+            idleStopRequested = idleStopResult.idleStopRequested,
+            idleStopReason = idleStopResult.idleStopReason,
+            hostStopServiceReturnValue = idleStopResult.hostStopServiceReturnValue,
+            idleStopDetail = idleStopResult.detail,
             errorClassName = error?.javaClass?.name,
             errorMessage = error?.message
         )
@@ -111,12 +146,17 @@ data class VirtualServiceLifecycleEvidence(
             request: VirtualServiceStopRequest,
             event: Event,
             success: Boolean,
+            idleStopResult: HostServiceIdleStopResult = HostServiceIdleStopResult.notRequested("notStopped"),
             error: Throwable? = null
         ): VirtualServiceLifecycleEvidence = VirtualServiceLifecycleEvidence(
             instanceId = request.instanceId,
             guestServiceClassName = request.guestServiceClassName,
             event = event,
             success = success,
+            idleStopRequested = idleStopResult.idleStopRequested,
+            idleStopReason = idleStopResult.idleStopReason,
+            hostStopServiceReturnValue = idleStopResult.hostStopServiceReturnValue,
+            idleStopDetail = idleStopResult.detail,
             errorClassName = error?.javaClass?.name,
             errorMessage = error?.message
         )

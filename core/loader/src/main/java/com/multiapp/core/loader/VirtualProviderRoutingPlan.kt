@@ -24,7 +24,7 @@ data class VirtualProviderRoutingPlan(
     val reason: String,
     val policySummary: VirtualProviderPolicySummary = VirtualProviderPolicySummary.EMPTY
 ) {
-    fun toEvidence(): List<BootstrapEvidence> = listOf(
+    fun toEvidence(contentResolverHookInstalled: Boolean = false): List<BootstrapEvidence> = listOf(
         BootstrapEvidence("providerRoutingEnabled", enabled.toString(), SOURCE),
         BootstrapEvidence("providerRoutingReason", reason, SOURCE),
         BootstrapEvidence("providerRoutingPrimary", primaryStrategy.name, SOURCE),
@@ -33,7 +33,10 @@ data class VirtualProviderRoutingPlan(
         BootstrapEvidence("providerAuthorityCount", authorityCount.toString(), SOURCE),
         BootstrapEvidence("providerAuthorityMapSize", authorityMap.size.toString(), SOURCE),
         BootstrapEvidence("providerHostPackage", hostPackageName ?: "", SOURCE)
-    ) + policySummary.toEvidence() + VirtualProviderOperationCapability.toEvidence(enabled)
+    ) + policySummary.toEvidence() + VirtualProviderOperationCapability.toEvidence(
+        plan = this,
+        contentResolverHookInstalled = contentResolverHookInstalled
+    )
 
     companion object {
         private const val SOURCE = "VirtualProviderRoutingPlan"
@@ -43,11 +46,15 @@ data class VirtualProviderRoutingPlan(
 object VirtualProviderOperationCapability {
     private const val SOURCE = "VirtualProviderOperationCapability"
     private const val ROUTED_BY_STUB_PROVIDER = "ROUTED_BY_STUB_PROVIDER"
+    private const val ROUTED_BY_CONTENT_RESOLVER_HOOK = "ROUTED_BY_CONTENT_RESOLVER_HOOK"
+    private const val CONTENT_RESOLVER_HOOK_DISABLED = "CONTENT_RESOLVER_HOOK_DISABLED"
+    private const val CONTENT_RESOLVER_HOOK_NOT_INSTALLED = "CONTENT_RESOLVER_HOOK_NOT_INSTALLED"
+    private const val NO_URI_REWRITE_REQUIRED = "NO_URI_REWRITE_REQUIRED"
     private const val ROUTING_DISABLED = "ROUTING_DISABLED"
-    private const val UNSUPPORTED = "UNSUPPORTED"
 
-    private val routedOperations = listOf(
+    private val stubProviderOperations = listOf(
         "query",
+        "getType",
         "insert",
         "update",
         "delete",
@@ -58,22 +65,47 @@ object VirtualProviderOperationCapability {
         "openTypedAssetFile"
     )
 
-    private val unsupportedOperations = linkedMapOf(
-        "notifyChange" to "CONTENT_RESOLVER_NOTIFY_CHANGE_NOT_VIRTUALIZED",
-        "ContentObserver" to "CONTENT_OBSERVER_REGISTRATION_NOT_VIRTUALIZED",
-        "grantUriPermission" to "URI_PERMISSION_GRANT_NOT_VIRTUALIZED"
+    private val contentResolverHookOperations = listOf(
+        "openFileDescriptor",
+        "openAssetFileDescriptor",
+        "openTypedAssetFileDescriptor",
+        "notifyChange",
+        "registerContentObserver",
+        "grantUriPermission",
+        "revokeUriPermission",
+        "canonicalize",
+        "uncanonicalize"
     )
 
-    fun toEvidence(routingEnabled: Boolean): List<BootstrapEvidence> {
-        val routedStatus = if (routingEnabled) ROUTED_BY_STUB_PROVIDER else ROUTING_DISABLED
-        return routedOperations.map { operation ->
-            BootstrapEvidence(operationStatusKey(operation), routedStatus, SOURCE)
-        } + unsupportedOperations.flatMap { (operation, reason) ->
-            listOf(
-                BootstrapEvidence(operationStatusKey(operation), UNSUPPORTED, SOURCE),
-                BootstrapEvidence(operationReasonKey(operation), reason, SOURCE)
-            )
+    fun toEvidence(
+        plan: VirtualProviderRoutingPlan,
+        contentResolverHookInstalled: Boolean = false
+    ): List<BootstrapEvidence> {
+        val stubStatus = if (plan.enabled) ROUTED_BY_STUB_PROVIDER else ROUTING_DISABLED
+        val hookStatus = when {
+            !plan.enabled -> ROUTING_DISABLED
+            plan.primaryStrategy != ProviderRoutingStrategy.CONTENT_RESOLVER_PASS_THROUGH_HOOK ->
+                CONTENT_RESOLVER_HOOK_DISABLED
+            contentResolverHookInstalled ->
+                ROUTED_BY_CONTENT_RESOLVER_HOOK
+            else -> CONTENT_RESOLVER_HOOK_NOT_INSTALLED
         }
+        val observerUnregisterStatus = when {
+            !plan.enabled -> ROUTING_DISABLED
+            plan.primaryStrategy != ProviderRoutingStrategy.CONTENT_RESOLVER_PASS_THROUGH_HOOK ->
+                CONTENT_RESOLVER_HOOK_DISABLED
+            contentResolverHookInstalled -> NO_URI_REWRITE_REQUIRED
+            else -> CONTENT_RESOLVER_HOOK_NOT_INSTALLED
+        }
+        return stubProviderOperations.map { operation ->
+            BootstrapEvidence(operationStatusKey(operation), stubStatus, SOURCE)
+        } + contentResolverHookOperations.map { operation ->
+            BootstrapEvidence(operationStatusKey(operation), hookStatus, SOURCE)
+        } + BootstrapEvidence(
+            operationStatusKey("unregisterContentObserver"),
+            observerUnregisterStatus,
+            SOURCE
+        )
     }
 
     private fun operationStatusKey(operation: String): String =

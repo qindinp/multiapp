@@ -7,6 +7,7 @@ import com.multiapp.core.loader.VirtualStorageDiagnosticKind
 import com.multiapp.core.loader.VirtualStorageDiagnosticStatus
 import com.multiapp.core.loader.VirtualStoragePathDiagnostic
 import com.multiapp.core.loader.VirtualStoragePathDiagnostics
+import com.multiapp.core.hook.NativeHookBridge
 import java.io.File
 
 /** Writes PR-10 storage redirect diagnostics for hosted-container instances. */
@@ -42,13 +43,13 @@ object ContainerStorageDiagnosticsEvidence {
             writeDiagnostic(context, diagnostic, marker)
         }
 
-        VirtualStoragePathDiagnostics.nativeIoUnsupportedDiagnostics(
+        nativeIoDiagnostics(
             instanceId = result.instanceId,
             originPackageName = originPackageName,
             virtualPackageName = virtualPackageName,
             dataRoot = dataRoot,
             caller = CALLER,
-            reason = nativeIoUnsupportedReason(result)
+            result = result
         ).forEach { diagnostic ->
             writeDiagnostic(context, diagnostic, null)
         }
@@ -76,6 +77,10 @@ object ContainerStorageDiagnosticsEvidence {
         diagnostic.candidateWithinDataRoot?.let { put("candidateWithinDataRoot", it) }
         if (diagnostic.kind == VirtualStorageDiagnosticKind.NATIVE_IO) {
             put("nativeIoDiagnosticStatus", diagnostic.status.name)
+            diagnostic.nativeProbeResultCode?.let { put("nativeProbeResultCode", it) }
+            diagnostic.nativeProbeErrno?.let { put("nativeProbeErrno", it) }
+            diagnostic.nativeProbeCandidateExists?.let { put("nativeProbeCandidateExists", it) }
+            diagnostic.nativeProbeResolvedPath?.let { put("nativeProbeResolvedPath", it) }
             putAll(nativeRuntimeVerdictFields(diagnostic))
         }
         isolationMarker?.let { marker ->
@@ -160,6 +165,79 @@ object ContainerStorageDiagnosticsEvidence {
             return "storage-native-${diagnostic.operation.orEmpty()}"
         }
         return javaProbeComponents[diagnostic.probeName] ?: "storage-java-absolute-path"
+    }
+
+    private fun nativeIoDiagnostics(
+        instanceId: String,
+        originPackageName: String,
+        virtualPackageName: String,
+        dataRoot: String,
+        caller: String,
+        result: HostedBootstrapResult
+    ): List<VirtualStoragePathDiagnostic> {
+        val bootstrapEvidence = result.stageResults
+            .flatMap { it.evidence }
+            .associate { it.key to it.value }
+        val redirectVerdict = bootstrapEvidence["nativePrivatePathRedirectVerdict"]
+        val unsupportedReason = nativeIoUnsupportedReason(result)
+        val baseDiagnostics = VirtualStoragePathDiagnostics.nativeIoUnsupportedDiagnostics(
+            instanceId = instanceId,
+            originPackageName = originPackageName,
+            virtualPackageName = virtualPackageName,
+            dataRoot = dataRoot,
+            caller = caller,
+            reason = unsupportedReason
+        )
+        if (redirectVerdict != "PARTIAL") return baseDiagnostics
+
+        val bridge = NativeHookBridge.getInstance()
+        return baseDiagnostics.map { diagnostic ->
+            val candidate = diagnostic.candidateRedirectedPath
+            if (candidate.isNullOrBlank() || diagnostic.candidateWithinDataRoot != true) {
+                diagnostic.copy(
+                    status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+                    reason = "NATIVE_IO_CANDIDATE_OUTSIDE_DATA_ROOT"
+                )
+            } else {
+                probeNativeIoDiagnostic(bridge, diagnostic, candidate)
+            }
+        }
+    }
+
+    private fun probeNativeIoDiagnostic(
+        bridge: NativeHookBridge,
+        diagnostic: VirtualStoragePathDiagnostic,
+        candidatePath: String
+    ): VirtualStoragePathDiagnostic {
+        val operation = diagnostic.operation.orEmpty()
+        val candidateFile = File(candidatePath)
+        candidateFile.parentFile?.mkdirs()
+        if (operation in setOf("stat", "access", "realpath")) {
+            candidateFile.writeText("multiapp-native-probe-$operation")
+        } else {
+            candidateFile.delete()
+        }
+        val probe = bridge.probePrivatePathRedirect(
+            operation = operation,
+            originalPath = diagnostic.originalPath,
+            expectedRedirectedPath = candidatePath
+        )
+        val status = if (probe.success) {
+            VirtualStorageDiagnosticStatus.REDIRECTED
+        } else {
+            VirtualStorageDiagnosticStatus.UNCHANGED
+        }
+        val redirectedPath = if (probe.success) candidateFile.absolutePath else ""
+        return diagnostic.copy(
+            status = status,
+            redirectedPath = redirectedPath,
+            withinDataRoot = probe.success,
+            reason = if (probe.success) null else probe.reason.ifBlank { "NATIVE_IO_PATH_NOT_REDIRECTED" },
+            nativeProbeResultCode = probe.resultCode,
+            nativeProbeErrno = probe.errno,
+            nativeProbeCandidateExists = probe.candidateExists,
+            nativeProbeResolvedPath = probe.resolvedPath
+        )
     }
 
     private fun nativeRuntimeVerdictFields(diagnostic: VirtualStoragePathDiagnostic): Map<String, Any?> {

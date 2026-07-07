@@ -40,6 +40,7 @@ class ManifestParser @Inject constructor(
         // 原 app 的 application theme 资源 ID（int，如 0x7f0f00xx）。
         // 0 表示未声明。由 StubBuilder 在构建期通过 getPackageArchiveInfo 填充。
         val applicationThemeId: Int = 0,
+        val applicationMetaData: List<MetaDataInfo> = emptyList(),
         // ContentProvider 的 <meta-data> 子元素，key = provider name
         val providerMetaData: Map<String, List<MetaDataInfo>> = emptyMap(),
         val applicationLabel: String? = null
@@ -85,7 +86,8 @@ class ManifestParser @Inject constructor(
 
     data class IntentFilterInfo(
         val actions: List<String>,
-        val categories: List<String> = emptyList()
+        val categories: List<String> = emptyList(),
+        val dataSchemes: List<String> = emptyList()
     )
 
     companion object {
@@ -305,16 +307,7 @@ class ManifestParser @Inject constructor(
 
         val providerMetaDataMap = mutableMapOf<String, List<MetaDataInfo>>()
         val providers = (info.providers ?: emptyArray<android.content.pm.ProviderInfo>()).map { prv: android.content.pm.ProviderInfo ->
-            val metaData = prv.metaData?.let { bundle ->
-                bundle.keySet().mapNotNull { key ->
-                    val value = bundle.get(key)
-                    when (value) {
-                        is Int -> MetaDataInfo(name = key, resource = "@0x${Integer.toHexString(value)}", resourceId = value)
-                        is String -> MetaDataInfo(name = key, value = value)
-                        else -> MetaDataInfo(name = key, value = value?.toString())
-                    }
-                }
-            } ?: emptyList()
+            val metaData = prv.metaData.toMetaDataList()
             if (metaData.isNotEmpty()) {
                 providerMetaDataMap[prv.name ?: ""] = metaData
             }
@@ -339,6 +332,7 @@ class ManifestParser @Inject constructor(
         // minSdk / targetSdk
         val minSdk = appInfo?.minSdkVersion ?: 28
         val targetSdk = appInfo?.targetSdkVersion ?: 36
+        val applicationMetaData = appInfo?.metaData.toMetaDataList()
 
         return applyPackageInfoThemeIds(
             manifest = ParsedManifest(
@@ -352,6 +346,7 @@ class ManifestParser @Inject constructor(
                 permissions = permissions,
                 minSdkVersion = minSdk,
                 targetSdkVersion = targetSdk,
+                applicationMetaData = applicationMetaData,
                 providerMetaData = providerMetaDataMap
             ),
             packageInfo = info
@@ -374,6 +369,17 @@ class ManifestParser @Inject constructor(
         packageInfo: PackageInfo
     ): ParsedManifest {
         val applicationThemeId = packageInfo.applicationInfo?.theme ?: 0
+        val applicationMetaData = packageInfo.applicationInfo?.metaData.toMetaDataList()
+        val targetActivityByName = (packageInfo.activities ?: emptyArray())
+            .mapNotNull { activityInfo ->
+                val name = activityInfo.name?.takeIf { it.isNotBlank() }
+                    ?.let { normalizeComponentName(manifest.packageName, it) }
+                    ?: return@mapNotNull null
+                val target = activityInfo.targetActivity?.takeIf { it.isNotBlank() }
+                    ?.let { normalizeComponentName(manifest.packageName, it) }
+                target?.let { name to it }
+            }
+            .toMap()
         val activityThemeByName = (packageInfo.activities ?: emptyArray())
             .flatMap { activityInfo ->
                 listOfNotNull(
@@ -384,6 +390,7 @@ class ManifestParser @Inject constructor(
             .toMap()
         return manifest.copy(
             applicationThemeId = applicationThemeId,
+            applicationMetaData = manifest.applicationMetaData.ifEmpty { applicationMetaData },
             activities = manifest.activities.map { component ->
                 val componentName = normalizeComponentName(manifest.packageName, component.name)
                 val targetName = component.targetActivityName
@@ -391,7 +398,11 @@ class ManifestParser @Inject constructor(
                 val resolvedTheme = listOfNotNull(componentName, targetName)
                     .firstNotNullOfOrNull { name -> activityThemeByName[name]?.takeIf { it != 0 } }
                     ?: component.themeId
-                component.copy(themeId = resolvedTheme)
+                component.copy(
+                    themeId = resolvedTheme,
+                    targetActivityName = component.targetActivityName
+                        ?: targetActivityByName[componentName]
+                )
             }
         )
     }
@@ -444,6 +455,7 @@ class ManifestParser @Inject constructor(
 
             val actions = mutableListOf<String>()
             val categories = mutableListOf<String>()
+            val dataSchemes = mutableListOf<String>()
 
             // IntentFilter.actions 是隐藏字段，通过反射获取
             try {
@@ -485,8 +497,25 @@ class ManifestParser @Inject constructor(
                 } catch (_: Exception) {}
             }
 
+            try {
+                val countMethod = android.content.IntentFilter::class.java.getDeclaredMethod("countDataSchemes")
+                countMethod.isAccessible = true
+                val count = countMethod.invoke(filter) as Int
+                val getMethod = android.content.IntentFilter::class.java.getDeclaredMethod("getDataScheme", Int::class.java)
+                getMethod.isAccessible = true
+                for (i in 0 until count) {
+                    (getMethod.invoke(filter, i) as? String)?.let { dataSchemes.add(it) }
+                }
+            } catch (_: Exception) {}
+
             if (actions.isNotEmpty()) {
-                return listOf(IntentFilterInfo(actions = actions, categories = categories))
+                return listOf(
+                    IntentFilterInfo(
+                        actions = actions,
+                        categories = categories,
+                        dataSchemes = dataSchemes
+                    )
+                )
             }
         } catch (_: Exception) {
             // filter 字段不可用（非安装 APK 或 API 版本差异）
@@ -515,6 +544,7 @@ class ManifestParser @Inject constructor(
         val applicationLabel = applicationEl
             ?.getAttributeNS(ANDROID_NS, "label")
             ?.takeIf { it.isNotBlank() && !it.startsWith("@") }
+        val applicationMetaData = extractMetaData(applicationEl)
 
         val permissions = extractPermissions(manifestEl)
         val activities = extractComponents(applicationEl, "activity") +
@@ -542,6 +572,7 @@ class ManifestParser @Inject constructor(
             minSdkVersion = minSdkVersion,
             targetSdkVersion = targetSdkVersion,
             applicationTheme = applicationTheme,
+            applicationMetaData = applicationMetaData,
             providerMetaData = providerMetaData
         )
     }
@@ -651,13 +682,30 @@ class ManifestParser @Inject constructor(
         return result
     }
 
+    private fun android.os.Bundle?.toMetaDataList(): List<MetaDataInfo> {
+        val bundle = this ?: return emptyList()
+        return bundle.keySet().mapNotNull { key ->
+            val value = bundle.get(key)
+            when (value) {
+                is Int -> MetaDataInfo(
+                    name = key,
+                    resource = "@0x${Integer.toHexString(value)}",
+                    resourceId = value
+                )
+                is String -> MetaDataInfo(name = key, value = value)
+                else -> MetaDataInfo(name = key, value = value?.toString())
+            }
+        }
+    }
+
     private fun extractIntentFilters(componentEl: Element): List<IntentFilterInfo> {
         val filters = mutableListOf<IntentFilterInfo>()
         forEachChild(componentEl, "intent-filter") { filterEl ->
             val actions = collectNames(filterEl, "action")
             val categories = collectNames(filterEl, "category")
+            val dataSchemes = collectAttributeValues(filterEl, "data", "scheme")
             if (actions.isNotEmpty()) {
-                filters.add(IntentFilterInfo(actions = actions, categories = categories))
+                filters.add(IntentFilterInfo(actions = actions, categories = categories, dataSchemes = dataSchemes))
             }
         }
         return filters
@@ -670,6 +718,15 @@ class ManifestParser @Inject constructor(
             if (value.isNotEmpty()) names.add(value)
         }
         return names
+    }
+
+    private fun collectAttributeValues(parent: Element, tagName: String, attributeName: String): List<String> {
+        val values = mutableListOf<String>()
+        forEachChild(parent, tagName) { el ->
+            val value = el.getAttributeNS(ANDROID_NS, attributeName)
+            if (value.isNotEmpty()) values.add(value)
+        }
+        return values
     }
 
     // ── DOM 遍历工具 ──────────────────────────────────────────────

@@ -2,7 +2,10 @@ package com.multiapp.core.loader
 
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.content.pm.VersionedPackage
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
@@ -77,9 +80,7 @@ class VirtualPackageManagerInvocationHandler(
             ?.let { authority -> serviceForAuthority(authority)?.resolveContentProvider(authority)?.handled() }
             ?: VirtualDispatchResult.NotHandled
 
-        "queryIntentActivities" -> queryIntent(args) { packageService, intent ->
-            packageService.queryIntentActivities(intent)
-        }
+        "queryIntentActivities" -> queryIntentActivities(method, args)
 
         "resolveIntent", "resolveActivity" -> intentArg(args, 0)
             ?.let { intent -> serviceForIntent(intent)?.resolveActivity(intent)?.handled() }
@@ -101,9 +102,9 @@ class VirtualPackageManagerInvocationHandler(
             packageService.queryIntentContentProviders(intent)
         }
 
-        "getInstalledPackages" -> service.getInstalledPackages().handled()
+        "getInstalledPackages" -> installedPackages(method, args).handled()
 
-        "getInstalledApplications" -> service.getInstalledApplications().handled()
+        "getInstalledApplications" -> installedApplications(method, args).handled()
 
         "checkPermission" -> {
             val permissionName = stringArg(args, 0)
@@ -163,6 +164,45 @@ class VirtualPackageManagerInvocationHandler(
         return if (uid == runtimeUid) service.queryContentProviders(stringArg(args, 0), uid, runtimeUid) else null
     }
 
+    private fun installedPackages(method: Method, args: Array<Any?>): Any {
+        val virtualPackages = service.getInstalledPackages()
+        val originalResult = invokeOriginalOrNull(method, args)
+        return mergeAggregateResult(
+            originalResult = originalResult,
+            virtualItems = virtualPackages,
+            itemClass = PackageInfo::class.java,
+            keyOf = { packageInfo: PackageInfo -> packageInfo.packageName }
+        )
+    }
+
+    private fun installedApplications(method: Method, args: Array<Any?>): Any {
+        val virtualApplications = service.getInstalledApplications()
+        val originalResult = invokeOriginalOrNull(method, args)
+        return mergeAggregateResult(
+            originalResult = originalResult,
+            virtualItems = virtualApplications,
+            itemClass = ApplicationInfo::class.java,
+            keyOf = { applicationInfo: ApplicationInfo -> applicationInfo.packageName }
+        )
+    }
+
+    private fun queryIntentActivities(method: Method, args: Array<Any?>): VirtualDispatchResult {
+        val intent = intentArg(args, 0) ?: return VirtualDispatchResult.NotHandled
+        val packageService = serviceForIntent(intent) ?: service
+        val virtualActivities = packageService.queryIntentActivities(intent)
+        if (virtualActivities.isEmpty()) return VirtualDispatchResult.NotHandled
+        if (!intent.isUnscopedLauncherIntent()) return virtualActivities.handled()
+
+        return VirtualDispatchResult.Handled(
+            mergeAggregateResult(
+                originalResult = invokeOriginalOrNull(method, args),
+                virtualItems = virtualActivities,
+                itemClass = ResolveInfo::class.java,
+                keyOf = { resolveInfo: ResolveInfo -> resolveInfo.activityInfo?.let { "${it.packageName}/${it.name}" } }
+            )
+        )
+    }
+
     private fun queryIntent(
         args: Array<Any?>,
         query: (VirtualPackageService, Intent) -> List<Any>
@@ -185,11 +225,82 @@ class VirtualPackageManagerInvocationHandler(
     private fun serviceForIntent(intent: Intent): VirtualPackageService? =
         serviceResolver?.serviceForIntent(intent) ?: service.takeIf { it.resolveActivity(intent) != null || it.resolveService(intent) != null }
 
+    private fun Intent.isUnscopedLauncherIntent(): Boolean {
+        if (runCatching { component }.getOrNull() != null) return false
+        if (runCatching { `package` }.getOrNull() != null) return false
+        return runCatching {
+            action == Intent.ACTION_MAIN && categories?.contains(Intent.CATEGORY_LAUNCHER) == true
+        }.getOrDefault(false)
+    }
+
     private fun invokeOriginal(method: Method, args: Array<Any?>?): Any? = try {
         method.isAccessible = true
         method.invoke(originalPackageManager, *(args ?: emptyArray()))
     } catch (error: InvocationTargetException) {
         throw error.targetException
+    }
+
+    private fun invokeOriginalOrNull(method: Method, args: Array<Any?>?): Any? =
+        runCatching { invokeOriginal(method, args) }.getOrNull()
+
+    private fun <T : Any> mergeAggregateResult(
+        originalResult: Any?,
+        virtualItems: List<T>,
+        itemClass: Class<T>,
+        keyOf: (T) -> String?
+    ): Any {
+        val originalItems = originalResult.extractList(itemClass)
+        val merged = mergeByKey(originalItems, virtualItems, keyOf)
+        if (originalResult == null || originalResult is List<*>) return merged
+        return rebuildListContainer(originalResult, merged) ?: merged
+    }
+
+    private fun <T : Any> mergeByKey(
+        originalItems: List<T>,
+        virtualItems: List<T>,
+        keyOf: (T) -> String?
+    ): List<T> {
+        val seen = linkedSetOf<String>()
+        val merged = mutableListOf<T>()
+        (originalItems + virtualItems).forEach { item ->
+            val key = keyOf(item)
+            if (key.isNullOrBlank() || seen.add(key)) {
+                merged += item
+            }
+        }
+        return merged
+    }
+
+    private fun <T : Any> Any?.extractList(itemClass: Class<T>): List<T> {
+        if (this == null) return emptyList()
+        if (this is List<*>) return typedItems(itemClass)
+        val getList = runCatching { javaClass.getMethod("getList") }.getOrNull()
+        val listFromMethod = runCatching { getList?.invoke(this) as? List<*> }.getOrNull()
+        if (listFromMethod != null) return listFromMethod.typedItems(itemClass)
+        val listField = runCatching { javaClass.getDeclaredField("mList").apply { isAccessible = true } }.getOrNull()
+        val listFromField = runCatching { listField?.get(this) as? List<*> }.getOrNull()
+        return listFromField?.typedItems(itemClass).orEmpty()
+    }
+
+    private fun <T : Any> List<*>.typedItems(itemClass: Class<T>): List<T> {
+        return mapNotNull { item ->
+            if (itemClass.isInstance(item)) itemClass.cast(item) else null
+        }
+    }
+
+    private fun <T : Any> rebuildListContainer(originalResult: Any, merged: List<T>): Any? {
+        val listConstructor = runCatching { originalResult.javaClass.getConstructor(List::class.java) }.getOrNull()
+        if (listConstructor != null) {
+            return runCatching { listConstructor.newInstance(merged) }.getOrNull()
+        }
+        val listField = runCatching { originalResult.javaClass.getDeclaredField("mList").apply { isAccessible = true } }.getOrNull()
+        if (listField != null) {
+            return runCatching {
+                listField.set(originalResult, merged.toMutableList())
+                originalResult
+            }.getOrNull()
+        }
+        return null
     }
 
     private fun invokeObjectMethod(proxy: Any, method: Method, args: Array<Any?>?): Any? = when (method.name) {

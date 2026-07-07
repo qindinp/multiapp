@@ -33,7 +33,7 @@ object ActivityClientRecordBridge {
         val patched = mutableListOf<String>()
         val skipped = mutableListOf<String>()
 
-        patchFirstPresent(record, listOf("activityInfo", "mActivityInfo"), state.activityInfo, patched, skipped)
+        patchFirstPresent(record, listOf("activityInfo", "mActivityInfo", "info", "mInfo"), state.activityInfo, patched, skipped)
         patchFirstPresent(record, listOf("intent", "mIntent"), state.intent, patched, skipped)
         if (state.loadedApk != null) {
             patchFirstPresent(record, listOf("packageInfo", "mPackageInfo", "loadedApk", "mLoadedApk"), state.loadedApk, patched, skipped)

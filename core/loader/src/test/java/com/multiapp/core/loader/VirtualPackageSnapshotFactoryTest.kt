@@ -9,6 +9,7 @@ import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedPackage
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class VirtualPackageSnapshotFactoryTest {
@@ -25,6 +26,7 @@ class VirtualPackageSnapshotFactoryTest {
                 targetSdk = 36,
                 minSdk = 28,
                 applicationClassName = "com.test.minimal.MinimalApp",
+                metaData = mapOf("channel" to "play"),
                 launcherActivityName = "com.test.minimal.MainActivity",
                 activities = listOf(
                     ResolvedComponent(
@@ -69,6 +71,7 @@ class VirtualPackageSnapshotFactoryTest {
         assertEquals("/data/apks/minimal.apk", snapshot.sourceDir)
         assertEquals("/data/inst", snapshot.dataDir)
         assertEquals("/data/inst/lib", snapshot.nativeLibraryDir)
+        assertEquals("play", snapshot.metaData["channel"])
         assertEquals(":ui", snapshot.activities.single().processName)
         assertEquals("com.test.minimal.main", snapshot.activities.single().taskAffinity)
         assertEquals(0x7f010002, snapshot.activities.single().themeId)
@@ -175,6 +178,85 @@ class VirtualPackageSnapshotFactoryTest {
         )
 
         assertEquals(0x7f010020, activityInfo?.theme)
+    }
+
+    @Test
+    fun `factory leaves launcher null when launcher metadata is missing`() {
+        val snapshot = VirtualPackageSnapshotFactory.create(
+            instance = instanceRecord(),
+            installRecord = installRecord(),
+            resolvedPackage = ResolvedPackage(
+                packageName = "com.test.minimal",
+                versionCode = 1,
+                versionName = "1.0",
+                targetSdk = 36,
+                minSdk = 28,
+                activities = listOf(
+                    ResolvedComponent(name = "com.test.minimal.InternalActivity", exported = false),
+                    ResolvedComponent(name = "com.test.minimal.EntryActivity", exported = true)
+                )
+            ),
+            nativeLibraryDir = null
+        )
+
+        assertNull(snapshot.launcherActivityName)
+    }
+
+    @Test
+    fun `factory preserves explicit launcher alias instead of replacing it with target`() {
+        val snapshot = VirtualPackageSnapshotFactory.create(
+            instance = instanceRecord(),
+            installRecord = installRecord(),
+            resolvedPackage = ResolvedPackage(
+                packageName = "com.test.minimal",
+                versionCode = 1,
+                versionName = "1.0",
+                targetSdk = 36,
+                minSdk = 28,
+                launcherActivityName = "com.test.minimal.LauncherAlias",
+                activities = listOf(
+                    ResolvedComponent(
+                        name = "com.test.minimal.LauncherAlias",
+                        exported = true,
+                        targetActivityName = "com.test.minimal.RealActivity"
+                    )
+                )
+            ),
+            nativeLibraryDir = null
+        )
+
+        assertEquals("com.test.minimal.LauncherAlias", snapshot.launcherActivityName)
+        assertEquals("com.test.minimal.RealActivity", snapshot.activities.single().targetActivityName)
+    }
+
+    @Test
+    fun `factory preserves fallback launcher alias instead of replacing it with target`() {
+        val snapshot = VirtualPackageSnapshotFactory.create(
+            instance = instanceRecord(),
+            installRecord = installRecord(),
+            resolvedPackage = ResolvedPackage(
+                packageName = "com.test.minimal",
+                versionCode = 1,
+                versionName = "1.0",
+                targetSdk = 36,
+                minSdk = 28,
+                activities = listOf(
+                    ResolvedComponent(
+                        name = "com.test.minimal.LauncherAlias",
+                        exported = true,
+                        intentFilters = listOf(
+                            "android.intent.action.MAIN",
+                            "android.intent.category.LAUNCHER"
+                        ),
+                        targetActivityName = "com.test.minimal.RealActivity"
+                    )
+                )
+            ),
+            nativeLibraryDir = null
+        )
+
+        assertEquals("com.test.minimal.LauncherAlias", snapshot.launcherActivityName)
+        assertEquals("com.test.minimal.RealActivity", snapshot.activities.single().targetActivityName)
     }
 
     @Test

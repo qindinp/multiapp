@@ -52,6 +52,46 @@ class VirtualActivityRecordManagerTest {
     }
 
     @Test
+    fun `pruneStaleProxyRecords removes records whose proxy task is no longer live`() {
+        val manager = VirtualActivityRecordManager()
+        val live = manager.registerLaunch(
+            record(token = "token-live", instanceId = "inst-001", proxyActivityClassName = "ProxyActivity0")
+        ).activity
+        val stale = manager.registerLaunch(
+            record(token = "token-stale", instanceId = "inst-002", proxyActivityClassName = "ProxyActivity1")
+        ).activity
+
+        val removed = manager.pruneStaleProxyRecords(
+            knownProxyActivityClassNames = setOf("ProxyActivity0", "ProxyActivity1"),
+            liveProxyActivityClassNames = setOf("ProxyActivity0")
+        )
+
+        assertEquals(1, removed)
+        assertEquals(live.token, manager.resolve(live.token)?.token)
+        assertNull(manager.resolve(stale.token))
+        assertNull(manager.resolveByProxy("ProxyActivity1"))
+        assertEquals(listOf(live.token), manager.listTasks().single().activities.map { it.token })
+    }
+
+    @Test
+    fun `pruneStaleProxyRecords removes records for proxy classes no longer declared`() {
+        val manager = VirtualActivityRecordManager()
+        val record = manager.registerLaunch(
+            record(token = "token-old", proxyActivityClassName = "OldProxyActivity")
+        ).activity
+
+        val removed = manager.pruneStaleProxyRecords(
+            knownProxyActivityClassNames = setOf("ProxyActivity0"),
+            liveProxyActivityClassNames = setOf("OldProxyActivity")
+        )
+
+        assertEquals(1, removed)
+        assertNull(manager.resolve(record.token))
+        assertNull(manager.lastLaunchResult())
+        assertEquals(emptyList(), manager.listTasks())
+    }
+
+    @Test
     fun `registerLaunch stores stack decision fields`() {
         val manager = VirtualActivityRecordManager()
         val result = manager.registerLaunch(
@@ -61,7 +101,7 @@ class VirtualActivityRecordManagerTest {
 
         assertEquals(1, result.activity.taskId)
         assertEquals(VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK, result.activity.intentFlags)
-        assertEquals("com.test.minimal", result.activity.taskAffinity)
+        assertEquals("com.test.minimal:inst-001", result.activity.taskAffinity)
         assertSame(result, manager.lastLaunchResult())
         assertSame(result.activity, manager.resolve("token-1"))
     }

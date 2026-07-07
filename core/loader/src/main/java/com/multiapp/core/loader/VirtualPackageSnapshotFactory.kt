@@ -32,7 +32,8 @@ internal object VirtualPackageSnapshotFactory {
             taskAffinity = resolvedPackage?.taskAffinity,
             themeId = resolvedPackage?.themeId ?: 0,
             metaData = resolvedPackage?.metaData ?: emptyMap(),
-            launcherActivityName = resolvedPackage?.launcherActivityName,
+            launcherActivityName = resolvedPackage?.launcherActivityName
+                ?: resolvedPackage?.activities?.resolveLauncherIntentActivityName(),
             activities = resolvedPackage?.activities ?: emptyList(),
             services = resolvedPackage?.services ?: emptyList(),
             receivers = resolvedPackage?.receivers ?: emptyList(),

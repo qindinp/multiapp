@@ -33,9 +33,10 @@ class ManifestVirtualPackageResolver(
                     manifest.applicationClass
                 ),
                 themeId = manifest.applicationThemeId,
+                metaData = manifest.applicationMetaData.toStringMap(),
                 launcherActivityName = normalizeComponentName(
                     manifest.packageName,
-                    launcher?.targetActivityName ?: launcher?.name
+                    launcher?.name
                 ),
                 activities = manifest.activities.mapNotNull { component ->
                     normalizeComponentName(manifest.packageName, component.name)?.let { name ->
@@ -55,7 +56,8 @@ class ManifestVirtualPackageResolver(
                             resolvedIntentFilters = component.intentFilters.map { filter ->
                                 ResolvedIntentFilter(
                                     actions = filter.actions,
-                                    categories = filter.categories
+                                    categories = filter.categories,
+                                    dataSchemes = filter.dataSchemes
                                 )
                             },
                             targetActivityName = normalizeComponentName(
@@ -70,6 +72,16 @@ class ManifestVirtualPackageResolver(
                         ResolvedComponent(
                             name = name,
                             exported = component.exported,
+                            intentFilters = component.intentFilters.flatMap { filter ->
+                                filter.actions + filter.categories
+                            },
+                            resolvedIntentFilters = component.intentFilters.map { filter ->
+                                ResolvedIntentFilter(
+                                    actions = filter.actions,
+                                    categories = filter.categories,
+                                    dataSchemes = filter.dataSchemes
+                                )
+                            },
                             processName = component.process,
                             permission = component.permission
                         )
@@ -80,6 +92,16 @@ class ManifestVirtualPackageResolver(
                         ResolvedComponent(
                             name = name,
                             exported = component.exported,
+                            intentFilters = component.intentFilters.flatMap { filter ->
+                                filter.actions + filter.categories
+                            },
+                            resolvedIntentFilters = component.intentFilters.map { filter ->
+                                ResolvedIntentFilter(
+                                    actions = filter.actions,
+                                    categories = filter.categories,
+                                    dataSchemes = filter.dataSchemes
+                                )
+                            },
                             processName = component.process,
                             permission = component.permission
                         )

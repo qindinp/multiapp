@@ -13,8 +13,12 @@ import com.multiapp.core.model.instance.VirtualInstanceRecord
 import io.mockk.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.jupiter.api.AfterEach
@@ -22,6 +26,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import kotlin.coroutines.CoroutineContext
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LauncherViewModelTest {
@@ -48,6 +53,8 @@ class LauncherViewModelTest {
     @AfterEach
     fun tearDown() {
         launcherIoDispatcher = Dispatchers.IO
+        instancesLoadTimeoutMs = 15_000L
+        allAppsLoadTimeoutMs = 15_000L
         Dispatchers.resetMain()
         unmockkAll()
     }
@@ -139,6 +146,65 @@ class LauncherViewModelTest {
     }
 
     @Test
+    fun `loadAllApps times out and clears loading state`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        launcherIoDispatcher = NeverDispatcher
+        allAppsLoadTimeoutMs = 100L
+        val viewModel = createViewModel()
+
+        viewModel.loadAllApps()
+        runCurrent()
+        advanceTimeBy(101L)
+        runCurrent()
+
+        assertEquals(false, viewModel.uiState.value.allAppsLoading)
+        assertEquals(false, viewModel.uiState.value.allAppsLoaded)
+        assertEquals("读取应用列表超时，请重试", viewModel.uiState.value.allAppsError)
+        verify(exactly = 0) { installedAppRepository.listInstalledApps(any()) }
+    }
+
+    @Test
+    fun `loadAllApps can retry after timeout`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        launcherIoDispatcher = NeverDispatcher
+        allAppsLoadTimeoutMs = 100L
+        val apps = listOf(testApp())
+        every { installedAppRepository.listInstalledApps(false) } returns apps
+        val viewModel = createViewModel()
+
+        viewModel.loadAllApps()
+        runCurrent()
+        advanceTimeBy(101L)
+        runCurrent()
+
+        launcherIoDispatcher = StandardTestDispatcher(testScheduler)
+        viewModel.loadAllApps()
+        runCurrent()
+
+        verify(exactly = 1) { installedAppRepository.listInstalledApps(false) }
+        assertEquals(apps, viewModel.allApps.value)
+        assertEquals(false, viewModel.uiState.value.allAppsLoading)
+        assertEquals(true, viewModel.uiState.value.allAppsLoaded)
+        assertNull(viewModel.uiState.value.allAppsError)
+    }
+
+    @Test
+    fun `loadInstances times out and clears loading state`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        launcherIoDispatcher = NeverDispatcher
+        instancesLoadTimeoutMs = 100L
+
+        val viewModel = createViewModel()
+        runCurrent()
+        advanceTimeBy(101L)
+        runCurrent()
+
+        assertEquals(false, viewModel.uiState.value.isLoading)
+        assertEquals("读取分身列表超时，请重试", viewModel.uiState.value.error)
+        verify(exactly = 0) { instanceManager.listInstances() }
+    }
+
+    @Test
     fun `launchInstance delegates to launch use case`() = runTest {
         val viewModel = createViewModel()
 
@@ -171,6 +237,10 @@ class LauncherViewModelTest {
             installedAppRepository = installedAppRepository,
             instanceLaunchUseCase = launchUseCase
         )
+    }
+
+    private object NeverDispatcher : CoroutineDispatcher() {
+        override fun dispatch(context: CoroutineContext, block: Runnable) = Unit
     }
 
     private fun testApp(): VirtualApp = VirtualApp(

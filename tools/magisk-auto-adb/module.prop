@@ -1,0 +1,6 @@
+id=auto_adb_wireless
+name=Auto ADB Wireless
+version=v1.0
+versionCode=1
+author=multiapp
+description=Automatically enable wireless ADB on boot

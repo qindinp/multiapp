@@ -126,7 +126,8 @@ class StubContentProvider : ContentProvider() {
     }
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
-        val uri = arg?.let { runCatching { Uri.parse(it) }.getOrNull() }
+        val route = callRoute(arg, extras)
+        val uri = route?.proxyUri
         val result = uri?.let { dispatch(it) }
         if (uri != null) writeProviderEvidence("call:$method", uri, result)
         Log.w(TAG, "call dispatch result=${result.statusForLog()} method=$method arg=${arg.redactUriStringForLog()}")
@@ -134,8 +135,8 @@ class StubContentProvider : ContentProvider() {
         if (uri != null && result is VirtualProviderDispatchResult.ProviderReady) {
             val guestResult = result.provider.call(
                 method,
-                uri.toGuestUri(result.resolution.guestAuthority).toString(),
-                extras
+                route.guestArg(result.resolution.guestAuthority),
+                extras.withoutProxyRoute()
             )
             if (guestResult != null) {
                 bundle.putAll(guestResult)
@@ -145,6 +146,30 @@ class StubContentProvider : ContentProvider() {
             }
         }
         return bundle
+    }
+
+    override fun canonicalize(uri: Uri): Uri? {
+        val result = dispatch(uri)
+        writeProviderEvidence("canonicalize", uri, result)
+        Log.w(TAG, "canonicalize dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
+        return when (result) {
+            is VirtualProviderDispatchResult.ProviderReady -> result.provider.canonicalize(
+                uri.toGuestUri(result.resolution.guestAuthority)
+            )
+            else -> null
+        }
+    }
+
+    override fun uncanonicalize(uri: Uri): Uri? {
+        val result = dispatch(uri)
+        writeProviderEvidence("uncanonicalize", uri, result)
+        Log.w(TAG, "uncanonicalize dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
+        return when (result) {
+            is VirtualProviderDispatchResult.ProviderReady -> result.provider.uncanonicalize(
+                uri.toGuestUri(result.resolution.guestAuthority)
+            )
+            else -> null
+        }
     }
 
     @Throws(FileNotFoundException::class)
@@ -225,13 +250,47 @@ class StubContentProvider : ContentProvider() {
 
     private fun dispatch(uri: Uri): VirtualProviderDispatchResult {
         val hostPackageName = context?.packageName ?: return VirtualProviderDispatchResult.InvalidProxyUri("missing host context")
+        val hostContext = context ?: return VirtualProviderDispatchResult.InvalidProxyUri("missing host context")
+        val runtimeBindResult = HostedProviderRuntimeBinder().ensureBound(hostContext, uri)
+        writeProviderRuntimeBindEvidence(uri, runtimeBindResult)
         return VirtualProviderDispatcher(
             hostPackageName = hostPackageName,
-            hostContext = context
+            hostContext = hostContext
         ).dispatch(uri)
     }
 
+    private fun callRoute(arg: String?, extras: Bundle?): ProviderCallRoute? {
+        arg?.let { value ->
+            val parsed = runCatching { Uri.parse(value) }.getOrNull()
+            if (parsed?.scheme == "content" && !parsed.authority.isNullOrBlank()) {
+                return ProviderCallRoute(parsed, value)
+            }
+        }
+        val instanceId = extras?.getString(VirtualProviderManager.PROXY_INSTANCE_ID)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val guestAuthority = extras.getString(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val hostPackageName = context?.packageName ?: return null
+        val proxyUri = Uri.Builder()
+            .scheme("content")
+            .authority("$hostPackageName.multiapp.provider.stub")
+            .appendQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID, instanceId)
+            .appendQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY, guestAuthority)
+            .build()
+        return ProviderCallRoute(proxyUri, arg)
+    }
+
     private fun Uri.toGuestUri(guestAuthority: String): Uri = ProviderProxyUri.toGuestUri(this, guestAuthority)
+
+    private fun Bundle?.withoutProxyRoute(): Bundle? {
+        if (this == null) return null
+        return Bundle(this).apply {
+            remove(VirtualProviderManager.PROXY_INSTANCE_ID)
+            remove(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+        }
+    }
 
     private fun Uri.redactForLog(): String = EvidenceSanitizer.redactUriForEvidence(toString())
 
@@ -266,6 +325,39 @@ class StubContentProvider : ContentProvider() {
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write provider evidence for instanceId=$instanceId", error)
+        }
+    }
+
+    private fun writeProviderRuntimeBindEvidence(
+        uri: Uri,
+        result: HostedProviderRuntimeBindResult
+    ) {
+        val instanceId = result.instanceIdForEvidence()
+            ?: uri.getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID)
+            ?: return
+        runCatching {
+            ContainerRuntimeEvidenceWriter.write(
+                context = requireNotNull(context),
+                instanceId = instanceId,
+                component = "provider-runtime-bind",
+                fields = linkedMapOf(
+                    "status" to result.status,
+                    "stage" to "PROVIDER_RUNTIME_BIND",
+                    "providerRuntimeBindStatus" to result.status,
+                    "providerRuntimeBindDetail" to result.detail,
+                    "providerRuntimeBindErrorClassName" to result.errorClassNameForEvidence(),
+                    "providerRuntimeBindErrorMessage" to result.errorMessageForEvidence(),
+                    "instanceId" to instanceId,
+                    "guestAuthority" to (
+                        result.guestAuthorityForEvidence()
+                            ?: uri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+                            ?: ""
+                        ),
+                    "detail" to result.detail
+                )
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write provider runtime bind evidence for instanceId=$instanceId", error)
         }
     }
 
@@ -385,6 +477,20 @@ class StubContentProvider : ContentProvider() {
         )
     }
 
+    private data class ProviderCallRoute(
+        val proxyUri: Uri,
+        private val originalArg: String?
+    ) {
+        fun guestArg(guestAuthority: String): String? {
+            val parsed = originalArg?.let { runCatching { Uri.parse(it) }.getOrNull() }
+            return if (parsed?.scheme == "content" && !parsed.authority.isNullOrBlank()) {
+                ProviderProxyUri.toGuestUri(proxyUri, guestAuthority).toString()
+            } else {
+                originalArg
+            }
+        }
+    }
+
     private fun VirtualProviderDispatchResult?.evidenceOrNull(): VirtualProviderEvidence? = when (this) {
         is VirtualProviderDispatchResult.ProviderReady -> evidence
         is VirtualProviderDispatchResult.RuntimeNotBound -> evidence
@@ -475,6 +581,28 @@ class StubContentProvider : ContentProvider() {
         is VirtualProviderDispatchResult.InvalidProxyUri -> "INVALID_PROXY_URI:$reason"
         is VirtualProviderDispatchResult.InstanceNotFound -> "INSTANCE_NOT_FOUND"
         is VirtualProviderDispatchResult.ProviderNotFound -> "PROVIDER_NOT_FOUND"
+    }
+
+    private fun HostedProviderRuntimeBindResult.instanceIdForEvidence(): String? = when (this) {
+        is HostedProviderRuntimeBindResult.Bound -> instanceId
+        is HostedProviderRuntimeBindResult.Failed -> instanceId
+        is HostedProviderRuntimeBindResult.NotRequested -> null
+    }
+
+    private fun HostedProviderRuntimeBindResult.guestAuthorityForEvidence(): String? = when (this) {
+        is HostedProviderRuntimeBindResult.Bound -> guestAuthority
+        is HostedProviderRuntimeBindResult.Failed -> guestAuthority
+        is HostedProviderRuntimeBindResult.NotRequested -> null
+    }
+
+    private fun HostedProviderRuntimeBindResult.errorClassNameForEvidence(): String? = when (this) {
+        is HostedProviderRuntimeBindResult.Failed -> errorClassName
+        else -> null
+    }
+
+    private fun HostedProviderRuntimeBindResult.errorMessageForEvidence(): String? = when (this) {
+        is HostedProviderRuntimeBindResult.Failed -> errorMessage
+        else -> null
     }
 
     companion object {

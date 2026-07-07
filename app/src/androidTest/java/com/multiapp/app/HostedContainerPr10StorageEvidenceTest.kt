@@ -25,6 +25,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -216,14 +217,51 @@ class HostedContainerPr10StorageEvidenceTest {
             assertEquals(minimalPackageName, fields["originPackageName"])
             assertEquals(instance.virtualPackageName, fields["virtualPackageName"])
             assertEquals("NATIVE_IO", fields["storageDiagnosticKind"])
-            assertEquals("UNSUPPORTED", fields["storageDiagnosticStatus"])
-            assertEquals("UNSUPPORTED", fields["nativeIoDiagnosticStatus"])
             assertEquals(operation, fields["nativeIoOperation"])
-            assertEquals("NATIVE_IO_HOOK_NOT_INSTALLED_FOR_ORDINARY_BASELINE", fields["reason"])
-            assertEquals("", fields["redirectedPath"])
             assertEquals("true", fields["candidateWithinDataRoot"])
+            assertEquals("true", fields["nativeIoCandidateWithinDataRoot"])
+            assertEquals("GUEST_PRIVATE_PATHS_ONLY", fields["nativeRedirectScope"])
+            assertEquals("false", fields["procMapsSpoofEnabled"])
+            assertEquals("false", fields["procStatusSpoofEnabled"])
+            assertEquals("UNKNOWN", fields["namespaceVerdict"])
+            assertEquals("UNKNOWN", fields["findLibraryVerdict"])
+            assertEquals("UNKNOWN", fields["nativeLoadVerdict"])
+
             val candidatePath = File(checkNotNull(fields["candidateRedirectedPath"])).canonicalPath
             assertTrue("$component candidate outside dataRoot: $candidatePath", candidatePath.startsWith(dataRootPath))
+            when (fields["nativeIoRedirectVerdict"]) {
+                "PASS" -> {
+                    assertEquals("REDIRECTED", fields["storageDiagnosticStatus"])
+                    assertEquals("REDIRECTED", fields["nativeIoDiagnosticStatus"])
+                    assertEquals("true", fields["withinDataRoot"])
+                    assertEquals("true", fields["nativeIoRedirectEnabled"])
+                    assertEquals("true", fields["nativeProbeCandidateExists"])
+                    assertEquals("0", fields["nativeProbeResultCode"])
+                    assertEquals("", fields["nativeIoRedirectVerdictReason"])
+
+                    val redirectedPath = File(checkNotNull(fields["redirectedPath"])).canonicalPath
+                    assertTrue("$component redirected outside dataRoot: $redirectedPath", redirectedPath.startsWith(dataRootPath))
+                }
+
+                "UNSUPPORTED" -> {
+                    assertEquals("UNSUPPORTED", fields["storageDiagnosticStatus"])
+                    assertEquals("UNSUPPORTED", fields["nativeIoDiagnosticStatus"])
+                    assertEquals("false", fields["withinDataRoot"])
+                    assertEquals("false", fields["nativeIoRedirectEnabled"])
+                    assertEquals("", fields["redirectedPath"])
+                    assertTrue(
+                        "$component unsupported native IO must include a reason",
+                        fields["nativeIoRedirectVerdictReason"].orEmpty().isNotBlank()
+                    )
+                }
+
+                "FAIL" -> fail(
+                    "$component native IO redirect probe failed: " +
+                        fields["nativeIoRedirectVerdictReason"].orEmpty()
+                )
+
+                else -> fail("$component unknown native IO redirect verdict: ${fields["nativeIoRedirectVerdict"]}")
+            }
         }
         return markers
     }

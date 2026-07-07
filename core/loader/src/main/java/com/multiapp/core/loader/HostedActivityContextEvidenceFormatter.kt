@@ -4,7 +4,8 @@ internal object HostedActivityContextEvidenceFormatter {
 
     fun format(
         guestActivityClassName: String,
-        injection: HostedActivityContextInjector.InjectionResult
+        injection: HostedActivityContextInjector.InjectionResult,
+        taskDescriptionLabel: String = ""
     ): String = listOf(
         "status=GUEST_ACTIVITY_CONTEXT_INJECTED",
         "stage=ACTIVITY_CONTEXT",
@@ -46,6 +47,7 @@ internal object HostedActivityContextEvidenceFormatter {
         "themeFieldPatched=${injection.themeFieldPatched}",
         "baseContextInjectedBeforeTheme=${injection.baseContextInjectedBeforeTheme}",
         "hiddenApiBypassApplied=${injection.hiddenApiBypassApplied}",
+        "taskDescriptionLabel=$taskDescriptionLabel",
         "dataDir=${injection.dataDir}"
     ).joinToString("\n")
 

@@ -2,6 +2,8 @@ package com.multiapp.core.loader
 
 import android.content.Context
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import io.mockk.every
+import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -44,6 +46,43 @@ class VirtualPackageManagerProxyStageTest {
         assertEquals(snapshot.originPackageName, evidence["originPackageName"])
         assertEquals(snapshot.virtualPackageName, evidence["virtualPackageName"])
         assertTrue(!output.isTerminalFailure)
+    }
+
+    @Test
+    fun `execute installs notification package proxy for origin and virtual package aliases`() {
+        val snapshot = snapshot()
+        val hostContext = mockk<Context>()
+        var capturedSourcePackages = emptyList<String>()
+        var capturedHostPackageName = ""
+        every { hostContext.packageName } returns "com.multiapp.app"
+        val stage = VirtualPackageManagerProxyStage(
+            hostContext = hostContext,
+            installer = VirtualPackageManagerGlobalInstallAction { _, _, _ ->
+                installResult(
+                    status = VirtualPackageManagerGlobalInstallStatus.INSTALLED,
+                    sPackageManagerRead = true,
+                    sPackageManagerPatched = true
+                )
+            },
+            notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { sourcePackages, hostPackageName ->
+                capturedSourcePackages = sourcePackages.toList()
+                capturedHostPackageName = hostPackageName
+                true
+            },
+            runtimeUidProvider = { RUNTIME_UID },
+            clock = fixedClock(100L, 109L)
+        )
+
+        val output = stage.execute(BootstrapStageInput(instanceId = snapshot.instanceId, packageSnapshot = snapshot))
+
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(listOf("com.test.minimal", "com.multiapp.instance.abc"), capturedSourcePackages)
+        assertEquals("com.multiapp.app", capturedHostPackageName)
+        assertEquals("INSTALLED", evidence["notificationPackageProxyStatus"])
+        assertEquals("com.test.minimal,com.multiapp.instance.abc", evidence["notificationPackageProxySourcePackages"])
+        assertEquals("com.multiapp.app", evidence["notificationPackageProxyHostPackage"])
+        assertEquals("guest-to-host-package-args", evidence["notificationPackageProxyMode"])
     }
 
     @Test

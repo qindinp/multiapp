@@ -1,23 +1,28 @@
 package com.multiapp.core.loader
 
 import com.multiapp.core.hook.HookEngine
+import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertTrue
 
 class VirtualProviderHookInstallerTest {
 
     @Test
     fun `install applies content provider hook for pass-through routing plan`() {
         val hookEngine = mockk<HookEngine>(relaxed = true)
+        every { hookEngine.initLsplant(any()) } returns true
+        every { hookEngine.hookMethodPassThrough(any(), any(), any()) } returns true
         val installer = VirtualProviderHookInstaller(hookEngineProvider = { hookEngine })
 
         val result = installer.install(enabledPlan())
 
         val installed = assertIs<VirtualProviderHookInstallResult.Installed>(result)
         assertEquals(1, installed.authorityMapSize)
+        assertTrue(installed.installedMethodCount > 0)
         verify(atLeast = 1) {
             hookEngine.hookMethodPassThrough(any(), any(), any())
         }
@@ -62,6 +67,8 @@ class VirtualProviderHookInstallerTest {
     @Test
     fun `install result evidence records installed status`() {
         val hookEngine = mockk<HookEngine>(relaxed = true)
+        every { hookEngine.initLsplant(any()) } returns true
+        every { hookEngine.hookMethodPassThrough(any(), any(), any()) } returns true
         val installer = VirtualProviderHookInstaller(hookEngineProvider = { hookEngine })
 
         val result = installer.install(enabledPlan())
@@ -69,7 +76,21 @@ class VirtualProviderHookInstallerTest {
 
         assertEquals("INSTALLED", evidence["providerHookInstallStatus"])
         assertEquals("1", evidence["providerHookInstallAuthorityMapSize"])
+        assertTrue((evidence["providerHookInstallMethodCount"]?.toIntOrNull() ?: 0) > 0)
         assertEquals("AUTHORITY_MAP_READY", evidence["providerHookInstallReason"])
+    }
+
+    @Test
+    fun `install skips when LSPlant pass-through hooks do not install`() {
+        val hookEngine = mockk<HookEngine>(relaxed = true)
+        every { hookEngine.initLsplant(any()) } returns false
+        every { hookEngine.hookMethodPassThrough(any(), any(), any()) } returns false
+        val installer = VirtualProviderHookInstaller(hookEngineProvider = { hookEngine })
+
+        val result = installer.install(enabledPlan())
+
+        val skipped = assertIs<VirtualProviderHookInstallResult.Skipped>(result)
+        assertTrue(skipped.reason.startsWith("NO_CONTENT_RESOLVER_HOOK_INSTALLED"))
     }
 
     private fun enabledPlan() = VirtualProviderRoutingPlan(

@@ -27,18 +27,30 @@ class VirtualContextStorageTest {
     }
 
     @Test
-    fun `file and database paths resolve safe path segments`(@TempDir dataRoot: File) {
+    fun `file and database paths resolve safe relative paths`(@TempDir dataRoot: File) {
         assertEquals(
             File(dataRoot, "files/probe.txt").canonicalFile,
             VirtualContextStorage.fileStreamPath(dataRoot.absolutePath, "probe.txt")
+        )
+        assertEquals(
+            File(dataRoot, "files/nested/probe.txt").canonicalFile,
+            VirtualContextStorage.fileStreamPath(dataRoot.absolutePath, "nested/probe.txt")
         )
         assertEquals(
             File(dataRoot, "databases/probe.db").canonicalFile,
             VirtualContextStorage.databasePath(dataRoot.absolutePath, "probe.db")
         )
         assertEquals(
+            File(dataRoot, "databases/room/gkd.db").canonicalFile,
+            VirtualContextStorage.databasePath(dataRoot.absolutePath, "room/gkd.db")
+        )
+        assertEquals(
             File(dataRoot, "shared_prefs/default.xml").canonicalFile,
             VirtualContextStorage.sharedPrefsPath(dataRoot.absolutePath, "")
+        )
+        assertEquals(
+            File(dataRoot, "shared_prefs/settings/main.xml").canonicalFile,
+            VirtualContextStorage.sharedPrefsPath(dataRoot.absolutePath, "settings/main")
         )
     }
 
@@ -59,11 +71,36 @@ class VirtualContextStorageTest {
     }
 
     @Test
-    fun `file and database paths reject unsafe path segments`(@TempDir dataRoot: File) {
+    fun `database paths redirect Android private absolute paths`(@TempDir dataRoot: File) {
+        assertEquals(
+            File(dataRoot, "databases/gkd/main.db").canonicalFile,
+            VirtualContextStorage.databasePath(
+                dataRoot = dataRoot.absolutePath,
+                name = "/data/user/0/com.example.app/databases/gkd/main.db",
+                originPackageName = "com.example.app",
+                virtualPackageName = "com.multiapp.instance.example"
+            )
+        )
+        assertEquals(
+            File(dataRoot, "databases/virtual.db").canonicalFile,
+            VirtualContextStorage.databasePath(
+                dataRoot = dataRoot.absolutePath,
+                name = "/data/data/com.multiapp.instance.example/databases/virtual.db",
+                originPackageName = "com.example.app",
+                virtualPackageName = "com.multiapp.instance.example"
+            )
+        )
+    }
+
+    @Test
+    fun `file and database paths reject unsafe relative paths`(@TempDir dataRoot: File) {
         val unsafeNames = listOf(
             "..",
             ".",
-            "a/b.txt",
+            "../escape.txt",
+            "a/../escape.txt",
+            "a//b.txt",
+            "/absolute.txt",
             "a\\b.txt",
             "bad\u0000name"
         )
@@ -119,6 +156,10 @@ class VirtualContextStorageTest {
             File(dataRoot, "external_files/images_private").canonicalFile,
             VirtualContextStorage.externalFilesDir(dataRoot.absolutePath, "images_private")
         )
+        assertEquals(
+            File(dataRoot, "external_files/Pictures/Screenshots").canonicalFile,
+            VirtualContextStorage.externalFilesDir(dataRoot.absolutePath, "Pictures/Screenshots")
+        )
     }
 
     @Test
@@ -126,6 +167,10 @@ class VirtualContextStorageTest {
         assertEquals(
             File(dataRoot, "app_images_private").canonicalFile,
             VirtualContextStorage.appDir(dataRoot.absolutePath, "images_private")
+        )
+        assertEquals(
+            File(dataRoot, "app_images/private").canonicalFile,
+            VirtualContextStorage.appDir(dataRoot.absolutePath, "images/private")
         )
     }
 

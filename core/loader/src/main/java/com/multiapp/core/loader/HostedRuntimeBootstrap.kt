@@ -52,6 +52,25 @@ data class HostedBootstrapResult(
 )
 
 /**
+ * Prepared hosted runtime state before guest Application/Activity attachment.
+ *
+ * [prepare] may run away from the UI thread because it resolves records,
+ * extracts native libraries, installs package/provider routing, and creates
+ * the guest ClassLoader. [attachAndLaunch] creates the guest Application and
+ * resolves the Activity handoff; callers that run it off the UI thread must
+ * provide a prepared Looper for guest code that creates default Handlers.
+ */
+data class HostedBootstrapPreparation(
+    val instanceId: String,
+    val context: BootstrapStageInput?,
+    val stageResults: List<BootstrapResult>,
+    val terminalResult: HostedBootstrapResult? = null
+) {
+    val isTerminal: Boolean
+        get() = terminalResult != null
+}
+
+/**
  * Entry point for bootstrapping a virtual app runtime from an instance ID.
  *
  * Loads the [VirtualInstanceRecord][com.multiapp.core.model.instance.VirtualInstanceRecord]
@@ -94,9 +113,28 @@ class HostedRuntimeBootstrap(
      * Returns a [HostedBootstrapResult] with per-stage results and overall status.
      * Stops at the first terminal failure.
      */
-    fun run(instanceId: String): HostedBootstrapResult {
+    fun run(instanceId: String): HostedBootstrapResult =
+        attachAndLaunch(prepare(instanceId))
+
+    /**
+     * Prepare the hosted runtime up to and including ClassLoader creation.
+     *
+     * This is the heavy half of bootstrap and is safe to run off the UI thread
+     * only when the caller accepts that PMS/provider routing is also prepared
+     * there. Foreground Activity launches should prefer doing the whole bind in
+     * a prewarm thread, then consume the cached result on the UI thread.
+     * It intentionally does not create the guest Application.
+     */
+    fun prepare(instanceId: String): HostedBootstrapPreparation =
+        createClassLoader(prepareBeforeClassLoader(instanceId))
+
+    /**
+     * Prepare all pre-ClassLoader state. Callers may keep this on the main
+     * thread for conservative diagnostics, or move it to a prewarm thread when
+     * foreground launch responsiveness is the priority.
+     */
+    fun prepareBeforeClassLoader(instanceId: String): HostedBootstrapPreparation {
         val stageResults = mutableListOf<BootstrapResult>()
-        val overallStartMs = clock()
 
         if (instanceId.isBlank()) {
             val configStartMs = clock()
@@ -107,24 +145,39 @@ class HostedRuntimeBootstrap(
                     durationMs = clock() - configStartMs
                 )
             )
-            return failedHostedResult(instanceId, stageResults)
+            return terminalPreparation(
+                instanceId = instanceId,
+                context = null,
+                stageResults = stageResults,
+                result = failedHostedResult(instanceId, stageResults)
+            )
         }
 
         val configOutput = ConfigStage(instanceManager, clock)
             .execute(BootstrapStageInput(instanceId = instanceId))
         stageResults.add(configOutput.result)
         if (configOutput.isTerminalFailure) {
-            return failedHostedResult(instanceId, stageResults)
+            return terminalPreparation(
+                instanceId = instanceId,
+                context = configOutput.context,
+                stageResults = stageResults,
+                result = failedHostedResult(instanceId, stageResults)
+            )
         }
 
         val installRecordOutput = InstallRecordStage(installRecordStore, clock)
             .execute(configOutput.context)
         stageResults.add(installRecordOutput.result)
         if (installRecordOutput.isTerminalFailure) {
-            return failedHostedResult(
+            return terminalPreparation(
                 instanceId = instanceId,
+                context = installRecordOutput.context,
                 stageResults = stageResults,
-                originPackageName = configOutput.context.instance?.originPackageName
+                result = failedHostedResult(
+                    instanceId = instanceId,
+                    stageResults = stageResults,
+                    originPackageName = configOutput.context.instance?.originPackageName
+                )
             )
         }
 
@@ -138,10 +191,15 @@ class HostedRuntimeBootstrap(
             "Install record stage must provide install record before resolving origin APK"
         }
         if (originApkOutput.isTerminalFailure) {
-            return failedHostedResult(
-                instanceId, stageResults,
-                originPackageName = instance.originPackageName,
-                installId = installRecord.packageName
+            return terminalPreparation(
+                instanceId = instanceId,
+                context = originApkOutput.context,
+                stageResults = stageResults,
+                result = failedHostedResult(
+                    instanceId, stageResults,
+                    originPackageName = instance.originPackageName,
+                    installId = installRecord.packageName
+                )
             )
         }
         val originApkPath = requireNotNull(originApkOutput.context.originApkPath) {
@@ -154,14 +212,18 @@ class HostedRuntimeBootstrap(
         ).execute(originApkOutput.context)
         stageResults.add(nativeLibrariesOutput.result)
         if (nativeLibrariesOutput.isTerminalFailure) {
-            return failedHostedResult(
-                instanceId, stageResults,
-                originPackageName = instance.originPackageName,
-                originApkPath = originApkPath,
-                installId = installRecord.packageName
+            return terminalPreparation(
+                instanceId = instanceId,
+                context = nativeLibrariesOutput.context,
+                stageResults = stageResults,
+                result = failedHostedResult(
+                    instanceId, stageResults,
+                    originPackageName = instance.originPackageName,
+                    originApkPath = originApkPath,
+                    installId = installRecord.packageName
+                )
             )
         }
-        val nativeLibraryDir = nativeLibrariesOutput.context.nativeLibraryDir
 
         val packageSnapshotOutput = PackageSnapshotStage(
             packageMetadataResolver = { apkPath -> resolvePackageMetadata(apkPath) },
@@ -170,16 +232,17 @@ class HostedRuntimeBootstrap(
         ).execute(nativeLibrariesOutput.context)
         stageResults.add(packageSnapshotOutput.result)
         if (packageSnapshotOutput.isTerminalFailure) {
-            return failedHostedResult(
-                instanceId, stageResults,
-                originPackageName = instance.originPackageName,
-                originApkPath = originApkPath,
-                installId = installRecord.packageName
+            return terminalPreparation(
+                instanceId = instanceId,
+                context = packageSnapshotOutput.context,
+                stageResults = stageResults,
+                result = failedHostedResult(
+                    instanceId, stageResults,
+                    originPackageName = instance.originPackageName,
+                    originApkPath = originApkPath,
+                    installId = installRecord.packageName
+                )
             )
-        }
-        val resolvedPackage = packageSnapshotOutput.context.resolvedPackage
-        val packageSnapshot = requireNotNull(packageSnapshotOutput.context.packageSnapshot) {
-            "Package snapshot stage must provide package snapshot after success"
         }
 
         val packageManagerProxyOutput = VirtualPackageManagerProxyStage(
@@ -190,11 +253,16 @@ class HostedRuntimeBootstrap(
         ).execute(packageSnapshotOutput.context)
         stageResults.add(packageManagerProxyOutput.result)
         if (packageManagerProxyOutput.isTerminalFailure) {
-            return failedHostedResult(
-                instanceId, stageResults,
-                originPackageName = instance.originPackageName,
-                originApkPath = originApkPath,
-                installId = installRecord.packageName
+            return terminalPreparation(
+                instanceId = instanceId,
+                context = packageManagerProxyOutput.context,
+                stageResults = stageResults,
+                result = failedHostedResult(
+                    instanceId, stageResults,
+                    originPackageName = instance.originPackageName,
+                    originApkPath = originApkPath,
+                    installId = installRecord.packageName
+                )
             )
         }
 
@@ -206,38 +274,110 @@ class HostedRuntimeBootstrap(
         ).execute(packageManagerProxyOutput.context)
         stageResults.add(providerRoutingOutput.result)
         if (providerRoutingOutput.isTerminalFailure) {
-            return failedHostedResult(
-                instanceId, stageResults,
-                originPackageName = instance.originPackageName,
-                originApkPath = originApkPath,
-                installId = installRecord.packageName
+            return terminalPreparation(
+                instanceId = instanceId,
+                context = providerRoutingOutput.context,
+                stageResults = stageResults,
+                result = failedHostedResult(
+                    instanceId, stageResults,
+                    originPackageName = instance.originPackageName,
+                    originApkPath = originApkPath,
+                    installId = installRecord.packageName
+                )
             )
         }
+        return HostedBootstrapPreparation(
+            instanceId = instanceId,
+            context = providerRoutingOutput.context,
+            stageResults = stageResults.toList()
+        )
+    }
+
+    /**
+     * Create the guest ClassLoader for a prepared runtime. This is the only
+     * bootstrap segment ContainerActivity runs on its background thread.
+     */
+    fun createClassLoader(preparation: HostedBootstrapPreparation): HostedBootstrapPreparation {
+        preparation.terminalResult?.let { return preparation }
+        val preparedContext = requireNotNull(preparation.context) {
+            "Prepared bootstrap context is required before ClassLoader creation"
+        }
+        val stageResults = preparation.stageResults.toMutableList()
+        val instance = requireNotNull(preparedContext.instance) {
+            "Prepared bootstrap must include instance before ClassLoader creation"
+        }
+        val installRecord = requireNotNull(preparedContext.installRecord) {
+            "Prepared bootstrap must include install record before ClassLoader creation"
+        }
+        val originApkPath = requireNotNull(preparedContext.originApkPath) {
+            "Prepared bootstrap must include origin APK path before ClassLoader creation"
+        }
+        val providerRoutingEvidence = stageResults
+            .lastOrNull { it.stage == RuntimeStage.GUEST_CONTEXT }
+            ?.evidence
+            .orEmpty()
         val classLoaderOutput = ClassLoaderStage(
             classLoaderFactory = classLoaderFactory,
             clock = clock
         ).execute(
-            input = providerRoutingOutput.context,
-            additionalEvidence = providerRoutingOutput.result.evidence
+            input = preparedContext,
+            additionalEvidence = providerRoutingEvidence
         )
         stageResults.add(classLoaderOutput.result)
         if (classLoaderOutput.isTerminalFailure) {
-            return failedHostedResult(
-                instanceId, stageResults,
-                originPackageName = instance.originPackageName,
-                originApkPath = originApkPath,
-                installId = installRecord.packageName
+            return terminalPreparation(
+                instanceId = preparation.instanceId,
+                context = classLoaderOutput.context,
+                stageResults = stageResults,
+                result = failedHostedResult(
+                    preparation.instanceId, stageResults,
+                    originPackageName = instance.originPackageName,
+                    originApkPath = originApkPath,
+                    installId = installRecord.packageName
+                )
             )
         }
-        val guestClassLoader = requireNotNull(classLoaderOutput.context.guestClassLoader) {
-            "ClassLoader stage must provide guest ClassLoader after success"
+
+        return HostedBootstrapPreparation(
+            instanceId = preparation.instanceId,
+            context = classLoaderOutput.context,
+            stageResults = stageResults.toList()
+        )
+    }
+
+    /**
+     * Complete prepared bootstrap by creating the guest Application and
+     * resolving launcher Activity on the caller thread.
+     */
+    fun attachAndLaunch(preparation: HostedBootstrapPreparation): HostedBootstrapResult {
+        preparation.terminalResult?.let { return it }
+        val preparedContext = requireNotNull(preparation.context) {
+            "Prepared bootstrap context is required when there is no terminal result"
+        }
+        val stageResults = preparation.stageResults.toMutableList()
+        val instance = requireNotNull(preparedContext.instance) {
+            "Prepared bootstrap must include instance"
+        }
+        val installRecord = requireNotNull(preparedContext.installRecord) {
+            "Prepared bootstrap must include install record"
+        }
+        val originApkPath = requireNotNull(preparedContext.originApkPath) {
+            "Prepared bootstrap must include origin APK path"
+        }
+        val guestClassLoader = requireNotNull(preparedContext.guestClassLoader) {
+            "Prepared bootstrap must include guest ClassLoader"
+        }
+        val resolvedPackage = preparedContext.resolvedPackage
+        val packageSnapshot = requireNotNull(preparedContext.packageSnapshot) {
+            "Prepared bootstrap must include package snapshot"
         }
 
         val applicationOutput = ApplicationStage(
             hostContext = hostContext,
             applicationClassNameResolver = applicationClassNameResolver,
+            runtimePublisher = VirtualProcessRuntime.global::rememberApplication,
             clock = clock
-        ).execute(classLoaderOutput.context)
+        ).execute(preparedContext)
         stageResults.add(applicationOutput.result)
 
         val launcherActivityOutput = LauncherActivityStage(
@@ -253,7 +393,7 @@ class HostedRuntimeBootstrap(
         val summary = stageResults.toSummary()
 
         return HostedBootstrapResult(
-            instanceId = instanceId,
+            instanceId = preparation.instanceId,
             installId = installRecord.packageName,
             originPackageName = instance.originPackageName,
             virtualPackageName = instance.virtualPackageName,
@@ -319,6 +459,18 @@ class HostedRuntimeBootstrap(
             diagnostics = diagnostics
         )
     }
+
+    private fun terminalPreparation(
+        instanceId: String,
+        context: BootstrapStageInput?,
+        stageResults: List<BootstrapResult>,
+        result: HostedBootstrapResult
+    ): HostedBootstrapPreparation = HostedBootstrapPreparation(
+        instanceId = instanceId,
+        context = context,
+        stageResults = stageResults.toList(),
+        terminalResult = result
+    )
 
     /**
      * Build diagnostics evidence from stage results and run NativeDiagnosticsProfile analysis.

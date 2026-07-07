@@ -11,6 +11,16 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
+data class NativePrivatePathProbeResult(
+    val operation: String,
+    val success: Boolean,
+    val resultCode: Int,
+    val errno: Int,
+    val candidateExists: Boolean,
+    val resolvedPath: String,
+    val reason: String
+)
+
 /**
  * NativeHookBridge 鈥?Native 灞?hook 寮曟搸
  *
@@ -588,6 +598,40 @@ class NativeHookBridge {
         if (nativeHooksAvailable) nativeAddPathRedirection(fromPrefix, toPrefix)
     }
 
+    fun probePrivatePathRedirect(
+        operation: String,
+        originalPath: String,
+        expectedRedirectedPath: String
+    ): NativePrivatePathProbeResult {
+        if (!nativeLibLoaded) {
+            return NativePrivatePathProbeResult(
+                operation = operation,
+                success = false,
+                resultCode = -1,
+                errno = 0,
+                candidateExists = false,
+                resolvedPath = "",
+                reason = "NATIVE_LIBRARY_NOT_AVAILABLE"
+            )
+        }
+        return try {
+            parsePrivatePathProbeReport(
+                nativeProbePrivatePathRedirect(operation, originalPath, expectedRedirectedPath),
+                operation
+            )
+        } catch (error: Throwable) {
+            NativePrivatePathProbeResult(
+                operation = operation,
+                success = false,
+                resultCode = -1,
+                errno = 0,
+                candidateExists = false,
+                resolvedPath = "",
+                reason = error.javaClass.simpleName + ":" + error.message.orEmpty()
+            )
+        }
+    }
+
     fun removePathRedirection(fromPrefix: String) {
         pathRedirections.remove(fromPrefix); rebuildPrefixIndex()
         if (nativeHooksAvailable) nativeRemovePathRedirection(fromPrefix)
@@ -1015,6 +1059,24 @@ class NativeHookBridge {
         return "Name:\t$name\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t$pid\nPid:\t$pid\nPPid:\t${pid - 1}\nTracerPid:\t0\n".toByteArray()
     }
 
+    private fun parsePrivatePathProbeReport(report: String, fallbackOperation: String): NativePrivatePathProbeResult {
+        val fields = report.split(';')
+            .mapNotNull { part ->
+                val separator = part.indexOf('=')
+                if (separator < 0) null else part.substring(0, separator) to part.substring(separator + 1)
+            }
+            .toMap()
+        return NativePrivatePathProbeResult(
+            operation = fields["operation"] ?: fallbackOperation,
+            success = fields["success"] == "true",
+            resultCode = fields["resultCode"]?.toIntOrNull() ?: -1,
+            errno = fields["errno"]?.toIntOrNull() ?: 0,
+            candidateExists = fields["candidateExists"] == "true",
+            resolvedPath = fields["resolvedPath"].orEmpty(),
+            reason = fields["reason"].orEmpty()
+        )
+    }
+
     fun filterProcMaps(originalMaps: String): String {
         val linesToHide = listOf(
             VirtualConstants.HOST_PACKAGE, "multiapp", "libmultiapp", "shadowhook", "lsplant",
@@ -1038,6 +1100,11 @@ class NativeHookBridge {
     private external fun nativeSetHostDataPrefix(prefix: String)
     private external fun nativeSetVirtualDataRoot(root: String)
     private external fun nativeGetRedirectCount(): Int
+    private external fun nativeProbePrivatePathRedirect(
+        operation: String,
+        originalPath: String,
+        expectedRedirectedPath: String
+    ): String
     private external fun nativeGetPropertySpoofCount(): Int
     private external fun nativeIsInitialized(): Boolean
     private external fun nativeInstallRuntimeLoadHook(fallbackCallerClasses: Array<String>): Boolean

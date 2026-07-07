@@ -22,6 +22,7 @@ class InstanceLaunchUseCase internal constructor(
                     "com.multiapp.app.container.ContainerActivity"
                 )
                 putExtra(EXTRA_INSTANCE_ID, instanceId)
+                putExtra(EXTRA_ENABLE_PROVIDER_HOOK, true)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
         }
@@ -45,5 +46,6 @@ class InstanceLaunchUseCase internal constructor(
 
     companion object {
         const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
+        const val EXTRA_ENABLE_PROVIDER_HOOK = "multiapp.profile.providerHookEnabled"
     }
 }

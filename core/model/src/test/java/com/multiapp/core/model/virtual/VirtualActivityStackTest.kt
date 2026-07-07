@@ -234,6 +234,42 @@ class VirtualActivityStackTest {
     }
 
     @Test
+    fun `newTask separates same origin package by instance id when affinity is absent`() {
+        val stack = VirtualActivityStack()
+
+        val first = stack.launch(
+            record(token = "token-a1", activity = "MainActivity", instanceId = "inst-001"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK
+        )
+        val second = stack.launch(
+            record(token = "token-b1", activity = "MainActivity", instanceId = "inst-002"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK
+        )
+
+        assertNotEquals(first.task.taskId, second.task.taskId)
+        assertEquals("com.test.minimal:inst-001", first.task.affinity)
+        assertEquals("com.test.minimal:inst-002", second.task.affinity)
+        assertEquals(2, stack.listTasks().size)
+    }
+
+    @Test
+    fun `standard launch uses latest task for same instance instead of global top task`() {
+        val stack = VirtualActivityStack()
+        val firstRoot = stack.launch(record(token = "token-a1", activity = "MainActivity", instanceId = "inst-001"))
+        stack.launch(record(token = "token-b1", activity = "MainActivity", instanceId = "inst-002"))
+
+        val firstDetail = stack.launch(record(token = "token-a2", activity = "DetailActivity", instanceId = "inst-001"))
+
+        assertEquals(firstRoot.task.taskId, firstDetail.task.taskId)
+        assertEquals("com.test.minimal:inst-001", firstDetail.task.affinity)
+        assertEquals(
+            listOf("token-a1", "token-a2"),
+            firstDetail.task.activities.map { it.token }
+        )
+        assertEquals(2, stack.listTasks().size)
+    }
+
+    @Test
     fun `activity record keeps backward compatible defaults`() {
         val record = record(token = "token-1", activity = "MainActivity")
 

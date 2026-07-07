@@ -6,6 +6,8 @@ internal object HostedActivityEvidenceFiles {
 
     fun instrumentation(instanceId: String): String = "${safeInstanceId(instanceId)}.activity-instrumentation.properties"
 
+    fun launchRecord(instanceId: String): String = "${safeInstanceId(instanceId)}.activity-launch-record.properties"
+
     fun context(instanceId: String): String = "${safeInstanceId(instanceId)}.activity-context.properties"
 
     fun remap(instanceId: String): String = "${safeInstanceId(instanceId)}.activity-remap.properties"

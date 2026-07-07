@@ -100,7 +100,9 @@ class VirtualPackageService(
 
     fun getLaunchIntentForPackage(packageName: String): Intent? {
         if (!snapshot.matchesPackageName(packageName)) return null
-        val launcher = snapshot.launcherActivityName ?: return null
+        val launcher = snapshot.launcherActivityName
+            ?: snapshot.activities.resolveLauncherIntentActivityName()
+            ?: return null
         return Intent(Intent.ACTION_MAIN)
             .addCategory(Intent.CATEGORY_LAUNCHER)
             .setComponent(ComponentName(snapshot.originPackageName, launcher))

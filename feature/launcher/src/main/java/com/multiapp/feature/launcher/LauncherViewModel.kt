@@ -21,6 +21,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +34,8 @@ import java.util.zip.ZipFile
 import javax.inject.Inject
 
 internal var launcherIoDispatcher: CoroutineDispatcher = Dispatchers.IO
+internal var instancesLoadTimeoutMs: Long = 15_000L
+internal var allAppsLoadTimeoutMs: Long = 15_000L
 
 internal fun normalizeApkComponentName(packageName: String, name: String?): String? {
     if (name.isNullOrBlank()) return null
@@ -72,6 +76,9 @@ class LauncherViewModel @Inject constructor(
     val allApps = _allApps.asStateFlow()
 
     private var loadJob: Job? = null
+    private var loadTimeoutJob: Job? = null
+    private var allAppsJob: Job? = null
+    private var allAppsTimeoutJob: Job? = null
 
     init {
         loadInstances()
@@ -79,15 +86,43 @@ class LauncherViewModel @Inject constructor(
 
     fun loadInstances() {
         loadJob?.cancel()
-        loadJob = viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true, error = null) }
+        loadTimeoutJob?.cancel()
+        _uiState.update { it.copy(isLoading = true, error = null) }
+
+        val job = viewModelScope.launch(launcherIoDispatcher) {
             try {
                 val records = instanceManager.listInstances()
+                ensureActive()
                 _uiState.update { it.copy(instances = records, isLoading = false) }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to load instances")
                 _uiState.update { it.copy(isLoading = false, error = e.message) }
+            }
+        }
+        loadJob = job
+
+        val timeoutJob = viewModelScope.launch {
+            delay(instancesLoadTimeoutMs)
+            if (loadJob === job && job.isActive) {
+                Timber.w("Timed out loading instances after ${instancesLoadTimeoutMs}ms")
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = "读取分身列表超时，请重试"
+                    )
+                }
+                loadJob = null
+                loadTimeoutJob = null
+                job.cancel()
+            }
+        }
+        loadTimeoutJob = timeoutJob
+        job.invokeOnCompletion {
+            if (loadJob === job) loadJob = null
+            if (loadTimeoutJob === timeoutJob) {
+                loadTimeoutJob = null
+                timeoutJob.cancel()
             }
         }
     }
@@ -210,15 +245,23 @@ class LauncherViewModel @Inject constructor(
     fun loadAllApps(forceRefresh: Boolean = false) {
         val currentState = _uiState.value
         if (!forceRefresh && currentState.allAppsLoaded) return
-        viewModelScope.launch(launcherIoDispatcher) {
-            _uiState.update {
-                it.copy(
-                    allAppsLoading = true,
-                    allAppsError = null
-                )
-            }
+        allAppsJob?.takeIf { it.isActive }?.let { activeJob ->
+            if (!forceRefresh) return
+            activeJob.cancel()
+            allAppsTimeoutJob?.cancel()
+        }
+
+        _uiState.update {
+            it.copy(
+                allAppsLoading = true,
+                allAppsError = null
+            )
+        }
+
+        val job = viewModelScope.launch(launcherIoDispatcher) {
             try {
                 val apps = installedAppRepository.listInstalledApps(forceRefresh)
+                ensureActive()
                 _allApps.value = apps
                 _uiState.update {
                     it.copy(
@@ -237,6 +280,32 @@ class LauncherViewModel @Inject constructor(
                         allAppsError = e.message ?: "Failed to load app list"
                     )
                 }
+            }
+        }
+        allAppsJob = job
+
+        val timeoutJob = viewModelScope.launch {
+            delay(allAppsLoadTimeoutMs)
+            if (allAppsJob === job && job.isActive) {
+                Timber.w("Timed out loading all apps after ${allAppsLoadTimeoutMs}ms")
+                _uiState.update {
+                    it.copy(
+                        allAppsLoading = false,
+                        allAppsLoaded = _allApps.value.isNotEmpty(),
+                        allAppsError = "读取应用列表超时，请重试"
+                    )
+                }
+                allAppsJob = null
+                allAppsTimeoutJob = null
+                job.cancel()
+            }
+        }
+        allAppsTimeoutJob = timeoutJob
+        job.invokeOnCompletion {
+            if (allAppsJob === job) allAppsJob = null
+            if (allAppsTimeoutJob === timeoutJob) {
+                allAppsTimeoutJob = null
+                timeoutJob.cancel()
             }
         }
     }

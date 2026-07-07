@@ -82,6 +82,25 @@ dispatchStatus=<Delivered|ReceiverNotFound|...>
 
 This evidence is emitted from the sticky ordered overload path after the overload is intercepted; `dispatchStatus` records the current virtual dispatcher result.
 
+### startForegroundService proxy/partial evidence
+
+Minimum fields:
+
+```text
+status=FOREGROUND_SERVICE_PROXY_STARTED
+api=startForegroundService
+hostFallback=false
+proxyStarted=true
+serviceResolved=true
+foreground=true
+reason=explicitForeground
+lifecycleImplemented=true
+guestForegroundLifecycleImplemented=false
+capabilityVerdict=PARTIAL
+```
+
+This evidence means the explicit guest foreground service was resolved and launched through the host service proxy. It is still `PARTIAL`: the host proxy enters the foreground path, but the guest foreground-service notification/lifecycle semantics are not complete.
+
 ### bindService overload evidence
 
 Minimum fields:
@@ -108,8 +127,9 @@ The probe should:
 1. Register a dynamic receiver with an explicit action.
 2. Send a broadcast for that dynamic receiver, if needed to show registration participates in virtual dispatch.
 3. Call `sendStickyOrderedBroadcast(...)` with a guest receiver component and a simple result receiver.
-4. Call at least the `bindService(Intent, ServiceConnection, int)` overload and record that the return value is `false`.
-5. On API levels where available, call executor and `BindServiceFlags` overloads so SDK36 device evidence covers the current overload surface.
+4. Call `startForegroundService(...)` with an explicit guest service so evidence records proxy-started foreground service coverage with `capabilityVerdict=PARTIAL`.
+5. Call at least the `bindService(Intent, ServiceConnection, int)` overload and record the observed proxy/connection evidence.
+6. On API levels where available, call executor and `BindServiceFlags` overloads so SDK36 device evidence covers the current overload surface.
 
 The fixture may log its local probe output for human debugging, but logcat is not the source of truth. The hosted evidence files are the source of truth.
 
@@ -203,7 +223,7 @@ Capture hosted evidence:
 Allowed:
 
 ```text
-PR-8 AMS API专项 device evidence added for registerReceiver, sticky ordered broadcast, and bindService overload blocking.
+PR-8 AMS API专项 device evidence added for registerReceiver, sticky ordered broadcast, startForegroundService proxy/partial coverage, and bindService overload evidence.
 ```
 
 Not allowed yet:
@@ -215,6 +235,6 @@ Virtual AMS complete.
 ## Spec Self-Review
 
 - Placeholder scan: no TODO/TBD placeholders remain.
-- Internal consistency: evidence file names, fields, and test assertions all refer to the same three API surfaces.
-- Scope check: one focused PR-8 device evidence slice; no global AMS proxy or bound-service lifecycle implementation is included.
-- Ambiguity check: bindService remains explicitly blocked; sticky ordered evidence proves interception/dispatch, not full sticky semantics compatibility.
+- Internal consistency: evidence file names, fields, and test assertions refer to the PR-8 receiver, broadcast, service proxy, foreground-service proxy, and bind/unbind API surfaces.
+- Scope check: one focused PR-8 device evidence slice; no global AMS proxy or full bound-service lifecycle implementation is included.
+- Ambiguity check: foreground service evidence is proxy/partial, not unsupported and not complete guest foreground-service lifecycle compatibility; sticky ordered evidence proves interception/dispatch, not full sticky semantics compatibility.

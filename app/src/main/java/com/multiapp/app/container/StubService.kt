@@ -1,43 +1,190 @@
 package com.multiapp.app.container
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import com.multiapp.core.loader.VirtualServiceDispatchResult
 import com.multiapp.core.loader.VirtualServiceDispatcher
+import com.multiapp.core.loader.VirtualServiceIntentStore
 import com.multiapp.core.loader.VirtualServiceManager
+import com.multiapp.core.loader.VirtualProcessRuntime
+import com.multiapp.core.loader.VirtualServiceStartRequest
 
 /** Host-declared Service proxy slot for v2 hosted containers. */
 class StubService : Service() {
+    private val mainHandler by lazy(LazyThreadSafetyMode.NONE) {
+        Handler(Looper.getMainLooper())
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val instanceId = intent?.getStringExtra(VirtualServiceManager.EXTRA_INSTANCE_ID).orEmpty()
-        val originPackage = intent?.getStringExtra(VirtualServiceManager.EXTRA_ORIGIN_PACKAGE_NAME).orEmpty()
-        val guestService = intent?.getStringExtra(VirtualServiceManager.EXTRA_GUEST_SERVICE_CLASS_NAME).orEmpty()
-        val reason = intent?.getStringExtra(VirtualServiceManager.EXTRA_SERVICE_START_REASON).orEmpty()
-        val foreground = intent?.getBooleanExtra(VirtualServiceManager.EXTRA_FOREGROUND_SERVICE, false) ?: false
+        val startRequest = intent?.let { VirtualServiceManager(packageName).requestFromProxyIntent(it) }
+        val instanceId = startRequest?.instanceId
+            ?: intent?.getStringExtra(VirtualServiceManager.EXTRA_INSTANCE_ID).orEmpty()
+        val originPackage = startRequest?.originPackageName
+            ?: intent?.getStringExtra(VirtualServiceManager.EXTRA_ORIGIN_PACKAGE_NAME).orEmpty()
+        val guestService = startRequest?.guestServiceClassName
+            ?: intent?.getStringExtra(VirtualServiceManager.EXTRA_GUEST_SERVICE_CLASS_NAME).orEmpty()
+        val reason = startRequest?.reason
+            ?: intent?.getStringExtra(VirtualServiceManager.EXTRA_SERVICE_START_REASON).orEmpty()
+        val foreground = startRequest?.foreground
+            ?: (intent?.getBooleanExtra(VirtualServiceManager.EXTRA_FOREGROUND_SERVICE, false) ?: false)
+        val foregroundStatus = enterForegroundIfNeeded(foreground)
+        val hasReusableRuntime = instanceId.isNotBlank() &&
+            VirtualProcessRuntime.global.reusableResult(instanceId) != null
+        if (shouldBindRuntimeAsync(instanceId, hasReusableRuntime)) {
+            Log.i(
+                TAG,
+                "StubService scheduling async runtime bind: instanceId=$instanceId, " +
+                    "origin=$originPackage, guest=$guestService, reason=$reason, " +
+                    "foreground=$foreground, foregroundStatus=$foregroundStatus, startId=$startId"
+            )
+            bindRuntimeAndDispatchAsync(
+                intent = intent,
+                startRequest = startRequest,
+                flags = flags,
+                startId = startId,
+                instanceId = instanceId,
+                originPackage = originPackage,
+                guestService = guestService,
+                reason = reason,
+                foreground = foreground,
+                foregroundStatus = foregroundStatus
+            )
+            return START_NOT_STICKY
+        }
 
+        val runtimeBindResult = if (startRequest != null) {
+            HostedServiceRuntimeBinder().ensureBound(this, startRequest)
+        } else {
+            HostedServiceRuntimeBinder().ensureBound(this, intent)
+        }
+        dispatchServiceStart(
+            intent = intent,
+            startRequest = startRequest,
+            flags = flags,
+            startId = startId,
+            instanceId = instanceId,
+            originPackage = originPackage,
+            guestService = guestService,
+            reason = reason,
+            foreground = foreground,
+            foregroundStatus = foregroundStatus,
+            runtimeBindResult = runtimeBindResult
+        )
+        return START_NOT_STICKY
+    }
+
+    private fun bindRuntimeAndDispatchAsync(
+        intent: Intent?,
+        startRequest: VirtualServiceStartRequest?,
+        flags: Int,
+        startId: Int,
+        instanceId: String,
+        originPackage: String,
+        guestService: String,
+        reason: String,
+        foreground: Boolean,
+        foregroundStatus: String
+    ) {
+        val hostContext = applicationContext ?: this
+        val completionHandler = mainHandler
+        Thread(
+            {
+                val runtimeBindResult = runCatching {
+                    if (startRequest != null) {
+                        HostedServiceRuntimeBinder().ensureBound(hostContext, startRequest)
+                    } else {
+                        HostedServiceRuntimeBinder().ensureBound(hostContext, intent)
+                    }
+                }.getOrElse { error ->
+                    HostedServiceRuntimeBindResult.Failed(
+                        instanceId = instanceId,
+                        errorClassName = error.javaClass.name,
+                        errorMessage = error.message,
+                        detail = "runtimeBindCrashed"
+                    )
+                }
+                completionHandler.post {
+                    dispatchServiceStart(
+                        intent = intent,
+                        startRequest = startRequest,
+                        flags = flags,
+                        startId = startId,
+                        instanceId = instanceId,
+                        originPackage = originPackage,
+                        guestService = guestService,
+                        reason = reason,
+                        foreground = foreground,
+                        foregroundStatus = foregroundStatus,
+                        runtimeBindResult = runtimeBindResult
+                    )
+                }
+            },
+            "multiapp-service-bind-${instanceId.take(8)}"
+        ).start()
+    }
+
+    private fun dispatchServiceStart(
+        intent: Intent?,
+        startRequest: VirtualServiceStartRequest?,
+        flags: Int,
+        startId: Int,
+        instanceId: String,
+        originPackage: String,
+        guestService: String,
+        reason: String,
+        foreground: Boolean,
+        foregroundStatus: String,
+        runtimeBindResult: HostedServiceRuntimeBindResult
+    ) {
         Log.i(
             TAG,
             "StubService received guest start: instanceId=$instanceId, " +
-                "origin=$originPackage, guest=$guestService, reason=$reason, startId=$startId"
+                "origin=$originPackage, guest=$guestService, reason=$reason, " +
+                "foreground=$foreground, foregroundStatus=$foregroundStatus, " +
+                "runtimeBindStatus=${runtimeBindResult.status}, startId=$startId"
         )
-        val dispatchResult = VirtualServiceDispatcher(hostContext = this).dispatch(intent, flags, startId)
+        val dispatchResult = if (startRequest != null) {
+            VirtualServiceDispatcher(hostContext = this).dispatch(startRequest, flags, startId)
+        } else {
+            VirtualServiceDispatcher(hostContext = this).dispatch(intent, flags, startId)
+        }
         val evidence = dispatchResult.toEvidenceFields(
             fallbackInstanceId = instanceId,
             fallbackOriginPackageName = originPackage,
             fallbackGuestServiceClassName = guestService,
             fallbackReason = reason,
             fallbackForeground = foreground,
+            foregroundStatus = foregroundStatus,
+            runtimeBindResult = runtimeBindResult,
             startId = startId
         )
-        if (evidence.instanceId.isNotBlank()) {
-            writeServiceEvidence(evidence)
+        val stopDecision = evidence.stubStopDecision()
+        val finalEvidence = evidence.copy(
+            stubStopped = stopDecision.stop,
+            stubStopDecision = stopDecision.reason,
+            foregroundHeld = foreground && foregroundStatus == FOREGROUND_STATUS_STARTED && !stopDecision.stop
+        )
+        if (finalEvidence.instanceId.isNotBlank()) {
+            writeServiceEvidence(finalEvidence)
         }
-        stopSelf(startId)
-        return START_NOT_STICKY
+        if (stopDecision.stop && foreground) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+        if (stopDecision.stop) {
+            stopSelf(startId)
+        }
+        VirtualServiceIntentStore.clear(startRequest?.proxyToken)
     }
 
     private fun writeServiceEvidence(evidence: ServiceEvidenceFields) {
@@ -53,9 +200,22 @@ class StubService : Service() {
                     "guestServiceClassName" to evidence.guestServiceClassName,
                     "reason" to evidence.reason,
                     "foreground" to evidence.foreground,
+                    "foregroundStatus" to evidence.foregroundStatus,
+                    "runtimeBindStatus" to evidence.runtimeBindStatus,
+                    "runtimeBindDetail" to evidence.runtimeBindDetail,
+                    "runtimeBindErrorClassName" to evidence.runtimeBindErrorClassName,
+                    "runtimeBindErrorMessage" to evidence.runtimeBindErrorMessage,
+                    "foregroundHeld" to evidence.foregroundHeld,
+                    "guestForegroundRequested" to evidence.guestForegroundRequested,
+                    "guestForegroundNotificationId" to evidence.guestForegroundNotificationId,
+                    "guestForegroundServiceType" to evidence.guestForegroundServiceType,
+                    "guestForegroundLifecycleImplemented" to false,
                     "startId" to evidence.startId,
-                    "stubStopped" to true,
+                    "stubStopped" to evidence.stubStopped,
+                    "stubStopDecision" to evidence.stubStopDecision,
                     "guestRecordCached" to evidence.guestRecordCached,
+                    "activeStartCount" to evidence.activeStartCount,
+                    "activeBindCount" to evidence.activeBindCount,
                     "lifecycle" to evidence.lifecycle,
                     "lifecycleSuccess" to evidence.lifecycleSuccess,
                     "startCommandResult" to evidence.startCommandResult,
@@ -75,6 +235,8 @@ class StubService : Service() {
         fallbackGuestServiceClassName: String,
         fallbackReason: String,
         fallbackForeground: Boolean,
+        foregroundStatus: String,
+        runtimeBindResult: HostedServiceRuntimeBindResult,
         startId: Int
     ): ServiceEvidenceFields {
         val request = startRequest
@@ -84,6 +246,11 @@ class StubService : Service() {
         val lifecycleSuccess: Boolean?
         val guestRecordCached: Boolean
         val startCommandResultValue: Int?
+        val activeStartCount: Int
+        val activeBindCount: Int
+        val guestForegroundRequested: Boolean
+        val guestForegroundNotificationId: Int?
+        val guestForegroundServiceType: Int
         val errorClassName: String?
         val errorMessage: String?
         when (this) {
@@ -94,6 +261,11 @@ class StubService : Service() {
                 lifecycleSuccess = lifecycleEvidence.success
                 guestRecordCached = lifecycleEvidence.cached
                 startCommandResultValue = lifecycleEvidence.startCommandResult
+                activeStartCount = lifecycleEvidence.activeStartCount
+                activeBindCount = lifecycleEvidence.activeBindCount
+                guestForegroundRequested = lifecycleEvidence.foreground
+                guestForegroundNotificationId = lifecycleEvidence.foregroundNotificationId
+                guestForegroundServiceType = lifecycleEvidence.foregroundServiceType
                 errorClassName = lifecycleEvidence.errorClassName
                 errorMessage = lifecycleEvidence.errorMessage
             }
@@ -104,6 +276,11 @@ class StubService : Service() {
                 lifecycleSuccess = null
                 guestRecordCached = false
                 startCommandResultValue = null
+                activeStartCount = 0
+                activeBindCount = 0
+                guestForegroundRequested = false
+                guestForegroundNotificationId = null
+                guestForegroundServiceType = 0
                 errorClassName = null
                 errorMessage = null
             }
@@ -114,6 +291,11 @@ class StubService : Service() {
                 lifecycleSuccess = null
                 guestRecordCached = false
                 startCommandResultValue = null
+                activeStartCount = 0
+                activeBindCount = 0
+                guestForegroundRequested = false
+                guestForegroundNotificationId = null
+                guestForegroundServiceType = 0
                 errorClassName = null
                 errorMessage = null
             }
@@ -124,6 +306,11 @@ class StubService : Service() {
                 lifecycleSuccess = null
                 guestRecordCached = false
                 startCommandResultValue = null
+                activeStartCount = 0
+                activeBindCount = 0
+                guestForegroundRequested = false
+                guestForegroundNotificationId = null
+                guestForegroundServiceType = 0
                 errorClassName = null
                 errorMessage = null
             }
@@ -134,6 +321,11 @@ class StubService : Service() {
                 lifecycleSuccess = lifecycleEvidence.success
                 guestRecordCached = lifecycleEvidence.cached
                 startCommandResultValue = lifecycleEvidence.startCommandResult
+                activeStartCount = lifecycleEvidence.activeStartCount
+                activeBindCount = lifecycleEvidence.activeBindCount
+                guestForegroundRequested = lifecycleEvidence.foreground
+                guestForegroundNotificationId = lifecycleEvidence.foregroundNotificationId
+                guestForegroundServiceType = lifecycleEvidence.foregroundServiceType
                 errorClassName = lifecycleEvidence.errorClassName
                 errorMessage = lifecycleEvidence.errorMessage
             }
@@ -144,6 +336,11 @@ class StubService : Service() {
                 lifecycleSuccess = lifecycleEvidence.success
                 guestRecordCached = lifecycleEvidence.cached
                 startCommandResultValue = lifecycleEvidence.startCommandResult
+                activeStartCount = lifecycleEvidence.activeStartCount
+                activeBindCount = lifecycleEvidence.activeBindCount
+                guestForegroundRequested = lifecycleEvidence.foreground
+                guestForegroundNotificationId = lifecycleEvidence.foregroundNotificationId
+                guestForegroundServiceType = lifecycleEvidence.foregroundServiceType
                 errorClassName = lifecycleEvidence.errorClassName
                 errorMessage = lifecycleEvidence.errorMessage
             }
@@ -154,6 +351,11 @@ class StubService : Service() {
                 lifecycleSuccess = lifecycleEvidence.success
                 guestRecordCached = lifecycleEvidence.cached
                 startCommandResultValue = lifecycleEvidence.startCommandResult
+                activeStartCount = lifecycleEvidence.activeStartCount
+                activeBindCount = lifecycleEvidence.activeBindCount
+                guestForegroundRequested = lifecycleEvidence.foreground
+                guestForegroundNotificationId = lifecycleEvidence.foregroundNotificationId
+                guestForegroundServiceType = lifecycleEvidence.foregroundServiceType
                 errorClassName = lifecycleEvidence.errorClassName
                 errorMessage = lifecycleEvidence.errorMessage
             }
@@ -164,6 +366,11 @@ class StubService : Service() {
                 lifecycleSuccess = lifecycleEvidence.success
                 guestRecordCached = lifecycleEvidence.cached
                 startCommandResultValue = lifecycleEvidence.startCommandResult
+                activeStartCount = lifecycleEvidence.activeStartCount
+                activeBindCount = lifecycleEvidence.activeBindCount
+                guestForegroundRequested = lifecycleEvidence.foreground
+                guestForegroundNotificationId = lifecycleEvidence.foregroundNotificationId
+                guestForegroundServiceType = lifecycleEvidence.foregroundServiceType
                 errorClassName = lifecycleEvidence.errorClassName
                 errorMessage = lifecycleEvidence.errorMessage
             }
@@ -174,6 +381,11 @@ class StubService : Service() {
                 lifecycleSuccess = null
                 guestRecordCached = false
                 startCommandResultValue = null
+                activeStartCount = 0
+                activeBindCount = 0
+                guestForegroundRequested = false
+                guestForegroundNotificationId = null
+                guestForegroundServiceType = 0
                 errorClassName = null
                 errorMessage = null
             }
@@ -184,6 +396,11 @@ class StubService : Service() {
                 lifecycleSuccess = null
                 guestRecordCached = false
                 startCommandResultValue = null
+                activeStartCount = 0
+                activeBindCount = 0
+                guestForegroundRequested = false
+                guestForegroundNotificationId = null
+                guestForegroundServiceType = 0
                 errorClassName = null
                 errorMessage = null
             }
@@ -194,16 +411,45 @@ class StubService : Service() {
             guestServiceClassName = request?.guestServiceClassName ?: fallbackGuestServiceClassName,
             reason = request?.reason ?: fallbackReason,
             foreground = request?.foreground ?: fallbackForeground,
+            foregroundStatus = foregroundStatus,
+            runtimeBindStatus = runtimeBindResult.status,
+            runtimeBindDetail = runtimeBindResult.detail,
+            runtimeBindErrorClassName = (runtimeBindResult as? HostedServiceRuntimeBindResult.Failed)?.errorClassName,
+            runtimeBindErrorMessage = (runtimeBindResult as? HostedServiceRuntimeBindResult.Failed)?.errorMessage,
             startId = startId,
             status = status,
             lifecycle = lifecycle,
             lifecycleSuccess = lifecycleSuccess,
             guestRecordCached = guestRecordCached,
             startCommandResult = startCommandResultValue,
+            activeStartCount = activeStartCount,
+            activeBindCount = activeBindCount,
+            guestForegroundRequested = guestForegroundRequested,
+            guestForegroundNotificationId = guestForegroundNotificationId,
+            guestForegroundServiceType = guestForegroundServiceType,
             errorClassName = errorClassName,
             errorMessage = errorMessage,
-            detail = detail
+            detail = detail,
+            foregroundHeld = false,
+            stubStopped = true,
+            stubStopDecision = "UNDECIDED"
         )
+    }
+
+    private fun ServiceEvidenceFields.stubStopDecision(): StubStopDecision {
+        if (status != "STARTED") {
+            return StubStopDecision(stop = true, reason = "STOP_DISPATCH_$status")
+        }
+        if (foreground && foregroundStatus != FOREGROUND_STATUS_STARTED) {
+            return StubStopDecision(stop = true, reason = "STOP_FOREGROUND_NOT_STARTED")
+        }
+        if (lifecycleSuccess != true) {
+            return StubStopDecision(stop = true, reason = "STOP_LIFECYCLE_NOT_SUCCESSFUL")
+        }
+        if (activeStartCount > 0 || activeBindCount > 0 || foreground) {
+            return StubStopDecision(stop = false, reason = "KEEP_GUEST_SERVICE_ACTIVE")
+        }
+        return StubStopDecision(stop = true, reason = "STOP_NO_ACTIVE_GUEST_RECORD")
     }
 
     private data class ServiceEvidenceFields(
@@ -212,18 +458,89 @@ class StubService : Service() {
         val guestServiceClassName: String,
         val reason: String,
         val foreground: Boolean,
+        val foregroundStatus: String,
+        val runtimeBindStatus: String,
+        val runtimeBindDetail: String,
+        val runtimeBindErrorClassName: String?,
+        val runtimeBindErrorMessage: String?,
+        val foregroundHeld: Boolean,
         val startId: Int,
         val status: String,
         val lifecycle: String,
         val lifecycleSuccess: Boolean?,
         val guestRecordCached: Boolean,
+        val activeStartCount: Int,
+        val activeBindCount: Int,
+        val guestForegroundRequested: Boolean,
+        val guestForegroundNotificationId: Int?,
+        val guestForegroundServiceType: Int,
         val startCommandResult: Int?,
         val errorClassName: String?,
         val errorMessage: String?,
-        val detail: String
+        val detail: String,
+        val stubStopped: Boolean,
+        val stubStopDecision: String
+    )
+
+    private data class StubStopDecision(
+        val stop: Boolean,
+        val reason: String
     )
 
     companion object {
         private const val TAG = "StubService"
+        private const val FOREGROUND_NOTIFICATION_ID = 10042
+        private const val FOREGROUND_CHANNEL_ID = "multiapp_proxy_service"
+        private const val FOREGROUND_STATUS_STARTED = "STARTED"
+
+        internal fun shouldBindRuntimeAsync(
+            instanceId: String,
+            hasReusableRuntime: Boolean
+        ): Boolean = instanceId.isNotBlank() && !hasReusableRuntime
+    }
+
+    private fun enterForegroundIfNeeded(foreground: Boolean): String {
+        if (!foreground) return "SKIPPED"
+        return runCatching {
+            val notification = buildForegroundNotification()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    FOREGROUND_NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(FOREGROUND_NOTIFICATION_ID, notification)
+            }
+            "STARTED"
+        }.getOrElse { error ->
+            Log.w(TAG, "Unable to enter foreground for hosted service proxy", error)
+            "FAILED:${error.javaClass.name}:${error.message.orEmpty()}"
+        }
+    }
+
+    private fun buildForegroundNotification(): Notification {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(
+                NotificationChannel(
+                    FOREGROUND_CHANNEL_ID,
+                    "MultiApp service proxy",
+                    NotificationManager.IMPORTANCE_LOW
+                )
+            )
+        }
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, FOREGROUND_CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+        return builder
+            .setSmallIcon(applicationInfo.icon.takeIf { it != 0 } ?: com.multiapp.app.R.mipmap.ic_launcher)
+            .setContentTitle("MultiApp")
+            .setContentText("Running hosted service")
+            .setOngoing(true)
+            .build()
     }
 }

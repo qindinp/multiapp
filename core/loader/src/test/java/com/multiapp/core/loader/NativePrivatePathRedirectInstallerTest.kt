@@ -62,7 +62,7 @@ class NativePrivatePathRedirectInstallerTest {
     }
 
     @Test
-    fun `evidence keeps realpath unsupported until native realpath hook exists`() {
+    fun `evidence marks realpath partial until device io probe verifies redirect`() {
         val result = NativePrivatePathRedirectInstallResult(
             hookInstalled = true,
             ruleCount = 2,
@@ -74,7 +74,8 @@ class NativePrivatePathRedirectInstallerTest {
         assertEquals("PARTIAL", evidence["nativePrivatePathRedirectVerdict"])
         assertEquals("PARTIAL", evidence["nativeIoRedirectVerdict"])
         assertEquals("GUEST_PRIVATE_PATHS_ONLY", evidence["nativeRedirectScope"])
-        assertEquals("UNSUPPORTED", evidence["nativeRealpathRedirectVerdict"])
+        assertEquals("PARTIAL", evidence["nativeRealpathRedirectVerdict"])
+        assertEquals("PATH_HOOK_INSTALLED_NEEDS_DEVICE_IO_PROBE", evidence["nativeRealpathRedirectVerdictReason"])
         assertEquals("false", evidence["procMapsSpoofEnabled"])
         assertEquals("false", evidence["procStatusSpoofEnabled"])
     }

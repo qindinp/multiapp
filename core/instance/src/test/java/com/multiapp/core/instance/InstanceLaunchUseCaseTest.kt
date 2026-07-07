@@ -45,4 +45,12 @@ class InstanceLaunchUseCaseTest {
         assertEquals("com.multiapp.app", factoryPackageName)
         assertEquals("instance-1", factoryInstanceId)
     }
+
+    @Test
+    fun `provider routing hook extra key matches container contract`() {
+        assertEquals(
+            "multiapp.profile.providerHookEnabled",
+            InstanceLaunchUseCase.EXTRA_ENABLE_PROVIDER_HOOK
+        )
+    }
 }

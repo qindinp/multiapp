@@ -42,9 +42,10 @@ class ProviderRoutingStageTest {
         assertEquals("false", evidence["processWideProviderHook"])
         assertEquals("VirtualContentResolver", evidence["authorityRewriteEntry"])
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenTypedAssetFileStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationNotifyChangeStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationContentObserverStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationGrantUriPermissionStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationRegisterContentObserverStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationUnregisterContentObserverStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationGrantUriPermissionStatus"])
         assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
         assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
     }
@@ -53,6 +54,8 @@ class ProviderRoutingStageTest {
     fun `execute installs provider hook when profile enabled`() {
         val snapshot = snapshotWithProvider()
         val hookEngine = mockk<HookEngine>(relaxed = true)
+        io.mockk.every { hookEngine.initLsplant(any()) } returns true
+        io.mockk.every { hookEngine.hookMethodPassThrough(any(), any(), any()) } returns true
         val stage = ProviderRoutingStage(
             hostPackageName = "com.multiapp.app",
             providerHookInstallEnabled = true,
@@ -68,6 +71,7 @@ class ProviderRoutingStageTest {
         val evidence = output.result.evidence.associate { it.key to it.value }
         assertEquals("INSTALLED", evidence["providerHookInstallStatus"])
         assertEquals("1", evidence["providerHookInstallAuthorityMapSize"])
+        assertEquals("ROUTED_BY_CONTENT_RESOLVER_HOOK", evidence["providerOperationNotifyChangeStatus"])
         assertEquals("CONTENT_RESOLVER_PASS_THROUGH_HOOK", evidence["providerRoutingPrimary"])
         assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingFallback"])
         verify(atLeast = 1) {

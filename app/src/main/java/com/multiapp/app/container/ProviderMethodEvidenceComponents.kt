@@ -11,7 +11,18 @@ object ProviderMethodEvidenceComponents {
         "openAssetFile" to "provider-open-asset-file",
         "openTypedAssetFile" to "provider-open-typed-asset-file",
         "bulkInsert" to "provider-bulk-insert",
-        "getType" to "provider-get-type"
+        "getType" to "provider-get-type",
+        "openFileDescriptor" to "provider-open-file-descriptor",
+        "openAssetFileDescriptor" to "provider-open-asset-file-descriptor",
+        "openTypedAssetFileDescriptor" to "provider-open-typed-asset-file-descriptor",
+        "notifyChange" to "provider-notify-change",
+        "registerContentObserver" to "provider-register-content-observer",
+        "unregisterContentObserver" to "provider-unregister-content-observer",
+        "ContentObserver" to "provider-register-content-observer",
+        "grantUriPermission" to "provider-grant-uri-permission",
+        "revokeUriPermission" to "provider-revoke-uri-permission",
+        "canonicalize" to "provider-canonicalize",
+        "uncanonicalize" to "provider-uncanonicalize"
     )
 
     fun forOperation(operationName: String): String {

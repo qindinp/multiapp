@@ -135,7 +135,7 @@ class NativeLibrariesStageTest {
         assertEquals("PARTIAL", evidence["nativeIoRedirectVerdict"])
         assertEquals("2", evidence["nativePrivatePathRedirectRuleCount"])
         assertEquals("GUEST_PRIVATE_PATHS_ONLY", evidence["nativeRedirectScope"])
-        assertEquals("UNSUPPORTED", evidence["nativeRealpathRedirectVerdict"])
+        assertEquals("PARTIAL", evidence["nativeRealpathRedirectVerdict"])
         assertEquals("false", evidence["procMapsSpoofEnabled"])
         assertEquals("false", evidence["procStatusSpoofEnabled"])
     }

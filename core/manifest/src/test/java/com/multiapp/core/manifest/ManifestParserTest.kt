@@ -36,6 +36,8 @@ class ManifestParserTest {
 
             <application android:name=".MyApplication" android:label="TestApp">
 
+                <meta-data android:name="channel" android:value="default"/>
+
                 <activity android:name=".MainActivity"
                     android:exported="true">
                     <intent-filter>
@@ -48,7 +50,13 @@ class ManifestParserTest {
 
                 <service android:name=".MyService"
                     android:exported="false"
-                    android:process=":remote"/>
+                    android:process=":remote">
+                    <intent-filter>
+                        <action android:name="com.example.testapp.SYNC"/>
+                        <category android:name="android.intent.category.DEFAULT"/>
+                        <data android:scheme="content"/>
+                    </intent-filter>
+                </service>
 
                 <receiver android:name=".MyReceiver" android:exported="true"/>
 
@@ -165,6 +173,16 @@ class ManifestParserTest {
         }
 
         @Test
+        fun `parse full manifest preserves service intent filters with data scheme`() {
+            val result = parser.parseFromXml(fullManifestXml())
+            val filter = result.services.single { it.name == ".MyService" }.intentFilters.single()
+
+            assertEquals(listOf("com.example.testapp.SYNC"), filter.actions)
+            assertEquals(listOf("android.intent.category.DEFAULT"), filter.categories)
+            assertEquals(listOf("content"), filter.dataSchemes)
+        }
+
+        @Test
         fun `解析完整 manifest 提取所有 receiver`() {
             val result = parser.parseFromXml(fullManifestXml())
             assertEquals(1, result.receivers.size)
@@ -190,6 +208,12 @@ class ManifestParserTest {
         fun `解析完整 manifest 提取 application label`() {
             val result = parser.parseFromXml(fullManifestXml())
             assertEquals("TestApp", result.applicationLabel)
+        }
+
+        @Test
+        fun `parse full manifest preserves application meta-data`() {
+            val result = parser.parseFromXml(fullManifestXml())
+            assertEquals("default", result.applicationMetaData.single { it.name == "channel" }.value)
         }
 
         @Test
@@ -219,6 +243,32 @@ class ManifestParserTest {
             assertEquals(0x7f100001, themed.applicationThemeId)
             assertEquals(0x7f100002, themed.activities.single { it.name == ".MainActivity" }.themeId)
             assertEquals(0, themed.activities.single { it.name == ".SettingsActivity" }.themeId)
+        }
+
+        @Test
+        fun `merge package info fills missing alias target activity`() {
+            val parsed = parser.parseFromXml(aliasLauncherManifestXml())
+            val manifest = parsed.copy(
+                activities = parsed.activities.map { activity ->
+                    if (activity.name == ".launcher4") activity.copy(targetActivityName = null) else activity
+                }
+            )
+            val merged = parser.applyPackageInfoThemeIds(
+                manifest = manifest,
+                packageInfo = PackageInfo().apply {
+                    activities = arrayOf(
+                        ActivityInfo().apply {
+                            name = "com.example.alias.launcher4"
+                            targetActivity = "com.example.alias.MainActivity"
+                            theme = 0x7f100020
+                        }
+                    )
+                }
+            )
+
+            val alias = merged.activities.single { it.name == ".launcher4" }
+            assertEquals("com.example.alias.MainActivity", alias.targetActivityName)
+            assertEquals(0x7f100020, alias.themeId)
         }
 
         @Test

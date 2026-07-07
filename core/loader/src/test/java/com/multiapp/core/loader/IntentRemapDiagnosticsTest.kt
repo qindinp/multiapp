@@ -32,4 +32,26 @@ class IntentRemapDiagnosticsTest {
         assertEquals("com.other.app", result[0])
         assertEquals(123, result[1])
     }
+
+    @Test
+    fun `remapNotificationPackageArgs rewrites origin and virtual packages to host`() {
+        val args = arrayOf<Any?>(
+            "com.example.app",
+            "channel-id",
+            "com.multiapp.instance.abc",
+            "com.other.app"
+        )
+
+        val result = IntentRemapDiagnostics.remapNotificationPackageArgs(
+            methodName = "getNotificationChannels",
+            args = args,
+            sourcePackages = setOf("com.example.app", "com.multiapp.instance.abc"),
+            hostPackageName = "com.multiapp.app"
+        )
+
+        assertEquals("com.multiapp.app", result[0])
+        assertEquals("channel-id", result[1])
+        assertEquals("com.multiapp.app", result[2])
+        assertEquals("com.other.app", result[3])
+    }
 }

@@ -79,6 +79,22 @@ class HostedActivityIdentityTest {
     }
 
     @Test
+    fun `application info for runtime supplies instance lib dir when native path is absent`() {
+        val source = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            nativeLibraryDir = null
+        }
+        val config = config(nativeLibraryDir = null)
+
+        val runtimeInfo = HostedActivityIdentity.applicationInfoForRuntime(config, source)
+
+        assertEquals(
+            "/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib",
+            runtimeInfo.nativeLibraryDir
+        )
+    }
+
+    @Test
     fun `application info for runtime rewrites source protected storage identity`() {
         val source = ApplicationInfo().apply {
             packageName = "com.multiapp.app"
@@ -179,13 +195,16 @@ class HostedActivityIdentityTest {
         assertSame(runtimeInfo, activityInfo.applicationInfo)
     }
 
-    private fun config(snapshot: VirtualPackageSnapshot? = null) = VirtualContextConfig(
+    private fun config(
+        snapshot: VirtualPackageSnapshot? = null,
+        nativeLibraryDir: String? = "/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib"
+    ) = VirtualContextConfig(
         instanceId = "inst-001",
         originPackageName = "com.test.minimal",
         virtualPackageName = "com.multiapp.instance.abc",
         dataDir = "/data/user/0/com.multiapp.app/files/instance_data/inst-001",
         sourceDir = "/data/apks/minimal.apk",
-        nativeLibraryDir = "/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib",
+        nativeLibraryDir = nativeLibraryDir,
         classLoader = ClassLoader.getSystemClassLoader(),
         applicationLabel = "MinimalTest",
         packageSnapshot = snapshot

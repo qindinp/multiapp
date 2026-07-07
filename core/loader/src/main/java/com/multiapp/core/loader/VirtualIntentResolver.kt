@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import android.content.ComponentName
 import android.content.Intent
+import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
 data class VirtualActivityLaunchRequest(
@@ -10,7 +11,8 @@ data class VirtualActivityLaunchRequest(
     val guestActivityClassName: String,
     val sourceIntent: Intent,
     val reason: String,
-    val launchMode: String? = null
+    val launchMode: String? = null,
+    val taskAffinity: String? = null
 )
 
 /** Resolves guest Activity intents against a virtual package snapshot. */
@@ -28,12 +30,31 @@ class VirtualIntentResolver(
             VirtualIntentFilterMatcher.matches(intent, component)
         }
         if (matched != null) {
-            return request(matched.effectiveActivityClassName(), intent, if (isLauncherIntent(intent)) "launcher" else "implicit", matched.launchMode)
+            return request(
+                guestActivityClassName = matched.effectiveActivityClassName(),
+                sourceIntent = intent,
+                reason = if (isLauncherIntent(intent)) "launcher" else "implicit",
+                launchMode = matched.launchMode,
+                taskAffinity = taskAffinityFor(matched)
+            )
         }
 
         if (isLauncherIntent(intent)) {
-            val launcher = snapshot.launcherActivityName ?: return null
-            return request(launcher, intent, "launcher")
+            val launcherComponent = snapshot.launcherActivityName
+                ?.let(::findActivityByNameOrTarget)
+                ?: snapshot.activities.firstOrNull { it.hasLauncherIntentFilter() }
+            if (launcherComponent != null) {
+                return request(
+                    guestActivityClassName = launcherComponent.effectiveActivityClassName(),
+                    sourceIntent = intent,
+                    reason = "launcher",
+                    launchMode = launcherComponent.launchMode,
+                    taskAffinity = taskAffinityFor(launcherComponent)
+                )
+            }
+            val launcher = snapshot.launcherActivityName
+                ?: return null
+            return request(launcher, intent, "launcher", taskAffinity = taskAffinityFor(null))
         }
 
         return null
@@ -52,7 +73,13 @@ class VirtualIntentResolver(
         if (component == null && snapshot.launcherActivityName != normalizedClassName) {
             return null
         }
-        return request(component?.effectiveActivityClassName() ?: normalizedClassName, sourceIntent, "explicit", component?.launchMode)
+        return request(
+            guestActivityClassName = component?.effectiveActivityClassName() ?: normalizedClassName,
+            sourceIntent = sourceIntent,
+            reason = "explicit",
+            launchMode = component?.launchMode,
+            taskAffinity = taskAffinityFor(component)
+        )
     }
 
     private fun resolveExplicit(component: ComponentName): VirtualActivityLaunchRequest? {
@@ -71,18 +98,30 @@ class VirtualIntentResolver(
         guestActivityClassName: String,
         sourceIntent: Intent,
         reason: String,
-        launchMode: String? = snapshot.activities.firstOrNull { it.name == guestActivityClassName }?.launchMode
+        launchMode: String? = snapshot.activities.firstOrNull { it.name == guestActivityClassName }?.launchMode,
+        taskAffinity: String? = taskAffinityFor(findActivityByNameOrTarget(guestActivityClassName))
     ): VirtualActivityLaunchRequest = VirtualActivityLaunchRequest(
         instanceId = snapshot.instanceId,
         originPackageName = snapshot.originPackageName,
         guestActivityClassName = guestActivityClassName,
         sourceIntent = sourceIntent,
         reason = reason,
-        launchMode = launchMode
+        launchMode = launchMode,
+        taskAffinity = taskAffinity
     )
 
     private fun isLauncherIntent(intent: Intent): Boolean =
         intent.action == Intent.ACTION_MAIN && intent.categories?.contains(Intent.CATEGORY_LAUNCHER) == true
+
+    private fun findActivityByNameOrTarget(className: String): ResolvedComponent? =
+        snapshot.activities.firstOrNull { it.name == className || it.targetActivityName == className }
+
+    private fun taskAffinityFor(component: ResolvedComponent?): String {
+        val guestAffinity = component?.taskAffinity?.takeIf { it.isNotBlank() }
+            ?: snapshot.taskAffinity?.takeIf { it.isNotBlank() }
+            ?: snapshot.originPackageName
+        return "$guestAffinity:${snapshot.instanceId}"
+    }
 }
 
 private fun com.multiapp.core.model.virtual.ResolvedComponent.effectiveActivityClassName(): String =

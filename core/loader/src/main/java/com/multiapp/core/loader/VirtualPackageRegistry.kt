@@ -12,12 +12,15 @@ import java.util.concurrent.ConcurrentHashMap
  */
 class VirtualPackageRegistry {
     private val byInstanceId = ConcurrentHashMap<String, VirtualPackageSnapshot>()
-    private val byPackageName = ConcurrentHashMap<String, String>()
+    private val byVirtualPackageName = ConcurrentHashMap<String, String>()
+    private val byOriginPackageName = ConcurrentHashMap<String, MutableSet<String>>()
 
     fun register(snapshot: VirtualPackageSnapshot): VirtualPackageSnapshot {
         byInstanceId[snapshot.instanceId] = snapshot
-        byPackageName[snapshot.originPackageName] = snapshot.instanceId
-        byPackageName[snapshot.virtualPackageName] = snapshot.instanceId
+        byVirtualPackageName[snapshot.virtualPackageName] = snapshot.instanceId
+        byOriginPackageName.compute(snapshot.originPackageName) { _, existing ->
+            (existing ?: linkedSetOf()).apply { add(snapshot.instanceId) }
+        }
         return snapshot
     }
 
@@ -25,12 +28,21 @@ class VirtualPackageRegistry {
 
     fun getByPackageName(packageName: String?): VirtualPackageSnapshot? {
         if (packageName.isNullOrBlank()) return null
-        return byPackageName[packageName]?.let { byInstanceId[it] }
+        byVirtualPackageName[packageName]?.let { instanceId -> return byInstanceId[instanceId] }
+        return getUniqueByOriginPackageName(packageName)
+    }
+
+    fun getUniqueByOriginPackageName(originPackageName: String?): VirtualPackageSnapshot? {
+        if (originPackageName.isNullOrBlank()) return null
+        val instanceIds = byOriginPackageName[originPackageName].orEmpty()
+        if (instanceIds.size != 1) return null
+        return byInstanceId[instanceIds.first()]
     }
 
     fun clear() {
         byInstanceId.clear()
-        byPackageName.clear()
+        byVirtualPackageName.clear()
+        byOriginPackageName.clear()
     }
 
     companion object {

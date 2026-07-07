@@ -2,11 +2,17 @@ package com.multiapp.core.loader
 
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
+import android.os.Handler
+import android.os.Looper
 import com.multiapp.core.common.EvidenceSanitizer
+import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import java.io.File
+import java.util.concurrent.Executor
 
 interface VirtualAmsComponentDispatcher {
     fun resolveStartActivityIntent(intent: Intent): VirtualContextWrapper.StartActivityMappingResult
@@ -21,6 +27,17 @@ interface VirtualAmsComponentDispatcher {
 
     fun dispatchStopService(intent: Intent): VirtualServiceStopDispatchResult?
 
+    fun dispatchBindService(
+        intent: Intent,
+        virtualContext: Context,
+        guestClassLoader: ClassLoader,
+        connection: ServiceConnection,
+        flags: Int,
+        executor: Executor?
+    ): VirtualServiceBindDispatchResult
+
+    fun dispatchUnbindService(connection: ServiceConnection): VirtualServiceUnbindDispatchResult
+
     fun dispatchBroadcast(
         intent: Intent,
         virtualContext: Context,
@@ -34,15 +51,32 @@ class DefaultVirtualAmsComponentDispatcher(
     private val packageSnapshot: VirtualPackageSnapshot?,
     private val instanceId: String = packageSnapshot?.instanceId.orEmpty(),
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
-    private val proxyActivityRegistry: ProxyActivityRegistry = defaultProxyActivityRegistry(hostPackageName),
+    private val proxyActivityRegistry: ProxyActivityRegistry = defaultProxyActivityRegistry(
+        hostPackageName,
+        hostContext?.filesDir
+    ),
     private val servicePackageRegistry: VirtualPackageRegistry = VirtualPackageRegistry.global,
     private val serviceRuntime: VirtualServiceRuntime = VirtualServiceRuntime.global,
     private val broadcastManager: VirtualBroadcastManager = VirtualBroadcastManager(),
     private val serviceProxyIntentFactory: (VirtualServiceManager, VirtualServiceStartRequest) -> Intent = { manager, request ->
         manager.createProxyIntent(request)
     },
-    private val activityProxyIntentFactory: ((VirtualActivityRecord, Intent) -> Intent)? = null
+    private val activityProxyIntentFactory: ((VirtualActivityRecord, Intent) -> Intent)? = null,
+    private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global
 ) : VirtualAmsComponentDispatcher {
+
+    private val boundServiceConnections = linkedMapOf<ServiceConnection, VirtualServiceBoundConnection>()
+
+    private val activityManager: VirtualActivityManager? by lazy(LazyThreadSafetyMode.NONE) {
+        hostContext?.let { context ->
+            VirtualActivityManager(
+                context = context,
+                proxyActivityRegistry = proxyActivityRegistry,
+                hostPackageName = hostPackageName,
+                activityRecordManager = activityRecordManager
+            )
+        }
+    }
 
     override fun resolveStartActivityIntent(intent: Intent): VirtualContextWrapper.StartActivityMappingResult {
         return when (val plan = planStartActivityIntent(intent)) {
@@ -85,22 +119,38 @@ class DefaultVirtualAmsComponentDispatcher(
     private fun remapStartActivityRequest(
         request: VirtualActivityLaunchRequest
     ): VirtualContextWrapper.StartActivityMappingResult.Remapped {
+        val manager = activityManager
+        val record = manager?.allocateGuestActivity(request)
+            ?: allocateGuestActivityFallback(request)
+        val proxyIntentFactory = activityProxyIntentFactory
+            ?: { activityRecord: VirtualActivityRecord, sourceIntent: Intent ->
+                manager?.createProxyIntent(activityRecord, sourceIntent)
+                    ?: createProxyIntent(activityRecord, sourceIntent)
+            }
+        return VirtualContextWrapper.StartActivityMappingResult.Remapped(
+            sourceIntent = request.sourceIntent,
+            proxyIntent = proxyIntentFactory(record, request.sourceIntent)
+        )
+    }
+
+    private fun allocateGuestActivityFallback(request: VirtualActivityLaunchRequest): VirtualActivityRecord {
+        val taskAffinity = request.taskAffinity ?: rootTaskAffinity(
+            originPackageName = request.originPackageName,
+            instanceId = request.instanceId
+        )
         val record = proxyActivityRegistry.allocate(
             instanceId = request.instanceId,
             originPackageName = request.originPackageName,
             guestActivityClassName = request.guestActivityClassName,
-            launchMode = request.launchMode
+            launchMode = request.launchMode,
+            taskKey = taskAffinity,
+            taskAffinity = taskAffinity
         )
-        val launchResult = activityRecordManager.registerLaunch(
+        return activityRecordManager.registerLaunch(
             record = record,
             intentFlags = request.sourceIntent.safeFlags(),
             dataIntent = request.sourceIntent.toVirtualIntentSnapshot()
-        )
-        val proxyIntentFactory = activityProxyIntentFactory ?: ::createProxyIntent
-        return VirtualContextWrapper.StartActivityMappingResult.Remapped(
-            sourceIntent = request.sourceIntent,
-            proxyIntent = proxyIntentFactory(launchResult.activity, request.sourceIntent)
-        )
+        ).activity
     }
 
     private sealed class ActivityStartPlan {
@@ -120,27 +170,17 @@ class DefaultVirtualAmsComponentDispatcher(
             foreground = foreground,
             reason = "missingPackageSnapshot"
         )
-        if (intent.component == null) {
-            return VirtualContextWrapper.StartServiceMappingResult.Blocked(
-                sourceIntent = intent,
-                foreground = foreground,
-                reason = "implicitServiceIntent"
-            )
-        }
         val manager = VirtualServiceManager(hostPackageName = hostPackageName)
-        val request = manager.resolveStartService(snapshot, intent)
+        val request = if (foreground) {
+            manager.resolveStartForegroundService(snapshot, intent)
+        } else {
+            manager.resolveStartService(snapshot, intent)
+        }
             ?: return VirtualContextWrapper.StartServiceMappingResult.Blocked(
                 sourceIntent = intent,
                 foreground = foreground,
                 reason = "unsupportedServiceIntent"
             )
-        if (foreground) {
-            return VirtualContextWrapper.StartServiceMappingResult.Blocked(
-                sourceIntent = intent,
-                foreground = true,
-                reason = FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON
-            )
-        }
         val proxyIntent = serviceProxyIntentFactory(manager, request)
         return VirtualContextWrapper.StartServiceMappingResult.Remapped(
             sourceIntent = intent,
@@ -159,6 +199,162 @@ class DefaultVirtualAmsComponentDispatcher(
             packageRegistry = servicePackageRegistry,
             serviceRuntime = serviceRuntime
         ).dispatchStop(request)
+    }
+
+    override fun dispatchBindService(
+        intent: Intent,
+        virtualContext: Context,
+        guestClassLoader: ClassLoader,
+        connection: ServiceConnection,
+        flags: Int,
+        executor: Executor?
+    ): VirtualServiceBindDispatchResult {
+        val existingConnection = boundServiceConnections[connection]
+        if (existingConnection != null) {
+            dispatchServiceConnectedCallback(
+                connection = connection,
+                componentName = existingConnection.componentName,
+                binder = existingConnection.binder,
+                nullBinding = existingConnection.nullBinding,
+                executor = executor
+            )
+            return VirtualServiceBindDispatchResult.Bound(
+                startRequest = existingConnection.startRequest,
+                componentName = existingConnection.componentName,
+                binder = existingConnection.binder,
+                cached = true,
+                bindKey = existingConnection.bindKey,
+                flags = existingConnection.flags,
+                bindCount = existingConnection.bindCount,
+                activeConnectionCount = existingConnection.activeConnectionCount,
+                reusedBinder = true,
+                rebindDelivered = false,
+                connectionReused = true,
+                nullBinding = existingConnection.nullBinding
+            )
+        }
+        val snapshot = packageSnapshot ?: return VirtualServiceBindDispatchResult.Blocked(
+            sourceIntent = intent,
+            reason = "missingPackageSnapshot",
+            serviceResolved = false
+        )
+        val serviceManager = VirtualServiceManager(hostPackageName = hostPackageName)
+        val startRequest = serviceManager.resolveStartService(snapshot, intent)
+        if (startRequest == null) {
+            return VirtualServiceBindDispatchResult.Blocked(
+                sourceIntent = intent,
+                reason = "unsupportedServiceIntent",
+                serviceResolved = false
+            )
+        }
+        val bindRequest = VirtualServiceRuntimeBindRequest(
+            startRequest = startRequest,
+            guestContext = virtualContext,
+            guestClassLoader = guestClassLoader,
+            guestApplication = processRuntime.get(startRequest.instanceId)?.result?.guestApplication,
+            config = snapshot.toVirtualContextConfig(guestClassLoader),
+            flags = flags
+        )
+        return when (val result = serviceRuntime.bind(bindRequest)) {
+            is VirtualServiceRuntimeBindResult.NotCreated -> VirtualServiceBindDispatchResult.Blocked(
+                sourceIntent = intent,
+                reason = result.reason,
+                serviceResolved = true,
+                flags = result.flags,
+                autoCreate = result.flags and Context.BIND_AUTO_CREATE != 0,
+                serviceAlreadyRunning = result.serviceAlreadyRunning
+            )
+            is VirtualServiceRuntimeBindResult.Bound -> {
+                val componentName = android.content.ComponentName(
+                    result.startRequest.originPackageName,
+                    result.startRequest.guestServiceClassName
+                )
+                boundServiceConnections[connection] = VirtualServiceBoundConnection(
+                    connection = connection,
+                    startRequest = result.startRequest,
+                    componentName = componentName,
+                    binder = result.binder,
+                    bindKey = result.bindKey,
+                    flags = result.flags,
+                    bindCount = result.bindCount,
+                    activeConnectionCount = result.activeConnectionCount,
+                    nullBinding = result.binder == null
+                )
+                dispatchServiceConnectedCallback(
+                    connection = connection,
+                    componentName = componentName,
+                    binder = result.binder,
+                    nullBinding = result.binder == null,
+                    executor = executor
+                )
+                VirtualServiceBindDispatchResult.Bound(
+                    startRequest = result.startRequest,
+                    componentName = componentName,
+                    binder = result.binder,
+                    cached = result.cached,
+                    bindKey = result.bindKey,
+                    flags = result.flags,
+                    bindCount = result.bindCount,
+                    activeConnectionCount = result.activeConnectionCount,
+                    reusedBinder = result.reusedBinder,
+                    rebindDelivered = result.rebindDelivered,
+                    connectionReused = false,
+                    nullBinding = result.binder == null
+                )
+            }
+            is VirtualServiceRuntimeBindResult.CreateFailed -> VirtualServiceBindDispatchResult.Failed(
+                startRequest = result.startRequest,
+                stage = "create",
+                error = result.error
+            )
+            is VirtualServiceRuntimeBindResult.AttachFailed -> VirtualServiceBindDispatchResult.Failed(
+                startRequest = result.startRequest,
+                stage = "attach",
+                error = result.error
+            )
+            is VirtualServiceRuntimeBindResult.OnCreateFailed -> VirtualServiceBindDispatchResult.Failed(
+                startRequest = result.startRequest,
+                stage = "onCreate",
+                error = result.error
+            )
+            is VirtualServiceRuntimeBindResult.OnBindFailed -> VirtualServiceBindDispatchResult.Failed(
+                startRequest = result.startRequest,
+                stage = "onBind",
+                error = result.error
+            )
+        }
+    }
+
+    override fun dispatchUnbindService(connection: ServiceConnection): VirtualServiceUnbindDispatchResult {
+        val bound = boundServiceConnections.remove(connection)
+            ?: return VirtualServiceUnbindDispatchResult.NotFound
+        return when (val result = serviceRuntime.unbind(
+            VirtualServiceRuntimeUnbindRequest(
+                startRequest = bound.startRequest
+            )
+        )) {
+            is VirtualServiceRuntimeUnbindResult.Unbound -> VirtualServiceUnbindDispatchResult.Unbound(
+                startRequest = result.startRequest,
+                destroyed = result.destroyed,
+                onUnbindResult = result.onUnbindResult,
+                onUnbindCalled = result.onUnbindCalled,
+                bindKey = result.bindKey,
+                activeConnectionCount = result.activeConnectionCount,
+                activeBindCount = result.activeBindCount,
+                idleStopResult = result.idleStopResult
+            )
+            is VirtualServiceRuntimeUnbindResult.NotFound -> VirtualServiceUnbindDispatchResult.NotFound
+            is VirtualServiceRuntimeUnbindResult.OnUnbindFailed -> VirtualServiceUnbindDispatchResult.Failed(
+                startRequest = result.startRequest,
+                stage = "onUnbind",
+                error = result.error
+            )
+            is VirtualServiceRuntimeUnbindResult.OnDestroyFailed -> VirtualServiceUnbindDispatchResult.Failed(
+                startRequest = result.startRequest,
+                stage = "onDestroy",
+                error = result.error
+            )
+        }
     }
 
     override fun dispatchBroadcast(
@@ -184,9 +380,12 @@ class DefaultVirtualAmsComponentDispatcher(
             putExtra(VirtualActivityManager.EXTRA_GUEST_ACTIVITY_CLASS_NAME, record.guestActivityClassName)
             putExtra(VirtualActivityManager.EXTRA_HOST_PACKAGE_NAME, hostPackageName)
             if (!record.launchMode.isNullOrBlank()) {
-                putExtra("multiapp.guestActivityLaunchMode", record.launchMode)
+                putExtra(VirtualActivityManager.EXTRA_GUEST_ACTIVITY_LAUNCH_MODE, record.launchMode)
             }
-            putExtra(VirtualActivityManager.EXTRA_ORIGINAL_GUEST_INTENT, Intent(sourceIntent))
+            if (!record.taskAffinity.isNullOrBlank()) {
+                putExtra(VirtualActivityManager.EXTRA_GUEST_TASK_AFFINITY, record.taskAffinity)
+            }
+            VirtualActivityIntentStore.remember(record.token, sourceIntent)
             if (sourceIntent.safeFlags().hasFlag(Intent.FLAG_ACTIVITY_NEW_TASK)) {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
@@ -214,12 +413,82 @@ class DefaultVirtualAmsComponentDispatcher(
 
     private fun String.redactUriForEvidence(): String = EvidenceSanitizer.redactUriForEvidence(this)
 
+    private fun VirtualPackageSnapshot.toVirtualContextConfig(classLoader: ClassLoader) =
+        com.multiapp.core.model.virtual.VirtualContextConfig(
+            instanceId = instanceId,
+            originPackageName = originPackageName,
+            virtualPackageName = virtualPackageName,
+            dataDir = dataDir,
+            sourceDir = sourceDir,
+            nativeLibraryDir = nativeLibraryDir,
+            classLoader = classLoader,
+            applicationLabel = applicationLabel,
+            packageSnapshot = this
+        )
+
+    private data class VirtualServiceBoundConnection(
+        val connection: ServiceConnection,
+        val startRequest: VirtualServiceStartRequest,
+        val componentName: android.content.ComponentName,
+        val binder: android.os.IBinder?,
+        val bindKey: String,
+        val flags: Int,
+        val bindCount: Int,
+        val activeConnectionCount: Int,
+        val nullBinding: Boolean
+    )
+
+    private fun dispatchServiceConnectedCallback(
+        connection: ServiceConnection,
+        componentName: android.content.ComponentName,
+        binder: android.os.IBinder?,
+        nullBinding: Boolean,
+        executor: Executor?
+    ) {
+        val callback = Runnable {
+            if (nullBinding) {
+                connection.onNullBinding(componentName)
+            } else {
+                connection.onServiceConnected(componentName, binder)
+            }
+        }
+        dispatchServiceConnectionCallback(executor, callback)
+    }
+
+    private fun dispatchServiceConnectionCallback(executor: Executor?, callback: Runnable) {
+        if (executor != null) {
+            executor.execute(callback)
+            return
+        }
+        runCatching {
+            val mainLooper = Looper.getMainLooper()
+            if (Looper.myLooper() == mainLooper) {
+                callback.run()
+            } else {
+                Handler(mainLooper).post(callback)
+            }
+        }.getOrElse {
+            callback.run()
+        }
+    }
+
     companion object {
-        fun defaultProxyActivityRegistry(hostPackageName: String): ProxyActivityRegistry {
+        fun defaultProxyActivityRegistry(
+            hostPackageName: String,
+            filesDir: File? = null
+        ): ProxyActivityRegistry {
             return ProxyActivityRegistry(
                 ProxyActivitySlots.classNames(hostPackageName),
-                ProxyActivitySlots.launchModeByClassName(hostPackageName)
+                ProxyActivitySlots.launchModeByClassName(hostPackageName),
+                filesDir?.let {
+                    FileBackedProxyActivitySlotAssignmentStore(
+                        File(it, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
+                    )
+                }
             )
         }
+
+        private fun rootTaskAffinity(originPackageName: String, instanceId: String): String =
+            "$originPackageName:$instanceId"
     }
 }

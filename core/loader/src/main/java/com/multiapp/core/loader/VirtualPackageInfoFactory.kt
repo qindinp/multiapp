@@ -21,7 +21,7 @@ internal object VirtualPackageInfoFactory {
         sourceDir = snapshot.sourceDir
         publicSourceDir = snapshot.publicSourceDir
         dataDir = snapshot.dataDir
-        nativeLibraryDir = snapshot.nativeLibraryDir
+        ApplicationInfoNativePathCompat.applyTo(this, snapshot.dataDir, snapshot.nativeLibraryDir)
         minSdkVersion = snapshot.minSdk
         targetSdkVersion = snapshot.targetSdk
         nonLocalizedLabel = snapshot.applicationLabel
@@ -95,7 +95,9 @@ internal object VirtualPackageInfoFactory {
     }
 
     fun launcherResolveInfo(snapshot: VirtualPackageSnapshot): ResolveInfo? {
-        val launcherName = snapshot.launcherActivityName ?: return null
+        val launcherName = snapshot.launcherActivityName
+            ?: snapshot.activities.resolveLauncherIntentActivityName()
+            ?: return null
         val component = snapshot.activities.firstOrNull {
             it.name == launcherName || it.targetActivityName == launcherName
         }

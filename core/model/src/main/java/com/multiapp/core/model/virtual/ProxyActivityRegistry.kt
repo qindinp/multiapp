@@ -4,7 +4,8 @@ import java.util.UUID
 
 class ProxyActivityRegistry(
     private val proxyActivityClassNames: List<String>,
-    private val launchModeByClassName: Map<String, String?> = emptyMap()
+    private val launchModeByClassName: Map<String, String?> = emptyMap(),
+    private val slotAssignmentStore: ProxyActivitySlotAssignmentStore? = null
 ) {
     private val records = LinkedHashMap<String, VirtualActivityRecord>()
 
@@ -19,10 +20,16 @@ class ProxyActivityRegistry(
         originPackageName: String,
         guestActivityClassName: String,
         launchMode: String? = null,
+        taskKey: String = instanceId,
+        taskAffinity: String? = null,
         nowMs: Long = System.currentTimeMillis()
     ): VirtualActivityRecord {
         val normalizedLaunchMode = normalizeLaunchMode(launchMode)
-        val proxyClassName = selectProxyActivity(normalizedLaunchMode)
+        val proxyClassName = selectProxyActivity(
+            launchMode = normalizedLaunchMode,
+            instanceId = instanceId,
+            taskKey = taskKey
+        )
         val record = VirtualActivityRecord(
             token = UUID.randomUUID().toString(),
             instanceId = instanceId,
@@ -30,6 +37,7 @@ class ProxyActivityRegistry(
             guestActivityClassName = guestActivityClassName,
             proxyActivityClassName = proxyClassName,
             launchMode = normalizedLaunchMode,
+            taskAffinity = taskAffinity,
             createdAtMs = nowMs
         )
         records[record.token] = record
@@ -52,14 +60,56 @@ class ProxyActivityRegistry(
     @Synchronized
     fun listRecords(): List<VirtualActivityRecord> = records.values.toList()
 
-    private fun selectProxyActivity(launchMode: String?): String {
+    private fun selectProxyActivity(
+        launchMode: String?,
+        instanceId: String,
+        taskKey: String
+    ): String {
         val candidates = proxyActivityClassNames.filter { className ->
             normalizeLaunchMode(launchModeByClassName[className]) == launchMode
         }.ifEmpty { proxyActivityClassNames }
-        val used = records.values.map { it.proxyActivityClassName }.toSet()
-        return candidates.firstOrNull { it !in used }
-            ?: candidates[records.size % candidates.size]
+        val activeByProxy = records.values.associateBy { it.proxyActivityClassName }
+        val assignmentKey = ProxyActivitySlotKey(
+            instanceId = instanceId,
+            launchMode = launchMode,
+            taskKey = taskKey
+        )
+        val assigned = slotAssignmentStore?.find(assignmentKey)
+        if (assigned != null && assigned in candidates && isProxyAvailableFor(assigned, assignmentKey, activeByProxy)) {
+            return assigned
+        }
+
+        val preferred = candidates[stableSlotIndex(taskKey, candidates.size)]
+        val selected = if (isProxyAvailableFor(preferred, assignmentKey, activeByProxy)) {
+            preferred
+        } else {
+            candidates.firstOrNull { candidate -> isProxyAvailableFor(candidate, assignmentKey, activeByProxy) }
+                ?: throw ProxyActivitySlotExhaustedException(
+                    instanceId = instanceId,
+                    launchMode = launchMode,
+                    taskKey = taskKey,
+                    candidateCount = candidates.size
+                )
+        }
+        slotAssignmentStore?.save(assignmentKey, selected)
+        return selected
     }
+
+    private fun isProxyAvailableFor(
+        proxyActivityClassName: String,
+        assignmentKey: ProxyActivitySlotKey,
+        activeByProxy: Map<String, VirtualActivityRecord>
+    ): Boolean {
+        val active = activeByProxy[proxyActivityClassName]
+        if (active != null && !active.matchesSlotOwner(assignmentKey)) return false
+        val persistedOwner = slotAssignmentStore?.ownerOf(proxyActivityClassName)
+        return persistedOwner == null || persistedOwner == assignmentKey
+    }
+
+    private fun VirtualActivityRecord.matchesSlotOwner(key: ProxyActivitySlotKey): Boolean =
+        instanceId == key.instanceId &&
+            normalizeLaunchMode(launchMode) == key.launchMode &&
+            taskAffinity == key.taskKey
 
     companion object {
         fun normalizeLaunchMode(launchMode: String?): String? = when (launchMode) {
@@ -68,5 +118,20 @@ class ProxyActivityRegistry(
             "singleTask", "singleInstance", "singleInstancePerTask" -> "singleTask"
             else -> null
         }
+
+        internal fun stableSlotIndex(instanceId: String, slotCount: Int): Int {
+            require(slotCount > 0) { "slotCount must be positive" }
+            return Math.floorMod(instanceId.hashCode(), slotCount)
+        }
     }
 }
+
+class ProxyActivitySlotExhaustedException(
+    val instanceId: String,
+    val launchMode: String?,
+    val taskKey: String,
+    val candidateCount: Int
+) : IllegalStateException(
+    "No free proxy Activity slot for instanceId=$instanceId, launchMode=${launchMode ?: "standard"}, " +
+        "taskKey=$taskKey, candidateCount=$candidateCount"
+)

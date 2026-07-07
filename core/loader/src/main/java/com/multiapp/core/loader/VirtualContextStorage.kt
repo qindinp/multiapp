@@ -27,22 +27,29 @@ internal object VirtualContextStorage {
 
     fun externalFilesDir(dataRoot: String, type: String?): File {
         val base = ensureDir(File(dataRoot), EXTERNAL_FILES_DIR)
-        return type?.let { ensureDir(base, sanitizePathSegment(it)) } ?: base
+        return type?.let { ensureDescendantDir(base, sanitizeRelativePath(it)) } ?: base
     }
 
     fun externalCacheDir(dataRoot: String): File = ensureDir(File(dataRoot), EXTERNAL_CACHE_DIR)
 
     fun fileStreamPath(dataRoot: String, name: String): File =
-        scopedChild(filesDir(dataRoot), sanitizePathSegment(name))
+        scopedDescendant(filesDir(dataRoot), sanitizeRelativePath(name))
 
-    fun databasePath(dataRoot: String, name: String): File =
-        scopedChild(databasesDir(dataRoot), sanitizePathSegment(name))
+    fun databasePath(
+        dataRoot: String,
+        name: String,
+        originPackageName: String? = null,
+        virtualPackageName: String? = null
+    ): File {
+        privateAbsolutePath(dataRoot, name, originPackageName, virtualPackageName)?.let { return it }
+        return scopedDescendant(databasesDir(dataRoot), sanitizeRelativePath(name))
+    }
 
     fun sharedPrefsPath(dataRoot: String, name: String): File =
-        scopedChild(sharedPrefsDir(dataRoot), "${sanitizeSharedPrefsName(name)}.xml")
+        scopedDescendant(sharedPrefsDir(dataRoot), "${sanitizeSharedPrefsName(name)}.xml")
 
     fun appDir(dataRoot: String, name: String): File =
-        scopedChild(File(dataRoot), "app_${sanitizePathSegment(name)}").apply { mkdirs() }
+        scopedDescendant(File(dataRoot), "app_${sanitizeRelativePath(name)}").apply { mkdirs() }
 
     fun listFileNames(dir: File): Array<String> = dir.list()?.sorted()?.toTypedArray() ?: emptyArray()
 
@@ -76,11 +83,52 @@ internal object VirtualContextStorage {
         return name
     }
 
+    fun sanitizeRelativePath(path: String): String {
+        require(path.isNotBlank()) { "storage path segment must not be blank" }
+        require(!path.isAndroidOrHostAbsolutePath()) { "unsafe storage path segment" }
+        require('\\' !in path) { "unsafe storage path segment" }
+        val segments = path.split('/')
+        require(segments.all { it.isNotBlank() }) { "unsafe storage path segment" }
+        segments.forEach { segment ->
+            require(segment != "." && segment != "..") { "unsafe storage path segment" }
+            require(segment.none { it.isISOControl() }) { "unsafe storage path segment" }
+        }
+        return segments.joinToString(File.separator)
+    }
+
     private fun sanitizeSharedPrefsName(name: String): String =
-        sanitizePathSegment(name.ifBlank { "default" })
+        sanitizeRelativePath(name.ifBlank { "default" })
 
     private fun ensureDir(parent: File, child: String): File =
         scopedChild(parent, child).apply { mkdirs() }
+
+    private fun ensureDescendantDir(parent: File, child: String): File =
+        scopedDescendant(parent, child).apply { mkdirs() }
+
+    private fun privateAbsolutePath(
+        dataRoot: String,
+        name: String,
+        originPackageName: String?,
+        virtualPackageName: String?
+    ): File? {
+        if (!name.isAndroidOrHostAbsolutePath()) return null
+        val root = File(dataRoot)
+        val direct = File(name)
+        if (direct.isWithin(root)) return direct.canonicalFile
+        listOfNotNull(originPackageName, virtualPackageName)
+            .asSequence()
+            .filter { it.isNotBlank() }
+            .mapNotNull { packageName ->
+                VirtualStoragePathDiagnostics.rewriteJavaAbsolutePath(
+                    originalPath = name,
+                    originPackageName = packageName,
+                    dataRoot = dataRoot
+                )
+            }
+            .firstOrNull { it.isWithin(root) }
+            ?.let { return it.canonicalFile }
+        throw IllegalArgumentException("unsafe storage path segment")
+    }
 
     private fun scopedChild(parent: File, child: String): File {
         val canonicalParent = parent.apply { mkdirs() }.canonicalFile
@@ -89,7 +137,27 @@ internal object VirtualContextStorage {
         return file
     }
 
+    private fun scopedDescendant(parent: File, child: String): File {
+        val canonicalParent = parent.apply { mkdirs() }.canonicalFile
+        val file = File(canonicalParent, child).canonicalFile
+        val parentPath = canonicalParent.absolutePath
+        val filePath = file.absolutePath
+        require(filePath == parentPath || filePath.startsWith(parentPath + File.separator)) {
+            "storage path escapes scoped directory"
+        }
+        return file
+    }
+
     private fun File.normalizedPath(): String = canonicalFile.absolutePath
+
+    private fun File.isWithin(root: File): Boolean {
+        val rootPath = root.normalizedPath()
+        val filePath = normalizedPath()
+        return filePath == rootPath || filePath.startsWith(rootPath + File.separator)
+    }
+
+    private fun String.isAndroidOrHostAbsolutePath(): Boolean =
+        startsWith("/") || File(this).isAbsolute
 }
 
 internal enum class StorageOperation {

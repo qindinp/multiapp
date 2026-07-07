@@ -6,6 +6,7 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.content.res.Resources
+import android.graphics.drawable.Drawable
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
@@ -104,6 +105,23 @@ class VirtualPackageManagerWrapperTest {
             )
         }
         verify(exactly = 0) { base.getResourcesForApplication("com.multiapp.instance.abc") }
+    }
+
+    @Test
+    fun `virtual package drawable and text lookups do not fall through to system package name lookup`() {
+        val base = mockk<PackageManager>(relaxed = true)
+        val icon = mockk<Drawable>(relaxed = true)
+        val resources = mockk<Resources>(relaxed = true)
+        every { base.getApplicationIcon(any<ApplicationInfo>()) } returns icon
+        every { base.getResourcesForApplication(any<ApplicationInfo>()) } returns resources
+        every { resources.getText(7) } returns "Virtual label"
+        val pm = VirtualPackageManagerWrapper(base, snapshot())
+
+        assertEquals(icon, pm.getApplicationIcon("com.multiapp.instance.abc"))
+        assertEquals("Virtual label", pm.getText("com.multiapp.instance.abc", 7, null))
+
+        verify(exactly = 0) { base.getApplicationIcon("com.multiapp.instance.abc") }
+        verify(exactly = 0) { base.getText("com.multiapp.instance.abc", 7, null) }
     }
 
     @Test

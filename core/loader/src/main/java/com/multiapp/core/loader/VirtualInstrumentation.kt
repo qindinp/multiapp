@@ -3,12 +3,14 @@
 package com.multiapp.core.loader
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Fragment
 import android.app.Instrumentation
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.os.IBinder
+import android.os.Looper
 import android.os.UserHandle
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
@@ -16,9 +18,13 @@ import com.multiapp.core.hook.NativeHookPolicyResolver
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
+import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
+import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualContextConfig
+import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -28,18 +34,47 @@ open class VirtualInstrumentation(
 
     private val hostedRuntimeCache = ConcurrentHashMap<String, HostedActivityRuntime>()
 
+    private sealed class StartActivityIntentDecision {
+        data class Launch(val intent: Intent) : StartActivityIntentDecision()
+        data class Blocked(val result: ActivityResult?) : StartActivityIntentDecision()
+    }
+
+    private sealed class StartActivitiesIntentDecision {
+        data class Launch(val intents: Array<Intent>) : StartActivitiesIntentDecision()
+        data object Blocked : StartActivitiesIntentDecision()
+    }
+
+    private data class UnmappedStartActivityBlock(
+        val filesDir: File,
+        val instanceId: String,
+        val reason: String
+    )
+
     companion object {
         private const val TAG = "VirtualInstrumentation"
         private const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
         private const val EXTRA_VIRTUAL_ACTIVITY_TOKEN = "multiapp.virtualActivityToken"
+        private const val EXTRA_ORIGIN_PACKAGE_NAME = "multiapp.originPackageName"
         private const val EXTRA_GUEST_ACTIVITY_CLASS_NAME = "multiapp.guestActivityClassName"
         private const val EXTRA_HOST_PACKAGE_NAME = "multiapp.hostPackageName"
         private const val EXTRA_ORIGINAL_GUEST_INTENT = "multiapp.originalGuestIntent"
+        private const val EXTRA_GUEST_ACTIVITY_LAUNCH_MODE = "multiapp.guestActivityLaunchMode"
+        private const val EXTRA_GUEST_TASK_AFFINITY = "multiapp.guestTaskAffinity"
         private const val INSTANCES_DIR = "instances"
         private const val INSTALLS_DIR = "installs"
         private const val INSTANCE_DATA_DIR = "instance_data"
         private const val EVIDENCE_DIR = "hosted_launch_evidence"
         private const val TOKEN_EVIDENCE_PREFIX_LENGTH = 8
+
+        internal fun shouldBlockForegroundRuntimeBootstrap(
+            isMainThread: Boolean,
+            hasReusableProcessRuntime: Boolean
+        ): Boolean = isMainThread && !hasReusableProcessRuntime
+
+        internal fun hostedTaskDescriptionLabel(originPackageName: String, instanceId: String): String {
+            val shortInstanceId = instanceId.take(8).ifBlank { instanceId }
+            return "$originPackageName #$shortInstanceId"
+        }
     }
 
     override fun newActivity(
@@ -149,19 +184,20 @@ open class VirtualInstrumentation(
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
-        val remapped = remapStartActivityIntent(
+        val decision = startActivityIntentDecision(
             target = target,
             who = who,
             intent = intent,
             api = "execStartActivity:activity-options",
             requestCode = requestCode
-        ) ?: intent
+        )
+        if (decision is StartActivityIntentDecision.Blocked) return decision.result
         return invokeBaseExecStartActivity(
             who = who,
             contextThread = contextThread,
             token = token,
             target = target,
-            intent = remapped,
+            intent = (decision as StartActivityIntentDecision.Launch).intent,
             requestCode = requestCode,
             options = options
         )
@@ -176,19 +212,20 @@ open class VirtualInstrumentation(
         intent: Intent,
         requestCode: Int
     ): ActivityResult? {
-        val remapped = remapStartActivityIntent(
+        val decision = startActivityIntentDecision(
             target = target,
             who = who,
             intent = intent,
             api = "execStartActivity:activity",
             requestCode = requestCode
-        ) ?: intent
+        )
+        if (decision is StartActivityIntentDecision.Blocked) return decision.result
         return invokeBaseExecStartActivity(
             who = who,
             contextThread = contextThread,
             token = token,
             target = target,
-            intent = remapped,
+            intent = (decision as StartActivityIntentDecision.Launch).intent,
             requestCode = requestCode,
             options = null
         )
@@ -204,19 +241,20 @@ open class VirtualInstrumentation(
         requestCode: Int,
         options: Bundle?
     ): ActivityResult? {
-        val remapped = remapStartActivityIntent(
+        val decision = startActivityIntentDecision(
             target = hostedStartActivitySource(who = who),
             who = who,
             intent = intent,
             api = "execStartActivity:string-options",
             requestCode = requestCode
-        ) ?: intent
+        )
+        if (decision is StartActivityIntentDecision.Blocked) return decision.result
         return invokeBaseExecStartActivity(
             who = who,
             contextThread = contextThread,
             token = token,
             target = target,
-            intent = remapped,
+            intent = (decision as StartActivityIntentDecision.Launch).intent,
             requestCode = requestCode,
             options = options
         )
@@ -243,19 +281,20 @@ open class VirtualInstrumentation(
         options: Bundle?
     ): ActivityResult? {
         val sourceActivity = target?.activity ?: hostedStartActivitySource(who = who)
-        val remapped = remapStartActivityIntent(
+        val decision = startActivityIntentDecision(
             target = sourceActivity,
             who = who,
             intent = intent,
             api = "execStartActivity:fragment-options",
             requestCode = requestCode
-        ) ?: intent
+        )
+        if (decision is StartActivityIntentDecision.Blocked) return decision.result
         return invokeBaseExecStartActivity(
             who = who,
             contextThread = contextThread,
             token = token,
             target = target,
-            intent = remapped,
+            intent = (decision as StartActivityIntentDecision.Launch).intent,
             requestCode = requestCode,
             options = options
         )
@@ -282,23 +321,207 @@ open class VirtualInstrumentation(
         options: Bundle?,
         user: UserHandle?
     ): ActivityResult? {
-        val remapped = remapStartActivityIntent(
+        val decision = startActivityIntentDecision(
             target = target,
             who = who,
             intent = intent,
             api = "execStartActivity:activity-user",
             requestCode = requestCode
-        ) ?: intent
+        )
+        if (decision is StartActivityIntentDecision.Blocked) return decision.result
         return invokeBaseExecStartActivity(
             who = who,
             contextThread = contextThread,
             token = token,
             target = target,
-            intent = remapped,
+            intent = (decision as StartActivityIntentDecision.Launch).intent,
             requestCode = requestCode,
             options = options,
             user = user
         )
+    }
+
+    @Suppress("unused")
+    fun execStartActivities(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: Activity?,
+        intents: Array<Intent>,
+        options: Bundle?
+    ) {
+        val decision = startActivitiesIntentDecision(
+            target = target,
+            who = who,
+            intents = intents,
+            api = "execStartActivities:activity-options"
+        )
+        if (decision is StartActivitiesIntentDecision.Blocked) return
+        invokeBaseExecStartActivities(
+            who = who,
+            contextThread = contextThread,
+            token = token,
+            target = target,
+            intents = (decision as StartActivitiesIntentDecision.Launch).intents,
+            options = options
+        )
+    }
+
+    @Suppress("unused")
+    fun execStartActivitiesAsUser(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: Activity?,
+        intents: Array<Intent>,
+        options: Bundle?,
+        userId: Int
+    ) {
+        val decision = startActivitiesIntentDecision(
+            target = target,
+            who = who,
+            intents = intents,
+            api = "execStartActivitiesAsUser:activity-options"
+        )
+        if (decision is StartActivitiesIntentDecision.Blocked) return
+        invokeBaseExecStartActivitiesAsUser(
+            who = who,
+            contextThread = contextThread,
+            token = token,
+            target = target,
+            intents = (decision as StartActivitiesIntentDecision.Launch).intents,
+            options = options,
+            userId = userId
+        )
+    }
+
+    private fun startActivityIntentDecision(
+        target: Activity?,
+        who: Context,
+        intent: Intent,
+        api: String,
+        requestCode: Int
+    ): StartActivityIntentDecision {
+        val remapped = remapStartActivityIntent(
+            target = target,
+            who = who,
+            intent = intent,
+            api = api,
+            requestCode = requestCode
+        )
+        if (remapped != null) return StartActivityIntentDecision.Launch(remapped)
+        unmappedStartActivityBlock(target, who, intent)?.let { block ->
+            writeRemapBlockedEvidence(
+                filesDir = block.filesDir,
+                instanceId = block.instanceId,
+                reason = block.reason,
+                api = api,
+                requestCode = requestCode,
+                intent = intent
+            )
+            return StartActivityIntentDecision.Blocked(blockedStartActivityResult(requestCode))
+        }
+        return StartActivityIntentDecision.Launch(intent)
+    }
+
+    private fun startActivitiesIntentDecision(
+        target: Activity?,
+        who: Context,
+        intents: Array<Intent>,
+        api: String
+    ): StartActivitiesIntentDecision {
+        val remapped = remapStartActivityIntents(
+            target = target,
+            who = who,
+            intents = intents,
+            api = api
+        )
+        if (remapped != null) return StartActivitiesIntentDecision.Launch(remapped)
+        unmappedStartActivitiesBlock(target, who, intents)?.let { block ->
+            writeRemapBlockedEvidence(
+                filesDir = block.filesDir,
+                instanceId = block.instanceId,
+                reason = block.reason,
+                api = api,
+                requestCode = -1,
+                intent = intents.firstOrNull() ?: Intent()
+            )
+            return StartActivitiesIntentDecision.Blocked
+        }
+        return StartActivitiesIntentDecision.Launch(intents)
+    }
+
+    private fun blockedStartActivityResult(requestCode: Int): ActivityResult? =
+        if (requestCode >= 0) ActivityResult(Activity.RESULT_CANCELED, null) else null
+
+    private fun unmappedStartActivityBlock(
+        target: Activity?,
+        who: Context,
+        intent: Intent
+    ): UnmappedStartActivityBlock? {
+        if (intent.component?.className?.contains(".container.ProxyActivity") == true) return null
+        val instanceId = hostedStartActivityInstanceId(target = target, who = who, intent = intent) ?: return null
+        val runtime = runCatching { createHostedRuntime(instanceId) }.getOrNull() ?: return null
+        val snapshot = runtime.result.packageSnapshot ?: return null
+        val guestPackages = setOf(snapshot.originPackageName, snapshot.virtualPackageName)
+        return if (intentTargetsGuestPackage(intent, guestPackages) || intentLooksGuestPrivate(intent)) {
+            UnmappedStartActivityBlock(
+                filesDir = runtime.hostApplication.filesDir,
+                instanceId = instanceId,
+                reason = "UNRESOLVED_GUEST_ACTIVITY_INTENT"
+            )
+        } else {
+            null
+        }
+    }
+
+    private fun unmappedStartActivitiesBlock(
+        target: Activity?,
+        who: Context,
+        intents: Array<Intent>
+    ): UnmappedStartActivityBlock? {
+        val firstIntent = intents.firstOrNull() ?: return null
+        if (intents.any { it.component?.className?.contains(".container.ProxyActivity") == true }) return null
+        val instanceId = hostedStartActivityInstanceId(target = target, who = who, intent = firstIntent) ?: return null
+        val runtime = runCatching { createHostedRuntime(instanceId) }.getOrNull() ?: return null
+        val snapshot = runtime.result.packageSnapshot ?: return null
+        val guestPackages = setOf(snapshot.originPackageName, snapshot.virtualPackageName)
+        return if (intents.any { intentTargetsGuestPackage(it, guestPackages) || intentLooksGuestPrivate(it) }) {
+            UnmappedStartActivityBlock(
+                filesDir = runtime.hostApplication.filesDir,
+                instanceId = instanceId,
+                reason = "UNRESOLVED_GUEST_ACTIVITY_INTENT_BATCH"
+            )
+        } else {
+            null
+        }
+    }
+
+    internal fun intentLooksGuestPrivate(intent: Intent): Boolean {
+        if (runCatching { intent.component }.getOrNull() != null) return false
+        if (runCatching { intent.`package` }.getOrNull() != null) return false
+        runCatching { intent.selector }.getOrNull()?.let { selector ->
+            return intentLooksGuestPrivate(selector)
+        }
+        val action = runCatching { intent.action }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: return false
+        if (action.startsWith("android.intent.action.") || action.startsWith("android.settings.")) {
+            return false
+        }
+        val categories = runCatching { intent.categories.orEmpty() }.getOrDefault(emptySet())
+        if (Intent.CATEGORY_BROWSABLE in categories) return false
+        val dataString = runCatching { intent.dataString }.getOrNull()
+        if (!dataString.isNullOrBlank()) return false
+        return true
+    }
+
+    internal fun intentTargetsGuestPackage(intent: Intent, guestPackages: Set<String>): Boolean {
+        val componentPackage = runCatching { intent.component?.packageName }.getOrNull()
+        val explicitPackage = runCatching { intent.`package` }.getOrNull()
+        val selector = runCatching { intent.selector }.getOrNull()
+        return componentPackage in guestPackages ||
+            explicitPackage in guestPackages ||
+            selector?.let { intentTargetsGuestPackage(it, guestPackages) } == true
     }
 
     internal fun remapStartActivityIntent(
@@ -309,9 +532,7 @@ open class VirtualInstrumentation(
         requestCode: Int = -1
     ): Intent? {
         if (intent.component?.className?.contains(".container.ProxyActivity") == true) return null
-        val sourceIntent = hostedStartActivitySource(target = target, who = who)?.intent
-        val instanceId = sourceIntent?.getStringExtra(EXTRA_INSTANCE_ID)
-            ?.takeIf { it.isNotBlank() }
+        val instanceId = hostedStartActivityInstanceId(target = target, who = who, intent = intent)
             ?: return null
 
         val runtime = runCatching { createHostedRuntime(instanceId) }
@@ -357,7 +578,10 @@ open class VirtualInstrumentation(
         return runCatching {
             val registry = ProxyActivityRegistry(
                 ProxyActivitySlots.classNames(runtime.hostApplication.packageName),
-                ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName)
+                ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
+                FileBackedProxyActivitySlotAssignmentStore(
+                    File(runtime.hostApplication.filesDir, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
+                )
             )
             val manager = VirtualActivityManager(
                 context = who,
@@ -393,10 +617,136 @@ open class VirtualInstrumentation(
         }.getOrNull()
     }
 
+    internal fun remapStartActivityIntents(
+        target: Activity?,
+        who: Context,
+        intents: Array<Intent>,
+        api: String = "execStartActivities:activity-options"
+    ): Array<Intent>? {
+        if (intents.isEmpty()) return null
+        if (intents.any { it.component?.className?.contains(".container.ProxyActivity") == true }) return null
+        val instanceId = hostedStartActivityInstanceId(target = target, who = who, intent = intents.first())
+            ?: return null
+
+        val runtime = runCatching { createHostedRuntime(instanceId) }
+            .onFailure { error ->
+                writeRemapFailureEvidence(
+                    filesDir = currentFilesDirOrNull(),
+                    instanceId = instanceId,
+                    reason = "RUNTIME_BOOTSTRAP_FAILED",
+                    api = api,
+                    requestCode = -1,
+                    error = error
+                )
+            }
+            .getOrNull()
+            ?: return null
+
+        val snapshot = runtime.result.packageSnapshot
+        if (snapshot == null) {
+            writeRemapSkippedEvidence(
+                filesDir = runtime.hostApplication.filesDir,
+                instanceId = instanceId,
+                reason = "PACKAGE_SNAPSHOT_MISSING",
+                api = api,
+                requestCode = -1,
+                intent = intents.first()
+            )
+            return null
+        }
+
+        val resolver = VirtualIntentResolver(snapshot)
+        val requests = intents.map { intent -> resolver.resolveActivity(intent) }
+        if (requests.any { it == null }) {
+            writeRemapSkippedEvidence(
+                filesDir = runtime.hostApplication.filesDir,
+                instanceId = instanceId,
+                reason = "INTENT_BATCH_NOT_RESOLVED",
+                api = api,
+                requestCode = -1,
+                intent = intents.first()
+            )
+            return null
+        }
+
+        return runCatching {
+            val registry = ProxyActivityRegistry(
+                ProxyActivitySlots.classNames(runtime.hostApplication.packageName),
+                ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
+                FileBackedProxyActivitySlotAssignmentStore(
+                    File(runtime.hostApplication.filesDir, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
+                )
+            )
+            val manager = VirtualActivityManager(
+                context = who,
+                proxyActivityRegistry = registry,
+                hostPackageName = runtime.hostApplication.packageName
+            )
+            val proxyIntents = requests.filterNotNull().map { request ->
+                val record = manager.allocateGuestActivity(request)
+                manager.createProxyIntent(record, request.sourceIntent).apply {
+                    flags = flags or (request.sourceIntent.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
+                    putExtra("multiapp.activityBatchSize", intents.size)
+                } to (request to record)
+            }
+            writeRemapBatchEvidence(
+                filesDir = runtime.hostApplication.filesDir,
+                instanceId = instanceId,
+                api = api,
+                guestActivityClassNames = proxyIntents.map { it.second.first.guestActivityClassName },
+                proxyActivityClassNames = proxyIntents.map { it.second.second.proxyActivityClassName },
+                reasons = proxyIntents.map { it.second.first.reason },
+                launchModes = proxyIntents.map { it.second.second.launchMode.orEmpty() }
+            )
+            proxyIntents.map { it.first }.toTypedArray()
+        }.onSuccess { proxyIntents ->
+            Log.i(TAG, "Remapped guest startActivities batch: size=${intents.size} proxies=${proxyIntents.size}")
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to remap guest startActivities intents", error)
+            writeRemapFailureEvidence(
+                filesDir = runtime.hostApplication.filesDir,
+                instanceId = instanceId,
+                reason = "PROXY_INTENT_BATCH_CREATE_FAILED",
+                api = api,
+                requestCode = -1,
+                error = error
+            )
+        }.getOrNull()
+    }
+
     internal fun hostedStartActivitySource(
         target: Activity? = null,
         who: Context
     ): Activity? = target ?: who as? Activity
+
+    internal fun hostedStartActivityInstanceId(
+        target: Activity? = null,
+        who: Context,
+        intent: Intent
+    ): String? {
+        hostedStartActivitySource(target = target, who = who)
+            ?.intent
+            ?.getStringExtra(EXTRA_INSTANCE_ID)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { return it }
+
+        val contextPackageName = runCatching { who.packageName }.getOrNull()
+        VirtualPackageRegistry.global.getByPackageName(contextPackageName)
+            ?.let { return it.instanceId }
+
+        val selector = runCatching { intent.selector }.getOrNull()
+        val candidatePackages = listOfNotNull(
+            runCatching { intent.component?.packageName }.getOrNull(),
+            runCatching { intent.`package` }.getOrNull(),
+            runCatching { selector?.component?.packageName }.getOrNull(),
+            runCatching { selector?.`package` }.getOrNull()
+        )
+        for (packageName in candidatePackages) {
+            VirtualPackageRegistry.global.getByPackageName(packageName)
+                ?.let { return it.instanceId }
+        }
+        return null
+    }
 
     private fun injectHostedActivityContextIfNeeded(
         activity: Activity,
@@ -414,6 +764,11 @@ open class VirtualInstrumentation(
             val runtime = createHostedRuntime(instanceId)
             val hostPackageName = activity.intent?.getStringExtra(EXTRA_HOST_PACKAGE_NAME)?.takeIf { it.isNotBlank() }
             val config = buildVirtualContextConfig(runtime)
+            val taskDescriptionLabel = hostedTaskDescriptionLabel(
+                originPackageName = config.originPackageName,
+                instanceId = instanceId
+            )
+            applyHostedTaskDescription(activity, taskDescriptionLabel)
             val injection = HostedActivityContextInjector.inject(
                 activity = activity,
                 hostContext = runtime.hostApplication,
@@ -428,7 +783,8 @@ open class VirtualInstrumentation(
                 filesDir = runtime.hostApplication.filesDir,
                 instanceId = instanceId,
                 guestActivityClassName = guestActivityClassName,
-                injection = injection
+                injection = injection,
+                taskDescriptionLabel = taskDescriptionLabel
             )
             Log.i(
                 TAG,
@@ -442,6 +798,14 @@ open class VirtualInstrumentation(
         }.onFailure { error ->
             Log.e(TAG, "Unable to inject hosted Activity context: $guestActivityClassName", error)
             writeSubstitutionFailureEvidence(instanceId, error)
+        }
+    }
+
+    private fun applyHostedTaskDescription(activity: Activity, label: String) {
+        runCatching {
+            activity.setTaskDescription(ActivityManager.TaskDescription(label))
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to set hosted task description: $label", error)
         }
     }
 
@@ -469,21 +833,32 @@ open class VirtualInstrumentation(
             val guestClassLoader = requireNotNull(result.guestClassLoader) {
                 "Hosted bootstrap returned null guestClassLoader"
             }
+            val guestIntent = buildGuestActivityIntent(intent, instanceId, guestActivityClassName)
             val activity = base.newActivity(
                 guestClassLoader,
                 guestActivityClassName,
-                buildGuestActivityIntent(intent, instanceId, guestActivityClassName)
+                guestIntent
+            )
+            val recovery = restoreActivityRecordFromProxyIntentIfMissing(
+                proxyClassName = proxyClassName,
+                proxyIntent = intent,
+                guestIntent = guestIntent,
+                instanceId = instanceId,
+                guestActivityClassName = guestActivityClassName,
+                fallbackOriginPackageName = result.originPackageName ?: result.packageSnapshot?.originPackageName
             )
             writeSubstitutionEvidence(
                 filesDir = runtime.hostApplication.filesDir,
                 instanceId = instanceId,
                 proxyClassName = proxyClassName,
-                guestActivityClassName = guestActivityClassName
+                guestActivityClassName = guestActivityClassName,
+                recovery = recovery
             )
             Log.i(
                 TAG,
                 "Substituted proxy Activity: proxy=$proxyClassName, guest=$guestActivityClassName, " +
-                    "instanceId=$instanceId"
+                    "instanceId=$instanceId, activityRecordRecovered=${recovery.activityRecordRecovered}, " +
+                    "activityRecordFound=${recovery.activityRecordFound}, recoveryReason=${recovery.skippedReason}"
             )
             activity
         }.onFailure { error ->
@@ -505,8 +880,8 @@ open class VirtualInstrumentation(
         virtualActivityToken: String? = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN),
         hostPackageName: String? = proxyIntent.getStringExtra(EXTRA_HOST_PACKAGE_NAME)
     ): Intent {
-        val guestIntent = proxyIntent.getParcelableExtra<Intent>(EXTRA_ORIGINAL_GUEST_INTENT)
-            ?.let { Intent(it) }
+        val guestIntent = VirtualActivityIntentStore.find(virtualActivityToken)
+            ?: legacyOriginalGuestIntent(proxyIntent)
             ?: Intent(proxyIntent)
         return guestIntent.apply {
             putExtra(EXTRA_INSTANCE_ID, instanceId)
@@ -541,10 +916,39 @@ open class VirtualInstrumentation(
         )
     }
 
+    @Suppress("DEPRECATION")
+    private fun legacyOriginalGuestIntent(proxyIntent: Intent): Intent? =
+        runCatching {
+            proxyIntent.getParcelableExtra<Intent>(EXTRA_ORIGINAL_GUEST_INTENT)
+                ?.let { Intent(it) }
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to read legacy original guest Activity intent extra", error)
+        }.getOrNull()
+
     private fun createHostedRuntime(instanceId: String): HostedActivityRuntime {
         hostedRuntimeCache[instanceId]?.let { return it }
 
         val hostApplication = ActivityThreadCompat.currentApplication()
+        val reusableResult = VirtualProcessRuntime.global.reusableResult(instanceId)
+        if (shouldBlockForegroundRuntimeBootstrap(isMainThread(), reusableResult != null)) {
+            writeForegroundBootstrapBlockedEvidence(
+                filesDir = hostApplication.filesDir,
+                instanceId = instanceId,
+                threadName = Thread.currentThread().name
+            )
+            throw ForegroundBootstrapBlockedException(instanceId)
+        }
+        if (reusableResult != null) {
+            writeProtectedDiagnosticsEvidence(hostApplication.filesDir, reusableResult)
+            require(reusableResult.success) {
+                "Hosted bootstrap failed: " + (reusableResult.summary.failureReason ?: "unknown")
+            }
+            requireNotNull(reusableResult.guestClassLoader) { "Hosted bootstrap returned null guestClassLoader" }
+            return HostedActivityRuntime(hostApplication, reusableResult).also {
+                hostedRuntimeCache[instanceId] = it
+            }
+        }
+
         val filesDir = hostApplication.filesDir
         val installRecordStore = JsonInstallRecordStore(File(filesDir, INSTALLS_DIR))
         val instanceManager = DefaultInstanceManager(
@@ -555,7 +959,8 @@ open class VirtualInstrumentation(
         val bootstrap = HostedRuntimeBootstrap(
             instanceManager = instanceManager,
             installRecordStore = installRecordStore,
-            hostContext = hostApplication
+            hostContext = hostApplication,
+            providerHookInstallEnabled = true
         )
         val result = VirtualProcessRuntime.global.bindApplication(instanceId) {
             bootstrap.run(instanceId)
@@ -569,6 +974,9 @@ open class VirtualInstrumentation(
             hostedRuntimeCache[instanceId] = it
         }
     }
+
+    private fun isMainThread(): Boolean =
+        Looper.myLooper() == Looper.getMainLooper()
 
     private fun buildVirtualContextConfig(runtime: HostedActivityRuntime): VirtualContextConfig {
         val result = runtime.result
@@ -681,6 +1089,33 @@ open class VirtualInstrumentation(
         }
     }
 
+    private fun invokeBaseExecStartActivities(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: Activity?,
+        intents: Array<Intent>,
+        options: Bundle?
+    ) {
+        val method = findExecStartActivitiesMethod()
+        method.isAccessible = true
+        method.invoke(base, who, contextThread, token, target, intents, options)
+    }
+
+    private fun invokeBaseExecStartActivitiesAsUser(
+        who: Context,
+        contextThread: IBinder,
+        token: IBinder?,
+        target: Activity?,
+        intents: Array<Intent>,
+        options: Bundle?,
+        userId: Int
+    ) {
+        val method = findExecStartActivitiesAsUserMethod()
+        method.isAccessible = true
+        method.invoke(base, who, contextThread, token, target, intents, options, userId)
+    }
+
     private fun findExecStartActivityMethod(
         targetType: Class<*>,
         preferOptionsSignature: Boolean
@@ -723,6 +1158,104 @@ open class VirtualInstrumentation(
         )
     }
 
+    private fun findExecStartActivitiesMethod(): java.lang.reflect.Method {
+        val parameterTypes = arrayOf(
+            Context::class.java,
+            IBinder::class.java,
+            IBinder::class.java,
+            Activity::class.java,
+            Array<Intent>::class.java,
+            Bundle::class.java
+        )
+        var clazz: Class<*>? = base.javaClass
+        while (clazz != null) {
+            runCatching { return clazz.getDeclaredMethod("execStartActivities", *parameterTypes) }
+            clazz = clazz.superclass
+        }
+        runCatching { return Instrumentation::class.java.getDeclaredMethod("execStartActivities", *parameterTypes) }
+        throw NoSuchMethodException(
+            "android.app.Instrumentation.execStartActivities " +
+                "candidate=${parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name }}"
+        )
+    }
+
+    @Suppress("DEPRECATION")
+    internal fun restoreActivityRecordFromProxyIntentIfMissing(
+        proxyClassName: String,
+        proxyIntent: Intent,
+        guestIntent: Intent,
+        instanceId: String,
+        guestActivityClassName: String,
+        fallbackOriginPackageName: String? = null,
+        activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global
+    ): ActivityRecordRecoveryResult {
+        val token = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+            ?: guestIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+        if (token.isNullOrBlank()) {
+            return ActivityRecordRecoveryResult(skippedReason = "TOKEN_MISSING")
+        }
+
+        activityRecordManager.resolve(token)?.let { existing ->
+            return ActivityRecordRecoveryResult(
+                record = existing,
+                activityRecordFound = true,
+                skippedReason = "ALREADY_REGISTERED"
+            )
+        }
+
+        val currentProxyOwner = activityRecordManager.resolveByProxy(proxyClassName)
+        if (currentProxyOwner != null && currentProxyOwner.token != token) {
+            return ActivityRecordRecoveryResult(
+                record = currentProxyOwner,
+                activityRecordFound = true,
+                skippedReason = "PROXY_SLOT_ALREADY_OWNED"
+            )
+        }
+
+        val originPackageName = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME)
+            ?.takeIf { it.isNotBlank() }
+            ?: fallbackOriginPackageName?.takeIf { it.isNotBlank() }
+        if (originPackageName.isNullOrBlank()) {
+            return ActivityRecordRecoveryResult(skippedReason = "ORIGIN_PACKAGE_MISSING")
+        }
+
+        return runCatching {
+            val originalGuestIntent = VirtualActivityIntentStore.find(token)
+                ?: legacyOriginalGuestIntent(proxyIntent)
+            val sourceIntent = originalGuestIntent ?: guestIntent
+            val record = VirtualActivityRecord(
+                token = token,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                guestActivityClassName = guestActivityClassName,
+                proxyActivityClassName = proxyClassName,
+                launchMode = proxyIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_LAUNCH_MODE)?.takeIf { it.isNotBlank() },
+                taskAffinity = proxyIntent.getStringExtra(EXTRA_GUEST_TASK_AFFINITY)?.takeIf { it.isNotBlank() },
+                state = VirtualActivityState.RESUMED
+            )
+            val launched = activityRecordManager.registerLaunch(
+                record = record,
+                intentFlags = sourceIntent.safeFlags(),
+                dataIntent = sourceIntent.toVirtualIntentSnapshot()
+            ).activity
+            ActivityRecordRecoveryResult(
+                record = launched,
+                activityRecordFound = false,
+                activityRecordRecovered = true
+            )
+        }.getOrElse { error ->
+            Log.w(TAG, "Unable to recover Activity record from proxy intent: token=$token", error)
+            ActivityRecordRecoveryResult(skippedReason = "RECOVERY_FAILED:${error.javaClass.name}")
+        }
+    }
+
+    internal data class ActivityRecordRecoveryResult(
+        val record: VirtualActivityRecord? = null,
+        val activityRecordFound: Boolean = false,
+        val activityRecordRecovered: Boolean = false,
+        val skippedReason: String = ""
+    )
+
     private fun findExecStartActivityWithUserMethod(targetType: Class<*>): java.lang.reflect.Method {
         val parameterTypes = arrayOf(
             Context::class.java,
@@ -746,11 +1279,34 @@ open class VirtualInstrumentation(
         )
     }
 
+    private fun findExecStartActivitiesAsUserMethod(): java.lang.reflect.Method {
+        val parameterTypes = arrayOf(
+            Context::class.java,
+            IBinder::class.java,
+            IBinder::class.java,
+            Activity::class.java,
+            Array<Intent>::class.java,
+            Bundle::class.java,
+            Integer.TYPE
+        )
+        var clazz: Class<*>? = base.javaClass
+        while (clazz != null) {
+            runCatching { return clazz.getDeclaredMethod("execStartActivitiesAsUser", *parameterTypes) }
+            clazz = clazz.superclass
+        }
+        runCatching { return Instrumentation::class.java.getDeclaredMethod("execStartActivitiesAsUser", *parameterTypes) }
+        throw NoSuchMethodException(
+            "android.app.Instrumentation.execStartActivitiesAsUser " +
+                "candidate=${parameterTypes.joinToString(prefix = "(", postfix = ")") { it.name }}"
+        )
+    }
+
     private fun writeSubstitutionEvidence(
         filesDir: File,
         instanceId: String,
         proxyClassName: String,
-        guestActivityClassName: String
+        guestActivityClassName: String,
+        recovery: ActivityRecordRecoveryResult = ActivityRecordRecoveryResult()
     ) {
         runCatching {
             val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }
@@ -759,7 +1315,17 @@ open class VirtualInstrumentation(
                     "status=GUEST_ACTIVITY_SUBSTITUTED",
                     "stage=ACTIVITY_INSTRUMENTATION",
                     "proxyActivityClassName=$proxyClassName",
-                    "guestActivityClassName=$guestActivityClassName"
+                    "guestActivityClassName=$guestActivityClassName",
+                    "originPackageName=${recovery.record?.originPackageName.orEmpty()}",
+                    "token=${recovery.record?.token?.redactTokenForEvidence().orEmpty()}",
+                    "activityRecordFound=${recovery.activityRecordFound}",
+                    "activityRecordRecovered=${recovery.activityRecordRecovered}",
+                    "activityRecordRecoveryReason=${recovery.skippedReason}",
+                    "activityRecordTaskId=${recovery.record?.taskId ?: 0}",
+                    "activityRecordIntentFlags=${recovery.record?.intentFlags ?: 0}",
+                    "activityRecordLaunchMode=${recovery.record?.launchMode.orEmpty()}",
+                    "activityRecordTaskAffinity=${recovery.record?.taskAffinity.orEmpty()}",
+                    "taskDescriptionLabel=${recovery.record?.let { hostedTaskDescriptionLabel(it.originPackageName, it.instanceId) }.orEmpty()}"
                 ).joinToString("\n")
             )
         }.onFailure { error ->
@@ -800,6 +1366,39 @@ open class VirtualInstrumentation(
         }
     }
 
+    private fun writeRemapBatchEvidence(
+        filesDir: File,
+        instanceId: String,
+        api: String,
+        guestActivityClassNames: List<String>,
+        proxyActivityClassNames: List<String>,
+        reasons: List<String>,
+        launchModes: List<String>
+    ) {
+        runCatching {
+            val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }
+            File(evidenceDir, HostedActivityEvidenceFiles.remap(instanceId)).writeText(
+                listOf(
+                    "status=GUEST_ACTIVITY_REMAP",
+                    "stage=ACTIVITY_START_REMAP",
+                    "api=$api",
+                    "hostFallback=false",
+                    "requestCode=-1",
+                    "resultRequested=false",
+                    "activityResultVerdict=NOT_REQUESTED",
+                    "activityResultVerdictReason=",
+                    "batchSize=${guestActivityClassNames.size}",
+                    "guestActivityClassNames=${guestActivityClassNames.joinToString(",")}",
+                    "proxyActivityClassNames=${proxyActivityClassNames.joinToString(",")}",
+                    "reasons=${reasons.joinToString(",")}",
+                    "launchModes=${launchModes.joinToString(",")}"
+                ).joinToString("\n")
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write startActivities remap evidence for instanceId=$instanceId", error)
+        }
+    }
+
     private fun writeRemapSkippedEvidence(
         filesDir: File,
         instanceId: String,
@@ -831,6 +1430,38 @@ open class VirtualInstrumentation(
         }
     }
 
+    private fun writeRemapBlockedEvidence(
+        filesDir: File,
+        instanceId: String,
+        reason: String,
+        api: String,
+        requestCode: Int,
+        intent: Intent
+    ) {
+        runCatching {
+            val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }
+            File(evidenceDir, HostedActivityEvidenceFiles.remap(instanceId)).writeText(
+                listOf(
+                    "status=GUEST_ACTIVITY_REMAP_BLOCKED",
+                    "stage=ACTIVITY_START_REMAP",
+                    "api=$api",
+                    "hostFallback=false",
+                    "requestCode=$requestCode",
+                    "resultRequested=${requestCode >= 0}",
+                    "activityResultVerdict=${if (requestCode >= 0) "CANCELED" else "NOT_REQUESTED"}",
+                    "activityResultVerdictReason=${if (requestCode >= 0) "UNRESOLVED_GUEST_ACTIVITY_INTENT" else ""}",
+                    "reason=$reason",
+                    "intentAction=${intent.action.orEmpty()}",
+                    "intentComponent=${intent.component?.flattenToShortString().orEmpty()}",
+                    "intentPackage=${intent.`package`.orEmpty()}",
+                    "intentData=${intent.dataString?.redactUriForEvidence().orEmpty()}"
+                ).joinToString("\n")
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write blocked remap evidence for instanceId=$instanceId", error)
+        }
+    }
+
     private fun writeRemapFailureEvidence(
         filesDir: File?,
         instanceId: String,
@@ -859,6 +1490,30 @@ open class VirtualInstrumentation(
             )
         }.onFailure { writeError ->
             Log.w(TAG, "Unable to write failed remap evidence for instanceId=$instanceId", writeError)
+        }
+    }
+
+    private fun writeForegroundBootstrapBlockedEvidence(
+        filesDir: File,
+        instanceId: String,
+        threadName: String
+    ) {
+        runCatching {
+            val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }
+            File(evidenceDir, HostedActivityEvidenceFiles.instrumentation(instanceId)).writeText(
+                listOf(
+                    "status=FAIL",
+                    "stage=ACTIVITY_INSTRUMENTATION",
+                    "detail=FOREGROUND_BOOTSTRAP_BLOCKED",
+                    "runtimeCacheHit=false",
+                    "processRuntimeReusable=false",
+                    "foregroundBootstrapAllowed=false",
+                    "threadName=$threadName",
+                    "reason=RUNTIME_CACHE_MISS_ON_MAIN_THREAD"
+                ).joinToString("\n")
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write foreground bootstrap blocked evidence for instanceId=$instanceId", error)
         }
     }
 
@@ -1020,6 +1675,23 @@ open class VirtualInstrumentation(
 
     private fun String.redactUriForEvidence(): String = EvidenceSanitizer.redactUriForEvidence(this)
 
+    private fun Intent.safeFlags(): Int = runCatching { flags }.getOrDefault(0)
+
+    private fun Intent.toVirtualIntentSnapshot(): VirtualIntentSnapshot {
+        val sourceExtras = runCatching { extras }.getOrNull()
+        val extrasSnapshot = sourceExtras
+            ?.keySet()
+            ?.associateWith { "<present>" }
+            .orEmpty()
+        return VirtualIntentSnapshot(
+            flags = safeFlags(),
+            action = runCatching { action }.getOrNull(),
+            dataUri = runCatching { dataString?.redactUriForEvidence() }.getOrNull(),
+            categories = runCatching { categories.orEmpty().toSet() }.getOrDefault(emptySet()),
+            extras = extrasSnapshot
+        )
+    }
+
     private fun String.redactTokenForEvidence(): String {
         if (isBlank()) return ""
         if (length <= TOKEN_EVIDENCE_PREFIX_LENGTH) return "<redacted>"
@@ -1036,14 +1708,16 @@ open class VirtualInstrumentation(
         filesDir: File,
         instanceId: String,
         guestActivityClassName: String,
-        injection: HostedActivityContextInjector.InjectionResult
+        injection: HostedActivityContextInjector.InjectionResult,
+        taskDescriptionLabel: String
     ) {
         runCatching {
             val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }
             File(evidenceDir, HostedActivityEvidenceFiles.context(instanceId)).writeText(
                 HostedActivityContextEvidenceFormatter.format(
                     guestActivityClassName = guestActivityClassName,
-                    injection = injection
+                    injection = injection,
+                    taskDescriptionLabel = taskDescriptionLabel
                 )
             )
         }.onFailure { error ->
@@ -1059,7 +1733,9 @@ open class VirtualInstrumentation(
                 listOf(
                     "status=FAIL",
                     "stage=ACTIVITY_INSTRUMENTATION",
-                    "detail=${(error.message ?: error.javaClass.name).replace('\n', ' ')}"
+                    "detail=${(error.message ?: error.javaClass.name).replace('\n', ' ')}",
+                    "errorClass=${error.javaClass.name}",
+                    "errorMessage=${(error.message ?: "").replace('\n', ' ')}"
                 ).joinToString("\n")
             )
         }.onFailure { writeError ->
@@ -1070,5 +1746,9 @@ open class VirtualInstrumentation(
     private data class HostedActivityRuntime(
         val hostApplication: android.app.Application,
         val result: HostedBootstrapResult
+    )
+
+    private class ForegroundBootstrapBlockedException(instanceId: String) : IllegalStateException(
+        "RUNTIME_CACHE_MISS_ON_MAIN_THREAD: proxy Activity for $instanceId must be launched after ContainerActivity prewarm"
     )
 }

@@ -3,6 +3,8 @@ package com.multiapp.core.loader
 import android.content.ComponentName
 import android.content.Intent
 import android.util.Log
+import java.lang.reflect.InvocationHandler
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Proxy
 
 /**
@@ -17,6 +19,7 @@ import java.lang.reflect.Proxy
 object IntentRemapDiagnostics {
 
     private const val TAG = "IntentRemapDiag"
+    private val notificationProxyLock = Any()
 
     /**
      * 重写 Intent 中的包名：component.packageName 和 intent.package。
@@ -103,19 +106,30 @@ object IntentRemapDiagnostics {
         args: Array<Any?>,
         originalPkg: String,
         stubPkg: String
+    ): Array<Any?> = remapNotificationPackageArgs(methodName, args, setOf(originalPkg), stubPkg)
+
+    fun remapNotificationPackageArgs(
+        methodName: String,
+        args: Array<Any?>,
+        sourcePackages: Collection<String>,
+        hostPackageName: String
     ): Array<Any?> {
+        val aliases = sourcePackages
+            .filter { it.isNotBlank() && it != hostPackageName }
+            .toSet()
+        if (aliases.isEmpty()) return args
         var changed = false
         val patched = args.copyOf()
         for (index in patched.indices) {
-            if (patched[index] == originalPkg) {
-                patched[index] = stubPkg
+            if (patched[index] in aliases) {
+                patched[index] = hostPackageName
                 changed = true
             }
         }
         if (changed) {
-            Log.d(TAG, "NotificationManager.$methodName package remap: $originalPkg -> $stubPkg")
+            Log.d(TAG, "NotificationManager.$methodName package remap: ${aliases.joinToString(",")} -> $hostPackageName")
         }
-        return patched
+        return if (changed) patched else args
     }
 
     /**
@@ -204,8 +218,21 @@ object IntentRemapDiagnostics {
     fun installNotificationManagerPackageProxy(
         originalPkg: String,
         stubPkg: String
+    ): Boolean = installNotificationManagerPackageProxy(setOf(originalPkg), stubPkg)
+
+    fun installNotificationManagerPackageProxy(
+        sourcePackages: Collection<String>,
+        hostPackageName: String
     ): Boolean {
-        return try {
+        val aliases = sourcePackages
+            .filter { it.isNotBlank() && it != hostPackageName }
+            .toSet()
+        if (hostPackageName.isBlank() || aliases.isEmpty()) {
+            Log.w(TAG, "NotificationManager package proxy skipped: empty host or aliases")
+            return false
+        }
+        return synchronized(notificationProxyLock) {
+            try {
             val notificationManagerClass = Class.forName("android.app.NotificationManager")
             val serviceField = notificationManagerClass.getDeclaredField("sService").apply {
                 isAccessible = true
@@ -221,30 +248,58 @@ object IntentRemapDiagnostics {
                 return false
             }
             if (Proxy.isProxyClass(base.javaClass)) {
-                Log.d(TAG, "NotificationManager package proxy already installed")
-                return true
+                val handler = runCatching { Proxy.getInvocationHandler(base) }.getOrNull()
+                if (handler is NotificationPackageInvocationHandler) {
+                    handler.addAliases(aliases, hostPackageName)
+                    Log.d(TAG, "NotificationManager package proxy aliases updated: ${aliases.joinToString(",")} -> $hostPackageName")
+                    return true
+                }
             }
 
             val iface = Class.forName("android.app.INotificationManager")
             val proxy = Proxy.newProxyInstance(
                 iface.classLoader,
-                arrayOf(iface)
-            ) { _, method, args ->
-                val patchedArgs = args?.let {
-                    remapNotificationPackageArgs(method.name, it, originalPkg, stubPkg)
-                }
-                try {
-                    method.invoke(base, *(patchedArgs ?: emptyArray()))
-                } catch (e: java.lang.reflect.InvocationTargetException) {
-                    throw e.targetException
-                }
-            }
+                arrayOf(iface),
+                NotificationPackageInvocationHandler(base, hostPackageName, aliases)
+            )
             serviceField.set(null, proxy)
-            Log.d(TAG, "NotificationManager package proxy installed: $originalPkg -> $stubPkg")
+            Log.d(TAG, "NotificationManager package proxy installed: ${aliases.joinToString(",")} -> $hostPackageName")
             true
         } catch (e: Throwable) {
             Log.w(TAG, "NotificationManager package proxy failed: ${e.javaClass.simpleName}: ${e.message}")
             false
+        }
+        }
+    }
+
+    private class NotificationPackageInvocationHandler(
+        private val base: Any,
+        private var hostPackageName: String,
+        initialAliases: Collection<String>
+    ) : InvocationHandler {
+        private val aliases = linkedSetOf<String>()
+
+        init {
+            addAliases(initialAliases, hostPackageName)
+        }
+
+        fun addAliases(sourcePackages: Collection<String>, hostPackageName: String) {
+            synchronized(aliases) {
+                this.hostPackageName = hostPackageName
+                aliases += sourcePackages.filter { it.isNotBlank() && it != hostPackageName }
+            }
+        }
+
+        override fun invoke(proxy: Any, method: java.lang.reflect.Method, args: Array<Any?>?): Any? {
+            val currentAliases = synchronized(aliases) { aliases.toSet() }
+            val patchedArgs = args?.let {
+                remapNotificationPackageArgs(method.name, it, currentAliases, hostPackageName)
+            }
+            return try {
+                method.invoke(base, *(patchedArgs ?: emptyArray()))
+            } catch (e: InvocationTargetException) {
+                throw e.targetException
+            }
         }
     }
 

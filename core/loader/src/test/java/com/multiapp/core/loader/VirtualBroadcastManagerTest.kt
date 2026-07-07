@@ -5,6 +5,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
@@ -103,6 +104,72 @@ class VirtualBroadcastManagerTest {
     }
 
     @Test
+    fun `implicit broadcast delivers all matching manifest receivers`() {
+        val first = RecordingReceiver()
+        val second = RecordingReceiver()
+        val receivers = mapOf(
+            "com.test.minimal.LegacyReceiver" to first,
+            "com.test.minimal.StructuredReceiver" to second
+        )
+        val recorder = InMemoryVirtualBroadcastRecorder()
+        val runtime = VirtualReceiverRuntime(
+            receiverFactory = ReceiverFactory { _, className -> receivers.getValue(className) },
+            recorder = recorder
+        )
+        val manager = VirtualBroadcastManager(runtime = runtime)
+        val intent = mockk<Intent>(relaxed = true) {
+            every { component } returns null
+            every { `package` } returns null
+            every { action } returns "com.test.ACTION_SYNC"
+            every { categories } returns setOf("com.test.CATEGORY")
+            every { data } returns null
+        }
+        val context = mockk<Context>(relaxed = true)
+
+        val result = manager.dispatch(
+            instanceId = "inst-001",
+            snapshot = snapshot(
+                receivers = listOf(
+                    ResolvedComponent(
+                        name = "com.test.minimal.LegacyReceiver",
+                        exported = false,
+                        intentFilters = listOf("com.test.ACTION_SYNC")
+                    ),
+                    ResolvedComponent(
+                        name = "com.test.minimal.StructuredReceiver",
+                        exported = false,
+                        resolvedIntentFilters = listOf(
+                            ResolvedIntentFilter(
+                                actions = listOf("com.test.ACTION_SYNC"),
+                                categories = listOf("com.test.CATEGORY")
+                            )
+                        )
+                    )
+                )
+            ),
+            intent = intent,
+            virtualContext = context,
+            receiverClassLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        val batch = assertIs<VirtualBroadcastResult.Batch>(result)
+        assertEquals(2, batch.results.size)
+        assertSame(intent, first.intent)
+        assertSame(intent, second.intent)
+        assertEquals(
+            listOf(
+                "com.test.minimal.LegacyReceiver",
+                "com.test.minimal.StructuredReceiver"
+            ),
+            recorder.records().map { it.receiverClassName }
+        )
+        assertEquals(
+            listOf(VirtualBroadcastResultCode.Delivered, VirtualBroadcastResultCode.Delivered),
+            recorder.records().map { it.result }
+        )
+    }
+
+    @Test
     fun `explicit receiver miss is recorded separately from implicit unsupported`() {
         val recorder = InMemoryVirtualBroadcastRecorder()
         val manager = VirtualBroadcastManager(recorder = recorder)
@@ -165,6 +232,115 @@ class VirtualBroadcastManagerTest {
     }
 
     @Test
+    fun `dispatch delivers all matching dynamic receivers`() {
+        val first = RecordingReceiver()
+        val second = RecordingReceiver()
+        val recorder = InMemoryVirtualBroadcastRecorder()
+        val registry = VirtualDynamicReceiverRegistry().apply {
+            register(
+                instanceId = "inst-001",
+                receiver = first,
+                filter = VirtualDynamicReceiverFilter(actions = setOf("com.test.ACTION_DYNAMIC"))
+            )
+            register(
+                instanceId = "inst-001",
+                receiver = second,
+                filter = VirtualDynamicReceiverFilter(actions = setOf("com.test.ACTION_DYNAMIC"))
+            )
+        }
+        val manager = VirtualBroadcastManager(
+            recorder = recorder,
+            dynamicReceiverRegistry = registry
+        )
+        val intent = mockk<Intent>(relaxed = true) {
+            every { component } returns null
+            every { action } returns "com.test.ACTION_DYNAMIC"
+            every { categories } returns emptySet()
+            every { data } returns null
+        }
+        val context = mockk<Context>(relaxed = true)
+        every { context.packageName } returns "com.multiapp.instance.abc"
+
+        val result = manager.dispatch(
+            instanceId = "inst-001",
+            snapshot = snapshot(),
+            intent = intent,
+            virtualContext = context,
+            receiverClassLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        val batch = assertIs<VirtualBroadcastResult.Batch>(result)
+        assertEquals(2, batch.results.size)
+        assertSame(intent, first.intent)
+        assertSame(intent, second.intent)
+        assertEquals(2, recorder.records().size)
+        assertEquals(
+            listOf(VirtualBroadcastResultCode.Delivered, VirtualBroadcastResultCode.Delivered),
+            recorder.records().map { it.result }
+        )
+    }
+
+    @Test
+    fun `dispatch implicit broadcast delivers dynamic and manifest receivers`() {
+        val dynamic = RecordingReceiver()
+        val manifest = RecordingReceiver()
+        val recorder = InMemoryVirtualBroadcastRecorder()
+        val registry = VirtualDynamicReceiverRegistry().apply {
+            register(
+                instanceId = "inst-001",
+                receiver = dynamic,
+                filter = VirtualDynamicReceiverFilter(actions = setOf("com.test.ACTION_BOTH"))
+            )
+        }
+        val runtime = VirtualReceiverRuntime(
+            receiverFactory = ReceiverFactory { _, _ -> manifest },
+            recorder = recorder
+        )
+        val manager = VirtualBroadcastManager(
+            runtime = runtime,
+            recorder = recorder,
+            dynamicReceiverRegistry = registry
+        )
+        val intent = mockk<Intent>(relaxed = true) {
+            every { component } returns null
+            every { `package` } returns null
+            every { action } returns "com.test.ACTION_BOTH"
+            every { categories } returns emptySet()
+            every { data } returns null
+        }
+        val context = mockk<Context>(relaxed = true)
+        every { context.packageName } returns "com.multiapp.instance.abc"
+
+        val result = manager.dispatch(
+            instanceId = "inst-001",
+            snapshot = snapshot(
+                receivers = listOf(
+                    ResolvedComponent(
+                        name = "com.test.minimal.ManifestReceiver",
+                        exported = false,
+                        intentFilters = listOf("com.test.ACTION_BOTH")
+                    )
+                )
+            ),
+            intent = intent,
+            virtualContext = context,
+            receiverClassLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        val batch = assertIs<VirtualBroadcastResult.Batch>(result)
+        assertEquals(2, batch.results.size)
+        assertSame(intent, dynamic.intent)
+        assertSame(intent, manifest.intent)
+        assertEquals(
+            listOf(
+                dynamic.javaClass.name,
+                "com.test.minimal.ManifestReceiver"
+            ),
+            recorder.records().map { it.receiverClassName }
+        )
+    }
+
+    @Test
     fun `dispatch falls back to unsupported implicit after dynamic unregister`() {
         val receiver = RecordingReceiver()
         val registry = VirtualDynamicReceiverRegistry().apply {
@@ -200,7 +376,11 @@ class VirtualBroadcastManagerTest {
         }
     }
 
-    private fun snapshot() = VirtualPackageSnapshot(
+    private fun snapshot(
+        receivers: List<ResolvedComponent> = listOf(
+            ResolvedComponent(name = "com.test.minimal.BootReceiver", exported = false)
+        )
+    ) = VirtualPackageSnapshot(
         instanceId = "inst-001",
         originPackageName = "com.test.minimal",
         virtualPackageName = "com.multiapp.instance.abc",
@@ -211,9 +391,7 @@ class VirtualBroadcastManagerTest {
         minSdk = 28,
         sourceDir = "/data/minimal.apk",
         dataDir = "/data/inst",
-        receivers = listOf(
-            ResolvedComponent(name = "com.test.minimal.BootReceiver", exported = false)
-        )
+        receivers = receivers
     )
 
     private class RecordingReceiver : BroadcastReceiver() {

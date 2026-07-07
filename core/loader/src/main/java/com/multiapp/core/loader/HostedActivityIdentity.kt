@@ -16,7 +16,7 @@ internal object HostedActivityIdentity {
         sourceDir = config.sourceDir
         publicSourceDir = config.sourceDir
         dataDir = config.dataDir
-        nativeLibraryDir = config.nativeLibraryDir
+        ApplicationInfoNativePathCompat.applyTo(this, config.dataDir, config.nativeLibraryDir)
         writeStringField(this, "credentialProtectedDataDir", config.dataDir)
         writeStringField(this, "deviceProtectedDataDir", config.dataDir)
         processName = runtimeProcessName(config)

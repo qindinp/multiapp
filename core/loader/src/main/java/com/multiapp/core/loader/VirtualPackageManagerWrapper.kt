@@ -176,26 +176,64 @@ class VirtualPackageManagerWrapper(
     override fun getActivityLogo(activityName: ComponentName): Drawable = base.getActivityLogo(activityName) ?: defaultActivityIcon
     override fun getActivityLogo(intent: Intent): Drawable = base.getActivityLogo(intent) ?: defaultActivityIcon
     override fun getAllPermissionGroups(flags: Int): List<PermissionGroupInfo> = base.getAllPermissionGroups(flags)
-    override fun getApplicationBanner(info: ApplicationInfo): Drawable = base.getApplicationBanner(info) ?: defaultActivityIcon
-    override fun getApplicationBanner(packageName: String): Drawable = base.getApplicationBanner(packageName) ?: defaultActivityIcon
-    override fun getApplicationEnabledSetting(packageName: String): Int = base.getApplicationEnabledSetting(packageName)
-    override fun getApplicationIcon(info: ApplicationInfo): Drawable = base.getApplicationIcon(info)
-    override fun getApplicationIcon(packageName: String): Drawable = base.getApplicationIcon(packageName)
-    override fun getApplicationLogo(info: ApplicationInfo): Drawable = base.getApplicationLogo(info) ?: defaultActivityIcon
-    override fun getApplicationLogo(packageName: String): Drawable = base.getApplicationLogo(packageName) ?: defaultActivityIcon
+    override fun getApplicationBanner(info: ApplicationInfo): Drawable =
+        virtualApplicationInfo(info)?.let { virtualInfo ->
+            runCatching { base.getApplicationBanner(virtualInfo) }.getOrNull()
+        } ?: base.getApplicationBanner(info) ?: defaultActivityIcon
+
+    override fun getApplicationBanner(packageName: String): Drawable =
+        virtualApplicationInfo(packageName)?.let { virtualInfo ->
+            runCatching { base.getApplicationBanner(virtualInfo) }.getOrNull()
+        } ?: base.getApplicationBanner(packageName) ?: defaultActivityIcon
+
+    override fun getApplicationEnabledSetting(packageName: String): Int =
+        if (virtualApplicationInfo(packageName) != null) {
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+        } else {
+            base.getApplicationEnabledSetting(packageName)
+        }
+
+    override fun getApplicationIcon(info: ApplicationInfo): Drawable =
+        virtualApplicationInfo(info)?.let { virtualInfo ->
+            runCatching { base.getApplicationIcon(virtualInfo) }.getOrNull()
+        } ?: base.getApplicationIcon(info)
+
+    override fun getApplicationIcon(packageName: String): Drawable =
+        virtualApplicationInfo(packageName)?.let { virtualInfo ->
+            runCatching { base.getApplicationIcon(virtualInfo) }.getOrNull()
+        } ?: base.getApplicationIcon(packageName)
+
+    override fun getApplicationLogo(info: ApplicationInfo): Drawable =
+        virtualApplicationInfo(info)?.let { virtualInfo ->
+            runCatching { base.getApplicationLogo(virtualInfo) }.getOrNull()
+        } ?: base.getApplicationLogo(info) ?: defaultActivityIcon
+
+    override fun getApplicationLogo(packageName: String): Drawable =
+        virtualApplicationInfo(packageName)?.let { virtualInfo ->
+            runCatching { base.getApplicationLogo(virtualInfo) }.getOrNull()
+        } ?: base.getApplicationLogo(packageName) ?: defaultActivityIcon
     override fun getChangedPackages(sequenceNumber: Int): ChangedPackages? = base.getChangedPackages(sequenceNumber)
     override fun getComponentEnabledSetting(componentName: ComponentName): Int =
         service.getComponentEnabledSetting(componentName) ?: base.getComponentEnabledSetting(componentName)
     override fun getDefaultActivityIcon(): Drawable = base.getDefaultActivityIcon()
-    override fun getDrawable(packageName: String, resid: Int, appInfo: ApplicationInfo?): Drawable? = base.getDrawable(packageName, resid, appInfo)
-    override fun getInstallerPackageName(packageName: String): String? = base.getInstallerPackageName(packageName)
+    override fun getDrawable(packageName: String, resid: Int, appInfo: ApplicationInfo?): Drawable? =
+        virtualResourcesForPackage(packageName, appInfo)
+            ?.let { resources -> runCatching { resources.getDrawable(resid, null) }.getOrNull() }
+            ?: base.getDrawable(packageName, resid, appInfo)
+
+    override fun getInstallerPackageName(packageName: String): String? =
+        if (virtualApplicationInfo(packageName) != null) null else base.getInstallerPackageName(packageName)
     override fun getInstantAppCookie(): ByteArray = base.instantAppCookie
     override fun getInstantAppCookieMaxBytes(): Int = base.instantAppCookieMaxBytes
     override fun getInstrumentationInfo(className: ComponentName, flags: Int): InstrumentationInfo = base.getInstrumentationInfo(className, flags)
-    override fun getLeanbackLaunchIntentForPackage(packageName: String): Intent? = base.getLeanbackLaunchIntentForPackage(packageName)
+    override fun getLeanbackLaunchIntentForPackage(packageName: String): Intent? =
+        if (virtualApplicationInfo(packageName) != null) null else base.getLeanbackLaunchIntentForPackage(packageName)
     override fun getNameForUid(uid: Int): String? = service.getNameForUid(uid, runtimeUid) ?: base.getNameForUid(uid)
-    override fun getPackageGids(packageName: String): IntArray = base.getPackageGids(packageName)
-    override fun getPackageGids(packageName: String, flags: Int): IntArray = base.getPackageGids(packageName, flags)
+    override fun getPackageGids(packageName: String): IntArray =
+        if (virtualApplicationInfo(packageName) != null) intArrayOf() else base.getPackageGids(packageName)
+
+    override fun getPackageGids(packageName: String, flags: Int): IntArray =
+        if (virtualApplicationInfo(packageName) != null) intArrayOf() else base.getPackageGids(packageName, flags)
     override fun getPackageInstaller(): PackageInstaller = base.packageInstaller
     override fun getPackageUid(packageName: String, flags: Int): Int = service.getPackageUid(packageName, runtimeUid) ?: base.getPackageUid(packageName, flags)
     override fun getPackagesForUid(uid: Int): Array<String>? = service.getPackagesForUid(uid, runtimeUid) ?: base.getPackagesForUid(uid)
@@ -220,16 +258,23 @@ class VirtualPackageManagerWrapper(
     override fun getSharedLibraries(flags: Int): List<SharedLibraryInfo> = base.getSharedLibraries(flags)
     override fun getSystemAvailableFeatures(): Array<FeatureInfo> = base.systemAvailableFeatures
     override fun getSystemSharedLibraryNames(): Array<String>? = base.systemSharedLibraryNames
-    override fun getText(packageName: String, resid: Int, appInfo: ApplicationInfo?): CharSequence? = base.getText(packageName, resid, appInfo)
+    override fun getText(packageName: String, resid: Int, appInfo: ApplicationInfo?): CharSequence? =
+        virtualResourcesForPackage(packageName, appInfo)
+            ?.let { resources -> runCatching { resources.getText(resid) }.getOrNull() }
+            ?: base.getText(packageName, resid, appInfo)
     override fun getUserBadgedDrawableForDensity(drawable: Drawable, user: UserHandle, badgeLocation: Rect?, badgeDensity: Int): Drawable = base.getUserBadgedDrawableForDensity(drawable, user, badgeLocation, badgeDensity)
     override fun getUserBadgedIcon(icon: Drawable, user: UserHandle): Drawable = base.getUserBadgedIcon(icon, user)
     override fun getUserBadgedLabel(label: CharSequence, user: UserHandle): CharSequence = base.getUserBadgedLabel(label, user)
-    override fun getXml(packageName: String, resid: Int, appInfo: ApplicationInfo?): XmlResourceParser? = base.getXml(packageName, resid, appInfo)
+    override fun getXml(packageName: String, resid: Int, appInfo: ApplicationInfo?): XmlResourceParser? =
+        virtualResourcesForPackage(packageName, appInfo)
+            ?.let { resources -> runCatching { resources.getXml(resid) }.getOrNull() }
+            ?: base.getXml(packageName, resid, appInfo)
     override fun hasSystemFeature(name: String): Boolean = base.hasSystemFeature(name)
     override fun hasSystemFeature(name: String, version: Int): Boolean = base.hasSystemFeature(name, version)
     override fun isInstantApp(): Boolean = base.isInstantApp
     override fun isInstantApp(packageName: String): Boolean = service.isInstantApp(packageName) ?: base.isInstantApp(packageName)
-    override fun isPermissionRevokedByPolicy(permission: String, packageName: String): Boolean = base.isPermissionRevokedByPolicy(permission, packageName)
+    override fun isPermissionRevokedByPolicy(permission: String, packageName: String): Boolean =
+        if (virtualApplicationInfo(packageName) != null) false else base.isPermissionRevokedByPolicy(permission, packageName)
     override fun isSafeMode(): Boolean = base.isSafeMode
     override fun queryBroadcastReceivers(intent: Intent, flags: Int): List<ResolveInfo> = service.queryBroadcastReceivers(intent).ifEmpty { base.queryBroadcastReceivers(intent, flags) }
     override fun queryContentProviders(processName: String?, uid: Int, flags: Int): List<ProviderInfo> {
@@ -247,7 +292,10 @@ class VirtualPackageManagerWrapper(
     override fun removePermission(name: String) = base.removePermission(name)
     override fun resolveService(intent: Intent, flags: Int): ResolveInfo? = service.resolveService(intent) ?: base.resolveService(intent, flags)
     override fun setApplicationCategoryHint(packageName: String, categoryHint: Int) = base.setApplicationCategoryHint(packageName, categoryHint)
-    override fun setApplicationEnabledSetting(packageName: String, newState: Int, flags: Int) = base.setApplicationEnabledSetting(packageName, newState, flags)
+    override fun setApplicationEnabledSetting(packageName: String, newState: Int, flags: Int) {
+        if (virtualApplicationInfo(packageName) != null) return
+        base.setApplicationEnabledSetting(packageName, newState, flags)
+    }
     override fun setComponentEnabledSetting(componentName: ComponentName, newState: Int, flags: Int) {
         if (service.setComponentEnabledSetting(componentName, newState, flags)) return
         base.setComponentEnabledSetting(componentName, newState, flags)
@@ -261,6 +309,22 @@ class VirtualPackageManagerWrapper(
         return runCatching {
             base.resolveActivity(requestIntent, 0)?.activityInfo?.packageName
         }.getOrNull()
+    }
+
+    private fun virtualApplicationInfo(packageName: String?): ApplicationInfo? =
+        packageName?.let { service.getApplicationInfo(it) }
+
+    private fun virtualApplicationInfo(info: ApplicationInfo?): ApplicationInfo? =
+        info?.let { service.getApplicationInfoForResources(it) }
+
+    private fun virtualResourcesForPackage(
+        packageName: String?,
+        appInfo: ApplicationInfo?
+    ): Resources? {
+        val virtualInfo = virtualApplicationInfo(appInfo)
+            ?: virtualApplicationInfo(packageName)
+            ?: return null
+        return runCatching { base.getResourcesForApplication(virtualInfo) }.getOrNull()
     }
 
     private fun invokeBasePackageManagerMethod(

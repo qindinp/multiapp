@@ -76,6 +76,15 @@ class InMemoryVirtualBroadcastRecorder : VirtualBroadcastRecorder {
 sealed class VirtualBroadcastResult {
     abstract val record: VirtualBroadcastRecord
 
+    data class Batch(
+        val results: List<VirtualBroadcastResult>,
+        override val record: VirtualBroadcastRecord = results.first().record
+    ) : VirtualBroadcastResult() {
+        init {
+            require(results.isNotEmpty()) { "broadcast batch must not be empty" }
+        }
+    }
+
     data class Delivered(
         val request: VirtualBroadcastDispatchRequest,
         val receiver: android.content.BroadcastReceiver,
@@ -117,7 +126,7 @@ sealed class VirtualBroadcastResult {
     ) : VirtualBroadcastResult()
 }
 
-/** Minimal in-process router for explicit guest BroadcastReceiver intents. */
+/** In-process router for guest BroadcastReceiver intents. */
 class VirtualBroadcastManager(
     private val runtime: VirtualReceiverRuntime = VirtualReceiverRuntime.global,
     private val recorder: VirtualBroadcastRecorder = GlobalVirtualBroadcastRecorder,
@@ -157,8 +166,13 @@ class VirtualBroadcastManager(
         virtualContext: Context,
         receiverClassLoader: ClassLoader
     ): VirtualBroadcastResult {
-        dispatchDynamic(instanceId, intent, virtualContext)?.let { return it }
-        if (snapshot == null) return noPackageSnapshot(instanceId, intent)
+        val dynamicResult = dispatchDynamic(instanceId, intent, virtualContext)
+        if (dynamicResult != null && intent.component != null) return dynamicResult
+        if (snapshot == null) return dynamicResult ?: noPackageSnapshot(instanceId, intent)
+        if (intent.component == null) {
+            val implicitResult = dispatchImplicit(snapshot, intent, virtualContext, receiverClassLoader)
+            return combineResults(dynamicResult, implicitResult) ?: unsupportedImplicit(intent)
+        }
         return dispatchExplicit(snapshot, intent, virtualContext, receiverClassLoader)
     }
 
@@ -167,7 +181,19 @@ class VirtualBroadcastManager(
         intent: Intent,
         virtualContext: Context
     ): VirtualBroadcastResult? {
-        val record = dynamicReceiverRegistry.query(instanceId, intent).firstOrNull() ?: return null
+        val records = dynamicReceiverRegistry.query(instanceId, intent)
+        if (records.isEmpty()) return null
+        val results = records.map { record ->
+            dispatchDynamicRecord(record, intent, virtualContext)
+        }
+        return singleOrBatch(results)
+    }
+
+    private fun dispatchDynamicRecord(
+        record: VirtualDynamicReceiverRecord,
+        intent: Intent,
+        virtualContext: Context
+    ): VirtualBroadcastResult {
         val request = VirtualBroadcastDispatchRequest(
             instanceId = record.instanceId,
             originPackageName = virtualContext.packageName,
@@ -193,6 +219,46 @@ class VirtualBroadcastManager(
             receiver = record.receiver,
             record = deliveredRecord
         )
+    }
+
+    private fun dispatchImplicit(
+        snapshot: VirtualPackageSnapshot,
+        intent: Intent,
+        virtualContext: Context,
+        receiverClassLoader: ClassLoader
+    ): VirtualBroadcastResult? {
+        val requests = createImplicitDispatchRequests(snapshot, intent)
+        if (requests.isEmpty()) return null
+        val results = requests.map { request ->
+            runtime.dispatch(
+                VirtualReceiverRuntimeRequest(
+                    dispatchRequest = request,
+                    virtualContext = virtualContext,
+                    receiverClassLoader = receiverClassLoader
+                )
+            )
+        }
+        return singleOrBatch(results)
+    }
+
+    internal fun createImplicitDispatchRequests(
+        snapshot: VirtualPackageSnapshot,
+        sourceIntent: Intent
+    ): List<VirtualBroadcastDispatchRequest> {
+        val packageName = runCatching { sourceIntent.`package` }.getOrNull()
+        if (packageName != null && !snapshot.matchesPackageName(packageName)) return emptyList()
+        return snapshot.receivers
+            .filter { receiver -> receiver.matchesImplicitBroadcast(sourceIntent) }
+            .map { receiver ->
+                VirtualBroadcastDispatchRequest(
+                    instanceId = snapshot.instanceId,
+                    originPackageName = snapshot.originPackageName,
+                    receiverClassName = receiver.name,
+                    sourceIntent = sourceIntent,
+                    action = sourceIntent.action,
+                    reason = "implicit"
+                )
+            }
     }
 
     internal fun createExplicitDispatchRequest(
@@ -288,5 +354,48 @@ class VirtualBroadcastManager(
         className.startsWith(".") -> packageName + className
         '.' !in className -> "$packageName.$className"
         else -> className
+    }
+
+    private fun singleOrBatch(results: List<VirtualBroadcastResult>): VirtualBroadcastResult =
+        if (results.size == 1) results.single() else VirtualBroadcastResult.Batch(results)
+
+    private fun combineResults(
+        first: VirtualBroadcastResult?,
+        second: VirtualBroadcastResult?
+    ): VirtualBroadcastResult? {
+        val results = buildList {
+            first?.flattenInto(this)
+            second?.flattenInto(this)
+        }
+        return when (results.size) {
+            0 -> null
+            1 -> results.single()
+            else -> VirtualBroadcastResult.Batch(results)
+        }
+    }
+
+    private fun VirtualBroadcastResult.flattenInto(results: MutableList<VirtualBroadcastResult>) {
+        if (this is VirtualBroadcastResult.Batch) {
+            results.addAll(this.results)
+        } else {
+            results += this
+        }
+    }
+
+    private fun ResolvedComponent.matchesImplicitBroadcast(intent: Intent): Boolean {
+        val action = runCatching { intent.action }.getOrNull()
+        val categories = runCatching { intent.categories.orEmpty() }.getOrDefault(emptySet())
+        val scheme = runCatching { intent.data?.scheme }.getOrNull()
+
+        if (resolvedIntentFilters.isNotEmpty()) {
+            return resolvedIntentFilters.any { filter ->
+                val actionMatches = filter.actions.isNotEmpty() && action in filter.actions
+                val categoriesMatch = filter.categories.containsAll(categories)
+                val schemeMatches = filter.dataSchemes.isEmpty() || scheme in filter.dataSchemes
+                actionMatches && categoriesMatch && schemeMatches
+            }
+        }
+
+        return intentFilters.isNotEmpty() && action in intentFilters
     }
 }

@@ -57,7 +57,8 @@ class HostedActivityContextEvidenceFormatterTest {
 
         val text = HostedActivityContextEvidenceFormatter.format(
             guestActivityClassName = "com.test.minimal.MainActivity",
-            injection = injection
+            injection = injection,
+            taskDescriptionLabel = "com.test.minimal #inst-001"
         )
 
         assertTrue("status=GUEST_ACTIVITY_CONTEXT_INJECTED" in text)
@@ -94,6 +95,7 @@ class HostedActivityContextEvidenceFormatterTest {
         assertTrue("themeFieldPatched=true" in text)
         assertTrue("baseContextInjectedBeforeTheme=true" in text)
         assertTrue("hiddenApiBypassApplied=true" in text)
+        assertTrue("taskDescriptionLabel=com.test.minimal #inst-001" in text)
         assertTrue("dataDir=/data/user/0/com.multiapp.app/files/instance_data/inst-001" in text)
     }
 

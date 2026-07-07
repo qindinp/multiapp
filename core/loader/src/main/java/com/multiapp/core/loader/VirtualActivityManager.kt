@@ -14,7 +14,8 @@ data class ProxyActivityLaunchSpec(
     val instanceId: String,
     val originPackageName: String,
     val guestActivityClassName: String,
-    val launchMode: String?
+    val launchMode: String?,
+    val taskAffinity: String?
 )
 
 class VirtualActivityManager(
@@ -34,16 +35,20 @@ class VirtualActivityManager(
         const val EXTRA_GUEST_ACTIVITY_CLASS_NAME = "multiapp.guestActivityClassName"
         const val EXTRA_ORIGINAL_GUEST_INTENT = "multiapp.originalGuestIntent"
         const val EXTRA_HOST_PACKAGE_NAME = "multiapp.hostPackageName"
+        const val EXTRA_GUEST_ACTIVITY_LAUNCH_MODE = "multiapp.guestActivityLaunchMode"
+        const val EXTRA_GUEST_TASK_AFFINITY = "multiapp.guestTaskAffinity"
     }
 
     fun launchGuestLauncher(
         instanceId: String,
         originPackageName: String,
         guestActivityClassName: String,
-        launchMode: String? = null
+        launchMode: String? = null,
+        taskAffinity: String? = null
     ): Result<VirtualActivityRecord> {
         return runCatching {
-            val launcherIntent = Intent()
+            val launcherIntent = Intent().addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val resolvedTaskAffinity = taskAffinity ?: rootTaskAffinity(originPackageName, instanceId)
             val record = allocateGuestActivity(
                 VirtualActivityLaunchRequest(
                     instanceId = instanceId,
@@ -51,7 +56,8 @@ class VirtualActivityManager(
                     guestActivityClassName = guestActivityClassName,
                     sourceIntent = launcherIntent,
                     reason = "launcher",
-                    launchMode = launchMode
+                    launchMode = launchMode,
+                    taskAffinity = resolvedTaskAffinity
                 )
             )
             context.startActivity(createProxyIntent(record, sourceIntent = launcherIntent, forceNewTask = true))
@@ -68,11 +74,17 @@ class VirtualActivityManager(
     }
 
     fun allocateGuestActivity(request: VirtualActivityLaunchRequest): VirtualActivityRecord {
+        val taskAffinity = request.taskAffinity ?: rootTaskAffinity(
+            originPackageName = request.originPackageName,
+            instanceId = request.instanceId
+        )
         val record = proxyActivityRegistry.allocate(
             instanceId = request.instanceId,
             originPackageName = request.originPackageName,
             guestActivityClassName = request.guestActivityClassName,
-            launchMode = request.launchMode
+            launchMode = request.launchMode,
+            taskKey = taskAffinity,
+            taskAffinity = taskAffinity
         )
         return activityRecordManager.registerLaunch(
             record,
@@ -95,10 +107,13 @@ class VirtualActivityManager(
             putExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME, spec.guestActivityClassName)
             putExtra(EXTRA_HOST_PACKAGE_NAME, spec.hostPackageName)
             if (!spec.launchMode.isNullOrBlank()) {
-                putExtra("multiapp.guestActivityLaunchMode", spec.launchMode)
+                putExtra(EXTRA_GUEST_ACTIVITY_LAUNCH_MODE, spec.launchMode)
+            }
+            if (!spec.taskAffinity.isNullOrBlank()) {
+                putExtra(EXTRA_GUEST_TASK_AFFINITY, spec.taskAffinity)
             }
             if (sourceIntent != null) {
-                putExtra(EXTRA_ORIGINAL_GUEST_INTENT, Intent(sourceIntent))
+                VirtualActivityIntentStore.remember(spec.token, sourceIntent)
             }
             if (forceNewTask || sourceIntent?.safeFlags()?.hasFlag(Intent.FLAG_ACTIVITY_NEW_TASK) == true) {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -114,7 +129,8 @@ class VirtualActivityManager(
             instanceId = record.instanceId,
             originPackageName = record.originPackageName,
             guestActivityClassName = record.guestActivityClassName,
-            launchMode = record.launchMode
+            launchMode = record.launchMode,
+            taskAffinity = record.taskAffinity
         )
     }
 
@@ -138,4 +154,7 @@ class VirtualActivityManager(
     private fun Int.hasFlag(flag: Int): Boolean = this and flag != 0
 
     private fun String.redactUriForEvidence(): String = EvidenceSanitizer.redactUriForEvidence(this)
+
+    private fun rootTaskAffinity(originPackageName: String, instanceId: String): String =
+        "$originPackageName:$instanceId"
 }

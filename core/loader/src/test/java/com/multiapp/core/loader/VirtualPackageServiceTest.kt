@@ -97,6 +97,48 @@ class VirtualPackageServiceTest {
     }
 
     @Test
+    fun `launch intent is null when snapshot has no launcher metadata`() {
+        val service = VirtualPackageService(
+            snapshot().copy(
+                launcherActivityName = null,
+                activities = listOf(
+                    ResolvedComponent(name = "com.test.minimal.ExportedActivity", exported = true)
+                )
+            )
+        )
+
+        assertNull(service.getLaunchIntentForPackage("com.test.minimal"))
+    }
+
+    @Test
+    fun `launcher query is empty when snapshot has no launcher metadata`() {
+        val service = VirtualPackageService(
+            snapshot().copy(
+                launcherActivityName = null,
+                activities = listOf(
+                    ResolvedComponent(name = "com.test.minimal.ExportedActivity", exported = true),
+                    ResolvedComponent(name = "com.test.minimal.MainActivity", exported = false)
+                )
+            )
+        )
+
+        val result = service.resolveActivity(intent(Intent.ACTION_MAIN, setOf(Intent.CATEGORY_LAUNCHER)))
+
+        assertNull(result)
+        assertNull(
+            VirtualPackageInfoFactory.launcherResolveInfo(
+                snapshot().copy(
+                    launcherActivityName = null,
+                    activities = listOf(
+                        ResolvedComponent(name = "com.test.minimal.ExportedActivity", exported = true),
+                        ResolvedComponent(name = "com.test.minimal.MainActivity", exported = false)
+                    )
+                )
+            )
+        )
+    }
+
+    @Test
     fun `view activity matches http scheme filter`() {
         val service = VirtualPackageService(snapshot())
 

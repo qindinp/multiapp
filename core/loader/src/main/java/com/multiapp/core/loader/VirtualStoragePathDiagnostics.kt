@@ -209,5 +209,9 @@ data class VirtualStoragePathDiagnostic(
     val caller: String,
     val reason: String?,
     val withinDataRoot: Boolean,
-    val candidateWithinDataRoot: Boolean?
+    val candidateWithinDataRoot: Boolean?,
+    val nativeProbeResultCode: Int? = null,
+    val nativeProbeErrno: Int? = null,
+    val nativeProbeCandidateExists: Boolean? = null,
+    val nativeProbeResolvedPath: String? = null
 )

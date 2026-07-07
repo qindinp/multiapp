@@ -12,6 +12,7 @@ object ContainerRuntimePaths {
     const val INSTANCE_DATA_DIR = "instance_data"
     const val INSTANCE_LIB_DIR = "lib"
     const val HOSTED_LAUNCH_EVIDENCE_DIR = "hosted_launch_evidence"
+    const val PROXY_ACTIVITY_SLOTS_FILE = "proxy_activity_slots.properties"
 
     fun instanceStoreDir(context: Context): File = instanceStoreDir(context.filesDir)
 
@@ -42,6 +43,12 @@ object ContainerRuntimePaths {
 
     fun hostedLaunchEvidenceDir(filesDir: File): File =
         ensureDir(filesDir, HOSTED_LAUNCH_EVIDENCE_DIR)
+
+    fun proxyActivitySlotsFile(context: Context): File =
+        proxyActivitySlotsFile(context.filesDir)
+
+    fun proxyActivitySlotsFile(filesDir: File): File =
+        File(filesDir, PROXY_ACTIVITY_SLOTS_FILE)
 
     fun hostedLaunchEvidenceFile(context: Context, instanceId: String): File =
         hostedLaunchEvidenceFile(context.filesDir, instanceId)

@@ -47,8 +47,22 @@ class HostedContainerPr9ProviderMethodEvidenceTest {
         "provider-call" to "CALL",
         "provider-open-file" to "OPEN_FILE",
         "provider-open-asset-file" to "OPEN_ASSET_FILE",
+        "provider-open-typed-asset-file" to "OPEN_TYPED_ASSET_FILE",
         "provider-bulk-insert" to "BULK_INSERT"
     )
+    private val pr9ProviderCapabilityEvidence = mapOf(
+        "provider-open-file-descriptor" to "ROUTED_BY_CONTENT_RESOLVER_HOOK",
+        "provider-open-asset-file-descriptor" to "ROUTED_BY_CONTENT_RESOLVER_HOOK",
+        "provider-open-typed-asset-file-descriptor" to "ROUTED_BY_CONTENT_RESOLVER_HOOK",
+        "provider-notify-change" to "ROUTED_BY_CONTENT_RESOLVER_HOOK",
+        "provider-register-content-observer" to "ROUTED_BY_CONTENT_RESOLVER_HOOK",
+        "provider-unregister-content-observer" to "NO_URI_REWRITE_REQUIRED",
+        "provider-grant-uri-permission" to "ROUTED_BY_CONTENT_RESOLVER_HOOK",
+        "provider-revoke-uri-permission" to "ROUTED_BY_CONTENT_RESOLVER_HOOK",
+        "provider-canonicalize" to "ROUTED_BY_CONTENT_RESOLVER_HOOK",
+        "provider-uncanonicalize" to "ROUTED_BY_CONTENT_RESOLVER_HOOK"
+    )
+    private val pr9EvidenceComponents = pr9ProviderMethodEvidence.keys + pr9ProviderCapabilityEvidence.keys
 
     @Before
     fun cleanPreviousPr9ProviderState() {
@@ -170,25 +184,34 @@ class HostedContainerPr9ProviderMethodEvidenceTest {
                 "status=PROVIDER_CACHED"
             ))
         }
+        pr9ProviderCapabilityEvidence.forEach { (component, status) ->
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "stage=PROVIDER_PROXY")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "instanceId=${instance.instanceId}")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "originPackageName=$minimalPackageName")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "virtualPackageName=${instance.virtualPackageName}")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "status=$status")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "hostFallback=false")
+            assertRuntimeEvidenceHasLine(instance.instanceId, component, "capabilityVerdict=$status")
+        }
     }
 
     private fun waitForPr9ProviderEvidence(instanceId: String) {
         val deadline = System.currentTimeMillis() + 8_000L
         while (System.currentTimeMillis() < deadline) {
-            val missing = pr9ProviderMethodEvidence.keys.filterNot { component ->
+            val missing = pr9EvidenceComponents.filterNot { component ->
                 ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component).isFile
             }
             if (missing.isEmpty()) return
             Thread.sleep(100L)
         }
-        val missing = pr9ProviderMethodEvidence.keys.filterNot { component ->
+        val missing = pr9EvidenceComponents.filterNot { component ->
             ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component).isFile
         }
         assertTrue("missing PR-9 provider method evidence for $instanceId: $missing", missing.isEmpty())
     }
 
     private fun deletePr9ProviderEvidence(instanceId: String) {
-        pr9ProviderMethodEvidence.keys.forEach { component ->
+        pr9EvidenceComponents.forEach { component ->
             val file = ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component)
             if (file.exists()) {
                 assertTrue("failed to delete stale PR-9 provider evidence: ${file.absolutePath}", file.delete())
@@ -199,7 +222,7 @@ class HostedContainerPr9ProviderMethodEvidenceTest {
     private fun deletePr9ProviderEvidenceFilesByComponentName() {
         ContainerRuntimePaths.hostedLaunchEvidenceDir(targetContext)
             .listFiles()
-            ?.filter { file -> file.isFile && pr9ProviderMethodEvidence.keys.any { component -> component in file.name } }
+            ?.filter { file -> file.isFile && pr9EvidenceComponents.any { component -> component in file.name } }
             ?.forEach { file ->
                 assertTrue("failed to delete stale PR-9 provider evidence: ${file.absolutePath}", file.delete())
             }

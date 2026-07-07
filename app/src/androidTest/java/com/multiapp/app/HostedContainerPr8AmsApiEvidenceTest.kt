@@ -41,9 +41,14 @@ class HostedContainerPr8AmsApiEvidenceTest {
     private val packageManager = instrumentation.context.packageManager
     private val minimalPackageName = "com.test.minimal"
     private val pr8AmsApiEvidenceComponents = listOf(
+        "ams-start-activity-overload",
+        "ams-start-activities-overload",
+        "ams-start-service",
         "ams-register-receiver",
         "ams-sticky-ordered-broadcast",
-        "ams-bind-service-overload"
+        "ams-start-foreground-service",
+        "ams-bind-service-overload",
+        "ams-unbind-service-overload"
     )
 
     @Before
@@ -150,12 +155,58 @@ class HostedContainerPr8AmsApiEvidenceTest {
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-sticky-ordered-broadcast", "hostFallback=false")
         assertRuntimeEvidenceHasLineStartingWith(instance.instanceId, "ams-sticky-ordered-broadcast", "dispatchStatus=")
 
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "stage=AMS_API_OVERLOAD")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "api=startActivity:options")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "status=ACTIVITY_START_BLOCKED")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "hostFallback=false")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "remapped=false")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "reason=unsupportedActivityIntent")
+
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "stage=AMS_API_OVERLOAD")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "api=startActivities")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "status=ACTIVITY_BATCH_BLOCKED")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "hostFallback=false")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "reason=unsupportedActivityIntent")
+
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "stage=AMS_API_OVERLOAD")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "api=startService")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "status=SERVICE_PROXY_STARTED")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "proxyStarted=true")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "serviceResolved=true")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "foreground=false")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "capabilityVerdict=PARTIAL")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "hostFallback=false")
+
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "stage=AMS_API_OVERLOAD")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "api=startForegroundService")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "status=FOREGROUND_SERVICE_PROXY_STARTED")
+        assertRuntimeEvidenceHasLineStartingWith(instance.instanceId, "ams-start-foreground-service", "returnValue=")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "proxyStarted=true")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "serviceResolved=true")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "foreground=true")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "reason=explicitForeground")
+        assertRuntimeEvidenceHasLine(
+            instance.instanceId,
+            "ams-start-foreground-service",
+            "guestServiceClassName=com.test.minimal.ProbeService"
+        )
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "lifecycleImplemented=true")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "guestForegroundLifecycleImplemented=false")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "capabilityVerdict=PARTIAL")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-foreground-service", "hostFallback=false")
+
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-bind-service-overload", "stage=AMS_API_OVERLOAD")
-        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-bind-service-overload", "status=BIND_BLOCKED")
-        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-bind-service-overload", "returnValue=false")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-bind-service-overload", "status=BIND_CONNECTED")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-bind-service-overload", "returnValue=true")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-bind-service-overload", "capabilityVerdict=PASS")
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-bind-service-overload", "hostFallback=false")
         assertRuntimeEvidenceHasLineStartingWith(instance.instanceId, "ams-bind-service-overload", "api=")
         assertRuntimeEvidenceHasLineStartingWith(instance.instanceId, "ams-bind-service-overload", "serviceResolved=")
+
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-unbind-service-overload", "stage=AMS_API_OVERLOAD")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-unbind-service-overload", "status=UNBIND_DISPATCHED")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-unbind-service-overload", "hostFallback=false")
+        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-unbind-service-overload", "capabilityVerdict=PASS")
     }
 
     private fun waitForPr8AmsApiEvidence(instanceId: String) {

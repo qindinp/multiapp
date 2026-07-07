@@ -125,6 +125,19 @@ class LoadedApkBridgeTest {
         assertTrue(result.skippedFieldReasons.any { it.startsWith("mDataDir:TYPE_MISMATCH:") })
     }
 
+    @Test
+    fun `frameworkSafeNativeLibraryDir falls back to instance lib path when missing`() {
+        val nativeLibraryDir = ApplicationInfoNativePathCompat.frameworkSafeNativeLibraryDir(
+            dataDir = "/data/user/0/com.multiapp.app/files/instance_data/inst-001",
+            nativeLibraryDir = null
+        )
+
+        assertEquals(
+            "/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib",
+            nativeLibraryDir
+        )
+    }
+
     private class FakeProtectedStorageApplicationInfo : ApplicationInfo() {
         var credentialProtectedDataDir: String? = null
         var deviceProtectedDataDir: String? = null

@@ -24,15 +24,29 @@ class VirtualProviderHookInstaller(
         }
 
         return try {
-            hook.apply(
+            val hookEngine = hookEngineProvider()
+            hookEngine.initLsplant(ContentProviderHook::class.java.classLoader ?: ClassLoader.getSystemClassLoader())
+            val stats = hook.install(
                 ProviderAuthorityHookConfig(
                     instanceId = plan.instanceId,
                     originalPackageName = plan.originPackageName,
                     authorityMap = plan.authorityMap
                 ),
-                hookEngineProvider()
+                hookEngine
             )
-            VirtualProviderHookInstallResult.Installed(plan, plan.authorityMap.size)
+            if (stats.installedMethodCount > 0) {
+                VirtualProviderHookInstallResult.Installed(
+                    plan = plan,
+                    authorityMapSize = plan.authorityMap.size,
+                    installedMethodCount = stats.installedMethodCount,
+                    attemptedMethodCount = stats.attemptedMethodCount
+                )
+            } else {
+                VirtualProviderHookInstallResult.Skipped(
+                    plan,
+                    "NO_CONTENT_RESOLVER_HOOK_INSTALLED:${stats.attemptedMethodCount}"
+                )
+            }
         } catch (error: Throwable) {
             VirtualProviderHookInstallResult.Failed(plan, error)
         }
@@ -46,6 +60,8 @@ sealed class VirtualProviderHookInstallResult {
         is Installed -> listOf(
             BootstrapEvidence("providerHookInstallStatus", "INSTALLED", SOURCE),
             BootstrapEvidence("providerHookInstallAuthorityMapSize", authorityMapSize.toString(), SOURCE),
+            BootstrapEvidence("providerHookInstallMethodCount", installedMethodCount.toString(), SOURCE),
+            BootstrapEvidence("providerHookInstallAttemptedMethodCount", attemptedMethodCount.toString(), SOURCE),
             BootstrapEvidence("providerHookInstallReason", plan.reason, SOURCE)
         )
         is Skipped -> listOf(
@@ -63,7 +79,9 @@ sealed class VirtualProviderHookInstallResult {
 
     data class Installed(
         override val plan: VirtualProviderRoutingPlan,
-        val authorityMapSize: Int
+        val authorityMapSize: Int,
+        val installedMethodCount: Int,
+        val attemptedMethodCount: Int
     ) : VirtualProviderHookInstallResult()
 
     data class Skipped(

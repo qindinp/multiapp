@@ -170,6 +170,15 @@ class VirtualActivityStack {
     }
 
     @Synchronized
+    fun pruneEmptyTasks(): Int {
+        val emptyTaskIds = tasks.values
+            .filter { it.activities.isEmpty() }
+            .map { it.taskId }
+        emptyTaskIds.forEach { tasks.remove(it) }
+        return emptyTaskIds.size
+    }
+
+    @Synchronized
     fun clearAll() {
         tasks.clear()
         nextTaskId = 1
@@ -177,11 +186,11 @@ class VirtualActivityStack {
     }
 
     private fun selectTaskFor(record: VirtualActivityRecord, intentFlags: Int): MutableTaskRecord {
-        val affinity = record.taskAffinity ?: record.originPackageName
+        val affinity = record.taskAffinity ?: record.instanceScopedAffinity()
         if (intentFlags.hasFlag(FLAG_ACTIVITY_NEW_TASK)) {
-            return tasks.values.firstOrNull { it.affinity == affinity } ?: createTask(affinity)
+            return tasks.values.lastOrNull { it.affinity == affinity } ?: createTask(affinity)
         }
-        return tasks.values.lastOrNull() ?: createTask(affinity)
+        return tasks.values.lastOrNull { it.affinity == affinity } ?: createTask(affinity)
     }
 
     private fun createTask(affinity: String): MutableTaskRecord {
@@ -285,6 +294,9 @@ class VirtualActivityStack {
         instanceId == other.instanceId &&
             originPackageName == other.originPackageName &&
             guestActivityClassName == other.guestActivityClassName
+
+    private fun VirtualActivityRecord.instanceScopedAffinity(): String =
+        "$originPackageName:$instanceId"
 
     data class LaunchResult(
         val activity: VirtualActivityRecord,

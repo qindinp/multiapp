@@ -36,6 +36,18 @@ class MainActivityPr8AmsApiProbeTest {
             "PR-8 probe must call Context.sendStickyOrderedBroadcast(...)"
         );
         assertTrue(
+            source.contains("runtimeContext.startActivity(missingActivity, new Bundle())"),
+            "PR-8 probe must call the Context.startActivity(Intent, Bundle) overload through the hosted runtime context"
+        );
+        assertTrue(
+            source.contains("runtimeContext.startActivities(new Intent[] { first, second })"),
+            "PR-8 probe must call the Context.startActivities(...) overload through the hosted runtime context"
+        );
+        assertTrue(
+            source.contains("runtimeContext.startForegroundService(foregroundService)"),
+            "PR-8 probe must call Context.startForegroundService(...) so foreground-service proxy/partial evidence is emitted"
+        );
+        assertTrue(
             source.contains("bindService(") && source.contains("connection") && source.contains("BIND_AUTO_CREATE"),
             "PR-8 probe must call a bindService overload with BIND_AUTO_CREATE"
         );

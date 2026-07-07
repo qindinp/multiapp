@@ -1,7 +1,8 @@
 package com.multiapp.core.loader
 
 object ProxyActivitySlots {
-    const val SLOT_COUNT: Int = 4
+    const val SLOT_COUNT: Int = 8
+    const val SLOT_ASSIGNMENT_FILE: String = "proxy_activity_slots.properties"
 
     fun classNames(hostPackageName: String): List<String> = buildList {
         repeat(SLOT_COUNT) { index ->

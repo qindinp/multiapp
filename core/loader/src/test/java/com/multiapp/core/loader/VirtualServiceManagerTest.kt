@@ -4,9 +4,11 @@ import android.app.Service
 import android.content.Intent
 import android.os.IBinder
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -66,6 +68,7 @@ class VirtualServiceManagerTest {
         assertEquals("com.test.minimal", spec.originPackageName)
         assertEquals("com.test.minimal.SyncService", spec.guestServiceClassName)
         assertEquals("explicit", spec.reason)
+        assertTrue(spec.token.isNotBlank())
     }
 
     @Test
@@ -85,6 +88,61 @@ class VirtualServiceManagerTest {
         assertNotNull(request)
         assertTrue(request.foreground)
         assertEquals("explicitForeground", request.reason)
+    }
+
+    @Test
+    fun `resolve implicit guest Service intent from snapshot filters`() {
+        val manager = VirtualServiceManager(hostPackageName = "com.multiapp.app")
+        val intent = mockk<Intent>(relaxed = true)
+        every { intent.component } returns null
+        every { intent.`package` } returns null
+        every { intent.action } returns "com.test.SYNC"
+        every { intent.categories } returns emptySet()
+        every { intent.scheme } returns null
+
+        val request = manager.resolveStartService(
+            snapshot = snapshot(),
+            intent = intent
+        )
+
+        assertNotNull(request)
+        assertFalse(request.foreground)
+        assertEquals("implicit", request.reason)
+        assertEquals("com.test.minimal.SyncService", request.guestServiceClassName)
+    }
+
+    @Test
+    fun `resolve implicit foreground Service intent marks foreground request`() {
+        val manager = VirtualServiceManager(hostPackageName = "com.multiapp.app")
+        val intent = mockk<Intent>(relaxed = true)
+        every { intent.component } returns null
+        every { intent.`package` } returns null
+        every { intent.action } returns "com.test.SYNC"
+        every { intent.categories } returns emptySet()
+        every { intent.scheme } returns null
+
+        val request = manager.resolveStartForegroundService(
+            snapshot = snapshot(),
+            intent = intent
+        )
+
+        assertNotNull(request)
+        assertTrue(request.foreground)
+        assertEquals("implicitForeground", request.reason)
+        assertEquals("com.test.minimal.SyncService", request.guestServiceClassName)
+    }
+
+    @Test
+    fun `ignore unresolved implicit guest Service intent`() {
+        val manager = VirtualServiceManager(hostPackageName = "com.multiapp.app")
+        val intent = mockk<Intent>(relaxed = true)
+        every { intent.component } returns null
+        every { intent.`package` } returns null
+        every { intent.action } returns "com.test.MISSING"
+        every { intent.categories } returns emptySet()
+        every { intent.scheme } returns null
+
+        assertNull(manager.resolveStartService(snapshot(), intent))
     }
 
     @Test
@@ -131,6 +189,69 @@ class VirtualServiceManagerTest {
         assertEquals(request.guestServiceClassName, decoded.guestServiceClassName)
         assertEquals(request.reason, decoded.reason)
         assertFalse(decoded.foreground)
+    }
+
+    @Test
+    fun `proxy intent stores original service intent by token instead of parcelable extra`() {
+        VirtualServiceIntentStore.clearAll()
+        VirtualServiceIntentStore.setIntentCopierForTest { it }
+        try {
+            val manager = VirtualServiceManager(hostPackageName = "com.multiapp.app")
+            val token = "service-token-001"
+            val sourceIntent = mockk<Intent>(relaxed = true)
+            every { sourceIntent.action } returns "com.test.SYNC"
+            VirtualServiceIntentStore.remember(token, sourceIntent)
+            val proxyIntent = mockk<Intent>(relaxed = true)
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_VIRTUAL_SERVICE_TOKEN) } returns token
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_INSTANCE_ID) } returns "inst-001"
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_ORIGIN_PACKAGE_NAME) } returns "com.test.minimal"
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_GUEST_SERVICE_CLASS_NAME) } returns "com.test.minimal.SyncService"
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_SERVICE_START_REASON) } returns "explicit"
+            every { proxyIntent.getBooleanExtra(VirtualServiceManager.EXTRA_FOREGROUND_SERVICE, false) } returns false
+
+            val decoded = manager.requestFromProxyIntent(proxyIntent)
+
+            assertNotNull(decoded)
+            assertEquals("com.test.SYNC", decoded.sourceIntent.action)
+            assertEquals(1, VirtualServiceIntentStore.size())
+            verify(exactly = 0) {
+                proxyIntent.getParcelableExtra<Intent>(VirtualServiceManager.EXTRA_ORIGINAL_GUEST_INTENT)
+            }
+        } finally {
+            VirtualServiceIntentStore.clearAll()
+            VirtualServiceIntentStore.resetIntentCopierForTest()
+        }
+    }
+
+    @Test
+    fun `proxy intent can decode original service intent more than once`() {
+        VirtualServiceIntentStore.clearAll()
+        VirtualServiceIntentStore.setIntentCopierForTest { it }
+        try {
+            val manager = VirtualServiceManager(hostPackageName = "com.multiapp.app")
+            val token = "service-token-repeat"
+            val sourceIntent = mockk<Intent>(relaxed = true)
+            every { sourceIntent.action } returns "com.test.REPEAT"
+            VirtualServiceIntentStore.remember(token, sourceIntent)
+            val proxyIntent = mockk<Intent>(relaxed = true)
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_VIRTUAL_SERVICE_TOKEN) } returns token
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_INSTANCE_ID) } returns "inst-001"
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_ORIGIN_PACKAGE_NAME) } returns "com.test.minimal"
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_GUEST_SERVICE_CLASS_NAME) } returns "com.test.minimal.SyncService"
+            every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_SERVICE_START_REASON) } returns "explicit"
+            every { proxyIntent.getBooleanExtra(VirtualServiceManager.EXTRA_FOREGROUND_SERVICE, false) } returns false
+
+            val first = manager.requestFromProxyIntent(proxyIntent)
+            val second = manager.requestFromProxyIntent(proxyIntent)
+
+            assertNotNull(first)
+            assertNotNull(second)
+            assertEquals("com.test.REPEAT", first.sourceIntent.action)
+            assertEquals("com.test.REPEAT", second.sourceIntent.action)
+        } finally {
+            VirtualServiceIntentStore.clearAll()
+            VirtualServiceIntentStore.resetIntentCopierForTest()
+        }
     }
 
     @Test
@@ -228,7 +349,13 @@ class VirtualServiceManagerTest {
         sourceDir = "/data/minimal.apk",
         dataDir = "/data/inst",
         services = listOf(
-            ResolvedComponent(name = "com.test.minimal.SyncService", exported = false)
+            ResolvedComponent(
+                name = "com.test.minimal.SyncService",
+                exported = false,
+                resolvedIntentFilters = listOf(
+                    ResolvedIntentFilter(actions = listOf("com.test.SYNC"))
+                )
+            )
         )
     )
 

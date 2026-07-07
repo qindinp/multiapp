@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
     <application
         android:name=".MultiAppApplication"
@@ -30,7 +32,9 @@
         <activity
             android:name=".container.ContainerActivity"
             android:exported="false"
+            android:excludeFromRecents="true"
             android:launchMode="standard"
+            android:noHistory="true"
             android:screenOrientation="unspecified"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
@@ -73,6 +77,42 @@
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
+            android:name=".container.ProxyActivity4"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard4"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity5"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard5"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity6"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard6"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity7"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard7"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
             android:name=".container.ProxyActivitySingleTop0"
             android:exported="false"
             android:excludeFromRecents="false"
@@ -106,6 +146,42 @@
             android:launchMode="singleTop"
             android:screenOrientation="unspecified"
             android:taskAffinity="${applicationId}.multiapp.task.singleTop3"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop4"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop4"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop5"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop5"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop6"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop6"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop7"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop7"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
@@ -144,11 +220,48 @@
             android:taskAffinity="${applicationId}.multiapp.task.singleTask3"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask4"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask4"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask5"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask5"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask6"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask6"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask7"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask7"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 
         <!-- v2 hosted Service proxy slot. Guest Service dispatch is partial/evidence-gated. -->
         <service
             android:name=".container.StubService"
-            android:exported="false" />
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!-- v2 hosted Provider proxy slot. Guest Provider dispatch is partial/evidence-gated. -->
         <provider

@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.UserHandle
 import androidx.annotation.RequiresApi
 import com.multiapp.core.model.virtual.VirtualContextConfig
+import java.lang.reflect.Modifier
 import java.util.concurrent.Executor
 
 @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
@@ -23,7 +24,10 @@ open class VirtualContextWrapperApi34(
     serviceProxyIntentFactory: (VirtualServiceManager, VirtualServiceStartRequest) -> Intent = { manager, request ->
         manager.createProxyIntent(request)
     },
-    amsDispatcher: VirtualAmsComponentDispatcher? = null
+    amsDispatcher: VirtualAmsComponentDispatcher? = null,
+    private val bindServiceFlagsReader: (Context.BindServiceFlags) -> Int = { flags ->
+        flags.toBindServiceFlagsIntValue()
+    }
 ) : VirtualContextWrapper(
     base = base,
     config = config,
@@ -44,11 +48,23 @@ open class VirtualContextWrapperApi34(
         executor: Executor,
         conn: ServiceConnection
     ): Boolean {
-        return dispatchBindServiceIntent(service, api = "bindService:flags-executor")
+        return dispatchBindServiceIntent(
+            service,
+            conn,
+            flags = bindServiceFlagsReader(flags),
+            executor = executor,
+            api = "bindService:flags-executor"
+        )
     }
 
     override fun bindService(service: Intent, conn: ServiceConnection, flags: Context.BindServiceFlags): Boolean {
-        return dispatchBindServiceIntent(service, api = "bindService:flags")
+        return dispatchBindServiceIntent(
+            service,
+            conn,
+            flags = bindServiceFlagsReader(flags),
+            executor = null,
+            api = "bindService:flags"
+        )
     }
 
     override fun bindServiceAsUser(
@@ -57,7 +73,13 @@ open class VirtualContextWrapperApi34(
         flags: Context.BindServiceFlags,
         user: UserHandle
     ): Boolean {
-        return dispatchBindServiceIntent(service, api = "bindServiceAsUser:flags")
+        return dispatchBindServiceIntent(
+            service,
+            conn,
+            flags = bindServiceFlagsReader(flags),
+            executor = null,
+            api = "bindServiceAsUser:flags"
+        )
     }
 
     override fun bindIsolatedService(
@@ -67,6 +89,46 @@ open class VirtualContextWrapperApi34(
         executor: Executor,
         conn: ServiceConnection
     ): Boolean {
-        return dispatchBindServiceIntent(service, api = "bindIsolatedService:flags")
+        return dispatchBindServiceIntent(
+            service,
+            conn,
+            flags = bindServiceFlagsReader(flags),
+            executor = executor,
+            api = "bindIsolatedService:flags"
+        )
     }
+}
+
+private fun Context.BindServiceFlags.toBindServiceFlagsIntValue(): Int =
+    readValueByMethod()
+        ?: readValueByField()
+        ?: 0
+
+private fun Context.BindServiceFlags.readValueByMethod(): Int? =
+    runCatching {
+        val method = (
+            javaClass.methods.asSequence() + javaClass.declaredMethods.asSequence()
+            )
+            .firstOrNull { method -> method.name == "getValue" && method.parameterTypes.isEmpty() }
+            ?: return@runCatching null
+        method.isAccessible = true
+        method.invoke(this).toIntValue()
+    }.getOrNull()
+
+private fun Context.BindServiceFlags.readValueByField(): Int? =
+    runCatching {
+        javaClass.declaredFields.firstNotNullOfOrNull { field ->
+            if (Modifier.isStatic(field.modifiers)) {
+                null
+            } else {
+                field.isAccessible = true
+                field.get(this).toIntValue()
+            }
+        }
+    }.getOrNull()
+
+private fun Any?.toIntValue(): Int? = when (this) {
+    is Long -> toInt()
+    is Int -> this
+    else -> null
 }

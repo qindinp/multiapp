@@ -43,7 +43,7 @@ class VirtualResourcesManager(
                 sourceDir = config.sourceDir
                 publicSourceDir = config.sourceDir
                 dataDir = config.dataDir
-                nativeLibraryDir = config.nativeLibraryDir
+                ApplicationInfoNativePathCompat.applyTo(this, config.dataDir, config.nativeLibraryDir)
                 nonLocalizedLabel = config.applicationLabel ?: config.originPackageName
                 enabled = true
             }

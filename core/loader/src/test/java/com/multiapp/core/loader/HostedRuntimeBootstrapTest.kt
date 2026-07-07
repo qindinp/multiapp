@@ -50,7 +50,7 @@ class FakeTestApplicationWithOnCreate : Application() {
     }
 
     override fun onCreate() {
-        // Do NOT call super.onCreate() â€” Android stub would throw on JVM
+        // Do NOT call super.onCreate() â€?Android stub would throw on JVM
         onCreateCalled = true
     }
 
@@ -781,9 +781,10 @@ class HostedRuntimeBootstrapTest {
         assertEquals("1", evidence["providerPolicyGrantUriPermissionCount"])
         assertEquals("INTERNAL_ONLY", evidence["providerPolicyStatuses"])
         assertEquals("ROUTED_BY_STUB_PROVIDER", evidence["providerOperationOpenTypedAssetFileStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationNotifyChangeStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationContentObserverStatus"])
-        assertEquals("UNSUPPORTED", evidence["providerOperationGrantUriPermissionStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationNotifyChangeStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationRegisterContentObserverStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationUnregisterContentObserverStatus"])
+        assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationGrantUriPermissionStatus"])
         assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
         assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
     }
@@ -898,6 +899,8 @@ class HostedRuntimeBootstrapTest {
         val mockContext: Context = mockk(relaxed = true)
         every { mockContext.packageName } returns "com.multiapp.app"
         val hookEngine = mockk<HookEngine>(relaxed = true)
+        every { hookEngine.initLsplant(any()) } returns true
+        every { hookEngine.hookMethodPassThrough(any(), any(), any()) } returns true
         val packageResolver = object : VirtualPackageResolver {
             override fun resolve(apkPath: String): ResolvedPackage? = ResolvedPackage(
                 packageName = "com.example.app",
@@ -962,6 +965,88 @@ class HostedRuntimeBootstrapTest {
         val appStage = result.stageResults.find { it.stage == RuntimeStage.APPLICATION }
         assertNotNull(appStage)
         assertEquals(BootstrapStatus.SUCCESS, appStage.status)
+    }
+
+    @Test
+    fun `prepare does not create guest Application until attachAndLaunch`(
+        @TempDir tempDir: File
+    ) {
+        FakeTestApplicationWithOnCreate.reset()
+        val mockContext: Context = mockk(relaxed = true)
+        val (bootstrap, _, _) = validBootstrap(
+            tempDir,
+            hostContext = mockContext,
+            applicationClassNameResolver = { _, _ ->
+                "com.multiapp.core.loader.FakeTestApplicationWithOnCreate"
+            }
+        )
+
+        val preparation = bootstrap.prepare("inst-001")
+
+        assertFalse(preparation.isTerminal)
+        assertNotNull(preparation.context?.guestClassLoader)
+        assertFalse(
+            FakeTestApplicationWithOnCreate.onCreateCalled,
+            "prepare() must not call Application.onCreate() off the UI thread"
+        )
+        assertNull(preparation.stageResults.find { it.stage == RuntimeStage.APPLICATION })
+        assertNull(preparation.stageResults.find { it.stage == RuntimeStage.LAUNCHER_ACTIVITY })
+
+        val result = bootstrap.attachAndLaunch(preparation)
+
+        assertTrue(result.success)
+        assertNotNull(result.guestApplication)
+        assertTrue(FakeTestApplicationWithOnCreate.onCreateCalled)
+    }
+
+    @Test
+    fun `prepareBeforeClassLoader defers classloader and application work`(
+        @TempDir tempDir: File
+    ) {
+        FakeTestApplicationWithOnCreate.reset()
+        var classLoaderFactoryCalls = 0
+        val mockContext: Context = mockk(relaxed = true)
+        val apkFile = File(tempDir, "example.apk").apply {
+            writeBytes(byteArrayOf(0x50, 0x4B))
+        }
+        val bootstrap = HostedRuntimeBootstrap(
+            instanceManager = FakeInstanceManager(
+                mapOf("inst-001" to instanceRecord())
+            ),
+            installRecordStore = FakeInstallRecordStore(
+                mapOf("com.example.app" to installRecord(originApkPath = apkFile.absolutePath))
+            ),
+            hostContext = mockContext,
+            classLoaderFactory = { _, _ ->
+                classLoaderFactoryCalls += 1
+                ClassLoader.getSystemClassLoader()
+            },
+            applicationClassNameResolver = { _, _ ->
+                "com.multiapp.core.loader.FakeTestApplicationWithOnCreate"
+            },
+            runtimeUidProvider = { 42420 }
+        )
+
+        val preClassLoader = bootstrap.prepareBeforeClassLoader("inst-001")
+
+        assertFalse(preClassLoader.isTerminal)
+        assertNull(preClassLoader.context?.guestClassLoader)
+        assertEquals(0, classLoaderFactoryCalls)
+        assertFalse(FakeTestApplicationWithOnCreate.onCreateCalled)
+        assertNull(preClassLoader.stageResults.find { it.stage == RuntimeStage.CLASS_LOADER })
+
+        val withClassLoader = bootstrap.createClassLoader(preClassLoader)
+
+        assertFalse(withClassLoader.isTerminal)
+        assertNotNull(withClassLoader.context?.guestClassLoader)
+        assertEquals(1, classLoaderFactoryCalls)
+        assertFalse(FakeTestApplicationWithOnCreate.onCreateCalled)
+        assertNotNull(withClassLoader.stageResults.find { it.stage == RuntimeStage.CLASS_LOADER })
+
+        val result = bootstrap.attachAndLaunch(withClassLoader)
+
+        assertTrue(result.success)
+        assertTrue(FakeTestApplicationWithOnCreate.onCreateCalled)
     }
 
     @Test

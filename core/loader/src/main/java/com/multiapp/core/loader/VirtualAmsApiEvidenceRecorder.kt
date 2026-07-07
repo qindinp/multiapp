@@ -3,10 +3,13 @@ package com.multiapp.core.loader
 enum class VirtualAmsApiEvidenceComponent(val componentName: String) {
     START_ACTIVITY_OVERLOAD("ams-start-activity-overload"),
     START_ACTIVITIES_OVERLOAD("ams-start-activities-overload"),
+    START_SERVICE("ams-start-service"),
+    STOP_SERVICE("ams-stop-service"),
     REGISTER_RECEIVER("ams-register-receiver"),
     STICKY_ORDERED_BROADCAST("ams-sticky-ordered-broadcast"),
     START_FOREGROUND_SERVICE("ams-start-foreground-service"),
-    BIND_SERVICE_OVERLOAD("ams-bind-service-overload")
+    BIND_SERVICE_OVERLOAD("ams-bind-service-overload"),
+    UNBIND_SERVICE_OVERLOAD("ams-unbind-service-overload")
 }
 
 data class VirtualAmsApiEvidenceRecord(

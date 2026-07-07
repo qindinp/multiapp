@@ -358,6 +358,49 @@ public class MainActivity extends Activity {
         }
 
         try {
+            Context runtimeContext = getApplicationContext();
+            Intent missingActivity = new Intent()
+                .setComponent(new ComponentName(getPackageName(), "com.test.minimal.MissingActivity"));
+            runtimeContext.startActivity(missingActivity, new Bundle());
+            out.append("startActivity.optionsReturned: true\n");
+        } catch (Exception e) {
+            out.append("startActivity.options failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        }
+
+        try {
+            Context runtimeContext = getApplicationContext();
+            Intent first = new Intent().setComponent(new ComponentName(getPackageName(), SecondActivity.class.getName()));
+            Intent second = new Intent().setComponent(new ComponentName(getPackageName(), "com.test.minimal.MissingActivity"));
+            runtimeContext.startActivities(new Intent[] { first, second });
+            out.append("startActivities.batchReturned: true\n");
+        } catch (Exception e) {
+            out.append("startActivities failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        }
+
+        try {
+            Context runtimeContext = getApplicationContext();
+            Intent foregroundService = new Intent().setComponent(new ComponentName(getPackageName(), ProbeService.class.getName()));
+            ComponentName foregroundResult = runtimeContext.startForegroundService(foregroundService);
+            out.append("startForegroundService.result: ")
+                .append(foregroundResult != null ? foregroundResult.flattenToShortString() : "null")
+                .append("\n");
+        } catch (Exception e) {
+            out.append("startForegroundService failed: ")
+                .append(e.getClass().getSimpleName())
+                .append(": ")
+                .append(e.getMessage())
+                .append("\n");
+        }
+
+        try {
             Intent bindIntent = new Intent().setComponent(new ComponentName(getPackageName(), ProbeService.class.getName()));
             ServiceConnection connection = new ServiceConnection() {
                 @Override

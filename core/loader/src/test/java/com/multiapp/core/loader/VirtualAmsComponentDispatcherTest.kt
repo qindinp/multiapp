@@ -5,14 +5,18 @@ import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.ServiceConnection
 import android.os.IBinder
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.verify
+import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -21,8 +25,16 @@ import kotlin.test.assertTrue
 
 class VirtualAmsComponentDispatcherTest {
 
+    @AfterTest
+    fun tearDown() {
+        VirtualActivityIntentStore.clearAll()
+        VirtualActivityIntentStore.resetIntentCopierForTest()
+    }
+
     @Test
     fun `resolveStartActivityIntent maps explicit guest activity to host proxy`() {
+        VirtualActivityIntentStore.clearAll()
+        VirtualActivityIntentStore.setIntentCopierForTest { it }
         val recordManager = VirtualActivityRecordManager()
         val dispatcher = dispatcher(activityRecordManager = recordManager)
         val intent = explicitIntent("com.test.minimal", "com.test.minimal.MainActivity")
@@ -47,8 +59,14 @@ class VirtualAmsComponentDispatcherTest {
             "com.test.minimal.MainActivity",
             proxyIntent.getStringExtra(VirtualActivityManager.EXTRA_GUEST_ACTIVITY_CLASS_NAME)
         )
-        assertNotNull(proxyIntent.getParcelableExtra<Intent>(VirtualActivityManager.EXTRA_ORIGINAL_GUEST_INTENT))
-        assertEquals("com.test.minimal.MainActivity", recordManager.lastLaunchResult()?.activity?.guestActivityClassName)
+        val activity = recordManager.lastLaunchResult()?.activity
+        assertNotNull(VirtualActivityIntentStore.find(activity?.token))
+        assertEquals("com.test.minimal.MainActivity", activity?.guestActivityClassName)
+        assertEquals("com.test.minimal:inst-001", activity?.taskAffinity)
+        assertEquals(
+            "com.test.minimal:inst-001",
+            proxyIntent.getStringExtra(VirtualActivityManager.EXTRA_GUEST_TASK_AFFINITY)
+        )
     }
 
     @Test
@@ -120,30 +138,56 @@ class VirtualAmsComponentDispatcherTest {
     }
 
     @Test
-    fun `resolveStartServiceIntent blocks foreground service lifecycle until implemented`() {
+    fun `resolveStartServiceIntent remaps explicit foreground service to host proxy`() {
         val dispatcher = dispatcher()
         val intent = explicitIntent("com.test.minimal", "com.test.minimal.SyncService")
 
         val result = dispatcher.resolveStartServiceIntent(intent, foreground = true)
 
-        val blocked = assertIs<VirtualContextWrapper.StartServiceMappingResult.Blocked>(result)
-        assertSame(intent, blocked.sourceIntent)
-        assertEquals(true, blocked.foreground)
-        assertEquals(FOREGROUND_SERVICE_LIFECYCLE_UNSUPPORTED_REASON, blocked.reason)
+        val remapped = assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(result)
+        assertSame(intent, remapped.sourceIntent)
+        assertEquals(true, remapped.foreground)
+        assertEquals(true, remapped.startRequest.foreground)
+        assertEquals("explicitForeground", remapped.startRequest.reason)
+        assertEquals("com.test.minimal.SyncService", remapped.startRequest.guestServiceClassName)
     }
 
     @Test
-    fun `resolveStartServiceIntent records fallback for implicit service`() {
+    fun `resolveStartServiceIntent remaps implicit service through snapshot resolver`() {
         val dispatcher = dispatcher()
         val intent = mockk<Intent>(relaxed = true) {
             every { component } returns null
+            every { `package` } returns null
+            every { action } returns "com.test.SYNC"
+            every { categories } returns emptySet()
+            every { scheme } returns null
+        }
+
+        val result = dispatcher.resolveStartServiceIntent(intent, foreground = false)
+
+        val remapped = assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(result)
+        assertSame(intent, remapped.sourceIntent)
+        assertEquals(false, remapped.foreground)
+        assertEquals("implicit", remapped.startRequest.reason)
+        assertEquals("com.test.minimal.SyncService", remapped.startRequest.guestServiceClassName)
+    }
+
+    @Test
+    fun `resolveStartServiceIntent blocks unresolved implicit service`() {
+        val dispatcher = dispatcher()
+        val intent = mockk<Intent>(relaxed = true) {
+            every { component } returns null
+            every { `package` } returns null
+            every { action } returns "com.test.MISSING"
+            every { categories } returns emptySet()
+            every { scheme } returns null
         }
 
         val result = dispatcher.resolveStartServiceIntent(intent, foreground = false)
 
         val blocked = assertIs<VirtualContextWrapper.StartServiceMappingResult.Blocked>(result)
         assertSame(intent, blocked.sourceIntent)
-        assertEquals("implicitServiceIntent", blocked.reason)
+        assertEquals("unsupportedServiceIntent", blocked.reason)
         assertEquals(false, blocked.foreground)
     }
 
@@ -163,6 +207,116 @@ class VirtualAmsComponentDispatcherTest {
         assertEquals("com.test.minimal.SyncService", stopped.stopRequest.guestServiceClassName)
         assertEquals(1, service.onDestroyCalls)
         assertNull(records.get("inst-001", "com.test.minimal.SyncService"))
+    }
+
+    @Test
+    fun `dispatchBindService reuses existing connection without rebinding runtime`() {
+        val binder = mockk<IBinder>(relaxed = true)
+        val service = FakeService(binder = binder)
+        val records = VirtualServiceRecordManager()
+        val dispatcher = dispatcher(
+            serviceRuntime = VirtualServiceRuntime(
+                serviceFactory = ServiceFactory { _, _ -> service },
+                serviceAttacher = ServiceAttacher { _, _, _, _ -> },
+                recordManager = records
+            )
+        )
+        val intent = explicitIntent("com.test.minimal", "com.test.minimal.SyncService")
+        val connection = mockk<ServiceConnection>(relaxed = true)
+        val context = mockk<Context>(relaxed = true)
+
+        val first = dispatcher.dispatchBindService(
+            intent = intent,
+            virtualContext = context,
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = null
+        )
+        val second = dispatcher.dispatchBindService(
+            intent = intent,
+            virtualContext = context,
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = null
+        )
+        dispatcher.dispatchUnbindService(connection)
+
+        val firstBound = assertIs<VirtualServiceBindDispatchResult.Bound>(first)
+        val secondBound = assertIs<VirtualServiceBindDispatchResult.Bound>(second)
+        assertFalse(firstBound.connectionReused)
+        assertTrue(secondBound.connectionReused)
+        assertEquals(1, service.onBindCalls)
+        assertEquals(1, service.onUnbindCalls)
+        verify(exactly = 2) {
+            connection.onServiceConnected(any<ComponentName>(), binder)
+        }
+    }
+
+    @Test
+    fun `dispatchBindService reports null binding without service connected callback`() {
+        val service = FakeService(binder = null)
+        val dispatcher = dispatcher(
+            serviceRuntime = VirtualServiceRuntime(
+                serviceFactory = ServiceFactory { _, _ -> service },
+                serviceAttacher = ServiceAttacher { _, _, _, _ -> },
+                recordManager = VirtualServiceRecordManager()
+            )
+        )
+        val intent = explicitIntent("com.test.minimal", "com.test.minimal.SyncService")
+        val connection = mockk<ServiceConnection>(relaxed = true)
+
+        val result = dispatcher.dispatchBindService(
+            intent = intent,
+            virtualContext = mockk(relaxed = true),
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = null
+        )
+
+        val bound = assertIs<VirtualServiceBindDispatchResult.Bound>(result)
+        assertTrue(bound.nullBinding)
+        assertNull(bound.binder)
+        verify(exactly = 1) { connection.onNullBinding(any<ComponentName>()) }
+        verify(exactly = 0) { connection.onServiceConnected(any<ComponentName>(), any()) }
+    }
+
+    @Test
+    fun `dispatchBindService blocks bind-only start without auto create`() {
+        val service = FakeService()
+        val records = VirtualServiceRecordManager()
+        val dispatcher = dispatcher(
+            serviceRuntime = VirtualServiceRuntime(
+                serviceFactory = ServiceFactory { _, _ -> service },
+                serviceAttacher = ServiceAttacher { _, _, _, _ -> },
+                recordManager = records
+            )
+        )
+        val intent = explicitIntent("com.test.minimal", "com.test.minimal.SyncService")
+        val connection = mockk<ServiceConnection>(relaxed = true)
+
+        val result = dispatcher.dispatchBindService(
+            intent = intent,
+            virtualContext = mockk(relaxed = true),
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = 0,
+            executor = null
+        )
+
+        val blocked = assertIs<VirtualServiceBindDispatchResult.Blocked>(result)
+        assertEquals("bindAutoCreateNotRequested", blocked.reason)
+        assertTrue(blocked.serviceResolved)
+        assertEquals(0, blocked.flags)
+        assertEquals(false, blocked.autoCreate)
+        assertEquals(false, blocked.serviceAlreadyRunning)
+        assertEquals(0, service.onCreateCalls)
+        assertEquals(0, service.onBindCalls)
+        assertNull(records.get("inst-001", "com.test.minimal.SyncService"))
+        verify(exactly = 0) { connection.onServiceConnected(any<ComponentName>(), any()) }
+        verify(exactly = 0) { connection.onNullBinding(any<ComponentName>()) }
     }
 
     @Test
@@ -212,6 +366,7 @@ class VirtualAmsComponentDispatcherTest {
         record: com.multiapp.core.model.virtual.VirtualActivityRecord,
         sourceIntent: Intent
     ): Intent {
+        VirtualActivityIntentStore.remember(record.token, sourceIntent)
         val component = mockk<ComponentName>(relaxed = true)
         every { component.className } returns record.proxyActivityClassName
         val intent = mockk<Intent>(relaxed = true)
@@ -219,7 +374,8 @@ class VirtualAmsComponentDispatcherTest {
         every { intent.getStringExtra(VirtualActivityManager.EXTRA_INSTANCE_ID) } returns record.instanceId
         every { intent.getStringExtra(VirtualActivityManager.EXTRA_ORIGIN_PACKAGE_NAME) } returns record.originPackageName
         every { intent.getStringExtra(VirtualActivityManager.EXTRA_GUEST_ACTIVITY_CLASS_NAME) } returns record.guestActivityClassName
-        every { intent.getParcelableExtra<Intent>(VirtualActivityManager.EXTRA_ORIGINAL_GUEST_INTENT) } returns sourceIntent
+        every { intent.getStringExtra(VirtualActivityManager.EXTRA_GUEST_TASK_AFFINITY) } returns record.taskAffinity
+        every { intent.getParcelableExtra<Intent>(VirtualActivityManager.EXTRA_ORIGINAL_GUEST_INTENT) } returns null
         return intent
     }
 
@@ -264,7 +420,11 @@ class VirtualAmsComponentDispatcherTest {
             ResolvedComponent(name = "com.test.minimal.MainActivity", exported = true)
         ),
         services = listOf(
-            ResolvedComponent(name = "com.test.minimal.SyncService", exported = false)
+            ResolvedComponent(
+                name = "com.test.minimal.SyncService",
+                exported = false,
+                intentFilters = listOf("com.test.SYNC")
+            )
         ),
         receivers = listOf(
             ResolvedComponent(name = "com.test.minimal.BootReceiver", exported = false)
@@ -279,14 +439,31 @@ class VirtualAmsComponentDispatcherTest {
         createdAtMs = 100L
     )
 
-    private class FakeService : Service() {
+    private class FakeService(
+        private val binder: IBinder? = null
+    ) : Service() {
+        var onCreateCalls = 0
+        var onBindCalls = 0
+        var onUnbindCalls = 0
         var onDestroyCalls = 0
+
+        override fun onCreate() {
+            onCreateCalls += 1
+        }
 
         override fun onDestroy() {
             onDestroyCalls += 1
         }
 
-        override fun onBind(intent: Intent?): IBinder? = null
+        override fun onBind(intent: Intent?): IBinder? {
+            onBindCalls += 1
+            return binder
+        }
+
+        override fun onUnbind(intent: Intent?): Boolean {
+            onUnbindCalls += 1
+            return false
+        }
     }
 
     private class RecordingReceiver : BroadcastReceiver() {

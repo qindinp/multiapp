@@ -28,6 +28,7 @@ class VirtualIntentResolverTest {
         assertEquals("com.test.minimal.SecondActivity", request?.guestActivityClassName)
         assertEquals("explicit", request?.reason)
         assertEquals("singleTop", request?.launchMode)
+        assertEquals("com.test.minimal.secondary:inst-001", request?.taskAffinity)
     }
 
     @Test
@@ -59,6 +60,25 @@ class VirtualIntentResolverTest {
 
         assertEquals("com.test.minimal.MainActivity", request?.guestActivityClassName)
         assertEquals("launcher", request?.reason)
+    }
+
+    @Test
+    fun `launcher intent does not fall back to first exported activity without launcher metadata`() {
+        val resolver = VirtualIntentResolver(
+            snapshot().copy(
+                launcherActivityName = null,
+                activities = listOf(
+                    ResolvedComponent("com.test.minimal.InternalActivity", exported = false),
+                    ResolvedComponent("com.test.minimal.ExportedActivity", exported = true)
+                )
+            )
+        )
+        val intent = intent(
+            action = Intent.ACTION_MAIN,
+            categories = setOf(Intent.CATEGORY_LAUNCHER)
+        )
+
+        assertNull(resolver.resolveActivity(intent))
     }
 
     @Test
@@ -162,7 +182,12 @@ class VirtualIntentResolverTest {
                     )
                 )
             ),
-            ResolvedComponent("com.test.minimal.SecondActivity", exported = false, launchMode = "singleTop"),
+            ResolvedComponent(
+                "com.test.minimal.SecondActivity",
+                exported = false,
+                launchMode = "singleTop",
+                taskAffinity = "com.test.minimal.secondary"
+            ),
             ResolvedComponent(
                 "com.test.minimal.ViewActivity",
                 exported = true,

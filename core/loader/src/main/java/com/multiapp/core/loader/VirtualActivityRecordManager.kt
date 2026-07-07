@@ -161,6 +161,28 @@ class VirtualActivityRecordManager {
     }
 
     @Synchronized
+    fun pruneStaleProxyRecords(
+        knownProxyActivityClassNames: Set<String>,
+        liveProxyActivityClassNames: Set<String>
+    ): Int {
+        val staleTokens = records.values
+            .filter { record ->
+                record.proxyActivityClassName !in knownProxyActivityClassNames ||
+                    record.proxyActivityClassName !in liveProxyActivityClassNames
+            }
+            .map { it.token }
+        staleTokens.forEach { token ->
+            unregister(token)
+            activityStack.removeByToken(token)
+        }
+        activityStack.pruneEmptyTasks()
+        if (lastLaunchResult?.activity?.token in staleTokens) {
+            lastLaunchResult = null
+        }
+        return staleTokens.size
+    }
+
+    @Synchronized
     fun list(): List<VirtualActivityRecord> = records.values.toList()
 
     @Synchronized
@@ -169,6 +191,7 @@ class VirtualActivityRecordManager {
         recordsByProxy.clear()
         recordsByActivityId.clear()
         activityStack.clearAll()
+        VirtualActivityIntentStore.clearAll()
         lastLaunchResult = null
     }
 
@@ -193,6 +216,7 @@ class VirtualActivityRecordManager {
 
     private fun unregister(token: String): VirtualActivityRecord? {
         val removed = records.remove(token) ?: return null
+        VirtualActivityIntentStore.clear(token)
         if (recordsByProxy[removed.proxyActivityClassName] == token) {
             recordsByProxy.remove(removed.proxyActivityClassName)
         }
