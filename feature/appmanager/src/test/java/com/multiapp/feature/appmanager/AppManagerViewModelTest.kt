@@ -1,6 +1,8 @@
 package com.multiapp.feature.appmanager
 
-import com.multiapp.core.instance.InstanceLaunchUseCase
+import com.multiapp.core.model.engine.EngineResult
+import com.multiapp.core.model.engine.LaunchInstanceRequest
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
@@ -26,15 +28,15 @@ class AppManagerViewModelTest {
 
     private val testDispatcher = UnconfinedTestDispatcher()
     private lateinit var instanceManager: InstanceManager
-    private lateinit var launchUseCase: InstanceLaunchUseCase
+    private lateinit var virtualizationEngine: VirtualizationEngine
 
     @BeforeEach
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
         instanceManager = mockk(relaxed = true)
-        launchUseCase = mockk(relaxed = true)
+        virtualizationEngine = mockk(relaxed = true)
         every { instanceManager.listInstances() } returns emptyList()
-        every { launchUseCase.launch(any()) } returns Result.success(Unit)
+        every { virtualizationEngine.launchInstance(any()) } returns EngineResult.pass(operation = "launchInstance")
     }
 
     @AfterEach
@@ -48,7 +50,7 @@ class AppManagerViewModelTest {
         val records = listOf(testRecord("instance-1"), testRecord("instance-2"))
         every { instanceManager.listInstances() } returns records
 
-        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
+        val viewModel = AppManagerViewModel(instanceManager, virtualizationEngine)
 
         assertFalse(viewModel.uiState.value.isLoading)
         assertNull(viewModel.uiState.value.error)
@@ -60,7 +62,7 @@ class AppManagerViewModelTest {
         val first = listOf(testRecord("instance-1"))
         val second = listOf(testRecord("instance-1"), testRecord("instance-2"))
         every { instanceManager.listInstances() } returnsMany listOf(first, second)
-        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
+        val viewModel = AppManagerViewModel(instanceManager, virtualizationEngine)
 
         viewModel.onEvent(AppManagerEvent.Refresh)
 
@@ -71,7 +73,7 @@ class AppManagerViewModelTest {
     @Test
     fun `delete removes instance and reloads list`() = runTest {
         every { instanceManager.deleteInstance("instance-1") } returns true
-        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
+        val viewModel = AppManagerViewModel(instanceManager, virtualizationEngine)
 
         viewModel.onEvent(AppManagerEvent.DeleteInstance("instance-1"))
 
@@ -83,7 +85,7 @@ class AppManagerViewModelTest {
     @Test
     fun `delete failure sets error`() = runTest {
         every { instanceManager.deleteInstance("missing") } throws IllegalArgumentException("missing")
-        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
+        val viewModel = AppManagerViewModel(instanceManager, virtualizationEngine)
 
         viewModel.onEvent(AppManagerEvent.DeleteInstance("missing"))
 
@@ -92,8 +94,9 @@ class AppManagerViewModelTest {
 
     @Test
     fun `launch failure emits launch failed event`() = runTest {
-        every { launchUseCase.launch("instance-1") } returns Result.failure(IllegalStateException("boom"))
-        val viewModel = AppManagerViewModel(instanceManager, launchUseCase)
+        every { virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1")) } returns
+            EngineResult.fail(operation = "launchInstance", instanceId = "instance-1", message = "boom")
+        val viewModel = AppManagerViewModel(instanceManager, virtualizationEngine)
 
         val eventJob = launch(testDispatcher) {
             assertEquals(AppManagerEvent.LaunchFailed("instance-1", "boom"), viewModel.events.first())
@@ -101,7 +104,7 @@ class AppManagerViewModelTest {
         viewModel.onEvent(AppManagerEvent.LaunchInstance("instance-1"))
         eventJob.join()
 
-        verify { launchUseCase.launch("instance-1") }
+        verify { virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1")) }
     }
 
     private fun testRecord(instanceId: String): VirtualInstanceRecord = VirtualInstanceRecord(

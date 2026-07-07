@@ -127,9 +127,13 @@ object IntentRemapDiagnostics {
             }
         }
         if (changed) {
-            Log.d(TAG, "NotificationManager.$methodName package remap: ${aliases.joinToString(",")} -> $hostPackageName")
+            logDebug("NotificationManager.$methodName package remap: ${aliases.joinToString(",")} -> $hostPackageName")
         }
         return if (changed) patched else args
+    }
+
+    private fun logDebug(message: String) {
+        runCatching { Log.d(TAG, message) }
     }
 
     /**

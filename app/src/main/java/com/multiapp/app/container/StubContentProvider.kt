@@ -10,6 +10,7 @@ import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
+import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.loader.VirtualProviderEvidence
 import com.multiapp.core.loader.VirtualProviderDispatchResult
 import com.multiapp.core.loader.VirtualProviderDispatcher
@@ -38,7 +39,7 @@ class StubContentProvider : ContentProvider() {
         selectionArgs: Array<out String>?,
         sortOrder: String?
     ): Cursor? {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "query")
         writeProviderEvidence("query", uri, result)
         Log.w(TAG, "query dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -54,7 +55,7 @@ class StubContentProvider : ContentProvider() {
     }
 
     override fun getType(uri: Uri): String? {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "getType")
         writeProviderEvidence("getType", uri, result)
         Log.w(TAG, "getType dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -66,7 +67,7 @@ class StubContentProvider : ContentProvider() {
     }
 
     override fun insert(uri: Uri, values: ContentValues?): Uri? {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "insert")
         writeProviderEvidence("insert", uri, result)
         Log.w(TAG, "insert dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -79,7 +80,7 @@ class StubContentProvider : ContentProvider() {
     }
 
     override fun bulkInsert(uri: Uri, values: Array<out ContentValues>): Int {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "bulkInsert")
         writeProviderEvidence("bulkInsert", uri, result)
         Log.w(TAG, "bulkInsert dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -92,7 +93,7 @@ class StubContentProvider : ContentProvider() {
     }
 
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "delete")
         writeProviderEvidence("delete", uri, result)
         Log.w(TAG, "delete dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -111,7 +112,7 @@ class StubContentProvider : ContentProvider() {
         selection: String?,
         selectionArgs: Array<out String>?
     ): Int {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "update")
         writeProviderEvidence("update", uri, result)
         Log.w(TAG, "update dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -128,7 +129,7 @@ class StubContentProvider : ContentProvider() {
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
         val route = callRoute(arg, extras)
         val uri = route?.proxyUri
-        val result = uri?.let { dispatch(it) }
+        val result = uri?.let { dispatch(it, "call") }
         if (uri != null) writeProviderEvidence("call:$method", uri, result)
         Log.w(TAG, "call dispatch result=${result.statusForLog()} method=$method arg=${arg.redactUriStringForLog()}")
         val bundle = result.toBundle()
@@ -149,7 +150,7 @@ class StubContentProvider : ContentProvider() {
     }
 
     override fun canonicalize(uri: Uri): Uri? {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "canonicalize")
         writeProviderEvidence("canonicalize", uri, result)
         Log.w(TAG, "canonicalize dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -161,7 +162,7 @@ class StubContentProvider : ContentProvider() {
     }
 
     override fun uncanonicalize(uri: Uri): Uri? {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "uncanonicalize")
         writeProviderEvidence("uncanonicalize", uri, result)
         Log.w(TAG, "uncanonicalize dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -174,7 +175,7 @@ class StubContentProvider : ContentProvider() {
 
     @Throws(FileNotFoundException::class)
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "openFile")
         writeProviderEvidence("openFile:$mode", uri, result)
         Log.w(TAG, "openFile dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -188,7 +189,7 @@ class StubContentProvider : ContentProvider() {
 
     @Throws(FileNotFoundException::class)
     override fun openAssetFile(uri: Uri, mode: String): AssetFileDescriptor? {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "openAssetFile")
         writeProviderEvidence("openAssetFile:$mode", uri, result)
         Log.w(TAG, "openAssetFile dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -232,7 +233,7 @@ class StubContentProvider : ContentProvider() {
         opts: Bundle?,
         signal: CancellationSignal?
     ): AssetFileDescriptor? {
-        val result = dispatch(uri)
+        val result = dispatch(uri, "openTypedAssetFile")
         writeProviderEvidence("openTypedAssetFile:$mimeTypeFilter", uri, result)
         Log.w(TAG, "openTypedAssetFile dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -248,7 +249,8 @@ class StubContentProvider : ContentProvider() {
         }
     }
 
-    private fun dispatch(uri: Uri): VirtualProviderDispatchResult {
+    private fun dispatch(uri: Uri, operationName: String): VirtualProviderDispatchResult {
+        validateRouteToken(uri, operationName)?.let { return it }
         val hostPackageName = context?.packageName ?: return VirtualProviderDispatchResult.InvalidProxyUri("missing host context")
         val hostContext = context ?: return VirtualProviderDispatchResult.InvalidProxyUri("missing host context")
         val runtimeBindResult = HostedProviderRuntimeBinder().ensureBound(hostContext, uri)
@@ -260,16 +262,24 @@ class StubContentProvider : ContentProvider() {
     }
 
     private fun callRoute(arg: String?, extras: Bundle?): ProviderCallRoute? {
+        routeFromExtras(arg, extras)?.let { return it }
         arg?.let { value ->
             val parsed = runCatching { Uri.parse(value) }.getOrNull()
             if (parsed?.scheme == "content" && !parsed.authority.isNullOrBlank()) {
                 return ProviderCallRoute(parsed, value)
             }
         }
+        return null
+    }
+
+    private fun routeFromExtras(arg: String?, extras: Bundle?): ProviderCallRoute? {
         val instanceId = extras?.getString(VirtualProviderManager.PROXY_INSTANCE_ID)
             ?.takeIf { it.isNotBlank() }
             ?: return null
         val guestAuthority = extras.getString(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val routeToken = extras.getString(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN)
             ?.takeIf { it.isNotBlank() }
             ?: return null
         val hostPackageName = context?.packageName ?: return null
@@ -278,17 +288,62 @@ class StubContentProvider : ContentProvider() {
             .authority("$hostPackageName.multiapp.provider.stub")
             .appendQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID, instanceId)
             .appendQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY, guestAuthority)
+            .appendQueryParameter(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN, routeToken)
             .build()
         return ProviderCallRoute(proxyUri, arg)
     }
 
-    private fun Uri.toGuestUri(guestAuthority: String): Uri = ProviderProxyUri.toGuestUri(this, guestAuthority)
+    internal fun routeTokenStatusForTest(
+        token: String?,
+        instanceId: String?,
+        guestAuthority: String?,
+        operationName: String
+    ): String = validateRouteTokenFields(token, instanceId, guestAuthority, operationName)?.reason
+        ?: "VALID"
+
+    private fun validateRouteToken(uri: Uri, operationName: String): VirtualProviderDispatchResult.InvalidProxyUri? {
+        val instanceId = uri.getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID)
+        val guestAuthority = uri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+        val token = uri.getQueryParameter(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN)
+        return validateRouteTokenFields(token, instanceId, guestAuthority, operationName)
+    }
+
+    private fun validateRouteTokenFields(
+        token: String?,
+        instanceId: String?,
+        guestAuthority: String?,
+        operationName: String
+    ): VirtualProviderDispatchResult.InvalidProxyUri? {
+        if (instanceId.isNullOrBlank()) {
+            return VirtualProviderDispatchResult.InvalidProxyUri("missing instanceId")
+        }
+        if (guestAuthority.isNullOrBlank()) {
+            return VirtualProviderDispatchResult.InvalidProxyUri("missing guestAuthority")
+        }
+        val result = ProviderRouteTokenRegistry.validate(
+            token = token,
+            callerInstanceId = instanceId,
+            targetInstanceId = instanceId,
+            authority = guestAuthority,
+            operation = operationName
+        )
+        return if (result.isValid) {
+            null
+        } else {
+            VirtualProviderDispatchResult.InvalidProxyUri("invalid route token:${result.status.name}")
+        }
+    }
+
+    private fun Uri.toGuestUri(guestAuthority: String): Uri {
+        return ProviderProxyUri.toGuestUri(this, guestAuthority).withoutRouteToken()
+    }
 
     private fun Bundle?.withoutProxyRoute(): Bundle? {
         if (this == null) return null
         return Bundle(this).apply {
             remove(VirtualProviderManager.PROXY_INSTANCE_ID)
             remove(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+            remove(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN)
         }
     }
 
@@ -483,8 +538,8 @@ class StubContentProvider : ContentProvider() {
     ) {
         fun guestArg(guestAuthority: String): String? {
             val parsed = originalArg?.let { runCatching { Uri.parse(it) }.getOrNull() }
-            return if (parsed?.scheme == "content" && !parsed.authority.isNullOrBlank()) {
-                ProviderProxyUri.toGuestUri(proxyUri, guestAuthority).toString()
+            return if (parsed?.scheme == "content" && parsed.authority == proxyUri.authority) {
+                ProviderProxyUri.toGuestUri(parsed, guestAuthority).withoutRouteToken().toString()
             } else {
                 originalArg
             }
@@ -607,5 +662,19 @@ class StubContentProvider : ContentProvider() {
 
     companion object {
         private const val TAG = "StubContentProvider"
+
+        private fun Uri.withoutRouteToken(): Uri {
+            return buildUpon()
+                .encodedQuery(removeRouteTokenFromEncodedQuery(encodedQuery))
+                .build()
+        }
+
+        private fun removeRouteTokenFromEncodedQuery(encodedQuery: String?): String? {
+            if (encodedQuery.isNullOrEmpty()) return null
+            val remaining = encodedQuery
+                .split("&")
+                .filterNot { part -> part.substringBefore("=") == ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN }
+            return remaining.takeIf { it.isNotEmpty() }?.joinToString("&")
+        }
     }
 }

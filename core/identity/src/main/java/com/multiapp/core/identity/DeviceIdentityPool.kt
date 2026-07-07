@@ -186,8 +186,8 @@ object DeviceIdentityPool {
     ): Map<String, String> {
         // 与 AuthorityRewriter 保持一致：直接追加 .$instanceId
         return mapOf(
-            "$originalPackageName.provider" to "$originalPackageName.provider.$instanceId",
-            "$originalPackageName.fileprovider" to "$originalPackageName.fileprovider.$instanceId"
+            "$originalPackageName.provider" to "$originalPackageName.provider.clone$instanceId",
+            "$originalPackageName.fileprovider" to "$originalPackageName.fileprovider.clone$instanceId"
         )
     }
 

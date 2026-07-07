@@ -8,8 +8,10 @@ import android.content.pm.ProviderInfo
 import android.content.pm.ServiceInfo
 import android.os.Build
 import com.multiapp.app.container.ContainerRuntimePaths
+import com.multiapp.core.engine.DefaultVirtualizationEngine
 import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.manifest.ManifestParser
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceRecordStore
@@ -36,6 +38,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideHookEngine(): HookEngine = HookEngine.getInstance()
+
+    @Provides
+    @Singleton
+    fun provideVirtualizationEngine(engine: DefaultVirtualizationEngine): VirtualizationEngine = engine
 
     @Provides
     @Singleton

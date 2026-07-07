@@ -4,6 +4,7 @@ import com.multiapp.core.model.VirtualConstants
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.nio.file.Files
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -300,6 +301,84 @@ class NativeHookBridgeTest {
         )
     }
 
+    @Test
+    fun `setupGuestPrivatePathRedirections binds same package rules to processSlot and instanceId`() {
+        bridge.setupGuestPrivatePathRedirections(
+            guestPackageName = "com.example.app",
+            processSlot = "slot-0",
+            instanceId = "inst_001",
+            dataRoot = "/sandbox/inst_001"
+        )
+        bridge.setupGuestPrivatePathRedirections(
+            guestPackageName = "com.example.app",
+            processSlot = "slot-1",
+            instanceId = "inst_002",
+            dataRoot = "/sandbox/inst_002"
+        )
+
+        bridge.setNativeRedirectScope("slot-0", "inst_001")
+        assertEquals(
+            "/sandbox/inst_001/files/config.json",
+            bridge.translatePath("/data/data/com.example.app/files/config.json")
+        )
+
+        bridge.setNativeRedirectScope("slot-1", "inst_002")
+        assertEquals(
+            "/sandbox/inst_002/files/config.json",
+            bridge.translatePath("/data/data/com.example.app/files/config.json")
+        )
+
+        val evidence = bridge.getPathRedirectionEvidence()
+        assertTrue(evidence.any { it.processSlot == "slot-0" && it.instanceId == "inst_001" && it.scoped })
+        assertTrue(evidence.any { it.processSlot == "slot-1" && it.instanceId == "inst_002" && it.scoped })
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections rejects parent traversal inputs`() {
+        val rules = bridge.setupGuestPrivatePathRedirections(
+            guestPackageName = "com.example.app",
+            processSlot = "slot-0",
+            instanceId = "inst_001",
+            dataRoot = "/sandbox/../escape"
+        )
+
+        assertEquals(0, rules)
+        assertEquals(0, bridge.getRedirectionCount())
+    }
+
+    @Test
+    fun `translatePath rejects parent traversal under scoped prefix`() {
+        bridge.setupGuestPrivatePathRedirections(
+            guestPackageName = "com.example.app",
+            processSlot = "slot-0",
+            instanceId = "inst_001",
+            dataRoot = "/sandbox/inst_001"
+        )
+
+        val unsafePath = "/data/data/com.example.app/../com.other.app/files/config.json"
+        assertEquals(unsafePath, bridge.translatePath(unsafePath))
+    }
+
+    @Test
+    fun `translatePath allows existing target when canonical path stays under dataRoot`() {
+        val dataRoot = Files.createTempDirectory("multiapp-data-root").toFile()
+        val existingFile = dataRoot.resolve("files/config.json")
+        requireNotNull(existingFile.parentFile).mkdirs()
+        existingFile.writeText("ok")
+
+        bridge.setupGuestPrivatePathRedirections(
+            guestPackageName = "com.example.app",
+            processSlot = "slot-0",
+            instanceId = "inst_001",
+            dataRoot = dataRoot.absolutePath
+        )
+
+        assertEquals(
+            existingFile.canonicalPath,
+            java.io.File(bridge.translatePath("/data/data/com.example.app/files/config.json")).canonicalPath
+        )
+    }
+
     // ===== setupExternalStorageRedirections tests =====
 
     @Test
@@ -364,7 +443,7 @@ class NativeHookBridgeTest {
 
         val cmdline = bridge.getFakeContent("/proc/self/cmdline")
         assertTrue(cmdline != null)
-        assertEquals("com.whatsapp", String(cmdline!!).trimEnd(' '))
+        assertEquals("com.whatsapp", String(cmdline!!).trimEnd('\u0000'))
     }
 
     @Test

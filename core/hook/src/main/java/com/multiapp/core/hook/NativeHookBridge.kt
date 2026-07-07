@@ -18,7 +18,18 @@ data class NativePrivatePathProbeResult(
     val errno: Int,
     val candidateExists: Boolean,
     val resolvedPath: String,
-    val reason: String
+    val reason: String,
+    val processSlot: String = "",
+    val instanceId: String = ""
+)
+
+data class NativePathRedirectEvidence(
+    val fromPrefix: String,
+    val toPrefix: String,
+    val processSlot: String,
+    val instanceId: String,
+    val dataRoot: String,
+    val scoped: Boolean
 )
 
 /**
@@ -140,7 +151,22 @@ class NativeHookBridge {
         }
     }
 
-    private val pathRedirections = ConcurrentHashMap<String, String>()
+    private data class PathRedirectionRule(
+        val fromPrefix: String,
+        val toPrefix: String,
+        val processSlot: String,
+        val instanceId: String,
+        val dataRoot: String,
+        val scoped: Boolean
+    ) {
+        val key: String = listOf(fromPrefix, processSlot, instanceId).joinToString("\u0000")
+
+        fun matchesScope(activeProcessSlot: String, activeInstanceId: String): Boolean {
+            return !scoped || (processSlot == activeProcessSlot && instanceId == activeInstanceId)
+        }
+    }
+
+    private val pathRedirections = ConcurrentHashMap<String, PathRedirectionRule>()
     private val pathTrie = PathTrie()
     /**
      * LRU 璺緞缂撳瓨锛屾渶澶?2048 鏉★紝瓒呭嚭鑷姩娣樻卑鏈€鏃ф潯鐩?
@@ -160,6 +186,8 @@ class NativeHookBridge {
     private var nativePathRedirectHooksInitialized = false
     private var nativeHooksAvailable = false
     private var appContext: android.content.Context? = null
+    @Volatile private var activeProcessSlot: String = ""
+    @Volatile private var activeInstanceId: String = ""
 
     fun initialize() {
         Timber.tag(TAG).i("NativeHookBridge.initialize() called")
@@ -586,16 +614,169 @@ class NativeHookBridge {
         }
     }
 
+    private fun defaultProcessSlot(instanceId: String): String {
+        return System.getProperty("multiapp.processSlot")
+            ?.takeIf { it.isNotBlank() }
+            ?: "process:${instanceId.ifBlank { "unknown" }}"
+    }
+
+    fun setNativeRedirectScope(processSlot: String, instanceId: String) {
+        if (hasParentTraversal(processSlot) || hasParentTraversal(instanceId)) {
+            Timber.tag(TAG).w("Native redirect scope rejected: processSlot=$processSlot instanceId=$instanceId")
+            return
+        }
+        activeProcessSlot = processSlot
+        activeInstanceId = instanceId
+        synchronized(pathCacheLock) { pathCache.clear() }
+        if (nativeHooksAvailable) nativeSetRedirectScope(processSlot, instanceId)
+    }
+
+    fun getPathRedirectionEvidence(): List<NativePathRedirectEvidence> {
+        return pathRedirections.values
+            .sortedWith(compareBy<PathRedirectionRule> { it.fromPrefix }.thenBy { it.instanceId }.thenBy { it.processSlot })
+            .map { rule ->
+                NativePathRedirectEvidence(
+                    fromPrefix = rule.fromPrefix,
+                    toPrefix = rule.toPrefix,
+                    processSlot = rule.processSlot,
+                    instanceId = rule.instanceId,
+                    dataRoot = rule.dataRoot,
+                    scoped = rule.scoped
+                )
+            }
+    }
+
+    private fun addScopedPathRedirection(
+        fromPrefix: String,
+        toPrefix: String,
+        processSlot: String,
+        instanceId: String,
+        dataRoot: String
+    ): Boolean {
+        val normalizedProcessSlot = processSlot.ifBlank { defaultProcessSlot(instanceId) }
+        setNativeRedirectScope(normalizedProcessSlot, instanceId)
+        return addPathRedirectionRule(
+            fromPrefix = fromPrefix,
+            toPrefix = toPrefix,
+            processSlot = normalizedProcessSlot,
+            instanceId = instanceId,
+            dataRoot = dataRoot.trimEnd('/', '\\'),
+            scoped = true
+        )
+    }
+
+    private fun addPathRedirectionRule(
+        fromPrefix: String,
+        toPrefix: String,
+        processSlot: String,
+        instanceId: String,
+        dataRoot: String,
+        scoped: Boolean
+    ): Boolean {
+        if (hasParentTraversal(fromPrefix) ||
+            hasParentTraversal(toPrefix) ||
+            hasParentTraversal(processSlot) ||
+            hasParentTraversal(instanceId) ||
+            hasParentTraversal(dataRoot)
+        ) {
+            return false
+        }
+
+        val rule = PathRedirectionRule(
+            fromPrefix = fromPrefix,
+            toPrefix = toPrefix,
+            processSlot = processSlot,
+            instanceId = instanceId,
+            dataRoot = dataRoot,
+            scoped = scoped
+        )
+        pathRedirections[rule.key] = rule
+        rebuildPrefixIndex()
+        Timber.tag(TAG).d(
+            "Path redirect: $fromPrefix -> $toPrefix processSlot=$processSlot instanceId=$instanceId scoped=$scoped"
+        )
+        if (nativeHooksAvailable) {
+            if (scoped) {
+                nativeAddScopedPathRedirection(fromPrefix, toPrefix, processSlot, instanceId, dataRoot)
+            } else {
+                nativeAddPathRedirection(fromPrefix, toPrefix)
+            }
+        }
+        return true
+    }
+
+    private fun hasParentTraversal(path: String): Boolean {
+        if (path.isEmpty()) return false
+        var segmentStart = 0
+        for (index in 0..path.length) {
+            val atEnd = index == path.length
+            val separator = !atEnd && (path[index] == '/' || path[index] == '\\')
+            if (atEnd || separator) {
+                if (index - segmentStart == 2 && path[segmentStart] == '.' && path[segmentStart + 1] == '.') {
+                    return true
+                }
+                segmentStart = index + 1
+            }
+        }
+        return false
+    }
+
+    private fun secureScopedTranslation(rule: PathRedirectionRule, originalPath: String): String? {
+        if (hasParentTraversal(originalPath)) return null
+        val candidate = rule.toPrefix + originalPath.substring(rule.fromPrefix.length)
+        if (rule.dataRoot.isBlank()) return candidate
+        val candidateFile = File(candidate)
+        if (!candidateFile.exists()) return candidate
+        return if (isCanonicalContained(candidateFile, File(rule.dataRoot))) candidate else null
+    }
+
+    private fun isCanonicalContained(candidate: File, root: File): Boolean {
+        return try {
+            val rootPath = root.canonicalFile.path.trimEnd(File.separatorChar)
+            val candidatePath = candidate.canonicalFile.path
+            candidatePath == rootPath || candidatePath.startsWith(rootPath + File.separator)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun translateScopedPath(originalPath: String): String? {
+        val processSlot = activeProcessSlot
+        val instanceId = activeInstanceId
+        if (processSlot.isBlank() || instanceId.isBlank()) return null
+
+        var bestRule: PathRedirectionRule? = null
+        for (rule in pathRedirections.values) {
+            if (!rule.scoped || !rule.matchesScope(processSlot, instanceId)) continue
+            if (originalPath.startsWith(rule.fromPrefix) &&
+                rule.fromPrefix.length > (bestRule?.fromPrefix?.length ?: -1)
+            ) {
+                bestRule = rule
+            }
+        }
+        return bestRule?.let { secureScopedTranslation(it, originalPath) }
+    }
+
     private fun rebuildPrefixIndex() {
         pathTrie.clear()
-        for ((from, to) in pathRedirections) pathTrie.insert(from, to)
-        pathCache.clear()
+        for (rule in pathRedirections.values) {
+            if (!rule.scoped) pathTrie.insert(rule.fromPrefix, rule.toPrefix)
+        }
+        synchronized(pathCacheLock) { pathCache.clear() }
     }
 
     fun addPathRedirection(fromPrefix: String, toPrefix: String) {
-        pathRedirections[fromPrefix] = toPrefix; rebuildPrefixIndex()
-        Timber.tag(TAG).d("Path redirect: $fromPrefix -> $toPrefix")
-        if (nativeHooksAvailable) nativeAddPathRedirection(fromPrefix, toPrefix)
+        if (!addPathRedirectionRule(
+                fromPrefix = fromPrefix,
+                toPrefix = toPrefix,
+                processSlot = "",
+                instanceId = "",
+                dataRoot = "",
+                scoped = false
+            )
+        ) {
+            Timber.tag(TAG).w("Path redirect rejected: $fromPrefix -> $toPrefix")
+        }
     }
 
     fun probePrivatePathRedirect(
@@ -633,7 +814,10 @@ class NativeHookBridge {
     }
 
     fun removePathRedirection(fromPrefix: String) {
-        pathRedirections.remove(fromPrefix); rebuildPrefixIndex()
+        pathRedirections.entries
+            .filter { it.value.fromPrefix == fromPrefix }
+            .forEach { pathRedirections.remove(it.key) }
+        rebuildPrefixIndex()
         if (nativeHooksAvailable) nativeRemovePathRedirection(fromPrefix)
     }
 
@@ -857,35 +1041,84 @@ class NativeHookBridge {
     }
 
     fun setupAppRedirections(guestPackageName: String, instanceId: String, sandboxDataDir: String) {
-        addPathRedirection("/data/data/$guestPackageName/", "$sandboxDataDir/")
-        addPathRedirection("/data/user/0/$guestPackageName/", "$sandboxDataDir/")
-        addPathRedirection("/storage/emulated/0/Android/data/$guestPackageName/", "$sandboxDataDir/external_data/")
-        addPathRedirection("/sdcard/Android/data/$guestPackageName/", "$sandboxDataDir/external_data/")
-        addPathRedirection("/storage/emulated/0/Android/obb/$guestPackageName/", "$sandboxDataDir/obb/")
+        val processSlot = defaultProcessSlot(instanceId)
+        addScopedPathRedirection("/data/data/$guestPackageName/", "$sandboxDataDir/", processSlot, instanceId, sandboxDataDir)
+        addScopedPathRedirection("/data/user/0/$guestPackageName/", "$sandboxDataDir/", processSlot, instanceId, sandboxDataDir)
+        addScopedPathRedirection(
+            "/storage/emulated/0/Android/data/$guestPackageName/",
+            "$sandboxDataDir/external_data/",
+            processSlot,
+            instanceId,
+            sandboxDataDir
+        )
+        addScopedPathRedirection(
+            "/sdcard/Android/data/$guestPackageName/",
+            "$sandboxDataDir/external_data/",
+            processSlot,
+            instanceId,
+            sandboxDataDir
+        )
+        addScopedPathRedirection(
+            "/storage/emulated/0/Android/obb/$guestPackageName/",
+            "$sandboxDataDir/obb/",
+            processSlot,
+            instanceId,
+            sandboxDataDir
+        )
         Timber.tag(TAG).d("App redirections set for $guestPackageName ($instanceId)")
     }
 
     fun setupGuestPrivatePathRedirections(guestPackageName: String, instanceId: String, dataRoot: String): Int {
-        if (guestPackageName.isBlank() || dataRoot.isBlank()) {
+        return setupGuestPrivatePathRedirections(
+            guestPackageName = guestPackageName,
+            processSlot = defaultProcessSlot(instanceId),
+            instanceId = instanceId,
+            dataRoot = dataRoot
+        )
+    }
+
+    fun setupGuestPrivatePathRedirections(
+        guestPackageName: String,
+        processSlot: String,
+        instanceId: String,
+        dataRoot: String
+    ): Int {
+        if (guestPackageName.isBlank() || processSlot.isBlank() || instanceId.isBlank() || dataRoot.isBlank()) {
             Timber.tag(TAG).w(
-                "Guest private path redirections skipped for instanceId=$instanceId: incomplete input"
+                "Guest private path redirections skipped for instanceId=$instanceId processSlot=$processSlot: incomplete input"
+            )
+            return 0
+        }
+        if (hasParentTraversal(guestPackageName) ||
+            hasParentTraversal(processSlot) ||
+            hasParentTraversal(instanceId) ||
+            hasParentTraversal(dataRoot)
+        ) {
+            Timber.tag(TAG).w(
+                "Guest private path redirections rejected for instanceId=$instanceId processSlot=$processSlot: unsafe input"
             )
             return 0
         }
         val targetRoot = dataRoot.trimEnd('/') + "/"
-        addPathRedirection("/data/data/$guestPackageName/", targetRoot)
-        addPathRedirection("/data/user/0/$guestPackageName/", targetRoot)
-        Timber.tag(TAG).d("Guest private path redirections set for $guestPackageName ($instanceId)")
-        return 2
+        var ruleCount = 0
+        if (addScopedPathRedirection("/data/data/$guestPackageName/", targetRoot, processSlot, instanceId, dataRoot)) {
+            ruleCount++
+        }
+        if (addScopedPathRedirection("/data/user/0/$guestPackageName/", targetRoot, processSlot, instanceId, dataRoot)) {
+            ruleCount++
+        }
+        Timber.tag(TAG).d("Guest private path redirections set for $guestPackageName ($instanceId/$processSlot)")
+        return ruleCount
     }
 
     fun setupExternalStorageRedirections(instanceId: String, virtualSdcardDir: String) {
-        addPathRedirection("/sdcard/", "$virtualSdcardDir/")
-        addPathRedirection("/storage/emulated/0/", "$virtualSdcardDir/")
-        addPathRedirection("/mnt/sdcard/", "$virtualSdcardDir/")
-        addPathRedirection("/storage/self/primary/", "$virtualSdcardDir/")
-        addPathRedirection("/storage/emulated/0", virtualSdcardDir)
-        addPathRedirection("/sdcard", virtualSdcardDir)
+        val processSlot = defaultProcessSlot(instanceId)
+        addScopedPathRedirection("/sdcard/", "$virtualSdcardDir/", processSlot, instanceId, virtualSdcardDir)
+        addScopedPathRedirection("/storage/emulated/0/", "$virtualSdcardDir/", processSlot, instanceId, virtualSdcardDir)
+        addScopedPathRedirection("/mnt/sdcard/", "$virtualSdcardDir/", processSlot, instanceId, virtualSdcardDir)
+        addScopedPathRedirection("/storage/self/primary/", "$virtualSdcardDir/", processSlot, instanceId, virtualSdcardDir)
+        addScopedPathRedirection("/storage/emulated/0", virtualSdcardDir, processSlot, instanceId, virtualSdcardDir)
+        addScopedPathRedirection("/sdcard", virtualSdcardDir, processSlot, instanceId, virtualSdcardDir)
         Timber.tag(TAG).d("External storage redirections set for $instanceId -> $virtualSdcardDir")
     }
 
@@ -925,10 +1158,13 @@ class NativeHookBridge {
 
     fun translatePath(originalPath: String): String {
         if (hiddenPaths.contains(originalPath)) return "/dev/null"
+        val scopedCacheKey = "$activeProcessSlot\u0000$activeInstanceId\u0000$originalPath"
         synchronized(pathCacheLock) {
-            pathCache[originalPath]?.let { return it }
-            val result = pathTrie.translate(originalPath) ?: originalPath
-            pathCache[originalPath] = result
+            pathCache[scopedCacheKey]?.let { return it }
+            val result = translateScopedPath(originalPath)
+                ?: pathTrie.translate(originalPath)
+                ?: originalPath
+            pathCache[scopedCacheKey] = result
             return result
         }
     }
@@ -946,6 +1182,7 @@ class NativeHookBridge {
         synchronized(pathCacheLock) { pathCache.clear() }
         fakeFileContent.clear(); propertyOverrides.clear()
         spoofedPackageName = null; spoofedPid = -1; appContext = null
+        activeProcessSlot = ""; activeInstanceId = ""
         if (nativeHooksAvailable) nativeCleanup()
         initialized = false
         nativeBaseHooksInitialized = false
@@ -1073,7 +1310,9 @@ class NativeHookBridge {
             errno = fields["errno"]?.toIntOrNull() ?: 0,
             candidateExists = fields["candidateExists"] == "true",
             resolvedPath = fields["resolvedPath"].orEmpty(),
-            reason = fields["reason"].orEmpty()
+            reason = fields["reason"].orEmpty(),
+            processSlot = fields["processSlot"].orEmpty(),
+            instanceId = fields["instanceId"].orEmpty()
         )
     }
 
@@ -1089,6 +1328,14 @@ class NativeHookBridge {
     private external fun nativeInit(): Boolean
     private external fun nativeInitPathRedirectHooks(): Boolean
     private external fun nativeAddPathRedirection(fromPrefix: String, toPrefix: String)
+    private external fun nativeAddScopedPathRedirection(
+        fromPrefix: String,
+        toPrefix: String,
+        processSlot: String,
+        instanceId: String,
+        dataRoot: String
+    )
+    private external fun nativeSetRedirectScope(processSlot: String, instanceId: String)
     private external fun nativeRemovePathRedirection(fromPrefix: String)
     private external fun nativeClearPathRedirections()
     private external fun nativeSpoofProcSelf(pid: Int, packageName: String)

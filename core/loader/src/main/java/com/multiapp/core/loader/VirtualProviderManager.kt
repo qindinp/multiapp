@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import android.content.pm.ProviderInfo
 import android.net.Uri
+import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
@@ -30,13 +31,24 @@ class VirtualProviderManager(
         )
     }
 
-    fun rewriteUri(snapshot: VirtualPackageSnapshot, uri: Uri): VirtualProviderUriRewrite? {
+    fun rewriteUri(
+        snapshot: VirtualPackageSnapshot,
+        uri: Uri,
+        operation: String = "query"
+    ): VirtualProviderUriRewrite? {
         val authority = uri.authority ?: return null
         val resolution = resolve(snapshot, authority) ?: return null
+        val routeToken = ProviderRouteTokenRegistry.issue(
+            callerInstanceId = snapshot.instanceId,
+            targetInstanceId = snapshot.instanceId,
+            authority = authority,
+            operation = operation
+        ).token
         val rewritten = uri.buildUpon()
             .authority(resolution.proxyAuthority)
             .appendQueryParameter(PROXY_INSTANCE_ID, snapshot.instanceId)
             .appendQueryParameter(PROXY_GUEST_AUTHORITY, authority)
+            .appendQueryParameter(PROXY_ROUTE_TOKEN, routeToken)
             .build()
         return VirtualProviderUriRewrite(
             originalUri = uri,
@@ -58,6 +70,7 @@ class VirtualProviderManager(
     companion object {
         const val PROXY_INSTANCE_ID = "multiapp_instanceId"
         const val PROXY_GUEST_AUTHORITY = "multiapp_guestAuthority"
+        const val PROXY_ROUTE_TOKEN = ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN
     }
 
     private fun providerInfo(

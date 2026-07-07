@@ -10,6 +10,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.CancellationSignal
 import com.multiapp.core.hook.HookEngine
+import java.security.SecureRandom
+import java.util.Base64
 import timber.log.Timber
 
 data class ProviderAuthorityHookConfig(
@@ -22,6 +24,161 @@ data class ContentProviderHookInstallStats(
     val attemptedMethodCount: Int,
     val installedMethodCount: Int
 )
+
+data class ProviderRouteToken(
+    val token: String,
+    val callerInstanceId: String,
+    val targetInstanceId: String,
+    val authority: String,
+    val operation: String,
+    val expiresAtMillis: Long
+)
+
+enum class ProviderRouteTokenValidationStatus {
+    VALID,
+    MISSING_TOKEN,
+    TOKEN_NOT_FOUND,
+    EXPIRED,
+    CALLER_INSTANCE_MISMATCH,
+    TARGET_INSTANCE_MISMATCH,
+    AUTHORITY_MISMATCH,
+    OPERATION_MISMATCH
+}
+
+data class ProviderRouteTokenValidationResult(
+    val status: ProviderRouteTokenValidationStatus,
+    val route: ProviderRouteToken? = null
+) {
+    val isValid: Boolean = status == ProviderRouteTokenValidationStatus.VALID
+}
+
+object ProviderRouteTokenRegistry {
+    const val PROXY_ROUTE_TOKEN = "multiapp_routeToken"
+    const val DEFAULT_TTL_MILLIS = 2 * 60 * 1000L
+
+    private const val TOKEN_BYTE_COUNT = 32
+    private const val MAX_ROUTE_TOKENS = 2048
+
+    private val random = SecureRandom()
+    private val tokenEncoder = Base64.getUrlEncoder().withoutPadding()
+    private val lock = Any()
+    private val routes = LinkedHashMap<String, ProviderRouteToken>()
+
+    fun issue(
+        callerInstanceId: String,
+        targetInstanceId: String,
+        authority: String,
+        operation: String,
+        nowMillis: Long = System.currentTimeMillis(),
+        ttlMillis: Long = DEFAULT_TTL_MILLIS
+    ): ProviderRouteToken {
+        require(callerInstanceId.isNotBlank()) { "callerInstanceId must not be blank" }
+        require(targetInstanceId.isNotBlank()) { "targetInstanceId must not be blank" }
+        require(authority.isNotBlank()) { "authority must not be blank" }
+        val normalizedOperation = normalizeOperation(operation)
+        require(normalizedOperation.isNotBlank()) { "operation must not be blank" }
+        require(ttlMillis > 0L) { "ttlMillis must be positive" }
+
+        synchronized(lock) {
+            pruneExpiredLocked(nowMillis)
+            val token = nextTokenLocked()
+            val route = ProviderRouteToken(
+                token = token,
+                callerInstanceId = callerInstanceId,
+                targetInstanceId = targetInstanceId,
+                authority = authority,
+                operation = normalizedOperation,
+                expiresAtMillis = nowMillis + ttlMillis
+            )
+            routes[token] = route
+            trimLocked()
+            return route
+        }
+    }
+
+    fun validate(
+        token: String?,
+        callerInstanceId: String,
+        targetInstanceId: String,
+        authority: String,
+        operation: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): ProviderRouteTokenValidationResult {
+        if (token.isNullOrBlank()) {
+            return ProviderRouteTokenValidationResult(ProviderRouteTokenValidationStatus.MISSING_TOKEN)
+        }
+        val normalizedOperation = normalizeOperation(operation)
+        synchronized(lock) {
+            val route = routes[token]
+                ?: return ProviderRouteTokenValidationResult(ProviderRouteTokenValidationStatus.TOKEN_NOT_FOUND)
+            if (nowMillis >= route.expiresAtMillis) {
+                routes.remove(token)
+                return ProviderRouteTokenValidationResult(ProviderRouteTokenValidationStatus.EXPIRED)
+            }
+            pruneExpiredLocked(nowMillis)
+            return when {
+                route.callerInstanceId != callerInstanceId -> ProviderRouteTokenValidationResult(
+                    ProviderRouteTokenValidationStatus.CALLER_INSTANCE_MISMATCH,
+                    route
+                )
+                route.targetInstanceId != targetInstanceId -> ProviderRouteTokenValidationResult(
+                    ProviderRouteTokenValidationStatus.TARGET_INSTANCE_MISMATCH,
+                    route
+                )
+                route.authority != authority -> ProviderRouteTokenValidationResult(
+                    ProviderRouteTokenValidationStatus.AUTHORITY_MISMATCH,
+                    route
+                )
+                route.operation != normalizedOperation -> ProviderRouteTokenValidationResult(
+                    ProviderRouteTokenValidationStatus.OPERATION_MISMATCH,
+                    route
+                )
+                else -> ProviderRouteTokenValidationResult(ProviderRouteTokenValidationStatus.VALID, route)
+            }
+        }
+    }
+
+    fun normalizeOperation(operation: String): String {
+        return when (val base = operation.substringBefore(":")) {
+            "openFileDescriptor" -> "openFile"
+            "openAssetFileDescriptor" -> "openAssetFile"
+            "openTypedAssetFileDescriptor" -> "openTypedAssetFile"
+            else -> base
+        }
+    }
+
+    internal fun clearForTest() {
+        synchronized(lock) {
+            routes.clear()
+        }
+    }
+
+    private fun nextTokenLocked(): String {
+        val bytes = ByteArray(TOKEN_BYTE_COUNT)
+        while (true) {
+            random.nextBytes(bytes)
+            val token = tokenEncoder.encodeToString(bytes)
+            if (!routes.containsKey(token)) return token
+        }
+    }
+
+    private fun pruneExpiredLocked(nowMillis: Long) {
+        val iterator = routes.entries.iterator()
+        while (iterator.hasNext()) {
+            if (nowMillis >= iterator.next().value.expiresAtMillis) {
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun trimLocked() {
+        val iterator = routes.entries.iterator()
+        while (routes.size > MAX_ROUTE_TOKENS && iterator.hasNext()) {
+            iterator.next()
+            iterator.remove()
+        }
+    }
+}
 
 /**
  * ContentProvider authority hook.
@@ -76,10 +233,12 @@ class ContentProviderHook : HookPoint {
         private const val TAG = "ContentProviderHook"
         internal const val PROXY_INSTANCE_ID = "multiapp_instanceId"
         internal const val PROXY_GUEST_AUTHORITY = "multiapp_guestAuthority"
+        internal const val PROXY_ROUTE_TOKEN = ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN
 
         private val proxyParameterNames = setOf(
             PROXY_INSTANCE_ID,
-            PROXY_GUEST_AUTHORITY
+            PROXY_GUEST_AUTHORITY,
+            PROXY_ROUTE_TOKEN
         )
 
         fun apply(config: IdentityConfig) {
@@ -150,7 +309,7 @@ class ContentProviderHook : HookPoint {
                     method = method,
                     beforeCallback = { _, args ->
                         val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
-                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap)
+                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap, "query")
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("query() URI rewrite: %s -> %s", uri, rewrittenUri)
                             val newArgs = args.copyOf()
@@ -187,7 +346,7 @@ class ContentProviderHook : HookPoint {
                     method = method,
                     beforeCallback = { _, args ->
                         val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
-                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap)
+                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap, "insert")
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("insert() URI rewrite: %s -> %s", uri, rewrittenUri)
                             val newArgs = args.copyOf()
@@ -226,7 +385,7 @@ class ContentProviderHook : HookPoint {
                     method = method,
                     beforeCallback = { _, args ->
                         val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
-                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap)
+                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap, "update")
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("update() URI rewrite: %s -> %s", uri, rewrittenUri)
                             val newArgs = args.copyOf()
@@ -264,7 +423,7 @@ class ContentProviderHook : HookPoint {
                     method = method,
                     beforeCallback = { _, args ->
                         val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
-                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap)
+                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap, "delete")
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("delete() URI rewrite: %s -> %s", uri, rewrittenUri)
                             val newArgs = args.copyOf()
@@ -307,12 +466,18 @@ class ContentProviderHook : HookPoint {
                     method = method,
                     beforeCallback = { _, args ->
                         val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
-                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap)
+                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap, "call")
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d("call() URI rewrite: %s -> %s", uri, rewrittenUri)
                             val newArgs = args.copyOf()
                             newArgs[0] = rewrittenUri
-                            newArgs[3] = routeExtras(args.getOrNull(3) as? Bundle, instanceId, uri.authority.orEmpty())
+                            newArgs[3] = routeExtras(
+                                original = args.getOrNull(3) as? Bundle,
+                                instanceId = instanceId,
+                                guestAuthority = uri.authority.orEmpty(),
+                                operation = "call",
+                                routeToken = rewrittenUri.getQueryParameter(PROXY_ROUTE_TOKEN)
+                            )
                             newArgs
                         } else {
                             null
@@ -346,7 +511,12 @@ class ContentProviderHook : HookPoint {
                         )
                         val newArgs = args.copyOf()
                         newArgs[0] = rewritten
-                        newArgs[3] = routeExtras(args.getOrNull(3) as? Bundle, instanceId, authority)
+                        newArgs[3] = routeExtras(
+                            original = args.getOrNull(3) as? Bundle,
+                            instanceId = instanceId,
+                            guestAuthority = authority,
+                            operation = "call"
+                        )
                         newArgs
                     }
                 )
@@ -410,7 +580,7 @@ class ContentProviderHook : HookPoint {
                     method = method,
                     beforeCallback = { _, args ->
                         val uri = args.firstOrNull() as? Uri ?: return@hookMethodPassThrough null
-                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap)
+                        val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap, "acquireProvider")
                         if (rewrittenUri != uri) {
                             Timber.tag(TAG).d(
                                 "acquireProvider(Uri) rewrite: %s -> %s",
@@ -779,7 +949,7 @@ class ContentProviderHook : HookPoint {
         ): Array<Any?>? {
             return try {
                 val uri = args.getOrNull(uriArgIndex) as? Uri ?: return null
-                val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap)
+                val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap, operationName)
                 if (rewrittenUri == uri) return null
                 Timber.tag(TAG).d("%s URI rewrite: %s -> %s", operationName, uri, rewrittenUri)
                 val newArgs = args.copyOf()
@@ -803,7 +973,7 @@ class ContentProviderHook : HookPoint {
                 var changed = false
                 val rewritten = uris.map { item ->
                     val uri = item as? Uri ?: return@map item
-                    val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap)
+                    val rewrittenUri = rewriteUriForProviderHook(uri, instanceId, authorityMap, operationName)
                     if (rewrittenUri != uri) changed = true
                     rewrittenUri
                 }
@@ -821,10 +991,19 @@ class ContentProviderHook : HookPoint {
         private fun routeExtras(
             original: Bundle?,
             instanceId: String,
-            guestAuthority: String
+            guestAuthority: String,
+            operation: String,
+            routeToken: String? = null
         ): Bundle = Bundle(original ?: Bundle()).apply {
+            val token = routeToken ?: ProviderRouteTokenRegistry.issue(
+                callerInstanceId = instanceId,
+                targetInstanceId = instanceId,
+                authority = guestAuthority,
+                operation = operation
+            ).token
             putString(PROXY_INSTANCE_ID, instanceId)
             putString(PROXY_GUEST_AUTHORITY, guestAuthority)
+            putString(PROXY_ROUTE_TOKEN, token)
         }
 
         /**
@@ -836,25 +1015,41 @@ class ContentProviderHook : HookPoint {
         internal fun rewriteUriForProviderHook(
             uri: Uri,
             instanceId: String,
-            authorityMap: Map<String, String>
+            authorityMap: Map<String, String>,
+            operation: String = "query"
         ): Uri {
             val authority = uri.authority ?: return uri
             val newAuthority = authorityMap[authority] ?: return uri
+            val routeToken = ProviderRouteTokenRegistry.issue(
+                callerInstanceId = instanceId,
+                targetInstanceId = instanceId,
+                authority = authority,
+                operation = operation
+            ).token
 
             return uri.buildUpon()
                 .encodedAuthority(newAuthority)
-                .encodedQuery(rewriteEncodedQueryForProviderHook(uri.encodedQuery, instanceId, authority))
+                .encodedQuery(
+                    rewriteEncodedQueryForProviderHook(
+                        encodedQuery = uri.encodedQuery,
+                        instanceId = instanceId,
+                        guestAuthority = authority,
+                        routeToken = routeToken
+                    )
+                )
                 .build()
         }
 
         internal fun rewriteEncodedQueryForProviderHook(
             encodedQuery: String?,
             instanceId: String,
-            guestAuthority: String
+            guestAuthority: String,
+            routeToken: String? = null
         ): String {
-            val routeParameters = listOf(
+            val routeParameters = listOfNotNull(
                 "$PROXY_INSTANCE_ID=$instanceId",
-                "$PROXY_GUEST_AUTHORITY=$guestAuthority"
+                "$PROXY_GUEST_AUTHORITY=$guestAuthority",
+                routeToken?.let { "$PROXY_ROUTE_TOKEN=$it" }
             )
             val remaining = rewriteEncodedQueryWithoutProxyParameters(encodedQuery)
             return (remaining?.split("&").orEmpty() + routeParameters).joinToString("&")

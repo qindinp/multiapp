@@ -2,7 +2,8 @@ package com.multiapp.feature.appmanager
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.multiapp.core.instance.InstanceLaunchUseCase
+import com.multiapp.core.model.engine.LaunchInstanceRequest
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -36,7 +37,7 @@ sealed interface AppManagerEvent {
 @HiltViewModel
 class AppManagerViewModel @Inject constructor(
     private val instanceManager: InstanceManager,
-    private val instanceLaunchUseCase: InstanceLaunchUseCase
+    private val virtualizationEngine: VirtualizationEngine
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(AppManagerUiState())
@@ -91,11 +92,10 @@ class AppManagerViewModel @Inject constructor(
 
     fun launchInstance(instanceId: String) {
         viewModelScope.launch {
-            val result = instanceLaunchUseCase.launch(instanceId)
-            result.exceptionOrNull()?.let { error ->
-                if (error is CancellationException) throw error
-                Timber.e(error, "Failed to launch instance")
-                _events.send(AppManagerEvent.LaunchFailed(instanceId, error.message ?: "未知错误"))
+            val result = virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = instanceId))
+            if (!result.success) {
+                Timber.e("Failed to launch instance via engine: ${result.message}")
+                _events.send(AppManagerEvent.LaunchFailed(instanceId, result.message ?: "未知错误"))
             }
         }
     }

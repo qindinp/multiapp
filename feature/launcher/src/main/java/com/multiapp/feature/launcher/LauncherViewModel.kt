@@ -10,9 +10,10 @@ import android.os.Build
 import com.multiapp.core.instance.CloneCreateFailureException
 import com.multiapp.core.instance.CloneCreateUseCase
 import com.multiapp.core.instance.InstalledAppRepository
-import com.multiapp.core.instance.InstanceLaunchUseCase
 import com.multiapp.core.manifest.ComponentExtractor
 import com.multiapp.core.manifest.ManifestParser
+import com.multiapp.core.model.engine.LaunchInstanceRequest
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.VirtualApp
@@ -66,7 +67,7 @@ class LauncherViewModel @Inject constructor(
     private val instanceManager: InstanceManager,
     private val cloneCreateUseCase: CloneCreateUseCase,
     private val installedAppRepository: InstalledAppRepository,
-    private val instanceLaunchUseCase: InstanceLaunchUseCase
+    private val virtualizationEngine: VirtualizationEngine
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(LauncherUiState())
@@ -184,11 +185,11 @@ class LauncherViewModel @Inject constructor(
 
     fun launchInstance(instanceId: String) {
         viewModelScope.launch {
-            val result = instanceLaunchUseCase.launch(instanceId)
-            result.exceptionOrNull()?.let { error ->
-                Timber.e(error, "Failed to launch instance")
+            val result = virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = instanceId))
+            if (!result.success) {
+                Timber.e("Failed to launch instance via engine: ${result.message}")
                 _uiState.update {
-                    it.copy(error = "启动失败", errorDetail = error.message ?: "无法打开分身")
+                    it.copy(error = "启动失败", errorDetail = result.message ?: "无法打开分身")
                 }
             }
         }

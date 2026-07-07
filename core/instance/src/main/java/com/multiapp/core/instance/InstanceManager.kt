@@ -49,6 +49,20 @@ class InstanceManager @Inject constructor(
 
     private val gson = Gson()
 
+    private fun logWarn(message: String) {
+        runCatching { Log.w(TAG, message) }
+    }
+
+    private fun logError(message: String, error: Throwable? = null) {
+        runCatching {
+            if (error != null) {
+                Log.e(TAG, message, error)
+            } else {
+                Log.e(TAG, message)
+            }
+        }
+    }
+
     /**
      * 创建分身实例
      *
@@ -72,7 +86,7 @@ class InstanceManager @Inject constructor(
         app: VirtualApp,
         onProgress: suspend (String) -> Unit = {}
     ): String = withContext(Dispatchers.IO) {
-        Log.w("InstanceMgr", "createInstance: ${app.packageName}, apkPath=${app.apkPath}")
+        logWarn("createInstance: ${app.packageName}, apkPath=${app.apkPath}")
         val instanceId = "stub_${UUID.randomUUID().toString().replace("-", "")}"
 
         // 1. 生成设备身份 (DeviceIdentityPool 是 object 单例，直接调用)
@@ -80,24 +94,24 @@ class InstanceManager @Inject constructor(
         val originApkFile = File(app.apkPath)
         require(originApkFile.exists()) { "Origin APK not found: ${app.apkPath}" }
         val manifest = parser.parse(originApkFile)
-        Log.w("InstanceMgr", "parsed manifest: ${manifest.activities.size} activities")
+        logWarn("parsed manifest: ${manifest.activities.size} activities")
 
         // 2. 提取 launcher Activity
         val launcherActivity = extractor.extractLauncherActivity(manifest)
             ?: error("No launcher activity found in ${app.packageName}")
-        Log.w("InstanceMgr", "launcher activity = ${launcherActivity.name}")
+        logWarn("launcher activity = ${launcherActivity.name}")
 
         onProgress("生成身份")
         val identity = DeviceIdentityPool.generateIdentity(instanceId, app.packageName)
-        Log.w("InstanceMgr", "identity generated, stubPackage=${identity.stubPackageName}")
+        logWarn("identity generated, stubPackage=${identity.stubPackageName}")
 
         // 2.5. 将身份同步到 IdentitySpoofingEngine，确保运行时使用相同的身份
         try {
             val deviceProfile = identity.toDeviceProfile()
             identitySpoofingEngine.applyDeviceProfile(deviceProfile, instanceId, identity)
-            Log.w("InstanceMgr", "identity synced to IdentitySpoofingEngine")
+            logWarn("identity synced to IdentitySpoofingEngine")
         } catch (e: Throwable) {
-            Log.e("InstanceMgr", "applyDeviceProfile failed (non-fatal, continuing)", e)
+            logError("applyDeviceProfile failed (non-fatal, continuing)", e)
         }
 
         // 3. 将 IdentityConfig 转换为 StubConfig 所需的 DeviceIdentityConfig
@@ -125,7 +139,7 @@ class InstanceManager @Inject constructor(
         }
 
         onProgress("构建Stub")
-        Log.w("InstanceMgr", "building stub APK")
+        logWarn("building stub APK")
         // 5. 构建 StubConfig (originalSignatures 存放 originApk 路径)
         val stubConfig = StubConfig(
             instanceId = instanceId,
@@ -142,7 +156,7 @@ class InstanceManager @Inject constructor(
 
         // 6. 构建 Stub APK
         val stubApk = stubBuilder.build(stubConfig)
-        Log.w("InstanceMgr", "stub APK built: ${stubApk.absolutePath}, size=${stubApk.length()}")
+        logWarn("stub APK built: ${stubApk.absolutePath}, size=${stubApk.length()}")
 
         onProgress("安装中")
         // 7. 安装 Stub (智能降级: Session API → 系统安装器 Intent)
@@ -150,13 +164,13 @@ class InstanceManager @Inject constructor(
         val installResult = stubInstaller.install(stubApk)
         when (installResult) {
             is StubInstaller.InstallResult.Success -> {
-                Log.w("InstanceMgr", "stub install initiated successfully")
+                logWarn("stub install initiated successfully")
             }
             is StubInstaller.InstallResult.PendingUserConfirmation -> {
-                Log.w("InstanceMgr", "waiting for user to confirm installation")
+                logWarn("waiting for user to confirm installation")
             }
             is StubInstaller.InstallResult.Error -> {
-                Log.e("InstanceMgr", "stub install failed: ${installResult.message}")
+                logError("stub install failed: ${installResult.message}")
                 throw RuntimeException("Stub install failed: ${installResult.message}")
             }
         }
@@ -169,7 +183,7 @@ class InstanceManager @Inject constructor(
             try {
                 context.packageManager.getPackageInfo(identity.stubPackageName, 0)
                 installConfirmed = true
-                Log.w("InstanceMgr", "install confirmed on attempt $attempt")
+                logWarn("install confirmed on attempt $attempt")
                 break
             } catch (_: Exception) {
                 kotlinx.coroutines.delay(1000)
@@ -193,7 +207,7 @@ class InstanceManager @Inject constructor(
             cloneProfile = cloneProfile.name
         )
         instanceDatabase.instanceDao().insert(entity)
-        Log.w("InstanceMgr", "instance saved to database")
+        logWarn("instance saved to database")
 
         // 10. 更新 StateFlow
         val info = InstanceInfo(
@@ -208,7 +222,7 @@ class InstanceManager @Inject constructor(
         )
         _instances.update { it + info }
 
-        Log.w("InstanceMgr", "instance created successfully, id=$instanceId")
+        logWarn("instance created successfully, id=$instanceId")
         instanceId
     }
 
@@ -399,6 +413,8 @@ data class InstanceInfo(
     val lastLaunchState: String = "",
     val lastError: String = ""
 )
+
+private const val TAG = "InstanceMgr"
 
 enum class InstanceStatus {
     CREATING, READY, RUNNING, ERROR

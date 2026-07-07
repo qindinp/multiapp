@@ -27,6 +27,7 @@ include(":app")
 // Core modules
 include(":core:model")
 include(":core:common")
+include(":core:engine")
 include(":core:designsystem")
 include(":core:apk")
 include(":core:hook")

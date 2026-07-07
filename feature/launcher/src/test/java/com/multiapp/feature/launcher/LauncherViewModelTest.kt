@@ -4,8 +4,10 @@ import com.multiapp.core.instance.CloneCreateFailureException
 import com.multiapp.core.instance.CloneCreateResult
 import com.multiapp.core.instance.CloneCreateUseCase
 import com.multiapp.core.instance.InstalledAppRepository
-import com.multiapp.core.instance.InstanceLaunchUseCase
 import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.model.engine.EngineResult
+import com.multiapp.core.model.engine.LaunchInstanceRequest
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
@@ -35,7 +37,7 @@ class LauncherViewModelTest {
     private lateinit var instanceManager: InstanceManager
     private lateinit var cloneCreateUseCase: CloneCreateUseCase
     private lateinit var installedAppRepository: InstalledAppRepository
-    private lateinit var launchUseCase: InstanceLaunchUseCase
+    private lateinit var virtualizationEngine: VirtualizationEngine
 
     @BeforeEach
     fun setUp() {
@@ -44,10 +46,10 @@ class LauncherViewModelTest {
         instanceManager = mockk(relaxed = true)
         cloneCreateUseCase = mockk(relaxed = true)
         installedAppRepository = mockk(relaxed = true)
-        launchUseCase = mockk(relaxed = true)
+        virtualizationEngine = mockk(relaxed = true)
         every { instanceManager.listInstances() } returns emptyList()
         every { installedAppRepository.listInstalledApps(any()) } returns emptyList()
-        every { launchUseCase.launch(any()) } returns Result.success(Unit)
+        every { virtualizationEngine.launchInstance(any()) } returns EngineResult.pass(operation = "launchInstance")
     }
 
     @AfterEach
@@ -205,12 +207,12 @@ class LauncherViewModelTest {
     }
 
     @Test
-    fun `launchInstance delegates to launch use case`() = runTest {
+    fun `launchInstance delegates to virtualization engine`() = runTest {
         val viewModel = createViewModel()
 
         viewModel.launchInstance("instance-1")
 
-        verify { launchUseCase.launch("instance-1") }
+        verify { virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1")) }
     }
 
     @Test
@@ -235,7 +237,7 @@ class LauncherViewModelTest {
             instanceManager = instanceManager,
             cloneCreateUseCase = cloneCreateUseCase,
             installedAppRepository = installedAppRepository,
-            instanceLaunchUseCase = launchUseCase
+            virtualizationEngine = virtualizationEngine
         )
     }
 

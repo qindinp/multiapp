@@ -85,6 +85,7 @@ dependencies {
     // All core modules
     implementation(project(":core:model"))
     implementation(project(":core:common"))
+    implementation(project(":core:engine"))
     implementation(project(":core:designsystem"))
     implementation(project(":core:apk"))
     implementation(project(":core:hook"))

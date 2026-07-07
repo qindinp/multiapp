@@ -87,8 +87,31 @@ static std::mutex g_online_materialize_mutex;
 static constexpr uint32_t HOOK_PROFILE_PATH_REDIRECT = 1u << 0;
 static constexpr uint32_t HOOK_PROFILE_FULL = 1u << 1;
 
-// Path redirection: source prefix → target prefix
-static std::unordered_map<std::string, std::string> g_path_redirects;
+struct PathRedirectRule {
+    std::string source;
+    std::string target;
+    std::string process_slot;
+    std::string instance_id;
+    std::string data_root;
+    bool scoped = false;
+};
+
+struct RedirectResult {
+    bool redirected = false;
+    bool denied = false;
+    int error = EACCES;
+    std::string path;
+    std::string source;
+    std::string target;
+    std::string data_root;
+    std::string process_slot;
+    std::string instance_id;
+};
+
+// Path redirection rules. Scoped rules are keyed by source + processSlot + instanceId.
+static std::unordered_map<std::string, PathRedirectRule> g_path_redirects;
+static std::string g_active_redirect_process_slot;
+static std::string g_active_redirect_instance_id;
 
 // Property spoofing: property name → spoofed value
 static std::unordered_map<std::string, std::string> g_property_spoofs;
@@ -192,10 +215,132 @@ static bool is_path_hidden(const char* path) {
 
 /**
  * Check if a path needs redirection and return the redirected path.
- * Returns empty string if no redirection needed. Thread-safe.
+ * Returns redirected=false if no redirection is needed. Thread-safe.
  */
-static std::string redirect_path(const char* path) {
-    if (path == nullptr || path[0] == '\0') return "";
+static bool path_has_parent_traversal(const std::string& path) {
+    size_t segment_start = 0;
+    for (size_t i = 0; i <= path.size(); ++i) {
+        bool at_end = i == path.size();
+        bool separator = !at_end && (path[i] == '/' || path[i] == '\\');
+        if (at_end || separator) {
+            if (i - segment_start == 2 && path[segment_start] == '.' && path[segment_start + 1] == '.') {
+                return true;
+            }
+            segment_start = i + 1;
+        }
+    }
+    return false;
+}
+
+static std::string trim_trailing_slashes(std::string path) {
+    while (path.size() > 1 && (path.back() == '/' || path.back() == '\\')) {
+        path.pop_back();
+    }
+    return path;
+}
+
+static std::string parent_path_of(const std::string& path) {
+    size_t slash = path.find_last_of("/\\");
+    if (slash == std::string::npos) return "";
+    if (slash == 0) return "/";
+    return path.substr(0, slash);
+}
+
+static bool canonicalize_existing_path(const std::string& path, std::string& out) {
+    char resolved[PATH_MAX] = {};
+    errno = 0;
+    char* result = real_realpath != nullptr
+        ? real_realpath(path.c_str(), resolved)
+        : ::realpath(path.c_str(), resolved);
+    if (result == nullptr) return false;
+    out = result;
+    return true;
+}
+
+static bool canonical_path_within_root(const std::string& canonical_path, const std::string& canonical_root) {
+    std::string root = trim_trailing_slashes(canonical_root);
+    if (root.empty()) return false;
+    if (root == "/") return !canonical_path.empty() && canonical_path[0] == '/';
+    return canonical_path == root ||
+           (canonical_path.size() > root.size() &&
+            canonical_path.compare(0, root.size(), root) == 0 &&
+            canonical_path[root.size()] == '/');
+}
+
+static bool validate_existing_redirect_target(const std::string& path, const std::string& data_root) {
+    if (data_root.empty()) return true;
+
+    std::string canonical_path;
+    if (!canonicalize_existing_path(path, canonical_path)) {
+        int saved_errno = errno;
+        return saved_errno == ENOENT || saved_errno == ENOTDIR;
+    }
+
+    std::string canonical_root;
+    if (!canonicalize_existing_path(data_root, canonical_root)) {
+        return false;
+    }
+    return canonical_path_within_root(canonical_path, canonical_root);
+}
+
+static bool validate_create_parent_in_root(const std::string& path, const std::string& data_root) {
+    if (data_root.empty()) return true;
+    std::string parent = parent_path_of(path);
+    if (parent.empty()) return false;
+
+    std::string canonical_parent;
+    if (!canonicalize_existing_path(parent, canonical_parent)) {
+        return false;
+    }
+
+    std::string canonical_root;
+    if (!canonicalize_existing_path(data_root, canonical_root)) {
+        return false;
+    }
+    return canonical_path_within_root(canonical_parent, canonical_root);
+}
+
+static bool fopen_mode_may_create(const char* mode) {
+    if (mode == nullptr || mode[0] == '\0') return false;
+    return mode[0] == 'w' || mode[0] == 'a' || strchr(mode, 'x') != nullptr;
+}
+
+static std::string redirect_rule_key(
+    const std::string& source,
+    const std::string& process_slot,
+    const std::string& instance_id) {
+    return source + '\n' + process_slot + '\n' + instance_id;
+}
+
+static bool rule_matches_active_scope(const PathRedirectRule& rule) {
+    if (!rule.scoped) return true;
+    return rule.process_slot == g_active_redirect_process_slot &&
+           rule.instance_id == g_active_redirect_instance_id;
+}
+
+static bool validate_redirect_result(RedirectResult& result, bool creates_path) {
+    if (!result.redirected) return true;
+    if (path_has_parent_traversal(result.source) || path_has_parent_traversal(result.path)) {
+        result.denied = true;
+        result.error = EACCES;
+        return false;
+    }
+    if (creates_path && !validate_create_parent_in_root(result.path, result.data_root)) {
+        result.denied = true;
+        result.error = EACCES;
+        return false;
+    }
+    if (!validate_existing_redirect_target(result.path, result.data_root)) {
+        result.denied = true;
+        result.error = EACCES;
+        return false;
+    }
+    return true;
+}
+
+static RedirectResult redirect_path(const char* path) {
+    RedirectResult result;
+    if (path == nullptr || path[0] == '\0') return result;
 
     // Normalize /data/user/0/ to /data/data/ before lock acquisition
     std::string path_str(path);
@@ -207,30 +352,40 @@ static std::string redirect_path(const char* path) {
     if (g_integrity_redirect_active && !g_integrity_redirect_from.empty()) {
         if (path_str == g_integrity_redirect_from) {
             LOGI("redirect_path: integrity redirect %s -> %s", path, g_integrity_redirect_to.c_str());
-            return g_integrity_redirect_to;
+            result.redirected = true;
+            result.path = g_integrity_redirect_to;
+            result.source = path_str;
+            result.target = g_integrity_redirect_to;
+            return result;
         }
     }
 
     std::shared_lock<std::shared_mutex> lock(g_mutex);
-    if (g_path_redirects.empty()) return "";
+    if (g_path_redirects.empty()) return result;
 
     // Check each registered redirect prefix (longest match wins)
-    std::string best_from;
-    std::string best_to;
-    for (const auto& redirect : g_path_redirects) {
-        if (path_str.compare(0, redirect.first.length(), redirect.first) == 0) {
-            if (redirect.first.length() > best_from.length()) {
-                best_from = redirect.first;
-                best_to = redirect.second;
+    const PathRedirectRule* best_rule = nullptr;
+    for (const auto& entry : g_path_redirects) {
+        const PathRedirectRule& rule = entry.second;
+        if (!rule_matches_active_scope(rule)) continue;
+        if (path_str.compare(0, rule.source.length(), rule.source) == 0) {
+            if (best_rule == nullptr || rule.source.length() > best_rule->source.length()) {
+                best_rule = &rule;
             }
         }
     }
 
-    if (!best_from.empty()) {
-        return best_to + path_str.substr(best_from.length());
+    if (best_rule != nullptr) {
+        result.redirected = true;
+        result.source = path_str;
+        result.target = best_rule->target;
+        result.data_root = best_rule->data_root;
+        result.process_slot = best_rule->process_slot;
+        result.instance_id = best_rule->instance_id;
+        result.path = best_rule->target + path_str.substr(best_rule->source.length());
     }
 
-    return "";
+    return result;
 }
 
 /**
@@ -253,10 +408,14 @@ static int hooked_open(const char* path, int flags, ...) {
         return -1;
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, (flags & O_CREAT) != 0)) {
+        errno = redirect.error;
+        return -1;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
-    if (!redirected.empty()) {
+    if (redirect.redirected) {
         LOGD("open: %s -> %s", path, actual_path);
     }
 
@@ -279,10 +438,14 @@ static int hooked_openat(int dirfd, const char* path, int flags, ...) {
         return -1;
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, (flags & O_CREAT) != 0)) {
+        errno = redirect.error;
+        return -1;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
-    if (!redirected.empty()) {
+    if (redirect.redirected) {
         LOGD("openat: %s -> %s", path, actual_path);
     }
 
@@ -305,8 +468,12 @@ static int hooked_access(const char* path, int mode) {
         return -1;
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, false)) {
+        errno = redirect.error;
+        return -1;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
     return real_access(actual_path, mode);
 }
@@ -320,8 +487,12 @@ static int hooked_stat(const char* path, struct stat* buf) {
         return -1;
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, false)) {
+        errno = redirect.error;
+        return -1;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
     return real_stat(actual_path, buf);
 }
@@ -335,8 +506,12 @@ static int hooked_lstat(const char* path, struct stat* buf) {
         return -1;
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, false)) {
+        errno = redirect.error;
+        return -1;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
     return real_lstat(actual_path, buf);
 }
@@ -364,8 +539,12 @@ static ssize_t hooked_readlink(const char* path, char* buf, size_t bufsiz) {
         }
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, false)) {
+        errno = redirect.error;
+        return -1;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
     return real_readlink(actual_path, buf, bufsiz);
 }
@@ -379,10 +558,14 @@ static char* hooked_realpath(const char* path, char* resolved_path) {
         return nullptr;
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, false)) {
+        errno = redirect.error;
+        return nullptr;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
-    if (!redirected.empty()) {
+    if (redirect.redirected) {
         LOGD("realpath: %s -> %s", path, actual_path);
     }
 
@@ -434,10 +617,14 @@ static FILE* hooked_fopen(const char* path, const char* mode) {
         }
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, fopen_mode_may_create(mode))) {
+        errno = redirect.error;
+        return nullptr;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
-    if (!redirected.empty()) {
+    if (redirect.redirected) {
         LOGD("fopen: %s -> %s", path, actual_path);
     }
 
@@ -453,10 +640,14 @@ static int hooked_mkdir(const char* path, mode_t mode) {
         return -1;
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, true)) {
+        errno = redirect.error;
+        return -1;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
-    if (!redirected.empty()) {
+    if (redirect.redirected) {
         LOGD("mkdir: %s -> %s", path, actual_path);
     }
 
@@ -472,10 +663,14 @@ static int hooked_unlink(const char* path) {
         return -1;
     }
 
-    std::string redirected = redirect_path(path);
-    const char* actual_path = redirected.empty() ? path : redirected.c_str();
+    RedirectResult redirect = redirect_path(path);
+    if (!validate_redirect_result(redirect, false)) {
+        errno = redirect.error;
+        return -1;
+    }
+    const char* actual_path = redirect.redirected ? redirect.path.c_str() : path;
 
-    if (!redirected.empty()) {
+    if (redirect.redirected) {
         LOGD("unlink: %s -> %s", path, actual_path);
     }
 
@@ -492,12 +687,17 @@ static int hooked_rename(const char* oldpath, const char* newpath) {
         return -1;
     }
 
-    std::string redirected_old = redirect_path(oldpath);
-    std::string redirected_new = redirect_path(newpath);
-    const char* actual_old = redirected_old.empty() ? oldpath : redirected_old.c_str();
-    const char* actual_new = redirected_new.empty() ? newpath : redirected_new.c_str();
+    RedirectResult redirected_old = redirect_path(oldpath);
+    RedirectResult redirected_new = redirect_path(newpath);
+    if (!validate_redirect_result(redirected_old, false) ||
+        !validate_redirect_result(redirected_new, true)) {
+        errno = EACCES;
+        return -1;
+    }
+    const char* actual_old = redirected_old.redirected ? redirected_old.path.c_str() : oldpath;
+    const char* actual_new = redirected_new.redirected ? redirected_new.path.c_str() : newpath;
 
-    if (!redirected_old.empty() || !redirected_new.empty()) {
+    if (redirected_old.redirected || redirected_new.redirected) {
         LOGD("rename: %s -> %s, %s -> %s", oldpath, actual_old, newpath, actual_new);
     }
 
@@ -906,14 +1106,95 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeAddPathRedirection(
     const char* src = env->GetStringUTFChars(sourcePath, nullptr);
     const char* tgt = env->GetStringUTFChars(targetPath, nullptr);
 
-    if (src && tgt) {
+    if (src && tgt && !path_has_parent_traversal(src) && !path_has_parent_traversal(tgt)) {
+        PathRedirectRule rule;
+        rule.source = src;
+        rule.target = tgt;
+        rule.scoped = false;
         std::unique_lock<std::shared_mutex> lock(g_mutex);
-        g_path_redirects[std::string(src)] = std::string(tgt);
+        g_path_redirects[redirect_rule_key(rule.source, "", "")] = rule;
         LOGI("Path redirect added: %s -> %s", src, tgt);
+    } else if (src && tgt) {
+        LOGW("Path redirect rejected: %s -> %s", src, tgt);
     }
 
     if (src) env->ReleaseStringUTFChars(sourcePath, src);
     if (tgt) env->ReleaseStringUTFChars(targetPath, tgt);
+}
+
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeAddScopedPathRedirection(
+    JNIEnv* env,
+    jobject thiz,
+    jstring sourcePath,
+    jstring targetPath,
+    jstring processSlot,
+    jstring instanceId,
+    jstring dataRoot)
+{
+    (void)thiz;
+    const char* src = env->GetStringUTFChars(sourcePath, nullptr);
+    const char* tgt = env->GetStringUTFChars(targetPath, nullptr);
+    const char* slot = env->GetStringUTFChars(processSlot, nullptr);
+    const char* inst = env->GetStringUTFChars(instanceId, nullptr);
+    const char* root = env->GetStringUTFChars(dataRoot, nullptr);
+
+    if (src && tgt && slot && inst && root &&
+        !path_has_parent_traversal(src) &&
+        !path_has_parent_traversal(tgt) &&
+        !path_has_parent_traversal(slot) &&
+        !path_has_parent_traversal(inst) &&
+        !path_has_parent_traversal(root)) {
+        PathRedirectRule rule;
+        rule.source = src;
+        rule.target = tgt;
+        rule.process_slot = slot;
+        rule.instance_id = inst;
+        rule.data_root = trim_trailing_slashes(root);
+        rule.scoped = true;
+        std::unique_lock<std::shared_mutex> lock(g_mutex);
+        g_path_redirects[redirect_rule_key(rule.source, rule.process_slot, rule.instance_id)] = rule;
+        LOGI(
+            "Scoped path redirect added: %s -> %s processSlot=%s instanceId=%s dataRoot=%s",
+            src,
+            tgt,
+            slot,
+            inst,
+            root);
+    } else if (src && tgt && slot && inst && root) {
+        LOGW(
+            "Scoped path redirect rejected: %s -> %s processSlot=%s instanceId=%s dataRoot=%s",
+            src,
+            tgt,
+            slot,
+            inst,
+            root);
+    }
+
+    if (src) env->ReleaseStringUTFChars(sourcePath, src);
+    if (tgt) env->ReleaseStringUTFChars(targetPath, tgt);
+    if (slot) env->ReleaseStringUTFChars(processSlot, slot);
+    if (inst) env->ReleaseStringUTFChars(instanceId, inst);
+    if (root) env->ReleaseStringUTFChars(dataRoot, root);
+}
+
+JNIEXPORT void JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeSetRedirectScope(
+    JNIEnv* env, jobject thiz, jstring processSlot, jstring instanceId)
+{
+    (void)thiz;
+    const char* slot = env->GetStringUTFChars(processSlot, nullptr);
+    const char* inst = env->GetStringUTFChars(instanceId, nullptr);
+    if (slot && inst && !path_has_parent_traversal(slot) && !path_has_parent_traversal(inst)) {
+        std::unique_lock<std::shared_mutex> lock(g_mutex);
+        g_active_redirect_process_slot = slot;
+        g_active_redirect_instance_id = inst;
+        LOGI("Active redirect scope set: processSlot=%s instanceId=%s", slot, inst);
+    } else if (slot && inst) {
+        LOGW("Active redirect scope rejected: processSlot=%s instanceId=%s", slot, inst);
+    }
+    if (slot) env->ReleaseStringUTFChars(processSlot, slot);
+    if (inst) env->ReleaseStringUTFChars(instanceId, inst);
 }
 
 JNIEXPORT jstring JNICALL
@@ -998,6 +1279,13 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeProbePrivatePathRedirect(
         }
         return value;
     };
+    std::string process_slot;
+    std::string instance_id;
+    {
+        std::shared_lock<std::shared_mutex> lock(g_mutex);
+        process_slot = g_active_redirect_process_slot;
+        instance_id = g_active_redirect_instance_id;
+    }
     std::string report =
         "operation=" + sanitize(op) +
         ";success=" + std::string(success ? "true" : "false") +
@@ -1005,7 +1293,9 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeProbePrivatePathRedirect(
         ";errno=" + std::to_string(saved_errno) +
         ";candidateExists=" + std::string(candidate_exists ? "true" : "false") +
         ";resolvedPath=" + sanitize(resolved_path) +
-        ";reason=" + sanitize(reason);
+        ";reason=" + sanitize(reason) +
+        ";processSlot=" + sanitize(process_slot) +
+        ";instanceId=" + sanitize(instance_id);
 
     if (op_chars) env->ReleaseStringUTFChars(operation, op_chars);
     if (original_chars) env->ReleaseStringUTFChars(originalPath, original_chars);
@@ -1025,7 +1315,13 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRemovePathRedirection(
 
     if (src) {
         std::unique_lock<std::shared_mutex> lock(g_mutex);
-        g_path_redirects.erase(std::string(src));
+        for (auto it = g_path_redirects.begin(); it != g_path_redirects.end();) {
+            if (it->second.source == src) {
+                it = g_path_redirects.erase(it);
+            } else {
+                ++it;
+            }
+        }
         LOGI("Path redirect removed: %s", src);
     }
 
@@ -1157,6 +1453,8 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeCleanup(
     g_status_tracerpid_spoof_enabled.store(false, std::memory_order_relaxed);
     g_host_data_prefix.clear();
     g_virtual_data_root.clear();
+    g_active_redirect_process_slot.clear();
+    g_active_redirect_instance_id.clear();
     // Note: ShadowHook inline hooks remain in place but do nothing without redirect rules
     LOGI("Native hook state cleaned up");
 }
