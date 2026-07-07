@@ -302,4 +302,163 @@ class VirtualContextStorageTest {
             assertTrue(diagnostic.candidateWithinDataRoot == true)
         }
     }
+
+    @Test
+    fun `native private path diagnostics bind decisions to instance data root`(@TempDir tempDir: File) {
+        val firstRoot = File(tempDir, "inst-a").also { it.mkdirs() }
+        val secondRoot = File(tempDir, "inst-b").also { it.mkdirs() }
+
+        val first = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+            instanceId = "inst-a",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.a",
+            dataRoot = firstRoot.absolutePath,
+            originalPath = "/data/data/com.example.app/files/config.json",
+            operation = "open",
+            caller = "test"
+        )
+        val second = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+            instanceId = "inst-b",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.b",
+            dataRoot = secondRoot.absolutePath,
+            originalPath = "/data/data/com.example.app/files/config.json",
+            operation = "open",
+            caller = "test"
+        )
+
+        assertEquals(VirtualStorageDiagnosticStatus.REDIRECTED, first.status)
+        assertEquals(VirtualStorageDiagnosticStatus.REDIRECTED, second.status)
+        assertEquals(File(firstRoot, "files/config.json").canonicalPath, File(first.redirectedPath).canonicalPath)
+        assertEquals(File(secondRoot, "files/config.json").canonicalPath, File(second.redirectedPath).canonicalPath)
+        assertEquals("process:inst-a", first.processSlot)
+        assertEquals("process:inst-b", second.processSlot)
+    }
+
+    @Test
+    fun `native private path diagnostics reject empty and traversal paths`(@TempDir dataRoot: File) {
+        val empty = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            originalPath = "",
+            operation = "open",
+            caller = "test"
+        )
+        assertEquals(VirtualStorageDiagnosticStatus.UNSUPPORTED, empty.status)
+        assertEquals("EMPTY_PATH", empty.reason)
+
+        listOf(
+            "/data/data/com.example.app/files/../secret.txt",
+            "/data/data/com.example.app/files\\..\\secret.txt"
+        ).forEach { unsafePath ->
+            val diagnostic = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+                instanceId = "inst-001",
+                originPackageName = "com.example.app",
+                virtualPackageName = "com.multiapp.instance.001",
+                dataRoot = dataRoot.absolutePath,
+                originalPath = unsafePath,
+                operation = "open",
+                caller = "test"
+            )
+
+            assertEquals(VirtualStorageDiagnosticStatus.UNSUPPORTED, diagnostic.status)
+            assertEquals("PATH_TRAVERSAL_REJECTED", diagnostic.reason)
+            assertTrue(!diagnostic.withinDataRoot)
+        }
+    }
+
+    @Test
+    fun `native private path diagnostics do not redirect non private paths`(@TempDir dataRoot: File) {
+        listOf(
+            "/sdcard/Android/data/com.example.app/files/config.json",
+            "/data/data/com.example.other/files/config.json",
+            "/proc/self/maps"
+        ).forEach { originalPath ->
+            val diagnostic = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+                instanceId = "inst-001",
+                originPackageName = "com.example.app",
+                virtualPackageName = "com.multiapp.instance.001",
+                dataRoot = dataRoot.absolutePath,
+                originalPath = originalPath,
+                operation = "open",
+                caller = "test"
+            )
+
+            assertEquals(VirtualStorageDiagnosticStatus.UNCHANGED, diagnostic.status)
+            assertEquals(originalPath, diagnostic.redirectedPath)
+            assertEquals("PATH_NOT_MATCHED", diagnostic.reason)
+            assertTrue(!diagnostic.withinDataRoot)
+        }
+    }
+
+    @Test
+    fun `native private path diagnostics reject creat parent canonical escape`(@TempDir tempDir: File) {
+        val dataRoot = File(tempDir, "root").also { it.mkdirs() }
+        val escapedRoot = File(tempDir, "escaped").also { it.mkdirs() }
+        val fakeFileSystem = object : NativePathFileSystem {
+            override fun canonicalFile(file: File): File {
+                val normalized = file.path.replace('\\', '/')
+                return if (normalized.endsWith("/files/link")) {
+                    escapedRoot
+                } else {
+                    file.canonicalFile
+                }
+            }
+        }
+
+        val diagnostic = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            originalPath = "/data/data/com.example.app/files/link/new.db",
+            operation = "open",
+            caller = "test",
+            processSlot = "process:inst-001",
+            openFlags = VirtualStoragePathDiagnostics.NATIVE_OPEN_FLAG_O_CREAT,
+            fileSystem = fakeFileSystem
+        )
+
+        assertEquals(VirtualStorageDiagnosticStatus.UNSUPPORTED, diagnostic.status)
+        assertEquals("CREATE_PARENT_ESCAPES_DATA_ROOT", diagnostic.reason)
+        assertTrue(diagnostic.candidateWithinDataRoot == false)
+    }
+
+    @Test
+    fun `native private path diagnostics reject existing canonical escape`(@TempDir tempDir: File) {
+        val dataRoot = File(tempDir, "root").also { it.mkdirs() }
+        val escapedFile = File(tempDir, "escaped/config.db").also {
+            it.parentFile.mkdirs()
+            it.writeText("outside")
+        }
+        val fakeFileSystem = object : NativePathFileSystem {
+            override fun canonicalFile(file: File): File {
+                val normalized = file.path.replace('\\', '/')
+                return if (normalized.endsWith("/files/link/config.db")) {
+                    escapedFile
+                } else {
+                    file.canonicalFile
+                }
+            }
+        }
+
+        val diagnostic = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            originalPath = "/data/data/com.example.app/files/link/config.db",
+            operation = "stat",
+            caller = "test",
+            processSlot = "process:inst-001",
+            openFlags = 0,
+            fileSystem = fakeFileSystem
+        )
+
+        assertEquals(VirtualStorageDiagnosticStatus.UNSUPPORTED, diagnostic.status)
+        assertEquals("REDIRECTED_PATH_ESCAPES_DATA_ROOT", diagnostic.reason)
+        assertTrue(diagnostic.candidateWithinDataRoot == false)
+    }
 }

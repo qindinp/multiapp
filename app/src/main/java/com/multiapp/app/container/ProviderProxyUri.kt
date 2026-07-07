@@ -7,7 +7,8 @@ internal object ProviderProxyUri {
 
     private val proxyParameterNames = setOf(
         VirtualProviderManager.PROXY_INSTANCE_ID,
-        VirtualProviderManager.PROXY_GUEST_AUTHORITY
+        VirtualProviderManager.PROXY_GUEST_AUTHORITY,
+        VirtualProviderManager.PROXY_ROUTE_TOKEN
     )
 
     fun toGuestUri(uri: Uri, guestAuthority: String): Uri =

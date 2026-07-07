@@ -189,6 +189,34 @@ Limit:
 - Added engine rebuild coverage using `FileBackedEngineRuntimeSlotStore` to
   prove slot assignments survive process-style engine recreation.
 
+### Provider Route Token Gate
+
+- Added an app-container route-token gate before `StubContentProvider` dispatch.
+- Direct provider proxy access now fails closed when the route token is missing,
+  expired, or does not match instance, authority, or operation.
+- Dispatch canonicalizes the proxy URI from the validated token before runtime
+  binding and provider resolution, so forged query parameters are not the source
+  of truth.
+- `ProviderProxyUri` removes the route token together with instance and guest
+  authority parameters when converting back to the guest URI, while preserving
+  the guest's original query parameters.
+- This is a local/runtime safety foundation. Device evidence for all provider
+  operations is still required before marking provider routing `PASS`.
+
+### Native Path Isolation Foundation
+
+- Added a native private-path redirect config model bound to
+  `instanceId + dataRoot + processSlot`.
+- Native private-path evidence now records redirect binding scope, process slot,
+  instance id, origin package, canonical data root, and rule prefixes.
+- Storage diagnostics now model native private path decisions with path
+  traversal rejection, canonical containment checks, `O_CREAT` parent checks,
+  same-origin multi-instance data-root separation, and non-private path
+  unchanged behavior.
+- Proc/maps and proc/status spoofing remain explicitly disabled in the baseline.
+- This is still JVM-level verification and Java bridge configuration. Real
+  native syscall/device evidence remains open.
+
 ## Verification
 
 The full all-in-one gate exceeded the local 180 second tool timeout, so the same
@@ -270,6 +298,29 @@ Result:
 - Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
   the project uses `compileSdk=36`.
 
+Additional verification after Provider route token gate and native path
+isolation foundation:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.container.ProviderProxyUriTest" --tests "com.multiapp.app.container.StubContentProviderRouteTokenTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.NativePrivatePathRedirectInstallerTest" --tests "com.multiapp.core.loader.VirtualContextStorageTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+git diff --check
+```
+
+Result:
+
+- Targeted app provider tests passed.
+- Targeted loader native/storage tests passed.
+- Full `:app:testDebugUnitTest` passed.
+- Full `:core:loader:testDebugUnitTest` passed.
+- `:app:assembleDebug` passed.
+- `git diff --check` passed with only existing CRLF normalization warnings.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
 ## Not Complete Yet
 
 The following items from the plan are still open and must not be marked `DONE`:
@@ -284,7 +335,10 @@ The following items from the plan are still open and must not be marked `DONE`:
   `ContainerActivity` and `Hosted*RuntimeBinder` through `:core:engine`, but
   device evidence is still required before marking this runtime path `PASS`.
 - Device-proven simultaneous same-origin multi-instance recents.
-- Real Android process-slot isolation for native multi-instance execution.
+- Real Android process-slot isolation for native multi-instance execution. JVM
+  decision tests exist, but native syscall evidence is not complete.
+- Engine-level aggregation of provider/native operation evidence into
+  `EngineEvidenceReport`.
 - Full PMS signatures/SigningInfo, typed metadata, provider read/write
   permissions, and `IntentFilter.match()` fidelity.
 - Complete AMS/ATM activity stack semantics:
@@ -300,10 +354,12 @@ The following items from the plan are still open and must not be marked `DONE`:
 
 Recommended next slice:
 
-1. Add a split/multidex fixture and device evidence for launcher Activity,
+1. Add engine-level evidence aggregation for provider route-token verdicts and
+   native redirect/path verdicts.
+2. Add a split/multidex fixture and device evidence for launcher Activity,
    resources, provider, service, and native library loading from splits.
-2. Add behavior tests for same-origin dual-instance isolation across storage,
+3. Add behavior tests for same-origin dual-instance isolation across storage,
    provider, service, and native redirect.
-3. Replace the reflective Application creator with a device-tested
+4. Replace the reflective Application creator with a device-tested
    `LoadedApk.makeApplication()`-equivalent creator behind the new
    `GuestApplicationCreator` seam.

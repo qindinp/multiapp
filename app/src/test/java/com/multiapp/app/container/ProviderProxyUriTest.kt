@@ -12,6 +12,7 @@ class ProviderProxyUriTest {
             "multiapp_instanceId=inst-001" +
                 "&bookId=123" +
                 "&multiapp_guestAuthority=com.test.minimal.probe" +
+                "&multiapp_routeToken=route-token-001" +
                 "&token=a%3Db" +
                 "&bookId=456" +
                 "&flag"
@@ -23,7 +24,9 @@ class ProviderProxyUriTest {
     @Test
     fun `rewrite encoded query returns null when only proxy parameters remain`() {
         val rewritten = ProviderProxyUri.rewriteEncodedQuery(
-            "multiapp_instanceId=inst-001&multiapp_guestAuthority=com.test.minimal.probe"
+            "multiapp_instanceId=inst-001" +
+                "&multiapp_guestAuthority=com.test.minimal.probe" +
+                "&multiapp_routeToken=route-token-001"
         )
 
         assertNull(rewritten)
@@ -44,10 +47,15 @@ class ProviderProxyUriTest {
             "multiapp_instanceIdExtra=keep" +
                 "&multiapp_instanceId" +
                 "&multiapp_guestAuthority=" +
+                "&multiapp_routeToken" +
                 "&multiapp_guestAuthorityExtra=keep" +
+                "&multiapp_routeTokenExtra=keep" +
                 "&token=a%26b"
         )
 
-        assertEquals("multiapp_instanceIdExtra=keep&multiapp_guestAuthorityExtra=keep&token=a%26b", rewritten)
+        assertEquals(
+            "multiapp_instanceIdExtra=keep&multiapp_guestAuthorityExtra=keep&multiapp_routeTokenExtra=keep&token=a%26b",
+            rewritten
+        )
     }
 }

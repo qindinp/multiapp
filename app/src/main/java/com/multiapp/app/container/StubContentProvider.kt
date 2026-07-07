@@ -250,15 +250,18 @@ class StubContentProvider : ContentProvider() {
     }
 
     private fun dispatch(uri: Uri, operationName: String): VirtualProviderDispatchResult {
-        validateRouteToken(uri, operationName)?.let { return it }
+        val route = when (val routeResult = validateRouteToken(uri, operationName)) {
+            is ProviderRouteTokenGateResult.Valid -> routeResult
+            is ProviderRouteTokenGateResult.Invalid -> return routeResult.result
+        }
         val hostPackageName = context?.packageName ?: return VirtualProviderDispatchResult.InvalidProxyUri("missing host context")
         val hostContext = context ?: return VirtualProviderDispatchResult.InvalidProxyUri("missing host context")
-        val runtimeBindResult = HostedProviderRuntimeBinder().ensureBound(hostContext, uri)
-        writeProviderRuntimeBindEvidence(uri, runtimeBindResult)
+        val runtimeBindResult = HostedProviderRuntimeBinder().ensureBound(hostContext, route.canonicalProxyUri)
+        writeProviderRuntimeBindEvidence(route.canonicalProxyUri, runtimeBindResult)
         return VirtualProviderDispatcher(
             hostPackageName = hostPackageName,
             hostContext = hostContext
-        ).dispatch(uri)
+        ).dispatch(route.canonicalProxyUri)
     }
 
     private fun callRoute(arg: String?, extras: Bundle?): ProviderCallRoute? {
@@ -297,22 +300,21 @@ class StubContentProvider : ContentProvider() {
         token: String?,
         instanceId: String?,
         guestAuthority: String?,
-        operationName: String
-    ): String = validateRouteTokenFields(token, instanceId, guestAuthority, operationName)?.reason
+        operationName: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): String = validateRouteTokenFields(token, instanceId, guestAuthority, operationName, nowMillis)?.reason
         ?: "VALID"
 
-    private fun validateRouteToken(uri: Uri, operationName: String): VirtualProviderDispatchResult.InvalidProxyUri? {
-        val instanceId = uri.getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID)
-        val guestAuthority = uri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
-        val token = uri.getQueryParameter(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN)
-        return validateRouteTokenFields(token, instanceId, guestAuthority, operationName)
+    private fun validateRouteToken(uri: Uri, operationName: String): ProviderRouteTokenGateResult {
+        return ProviderRouteTokenGate.validate(uri, operationName)
     }
 
     private fun validateRouteTokenFields(
         token: String?,
         instanceId: String?,
         guestAuthority: String?,
-        operationName: String
+        operationName: String,
+        nowMillis: Long = System.currentTimeMillis()
     ): VirtualProviderDispatchResult.InvalidProxyUri? {
         if (instanceId.isNullOrBlank()) {
             return VirtualProviderDispatchResult.InvalidProxyUri("missing instanceId")
@@ -325,7 +327,8 @@ class StubContentProvider : ContentProvider() {
             callerInstanceId = instanceId,
             targetInstanceId = instanceId,
             authority = guestAuthority,
-            operation = operationName
+            operation = operationName,
+            nowMillis = nowMillis
         )
         return if (result.isValid) {
             null

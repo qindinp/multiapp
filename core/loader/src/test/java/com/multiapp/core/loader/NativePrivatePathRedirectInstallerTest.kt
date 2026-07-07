@@ -4,6 +4,8 @@ import com.multiapp.core.hook.NativeHookBridge
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 
@@ -22,13 +24,13 @@ class NativePrivatePathRedirectInstallerTest {
     }
 
     @Test
-    fun `bridge installer records unsupported when native library is unavailable`() {
+    fun `bridge installer records unsupported when native library is unavailable`(@TempDir dataRoot: File) {
         val installer = NativePrivatePathRedirectInstallers.bridge(bridgeProvider = { bridge })
 
         val result = installer.install(
             instanceId = "inst-001",
             originPackageName = "com.example.app",
-            dataRoot = "/sandbox/example",
+            dataRoot = dataRoot.absolutePath,
             hostContext = null
         )
 
@@ -36,12 +38,50 @@ class NativePrivatePathRedirectInstallerTest {
         assertEquals(2, result.ruleCount)
         assertEquals("UNSUPPORTED", result.verdict)
         assertEquals(
-            "/sandbox/example/files/config.json",
-            bridge.translatePath("/data/data/com.example.app/files/config.json")
+            File(dataRoot, "files/config.json").canonicalPath,
+            File(bridge.translatePath("/data/data/com.example.app/files/config.json")).canonicalPath
         )
+        val evidence = result.evidence().associate { it.key to it.value }
+        assertEquals("inst-001", evidence["nativeRedirectInstanceId"])
+        assertEquals("process:inst-001", evidence["nativeRedirectProcessSlot"])
+        assertEquals(dataRoot.canonicalPath, evidence["nativeRedirectDataRoot"])
+        assertEquals("true", evidence["nativeRedirectProcessSlotBound"])
         assertEquals("/proc/self/maps", bridge.translatePath("/proc/self/maps"))
         assertFalse(bridge.hasFakeContent("/proc/self/cmdline"))
         assertFalse(bridge.hasFakeContent("/proc/self/status"))
+    }
+
+    @Test
+    fun `same origin instances bind private redirects to distinct process slots`(@TempDir tempDir: File) {
+        val installer = NativePrivatePathRedirectInstallers.bridge(bridgeProvider = { bridge })
+        val originPackageName = "com.example.app"
+        val firstRoot = File(tempDir, "inst-a").also { it.mkdirs() }
+        val secondRoot = File(tempDir, "inst-b").also { it.mkdirs() }
+
+        installer.install(
+            instanceId = "inst-a",
+            originPackageName = originPackageName,
+            dataRoot = firstRoot.absolutePath,
+            hostContext = null
+        )
+        installer.install(
+            instanceId = "inst-b",
+            originPackageName = originPackageName,
+            dataRoot = secondRoot.absolutePath,
+            hostContext = null
+        )
+
+        bridge.setNativeRedirectScope("process:inst-a", "inst-a")
+        assertEquals(
+            File(firstRoot, "files/config.json").canonicalPath,
+            File(bridge.translatePath("/data/data/com.example.app/files/config.json")).canonicalPath
+        )
+
+        bridge.setNativeRedirectScope("process:inst-b", "inst-b")
+        assertEquals(
+            File(secondRoot, "files/config.json").canonicalPath,
+            File(bridge.translatePath("/data/data/com.example.app/files/config.json")).canonicalPath
+        )
     }
 
     @Test
@@ -59,6 +99,23 @@ class NativePrivatePathRedirectInstallerTest {
         assertEquals(0, result.ruleCount)
         assertEquals("FAIL", result.verdict)
         assertEquals("PRIVATE_PATH_REDIRECT_INPUT_INCOMPLETE", result.reason)
+    }
+
+    @Test
+    fun `bridge installer rejects traversal in data root`() {
+        val installer = NativePrivatePathRedirectInstallers.bridge(bridgeProvider = { bridge })
+
+        val result = installer.install(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            dataRoot = "/sandbox/../escape",
+            hostContext = null
+        )
+
+        assertFalse(result.hookInstalled)
+        assertEquals(0, result.ruleCount)
+        assertEquals("FAIL", result.verdict)
+        assertEquals("PRIVATE_PATH_REDIRECT_UNSAFE_TRAVERSAL", result.reason)
     }
 
     @Test

@@ -4,6 +4,8 @@ import java.io.File
 
 /** Deterministic diagnostics for storage paths that are not covered by Context APIs. */
 object VirtualStoragePathDiagnostics {
+    const val NATIVE_OPEN_FLAG_O_CREAT: Int = 0x40
+
     val DEFAULT_NATIVE_IO_OPERATIONS: List<String> = listOf(
         "open",
         "openat",
@@ -12,6 +14,9 @@ object VirtualStoragePathDiagnostics {
         "fopen",
         "realpath"
     )
+
+    fun nativeProcessSlot(instanceId: String): String =
+        "process:${instanceId.ifBlank { "unknown" }}"
 
     fun javaAbsolutePathDiagnostics(
         instanceId: String,
@@ -99,10 +104,15 @@ object VirtualStoragePathDiagnostics {
     ): List<VirtualStoragePathDiagnostic> {
         return operations.map { operation ->
             val originalPath = "/data/data/$originPackageName/files/pr10-native-$operation.txt"
-            val candidate = rewriteJavaAbsolutePath(
-                originalPath = originalPath,
+            val decision = diagnoseNativePrivatePath(
+                instanceId = instanceId,
                 originPackageName = originPackageName,
-                dataRoot = dataRoot
+                virtualPackageName = virtualPackageName,
+                dataRoot = dataRoot,
+                originalPath = originalPath,
+                operation = operation,
+                caller = caller,
+                processSlot = nativeProcessSlot(instanceId)
             )
             VirtualStoragePathDiagnostic(
                 kind = VirtualStorageDiagnosticKind.NATIVE_IO,
@@ -115,13 +125,180 @@ object VirtualStoragePathDiagnostics {
                 operation = operation,
                 originalPath = originalPath,
                 redirectedPath = "",
-                candidateRedirectedPath = candidate?.normalizedPath(),
+                candidateRedirectedPath = decision.redirectedPath
+                    .takeIf { decision.status == VirtualStorageDiagnosticStatus.REDIRECTED },
                 caller = caller,
                 reason = reason,
                 withinDataRoot = false,
-                candidateWithinDataRoot = candidate?.isWithin(File(dataRoot))
+                candidateWithinDataRoot = decision.withinDataRoot,
+                processSlot = decision.processSlot
             )
         }
+    }
+
+    fun diagnoseNativePrivatePath(
+        instanceId: String,
+        originPackageName: String,
+        virtualPackageName: String,
+        dataRoot: String,
+        originalPath: String,
+        operation: String,
+        caller: String,
+        processSlot: String = nativeProcessSlot(instanceId),
+        openFlags: Int = 0
+    ): VirtualStoragePathDiagnostic {
+        return diagnoseNativePrivatePath(
+            instanceId = instanceId,
+            originPackageName = originPackageName,
+            virtualPackageName = virtualPackageName,
+            dataRoot = dataRoot,
+            originalPath = originalPath,
+            operation = operation,
+            caller = caller,
+            processSlot = processSlot,
+            openFlags = openFlags,
+            fileSystem = JvmNativePathFileSystem
+        )
+    }
+
+    internal fun diagnoseNativePrivatePath(
+        instanceId: String,
+        originPackageName: String,
+        virtualPackageName: String,
+        dataRoot: String,
+        originalPath: String,
+        operation: String,
+        caller: String,
+        processSlot: String,
+        openFlags: Int,
+        fileSystem: NativePathFileSystem
+    ): VirtualStoragePathDiagnostic {
+        val normalizedProcessSlot = processSlot.ifBlank { nativeProcessSlot(instanceId) }
+        val root = File(dataRoot)
+
+        fun diagnostic(
+            status: VirtualStorageDiagnosticStatus,
+            redirectedPath: String,
+            candidate: File?,
+            reason: String?,
+            withinDataRoot: Boolean,
+            candidateWithinDataRoot: Boolean?
+        ): VirtualStoragePathDiagnostic {
+            return VirtualStoragePathDiagnostic(
+                kind = VirtualStorageDiagnosticKind.NATIVE_IO,
+                status = status,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                virtualPackageName = virtualPackageName,
+                dataRoot = root.normalizedPath(fileSystem),
+                probeName = null,
+                operation = operation,
+                originalPath = originalPath,
+                redirectedPath = redirectedPath,
+                candidateRedirectedPath = candidate?.normalizedPath(fileSystem),
+                caller = caller,
+                reason = reason,
+                withinDataRoot = withinDataRoot,
+                candidateWithinDataRoot = candidateWithinDataRoot,
+                openFlags = openFlags,
+                processSlot = normalizedProcessSlot
+            )
+        }
+
+        if (originalPath.isBlank()) {
+            return diagnostic(
+                status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+                redirectedPath = "",
+                candidate = null,
+                reason = "EMPTY_PATH",
+                withinDataRoot = false,
+                candidateWithinDataRoot = null
+            )
+        }
+        if (instanceId.isBlank() || originPackageName.isBlank() || dataRoot.isBlank()) {
+            return diagnostic(
+                status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+                redirectedPath = "",
+                candidate = null,
+                reason = "PRIVATE_PATH_REDIRECT_INPUT_INCOMPLETE",
+                withinDataRoot = false,
+                candidateWithinDataRoot = null
+            )
+        }
+        if (hasUnsafePathCharacter(originalPath) ||
+            hasUnsafePathCharacter(originPackageName) ||
+            hasUnsafePathCharacter(instanceId) ||
+            hasUnsafePathCharacter(dataRoot)
+        ) {
+            return diagnostic(
+                status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+                redirectedPath = "",
+                candidate = null,
+                reason = "PATH_CONTAINS_NUL",
+                withinDataRoot = false,
+                candidateWithinDataRoot = null
+            )
+        }
+
+        val normalizedPath = normalizeSeparators(originalPath)
+        if (listOf(normalizedPath, instanceId, originPackageName, dataRoot, normalizedProcessSlot).any {
+                hasParentTraversalSegment(it)
+            }
+        ) {
+            return diagnostic(
+                status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+                redirectedPath = "",
+                candidate = null,
+                reason = "PATH_TRAVERSAL_REJECTED",
+                withinDataRoot = false,
+                candidateWithinDataRoot = null
+            )
+        }
+
+        val remainder = guestPrivatePathRemainder(normalizedPath, originPackageName)
+            ?: return diagnostic(
+                status = VirtualStorageDiagnosticStatus.UNCHANGED,
+                redirectedPath = originalPath,
+                candidate = null,
+                reason = "PATH_NOT_MATCHED",
+                withinDataRoot = false,
+                candidateWithinDataRoot = null
+            )
+
+        val candidate = childPath(root, remainder)
+        if (openFlags and NATIVE_OPEN_FLAG_O_CREAT != 0) {
+            val parent = candidate.parentFile ?: root
+            if (!parent.isWithin(root, fileSystem)) {
+                return diagnostic(
+                    status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+                    redirectedPath = "",
+                    candidate = candidate,
+                    reason = "CREATE_PARENT_ESCAPES_DATA_ROOT",
+                    withinDataRoot = false,
+                    candidateWithinDataRoot = false
+                )
+            }
+        }
+
+        if (!candidate.isWithin(root, fileSystem)) {
+            return diagnostic(
+                status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+                redirectedPath = "",
+                candidate = candidate,
+                reason = "REDIRECTED_PATH_ESCAPES_DATA_ROOT",
+                withinDataRoot = false,
+                candidateWithinDataRoot = false
+            )
+        }
+
+        return diagnostic(
+            status = VirtualStorageDiagnosticStatus.REDIRECTED,
+            redirectedPath = candidate.normalizedPath(fileSystem),
+            candidate = null,
+            reason = null,
+            withinDataRoot = true,
+            candidateWithinDataRoot = true
+        )
     }
 
     fun rewriteJavaAbsolutePath(
@@ -154,6 +331,13 @@ object VirtualStoragePathDiagnostics {
         }
     }
 
+    private fun guestPrivatePathRemainder(path: String, originPackageName: String): String? {
+        return listOf(
+            "/data/data/$originPackageName",
+            "/data/user/0/$originPackageName"
+        ).firstNotNullOfOrNull { prefix -> stripPackagePrefix(path, prefix) }
+    }
+
     private fun redirectExternalPath(dataRoot: File, remainder: String): File {
         val clean = remainder.trim('/')
         val externalFiles = File(dataRoot, "external_files")
@@ -173,14 +357,42 @@ object VirtualStoragePathDiagnostics {
         return if (clean.isBlank()) parent else File(parent, clean)
     }
 
+    internal fun hasParentTraversalSegment(path: String): Boolean {
+        val normalized = normalizeSeparators(path)
+        return normalized.split('/').any { it == ".." }
+    }
+
+    internal fun hasUnsafePathCharacter(path: String): Boolean =
+        path.indexOf('\u0000') >= 0
+
+    private fun normalizeSeparators(path: String): String =
+        path.replace('\\', '/')
+
     private fun File.isWithin(root: File): Boolean {
         val filePath = normalizedPath()
         val rootPath = root.normalizedPath()
         return filePath == rootPath || filePath.startsWith(rootPath + File.separator)
     }
 
+    private fun File.isWithin(root: File, fileSystem: NativePathFileSystem): Boolean {
+        val filePath = normalizedPath(fileSystem)
+        val rootPath = root.normalizedPath(fileSystem).trimEnd(File.separatorChar)
+        return filePath == rootPath || filePath.startsWith(rootPath + File.separator)
+    }
+
     private fun File.normalizedPath(): String =
         runCatching { canonicalFile.absolutePath }.getOrElse { absoluteFile.absolutePath }
+
+    private fun File.normalizedPath(fileSystem: NativePathFileSystem): String =
+        runCatching { fileSystem.canonicalFile(this).absolutePath }.getOrElse { absoluteFile.absolutePath }
+}
+
+internal interface NativePathFileSystem {
+    fun canonicalFile(file: File): File
+}
+
+private object JvmNativePathFileSystem : NativePathFileSystem {
+    override fun canonicalFile(file: File): File = file.canonicalFile
 }
 
 enum class VirtualStorageDiagnosticKind {
@@ -213,5 +425,7 @@ data class VirtualStoragePathDiagnostic(
     val nativeProbeResultCode: Int? = null,
     val nativeProbeErrno: Int? = null,
     val nativeProbeCandidateExists: Boolean? = null,
-    val nativeProbeResolvedPath: String? = null
+    val nativeProbeResolvedPath: String? = null,
+    val openFlags: Int? = null,
+    val processSlot: String? = null
 )
