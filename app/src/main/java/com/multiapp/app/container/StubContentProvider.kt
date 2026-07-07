@@ -381,6 +381,11 @@ class StubContentProvider : ContentProvider() {
                 component = ProviderMethodEvidenceComponents.forOperation(operationName),
                 fields = fields
             )
+            ContainerEngineEvidenceBridge.recordProviderOperation(
+                instanceId = instanceId,
+                operationName = operationName,
+                fields = fields
+            )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write provider evidence for instanceId=$instanceId", error)
         }
@@ -394,25 +399,31 @@ class StubContentProvider : ContentProvider() {
             ?: uri.getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID)
             ?: return
         runCatching {
+            val fields = linkedMapOf(
+                "status" to result.status,
+                "stage" to "PROVIDER_RUNTIME_BIND",
+                "providerRuntimeBindStatus" to result.status,
+                "providerRuntimeBindDetail" to result.detail,
+                "providerRuntimeBindErrorClassName" to result.errorClassNameForEvidence(),
+                "providerRuntimeBindErrorMessage" to result.errorMessageForEvidence(),
+                "instanceId" to instanceId,
+                "guestAuthority" to (
+                    result.guestAuthorityForEvidence()
+                        ?: uri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+                        ?: ""
+                    ),
+                "detail" to result.detail
+            )
             ContainerRuntimeEvidenceWriter.write(
                 context = requireNotNull(context),
                 instanceId = instanceId,
                 component = "provider-runtime-bind",
-                fields = linkedMapOf(
-                    "status" to result.status,
-                    "stage" to "PROVIDER_RUNTIME_BIND",
-                    "providerRuntimeBindStatus" to result.status,
-                    "providerRuntimeBindDetail" to result.detail,
-                    "providerRuntimeBindErrorClassName" to result.errorClassNameForEvidence(),
-                    "providerRuntimeBindErrorMessage" to result.errorMessageForEvidence(),
-                    "instanceId" to instanceId,
-                    "guestAuthority" to (
-                        result.guestAuthorityForEvidence()
-                            ?: uri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
-                            ?: ""
-                        ),
-                    "detail" to result.detail
-                )
+                fields = fields
+            )
+            ContainerEngineEvidenceBridge.recordProviderOperation(
+                instanceId = instanceId,
+                operationName = "runtime-bind",
+                fields = fields
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write provider runtime bind evidence for instanceId=$instanceId", error)

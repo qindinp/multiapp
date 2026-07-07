@@ -149,11 +149,57 @@ data class EngineEvidenceReport(
     val evidenceSessionId: String,
     val status: EngineResultStatus,
     val profile: EngineProfile,
-    val entries: Map<String, String> = emptyMap()
+    val entries: Map<String, String> = emptyMap(),
+    val operationEvidence: Map<String, Map<String, List<EngineOperationEvidence>>> = emptyMap()
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
         require(evidenceSessionId.isNotBlank()) { "evidenceSessionId must not be blank" }
+        require(operationEvidence.keys.none { it.isBlank() }) {
+            "operationEvidence component keys must not be blank"
+        }
+        require(operationEvidence.values.all { operations -> operations.keys.none { it.isBlank() } }) {
+            "operationEvidence operation keys must not be blank"
+        }
+    }
+
+    fun withOperationEvidence(evidence: EngineOperationEvidence): EngineEvidenceReport {
+        val componentEvidence = operationEvidence[evidence.component].orEmpty()
+        val mergedOperationEvidence = componentEvidence[evidence.operation].orEmpty() + evidence
+        val mergedComponentEvidence = componentEvidence + (evidence.operation to mergedOperationEvidence)
+        return copy(
+            status = status.merge(evidence.verdict),
+            operationEvidence = operationEvidence + (evidence.component to mergedComponentEvidence)
+        )
+    }
+
+    fun operationEntries(component: String, operation: String): List<EngineOperationEvidence> =
+        operationEvidence[component]?.get(operation).orEmpty()
+}
+
+data class EngineOperationEvidence(
+    val component: String,
+    val operation: String,
+    val verdict: EngineResultStatus,
+    val entries: Map<String, String> = emptyMap()
+) {
+    init {
+        require(component.isNotBlank()) { "component must not be blank" }
+        require(operation.isNotBlank()) { "operation must not be blank" }
+        require(entries.keys.none { it.isBlank() }) { "entries keys must not be blank" }
+    }
+}
+
+private fun EngineResultStatus.merge(verdict: EngineResultStatus): EngineResultStatus {
+    return if (verdict.rank() > rank()) verdict else this
+}
+
+private fun EngineResultStatus.rank(): Int {
+    return when (this) {
+        EngineResultStatus.PASS -> 0
+        EngineResultStatus.PARTIAL -> 1
+        EngineResultStatus.UNSUPPORTED -> 2
+        EngineResultStatus.FAIL -> 3
     }
 }
 

@@ -3,6 +3,7 @@ package com.multiapp.core.engine
 import com.multiapp.core.model.InstallArtifactManifest
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.VirtualPackageRecord
+import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.LaunchInstanceRequest
@@ -17,6 +18,7 @@ import com.multiapp.core.model.installer.VirtualInstallService
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -52,6 +54,73 @@ class DefaultVirtualizationEngineTest {
         assertTrue(launches.single().providerRoutingEnabled)
         assertNotNull(registry.get(instance.instanceId))
         assertEquals(1, instances.launchUpdates)
+    }
+
+    @Test
+    fun `launch report merges provider and native operation evidence`() {
+        val instance = instance()
+        val registry = EngineRuntimeRegistry()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = registry,
+            evidenceSessionFactory = { "evidence-1" }
+        )
+
+        val launch = engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+        val providerAccepted = registry.registerOperationEvidence(
+            instance.instanceId,
+            EngineOperationEvidence(
+                component = "provider",
+                operation = "route-token",
+                verdict = EngineResultStatus.PASS,
+                entries = mapOf(
+                    "authority" to "com.test.app.provider",
+                    "routeToken" to "route-token-1"
+                )
+            )
+        )
+        val nativeAccepted = registry.registerOperationEvidence(
+            instance.instanceId,
+            EngineOperationEvidence(
+                component = "native",
+                operation = "path-redirect",
+                verdict = EngineResultStatus.PARTIAL,
+                entries = mapOf(
+                    "requestedPath" to "/data/data/com.test.app/lib/libfoo.so",
+                    "redirectedPath" to File(instance.dataRoot, "lib/libfoo.so").absolutePath
+                )
+            )
+        )
+
+        val report = engine.exportEvidence(instance.instanceId)
+
+        assertEquals(EngineResultStatus.PASS, launch.status)
+        assertTrue(providerAccepted)
+        assertTrue(nativeAccepted)
+        assertEquals("com.multiapp.app", report.entries["hostPackageName"])
+        assertEquals(instance.dataRoot, report.entries["dataRoot"])
+        assertEquals("<redacted>", report.operationEntries("provider", "route-token").single().entries["routeToken"])
+        assertEquals(
+            File(instance.dataRoot, "lib/libfoo.so").absolutePath,
+            report.operationEntries("native", "path-redirect").single().entries["redirectedPath"]
+        )
+        assertEquals(EngineResultStatus.PARTIAL, report.status)
+
+        assertEquals(EngineResultStatus.PASS, engine.stopInstance(instance.instanceId).status)
+        assertFalse(
+            registry.registerOperationEvidence(
+                instance.instanceId,
+                EngineOperationEvidence(
+                    component = "provider",
+                    operation = "route-token",
+                    verdict = EngineResultStatus.PASS,
+                    entries = mapOf("routeToken" to "after-stop")
+                )
+            )
+        )
     }
 
     @Test

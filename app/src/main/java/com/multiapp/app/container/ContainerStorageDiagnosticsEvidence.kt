@@ -97,30 +97,35 @@ object ContainerStorageDiagnosticsEvidence {
         dataRoot: String
     ) {
         runCatching {
+            val fields = linkedMapOf(
+                "stage" to STAGE,
+                "instanceId" to result.instanceId,
+                "originPackageName" to originPackageName,
+                "virtualPackageName" to virtualPackageName,
+                "dataRoot" to dataRoot,
+                "storageDiagnosticStatus" to VirtualStorageDiagnosticStatus.UNSUPPORTED.name,
+                "nativeIoRedirectVerdict" to "UNSUPPORTED",
+                "nativeIoRedirectVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                "namespaceVerdict" to "UNKNOWN",
+                "namespaceVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                "findLibraryVerdict" to "UNKNOWN",
+                "findLibraryVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                "nativeLoadVerdict" to "UNKNOWN",
+                "nativeLoadVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                "procMapsSpoofEnabled" to false,
+                "procStatusSpoofEnabled" to false,
+                "reason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+                "caller" to CALLER
+            )
             ContainerRuntimeEvidenceWriter.write(
                 context = context,
                 instanceId = result.instanceId,
                 component = "storage-bootstrap",
-                fields = linkedMapOf(
-                    "stage" to STAGE,
-                    "instanceId" to result.instanceId,
-                    "originPackageName" to originPackageName,
-                    "virtualPackageName" to virtualPackageName,
-                    "dataRoot" to dataRoot,
-                    "storageDiagnosticStatus" to VirtualStorageDiagnosticStatus.UNSUPPORTED.name,
-                    "nativeIoRedirectVerdict" to "UNSUPPORTED",
-                    "nativeIoRedirectVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
-                    "namespaceVerdict" to "UNKNOWN",
-                    "namespaceVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
-                    "findLibraryVerdict" to "UNKNOWN",
-                    "findLibraryVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
-                    "nativeLoadVerdict" to "UNKNOWN",
-                    "nativeLoadVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
-                    "procMapsSpoofEnabled" to false,
-                    "procStatusSpoofEnabled" to false,
-                    "reason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
-                    "caller" to CALLER
-                )
+                fields = fields
+            )
+            ContainerEngineEvidenceBridge.recordNativeBootstrapUnsupported(
+                instanceId = result.instanceId,
+                fields = fields
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write PR-10 bootstrap storage evidence for instanceId=${result.instanceId}", error)
@@ -133,11 +138,16 @@ object ContainerStorageDiagnosticsEvidence {
         isolationMarker: File?
     ) {
         runCatching {
+            val fields = fieldsForDiagnostic(diagnostic, isolationMarker)
             ContainerRuntimeEvidenceWriter.write(
                 context = context,
                 instanceId = diagnostic.instanceId,
                 component = componentName(diagnostic),
-                fields = fieldsForDiagnostic(diagnostic, isolationMarker)
+                fields = fields
+            )
+            ContainerEngineEvidenceBridge.recordNativeStorageDiagnostic(
+                diagnostic = diagnostic,
+                fields = fields
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write PR-10 storage evidence for instanceId=${diagnostic.instanceId}", error)

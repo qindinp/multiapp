@@ -217,6 +217,29 @@ Limit:
 - This is still JVM-level verification and Java bridge configuration. Real
   native syscall/device evidence remains open.
 
+### Engine Evidence Aggregation
+
+- `EngineEvidenceReport` now keeps the original launch/runtime `entries` map and
+  adds grouped operation evidence under `operationEvidence[component][operation]`.
+- Added `EngineOperationEvidence` for provider/native operation verdicts and
+  sanitized key-value details.
+- `EngineRuntimeRegistry` can append operation evidence only for an active
+  registered runtime. Missing or stopped runtimes reject the evidence instead of
+  creating an implicit `PASS` report.
+- Provider proxy evidence and provider runtime-bind evidence now also append a
+  provider operation verdict to the engine report.
+- Native storage diagnostics now append native operation verdicts to the engine
+  report.
+- App-side engine evidence bridge redacts token/password/secret-like fields
+  before writing operation evidence, so route tokens are not copied into engine
+  reports.
+- `EngineRuntimeRegistry` also sanitizes operation evidence at the aggregation
+  boundary, so future adapters cannot bypass bridge-side redaction by calling
+  the registry directly.
+- This is an in-process aggregation path. Device evidence still has to prove
+  that exported engine reports include the expected provider/native entries for
+  real launches.
+
 ## Verification
 
 The full all-in-one gate exceeded the local 180 second tool timeout, so the same
@@ -321,6 +344,31 @@ Result:
 - Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
   the project uses `compileSdk=36`.
 
+Additional verification after engine evidence aggregation:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.container.ContainerEngineEvidenceBridgeTest" --tests "com.multiapp.app.container.ContainerStorageDiagnosticsEvidenceTest" --tests "com.multiapp.app.container.ProviderProxyUriTest" --tests "com.multiapp.app.container.StubContentProviderRouteTokenTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:common:testDebugUnitTest :core:model:testDebugUnitTest :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Targeted app evidence bridge/provider/storage tests passed.
+- `:core:common:testDebugUnitTest`, `:core:model:testDebugUnitTest`, and
+  `:core:engine:testDebugUnitTest` passed after registry-boundary redaction was
+  added.
+- Full `:app:testDebugUnitTest` passed.
+- `:app:assembleDebug` passed.
+- `git diff --check` passed with only existing CRLF normalization warnings.
+- During integration, one transient KSP generated-file collision occurred under
+  `app/build/generated/ksp/debug`; removing that generated directory and rerunning
+  the same target tests passed.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
 ## Not Complete Yet
 
 The following items from the plan are still open and must not be marked `DONE`:
@@ -337,8 +385,9 @@ The following items from the plan are still open and must not be marked `DONE`:
 - Device-proven simultaneous same-origin multi-instance recents.
 - Real Android process-slot isolation for native multi-instance execution. JVM
   decision tests exist, but native syscall evidence is not complete.
-- Engine-level aggregation of provider/native operation evidence into
-  `EngineEvidenceReport`.
+- Device-proven exported `EngineEvidenceReport` for provider/native operation
+  evidence. Local in-process aggregation exists, but real launch reports still
+  need device evidence.
 - Full PMS signatures/SigningInfo, typed metadata, provider read/write
   permissions, and `IntentFilter.match()` fidelity.
 - Complete AMS/ATM activity stack semantics:
@@ -354,8 +403,8 @@ The following items from the plan are still open and must not be marked `DONE`:
 
 Recommended next slice:
 
-1. Add engine-level evidence aggregation for provider route-token verdicts and
-   native redirect/path verdicts.
+1. Add device evidence export for engine operation reports and verify provider
+   route-token/native verdicts after real launches.
 2. Add a split/multidex fixture and device evidence for launcher Activity,
    resources, provider, service, and native library loading from splits.
 3. Add behavior tests for same-origin dual-instance isolation across storage,
