@@ -76,7 +76,8 @@ class VirtualProviderDispatcher(
             splitSourceDirs = snapshot.splitSourceDirs,
             splitPublicSourceDirs = snapshot.splitPublicSourceDirs,
             splitNames = snapshot.splitNames,
-            isolatedSplits = snapshot.isolatedSplits
+            isolatedSplits = snapshot.isolatedSplits,
+            processSlot = processRuntime.get(snapshot.instanceId)?.result?.processSlot
         )
         val guestContext = VirtualContextWrappers.create(
             base = context,

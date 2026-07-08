@@ -39,6 +39,7 @@ data class HostedBootstrapResult(
     val originPackageName: String?,
     val virtualPackageName: String? = null,
     val applicationLabel: String? = null,
+    val processSlot: String? = null,
     val originApkPath: String?,
     val dataRoot: String? = null,
     val guestClassLoader: ClassLoader?,
@@ -401,6 +402,7 @@ class HostedRuntimeBootstrap(
             originPackageName = instance.originPackageName,
             virtualPackageName = instance.virtualPackageName,
             applicationLabel = resolvedPackage?.applicationLabel,
+            processSlot = preparedContext.processSlot,
             originApkPath = originApkPath,
             dataRoot = instance.dataRoot,
             guestClassLoader = guestClassLoader,
@@ -443,7 +445,8 @@ class HostedRuntimeBootstrap(
         stageResults: List<BootstrapResult>,
         originPackageName: String? = null,
         originApkPath: String? = null,
-        installId: String? = null
+        installId: String? = null,
+        processSlot: String? = null
     ): HostedBootstrapResult {
         val summary = stageResults.toSummary()
         val diagnostics = runDiagnosticsAnalysis(stageResults, originApkPath)
@@ -451,6 +454,7 @@ class HostedRuntimeBootstrap(
             instanceId = instanceId,
             installId = installId,
             originPackageName = originPackageName,
+            processSlot = processSlot,
             originApkPath = originApkPath,
             guestClassLoader = null,
             guestApplication = null,

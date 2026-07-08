@@ -129,6 +129,7 @@ object ActivityThreadLaunchRecordPatcher {
         classLoader: ClassLoader
     ): LaunchRuntimeState {
         val hostApplication = runCatching { ActivityThreadCompat.currentApplication() }.getOrNull()
+        val processSlot = VirtualProcessRuntime.global.get(spec.instanceId)?.result?.processSlot
         val config = VirtualContextConfig(
             instanceId = spec.instanceId,
             originPackageName = spec.originPackageName,
@@ -142,7 +143,8 @@ object ActivityThreadLaunchRecordPatcher {
             splitSourceDirs = snapshot.splitSourceDirs,
             splitPublicSourceDirs = snapshot.splitPublicSourceDirs,
             splitNames = snapshot.splitNames,
-            isolatedSplits = snapshot.isolatedSplits
+            isolatedSplits = snapshot.isolatedSplits,
+            processSlot = processSlot
         )
         val resourceBundle = hostApplication?.let { VirtualResourcesManager(it).create(config) }
         val applicationInfo = resourceBundle

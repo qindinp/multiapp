@@ -589,7 +589,10 @@ open class VirtualInstrumentation(
 
         return runCatching {
             val registry = ProxyActivityRegistry(
-                ProxyActivitySlots.classNames(runtime.hostApplication.packageName),
+                ProxyActivitySlots.classNamesForProcessSlot(
+                    runtime.hostApplication.packageName,
+                    runtime.result.processSlot
+                ),
                 ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
                 FileBackedProxyActivitySlotAssignmentStore(
                     File(runtime.hostApplication.filesDir, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
@@ -683,7 +686,10 @@ open class VirtualInstrumentation(
 
         return runCatching {
             val registry = ProxyActivityRegistry(
-                ProxyActivitySlots.classNames(runtime.hostApplication.packageName),
+                ProxyActivitySlots.classNamesForProcessSlot(
+                    runtime.hostApplication.packageName,
+                    runtime.result.processSlot
+                ),
                 ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
                 FileBackedProxyActivitySlotAssignmentStore(
                     File(runtime.hostApplication.filesDir, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
@@ -1014,7 +1020,8 @@ open class VirtualInstrumentation(
             splitSourceDirs = result.packageSnapshot?.splitSourceDirs.orEmpty(),
             splitPublicSourceDirs = result.packageSnapshot?.splitPublicSourceDirs.orEmpty(),
             splitNames = result.packageSnapshot?.splitNames.orEmpty(),
-            isolatedSplits = result.packageSnapshot?.isolatedSplits ?: false
+            isolatedSplits = result.packageSnapshot?.isolatedSplits ?: false,
+            processSlot = result.processSlot
         )
     }
 
@@ -1068,7 +1075,8 @@ open class VirtualInstrumentation(
             splitSourceDirs = snapshot.splitSourceDirs,
             splitPublicSourceDirs = snapshot.splitPublicSourceDirs,
             splitNames = snapshot.splitNames,
-            isolatedSplits = snapshot.isolatedSplits
+            isolatedSplits = snapshot.isolatedSplits,
+            processSlot = runtime?.processSlot
         )
         Log.i(
             TAG,

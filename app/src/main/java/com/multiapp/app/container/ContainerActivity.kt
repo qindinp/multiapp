@@ -116,7 +116,8 @@ open class ContainerActivity : Activity() {
             fallbackDataRoot: File,
             guestClassLoader: ClassLoader,
             applicationLabel: String? = null,
-            packageSnapshot: VirtualPackageSnapshot? = null
+            packageSnapshot: VirtualPackageSnapshot? = null,
+            processSlot: String? = null
         ): VirtualContextConfig {
             val resolvedDataRoot = dataRoot ?: fallbackDataRoot.absolutePath
             return VirtualContextConfig(
@@ -132,7 +133,8 @@ open class ContainerActivity : Activity() {
                 splitSourceDirs = packageSnapshot?.splitSourceDirs.orEmpty(),
                 splitPublicSourceDirs = packageSnapshot?.splitPublicSourceDirs.orEmpty(),
                 splitNames = packageSnapshot?.splitNames.orEmpty(),
-                isolatedSplits = packageSnapshot?.isolatedSplits ?: false
+                isolatedSplits = packageSnapshot?.isolatedSplits ?: false,
+                processSlot = processSlot
             )
         }
 

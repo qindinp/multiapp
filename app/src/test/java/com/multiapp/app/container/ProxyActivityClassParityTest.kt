@@ -47,6 +47,15 @@ class ProxyActivityClassParityTest {
                 "Proxy taskAffinity must stay host-scoped and unique: ${entry.className}"
             )
         }
+
+        repeat(ProxyActivitySlots.SLOT_COUNT) { index ->
+            val standard = manifest.single { it.className == "$hostPackageName.container.ProxyActivity$index" }
+            val singleTop = manifest.single { it.className == "$hostPackageName.container.ProxyActivitySingleTop$index" }
+            val singleTask = manifest.single { it.className == "$hostPackageName.container.ProxyActivitySingleTask$index" }
+            assertEquals(":v$index", standard.processName)
+            assertEquals(standard.processName, singleTop.processName)
+            assertEquals(standard.processName, singleTask.processName)
+        }
     }
 
     @Test

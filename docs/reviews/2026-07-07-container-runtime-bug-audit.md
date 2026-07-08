@@ -719,8 +719,52 @@ All four commands passed. A combined loader/engine/app unit-test invocation exce
 
 ### Still BLOCK
 
-- AppOps now covers both `AppOpsManager.mService` and `ServiceManager.sCache["appops"]` paths, but it still needs device proof and does not yet rewrite nested `AttributionSourceState` / parcelable internals.
+- AppOps now covers both `AppOpsManager.mService` and `ServiceManager.sCache["appops"]` paths. Nested `AttributionSource` / `AttributionSourceState`-like values are covered by local tests, but the path still needs device proof.
 - Process slots now bind hosted Activity bootstrap to real Android processes, but Provider/Service/Broadcast stubs are not yet fully per-process and per-instance.
 - Per-process globals (`EngineRuntimeRegistry.global`, `VirtualProcessRuntime.global`, `VirtualActivityRecordManager.global`) must be audited because real process slots mean memory singletons are no longer shared across all slots.
 - LoadedApk/Application equivalence remains incomplete: progress evidence improved observability, but this is not yet a full `LoadedApk.makeApplication()` / `ActivityThread` model.
 - Device evidence is still required before any `DONE` claim: `logcat`, `dumpsys activity exit-info`, `dumpsys activity recents`, `run-as com.multiapp.app files/hosted_launch_evidence`, and `files/instances`.
+
+## Execution Update - 2026-07-08 Process-Slot Consistency
+
+### Implemented in this pass
+
+- Fixed the proxy/process slot model so one slot index owns all three Activity
+  proxy launchMode variants:
+  - `ProxyActivityN`
+  - `ProxyActivitySingleTopN`
+  - `ProxyActivitySingleTaskN`
+- The owning process set is now `:v0` through `:v7`; all three proxy variants
+  for index `N` run in `:vN`. This prevents one guest instance from being split
+  across different host processes only because a guest Activity uses
+  `singleTop` or `singleTask`.
+- Carried `processSlot` through `HostedBootstrapResult` and
+  `VirtualContextConfig`, then used it to restrict proxy allocation in
+  `VirtualContextWrapper`, `VirtualInstrumentation`,
+  `ActivityThreadLaunchRecordPatcher`, `VirtualAmsComponentDispatcher`,
+  provider dispatch, and service dispatch where runtime state is available.
+- Extended AppOps rewrite to nested `AttributionSource` /
+  `AttributionSourceState`-like values and arrays, so AppOps calls are no
+  longer limited to direct `String` package arguments.
+- `StubService` now returns the guest Service `onStartCommand()` result for the
+  synchronous path. Async bootstrap still returns `START_NOT_STICKY` because
+  the host method has already returned; evidence records that distinction.
+
+### Verification
+
+```bash
+./gradlew :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ProxyActivitySlotsTest" --tests "com.multiapp.core.loader.VirtualContextWrapperTest" --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :app:testDebugUnitTest --tests "com.multiapp.app.container.ProxyActivityClassParityTest" --tests "com.multiapp.app.container.StubServiceTest" --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+```
+
+All three commands passed. A combined loader/app targeted invocation exceeded
+the local 180s tool timeout, so it was split by module and then passed.
+
+### Still BLOCK
+
+- This is still not device proof. Need evidence that standard/singleTop/
+  singleTask launches for one instance remain in the same `:vN` process.
+- Provider/Service/Broadcast owning-process routing is still incomplete.
+- LoadedApk/Application equivalence remains incomplete and still blocks
+  commercial compatibility claims.

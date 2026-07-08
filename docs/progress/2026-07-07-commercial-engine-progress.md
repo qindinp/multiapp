@@ -498,6 +498,63 @@ Remaining gate for this slice:
   `appOpsServiceManagerProxyStatus=INSTALLED`, and no AppOps
   uid/package mismatch during GKD, QQ, WeChat, and QQ Reader launches.
 
+## Execution Update - 2026-07-08 Process-Slot Consistency Slice
+
+This slice addresses a multi-instance/process bug found during parallel review:
+the previous catalog mapped `ProxyActivity0`, `ProxyActivitySingleTop0`, and
+`ProxyActivitySingleTask0` to different Android processes. That could split one
+guest instance across multiple host processes when the guest launched Activities
+with different `launchMode` values.
+
+Implemented:
+
+- Changed the proxy/process model to eight owning process slots:
+  `:v0` through `:v7`.
+- Mapped each slot's three proxy variants to the same process:
+  - `ProxyActivityN`
+  - `ProxyActivitySingleTopN`
+  - `ProxyActivitySingleTaskN`
+- Restricted runtime proxy allocation to the current runtime `processSlot` by
+  carrying `processSlot` through `HostedBootstrapResult` and
+  `VirtualContextConfig`.
+- Updated `VirtualContextWrapper`, `VirtualInstrumentation`,
+  `ActivityThreadLaunchRecordPatcher`, `VirtualAmsComponentDispatcher`,
+  provider dispatch, and service dispatch to preserve the owning process slot
+  where local runtime state is available.
+- Extended AppOps package rewriting to handle nested
+  `AttributionSource`/`AttributionSourceState`-like arguments and arrays,
+  not only direct `String` package arguments.
+- Made `StubService` return the guest Service `onStartCommand()` result on the
+  synchronous path. Async runtime bootstrap still returns
+  `START_NOT_STICKY`, and evidence records
+  `hostStartCommandReturnMode=ASYNC_HOST_ALREADY_RETURNED_DEFAULT`.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ProxyActivitySlotsTest" --tests "com.multiapp.core.loader.VirtualContextWrapperTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.container.ProxyActivityClassParityTest" --tests "com.multiapp.app.container.StubServiceTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Targeted loader tests passed.
+- Targeted app tests passed.
+- Full `:core:engine:testDebugUnitTest` passed.
+- A combined loader/app targeted invocation exceeded the 180 second local tool
+  timeout; the same scopes were split by module and passed.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
+Remaining gate for this slice:
+
+- Device evidence must prove that an instance starting standard, singleTop, and
+  singleTask guest Activities remains inside one owning `:vN` process.
+- Same-origin dual-instance recents still require device evidence.
+- Provider/Service/Broadcast still need owning-process binding instead of
+  default-process bootstrap.
+
 ## Not Complete Yet
 
 The following items from the plan are still open and must not be marked `DONE`:

@@ -9,6 +9,7 @@ import android.os.Process
 import android.util.Log
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Array as ReflectArray
 import java.lang.reflect.Proxy
 
 /**
@@ -327,6 +328,19 @@ object IntentRemapDiagnostics {
                             patched[index] = rewritten
                             changed = true
                         }
+                    } else {
+                        val remapped = remapAttributionSourceLike(value, aliases, hostPackageName, runtimeUid)
+                        if (remapped.changed) {
+                            patched[index] = remapped.value
+                            changed = true
+                        }
+                    }
+                }
+                else -> {
+                    val remapped = remapAttributionSourceLike(value, aliases, hostPackageName, runtimeUid)
+                    if (remapped.changed) {
+                        patched[index] = remapped.value
+                        changed = true
                     }
                 }
             }
@@ -643,6 +657,204 @@ object IntentRemapDiagnostics {
             lower.contains("mode") ||
             lower.contains("active")
     }
+
+    private data class AttributionRemapResult(
+        val value: Any?,
+        val changed: Boolean
+    )
+
+    private fun remapAttributionSourceLike(
+        value: Any?,
+        aliases: Set<String>,
+        hostPackageName: String,
+        runtimeUid: Int,
+        depth: Int = 0
+    ): AttributionRemapResult {
+        if (value == null || depth > 8) return AttributionRemapResult(value, changed = false)
+        val type = value.javaClass
+        return when {
+            type.isArray -> remapAttributionArray(value, aliases, hostPackageName, runtimeUid, depth)
+            type.name == "android.content.AttributionSource" ->
+                remapPublicAttributionSource(value, aliases, hostPackageName, runtimeUid, depth)
+            type.name == "android.content.AttributionSourceState" ||
+                type.simpleName.endsWith("AttributionSourceState") ->
+                remapAttributionSourceState(value, aliases, hostPackageName, runtimeUid, depth)
+            else -> AttributionRemapResult(value, changed = false)
+        }
+    }
+
+    private fun remapAttributionArray(
+        value: Any,
+        aliases: Set<String>,
+        hostPackageName: String,
+        runtimeUid: Int,
+        depth: Int
+    ): AttributionRemapResult {
+        val length = ReflectArray.getLength(value)
+        var copy: Any? = null
+        var changed = false
+        for (index in 0 until length) {
+            val item = ReflectArray.get(value, index)
+            val remapped = remapAttributionSourceLike(item, aliases, hostPackageName, runtimeUid, depth + 1)
+            if (remapped.changed) {
+                if (copy == null) {
+                    copy = ReflectArray.newInstance(value.javaClass.componentType, length)
+                    for (copyIndex in 0 until length) {
+                        ReflectArray.set(copy, copyIndex, ReflectArray.get(value, copyIndex))
+                    }
+                }
+                ReflectArray.set(copy, index, remapped.value)
+                changed = true
+            }
+        }
+        return AttributionRemapResult(copy ?: value, changed)
+    }
+
+    private fun remapPublicAttributionSource(
+        value: Any,
+        aliases: Set<String>,
+        hostPackageName: String,
+        runtimeUid: Int,
+        depth: Int
+    ): AttributionRemapResult {
+        return runCatching {
+            val sourceClass = value.javaClass
+            val packageName = invokeNoArg(value, "getPackageName") as? String
+            val next = invokeNoArg(value, "getNext")
+            val remappedNext = remapAttributionSourceLike(next, aliases, hostPackageName, runtimeUid, depth + 1)
+            val shouldRewriteSelf = packageName in aliases
+            if (!shouldRewriteSelf && !remappedNext.changed) {
+                return@runCatching AttributionRemapResult(value, changed = false)
+            }
+            val builderClass = Class.forName("android.content.AttributionSource\$Builder")
+            val builder = builderClass.getDeclaredConstructor(sourceClass).apply {
+                isAccessible = true
+            }.newInstance(value)
+            if (shouldRewriteSelf) {
+                invokeSingleArg(builder, "setPackageName", hostPackageName)
+                invokeSingleArg(builder, "setUid", runtimeUid)
+            }
+            if (remappedNext.changed && remappedNext.value != null) {
+                invokeSingleArg(builder, "setNext", remappedNext.value)
+            }
+            val built = builderClass.getDeclaredMethod("build").apply {
+                isAccessible = true
+            }.invoke(builder)
+            AttributionRemapResult(built ?: value, changed = true)
+        }.getOrElse {
+            AttributionRemapResult(value, changed = false)
+        }
+    }
+
+    private fun remapAttributionSourceState(
+        value: Any,
+        aliases: Set<String>,
+        hostPackageName: String,
+        runtimeUid: Int,
+        depth: Int
+    ): AttributionRemapResult {
+        return runCatching {
+            val type = value.javaClass
+            val target = newInstanceWithCopiedFields(value) ?: value
+            var changed = false
+            val packageField = findFieldInHierarchy(type, "packageName")
+            val uidField = findFieldInHierarchy(type, "uid")
+            val packageName = packageField?.get(value) as? String
+            if (packageName in aliases) {
+                packageField?.set(target, hostPackageName)
+                uidField?.set(target, runtimeUid)
+                changed = true
+            }
+            for (field in allInstanceFields(type)) {
+                if (!field.isAttributionNestedField()) continue
+                val nested = field.get(value) ?: continue
+                val remapped = remapAttributionSourceLike(nested, aliases, hostPackageName, runtimeUid, depth + 1)
+                if (remapped.changed) {
+                    field.set(target, remapped.value)
+                    changed = true
+                }
+            }
+            AttributionRemapResult(if (changed) target else value, changed)
+        }.getOrElse {
+            AttributionRemapResult(value, changed = false)
+        }
+    }
+
+    private fun newInstanceWithCopiedFields(source: Any): Any? {
+        return runCatching {
+            val constructor = source.javaClass.getDeclaredConstructor().apply {
+                isAccessible = true
+            }
+            val target = constructor.newInstance()
+            for (field in allInstanceFields(source.javaClass)) {
+                field.set(target, field.get(source))
+            }
+            target
+        }.getOrNull()
+    }
+
+    private fun java.lang.reflect.Field.isAttributionNestedField(): Boolean {
+        val fieldType = type
+        if (name == "next") return true
+        if (fieldType.isArray) {
+            val componentName = fieldType.componentType?.name.orEmpty()
+            return componentName.contains("AttributionSource")
+        }
+        return fieldType.name.contains("AttributionSource")
+    }
+
+    private fun allInstanceFields(type: Class<*>): List<java.lang.reflect.Field> {
+        val result = mutableListOf<java.lang.reflect.Field>()
+        var current: Class<*>? = type
+        while (current != null) {
+            for (field in current.declaredFields) {
+                if (java.lang.reflect.Modifier.isStatic(field.modifiers)) continue
+                field.isAccessible = true
+                result += field
+            }
+            current = current.superclass
+        }
+        return result
+    }
+
+    private fun findFieldInHierarchy(type: Class<*>, name: String): java.lang.reflect.Field? {
+        var current: Class<*>? = type
+        while (current != null) {
+            val field = runCatching { current.getDeclaredField(name) }.getOrNull()
+            if (field != null) {
+                field.isAccessible = true
+                return field
+            }
+            current = current.superclass
+        }
+        return null
+    }
+
+    private fun invokeNoArg(target: Any, methodName: String): Any? =
+        runCatching {
+            target.javaClass.methods.firstOrNull { method ->
+                method.name == methodName && method.parameterTypes.isEmpty()
+            }?.invoke(target)
+        }.getOrNull()
+
+    private fun invokeSingleArg(target: Any, methodName: String, arg: Any): Boolean =
+        runCatching {
+            val method = target.javaClass.methods.firstOrNull { candidate ->
+                candidate.name == methodName &&
+                    candidate.parameterTypes.size == 1 &&
+                    candidate.parameterTypes[0].acceptsArgument(arg)
+            } ?: return@runCatching false
+            method.isAccessible = true
+            method.invoke(target, arg)
+            true
+        }.getOrDefault(false)
+
+    private fun Class<*>.acceptsArgument(arg: Any): Boolean =
+        when {
+            isPrimitive && this == Integer.TYPE -> arg is Int
+            isPrimitive && this == java.lang.Long.TYPE -> arg is Long
+            else -> isAssignableFrom(arg.javaClass)
+        }
 
     private fun invokeObjectMethod(proxy: Any, method: java.lang.reflect.Method, args: Array<Any?>?): Any? =
         when (method.name) {

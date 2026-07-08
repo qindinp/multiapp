@@ -68,7 +68,7 @@ class StubService : Service() {
         } else {
             HostedServiceRuntimeBinder().ensureBound(this, intent)
         }
-        dispatchServiceStart(
+        return dispatchServiceStart(
             intent = intent,
             startRequest = startRequest,
             flags = flags,
@@ -79,9 +79,9 @@ class StubService : Service() {
             reason = reason,
             foreground = foreground,
             foregroundStatus = foregroundStatus,
-            runtimeBindResult = runtimeBindResult
+            runtimeBindResult = runtimeBindResult,
+            hostReturnMode = HOST_RETURN_MODE_SYNC_GUEST_RESULT
         )
-        return START_NOT_STICKY
     }
 
     private fun bindRuntimeAndDispatchAsync(
@@ -126,7 +126,8 @@ class StubService : Service() {
                         reason = reason,
                         foreground = foreground,
                         foregroundStatus = foregroundStatus,
-                        runtimeBindResult = runtimeBindResult
+                        runtimeBindResult = runtimeBindResult,
+                        hostReturnMode = HOST_RETURN_MODE_ASYNC_DEFAULT
                     )
                 }
             },
@@ -145,8 +146,9 @@ class StubService : Service() {
         reason: String,
         foreground: Boolean,
         foregroundStatus: String,
-        runtimeBindResult: HostedServiceRuntimeBindResult
-    ) {
+        runtimeBindResult: HostedServiceRuntimeBindResult,
+        hostReturnMode: String
+    ): Int {
         Log.i(
             TAG,
             "StubService received guest start: instanceId=$instanceId, " +
@@ -169,11 +171,17 @@ class StubService : Service() {
             runtimeBindResult = runtimeBindResult,
             startId = startId
         )
+        val hostStartCommandResult = hostStartCommandResult(
+            guestStartCommandResult = evidence.startCommandResult,
+            asyncDispatch = hostReturnMode == HOST_RETURN_MODE_ASYNC_DEFAULT
+        )
         val stopDecision = evidence.stubStopDecision()
         val finalEvidence = evidence.copy(
             stubStopped = stopDecision.stop,
             stubStopDecision = stopDecision.reason,
-            foregroundHeld = foreground && foregroundStatus == FOREGROUND_STATUS_STARTED && !stopDecision.stop
+            foregroundHeld = foreground && foregroundStatus == FOREGROUND_STATUS_STARTED && !stopDecision.stop,
+            hostStartCommandResult = hostStartCommandResult,
+            hostStartCommandReturnMode = hostReturnMode
         )
         if (finalEvidence.instanceId.isNotBlank()) {
             writeServiceEvidence(finalEvidence)
@@ -185,6 +193,7 @@ class StubService : Service() {
             stopSelf(startId)
         }
         VirtualServiceIntentStore.clear(startRequest?.proxyToken)
+        return hostStartCommandResult
     }
 
     private fun writeServiceEvidence(evidence: ServiceEvidenceFields) {
@@ -219,6 +228,8 @@ class StubService : Service() {
                     "lifecycle" to evidence.lifecycle,
                     "lifecycleSuccess" to evidence.lifecycleSuccess,
                     "startCommandResult" to evidence.startCommandResult,
+                    "hostStartCommandResult" to evidence.hostStartCommandResult,
+                    "hostStartCommandReturnMode" to evidence.hostStartCommandReturnMode,
                     "errorClassName" to evidence.errorClassName,
                     "errorMessage" to evidence.errorMessage,
                     "detail" to evidence.detail
@@ -432,7 +443,9 @@ class StubService : Service() {
             detail = detail,
             foregroundHeld = false,
             stubStopped = true,
-            stubStopDecision = "UNDECIDED"
+            stubStopDecision = "UNDECIDED",
+            hostStartCommandResult = START_NOT_STICKY,
+            hostStartCommandReturnMode = HOST_RETURN_MODE_UNDECIDED
         )
     }
 
@@ -479,7 +492,9 @@ class StubService : Service() {
         val errorMessage: String?,
         val detail: String,
         val stubStopped: Boolean,
-        val stubStopDecision: String
+        val stubStopDecision: String,
+        val hostStartCommandResult: Int,
+        val hostStartCommandReturnMode: String
     )
 
     private data class StubStopDecision(
@@ -492,11 +507,25 @@ class StubService : Service() {
         private const val FOREGROUND_NOTIFICATION_ID = 10042
         private const val FOREGROUND_CHANNEL_ID = "multiapp_proxy_service"
         private const val FOREGROUND_STATUS_STARTED = "STARTED"
+        private const val HOST_RETURN_MODE_SYNC_GUEST_RESULT = "SYNC_GUEST_RESULT"
+        private const val HOST_RETURN_MODE_ASYNC_DEFAULT = "ASYNC_HOST_ALREADY_RETURNED_DEFAULT"
+        private const val HOST_RETURN_MODE_UNDECIDED = "UNDECIDED"
 
         internal fun shouldBindRuntimeAsync(
             instanceId: String,
             hasReusableRuntime: Boolean
         ): Boolean = instanceId.isNotBlank() && !hasReusableRuntime
+
+        internal fun hostStartCommandResult(
+            guestStartCommandResult: Int?,
+            asyncDispatch: Boolean
+        ): Int {
+            return if (asyncDispatch) {
+                Service.START_NOT_STICKY
+            } else {
+                guestStartCommandResult ?: Service.START_NOT_STICKY
+            }
+        }
     }
 
     private fun enterForegroundIfNeeded(foreground: Boolean): String {

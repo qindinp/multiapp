@@ -26,7 +26,11 @@ class ProxyActivitySlotsTest {
         assertEquals("singleTop", launchModes["$hostPackageName.container.ProxyActivitySingleTop7"])
         assertEquals("singleTask", launchModes["$hostPackageName.container.ProxyActivitySingleTask7"])
         assertEquals("$hostPackageName:v0", processNames["$hostPackageName.container.ProxyActivity0"])
-        assertEquals("$hostPackageName:v8", processNames["$hostPackageName.container.ProxyActivitySingleTop0"])
-        assertEquals("$hostPackageName:v23", processNames["$hostPackageName.container.ProxyActivitySingleTask7"])
+        assertEquals("$hostPackageName:v0", processNames["$hostPackageName.container.ProxyActivitySingleTop0"])
+        assertEquals("$hostPackageName:v0", processNames["$hostPackageName.container.ProxyActivitySingleTask0"])
+        assertEquals("$hostPackageName:v7", processNames["$hostPackageName.container.ProxyActivity7"])
+        assertEquals("$hostPackageName:v7", processNames["$hostPackageName.container.ProxyActivitySingleTop7"])
+        assertEquals("$hostPackageName:v7", processNames["$hostPackageName.container.ProxyActivitySingleTask7"])
+        assertEquals(8, processNames.values.distinct().size)
     }
 }

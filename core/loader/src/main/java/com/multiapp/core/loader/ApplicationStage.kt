@@ -94,7 +94,8 @@ class ApplicationStage(
                 splitSourceDirs = packageSnapshot.splitSourceDirs,
                 splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
                 splitNames = packageSnapshot.splitNames,
-                isolatedSplits = packageSnapshot.isolatedSplits
+                isolatedSplits = packageSnapshot.isolatedSplits,
+                processSlot = input.processSlot
             )
             val creation = guestApplicationCreator.create(
                 GuestApplicationCreateRequest(

@@ -147,7 +147,7 @@ open class VirtualContextWrapper(
             )
         }
         com.multiapp.core.model.virtual.ProxyActivityRegistry(
-            ProxyActivitySlots.classNames(base.packageName),
+            ProxyActivitySlots.classNamesForProcessSlot(base.packageName, config.processSlot),
             ProxyActivitySlots.launchModeByClassName(base.packageName),
             assignmentStore
         )
@@ -162,6 +162,7 @@ open class VirtualContextWrapper(
             hostPackageName = base.packageName,
             packageSnapshot = config.packageSnapshot,
             instanceId = config.instanceId,
+            processSlot = config.processSlot,
             activityRecordManager = activityRecordManager,
             proxyActivityRegistry = proxyActivityRegistry,
             servicePackageRegistry = servicePackageRegistry,

@@ -50,10 +50,12 @@ class DefaultVirtualAmsComponentDispatcher(
     private val hostPackageName: String = hostContext?.packageName.orEmpty(),
     private val packageSnapshot: VirtualPackageSnapshot?,
     private val instanceId: String = packageSnapshot?.instanceId.orEmpty(),
+    private val processSlot: String? = null,
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val proxyActivityRegistry: ProxyActivityRegistry = defaultProxyActivityRegistry(
         hostPackageName,
-        hostContext?.filesDir
+        hostContext?.filesDir,
+        processSlot
     ),
     private val servicePackageRegistry: VirtualPackageRegistry = VirtualPackageRegistry.global,
     private val serviceRuntime: VirtualServiceRuntime = VirtualServiceRuntime.global,
@@ -427,7 +429,8 @@ class DefaultVirtualAmsComponentDispatcher(
             splitSourceDirs = splitSourceDirs,
             splitPublicSourceDirs = splitPublicSourceDirs,
             splitNames = splitNames,
-            isolatedSplits = isolatedSplits
+            isolatedSplits = isolatedSplits,
+            processSlot = processRuntime.get(instanceId)?.result?.processSlot ?: processSlot
         )
 
     private data class VirtualServiceBoundConnection(
@@ -479,10 +482,11 @@ class DefaultVirtualAmsComponentDispatcher(
     companion object {
         fun defaultProxyActivityRegistry(
             hostPackageName: String,
-            filesDir: File? = null
+            filesDir: File? = null,
+            processSlot: String? = null
         ): ProxyActivityRegistry {
             return ProxyActivityRegistry(
-                ProxyActivitySlots.classNames(hostPackageName),
+                ProxyActivitySlots.classNamesForProcessSlot(hostPackageName, processSlot),
                 ProxyActivitySlots.launchModeByClassName(hostPackageName),
                 filesDir?.let {
                     FileBackedProxyActivitySlotAssignmentStore(

@@ -30,6 +30,7 @@ import java.util.concurrent.Executor
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotSame
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
@@ -194,6 +195,95 @@ class VirtualContextWrapperTest {
         assertEquals("com.multiapp.app", remappedPackages[0])
         assertEquals("com.other", remappedPackages[1])
         assertEquals("li.songe.gkd", packages[0])
+    }
+
+    @Test
+    fun `app ops package args remap attribution source state without mutating source`() {
+        val source = FakeAttributionSourceState().apply {
+            uid = 1000
+            packageName = "li.songe.gkd"
+        }
+        val args = arrayOf<Any?>(source)
+
+        val remapped = IntentRemapDiagnostics.remapAppOpsPackageArgs(
+            methodName = "checkOperation",
+            args = args,
+            sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+            hostPackageName = "com.multiapp.app",
+            runtimeUid = 10466
+        )
+
+        val remappedState = remapped[0] as FakeAttributionSourceState
+        assertNotSame(source, remappedState)
+        assertEquals("com.multiapp.app", remappedState.packageName)
+        assertEquals(10466, remappedState.uid)
+        assertEquals("li.songe.gkd", source.packageName)
+        assertEquals(1000, source.uid)
+    }
+
+    @Test
+    fun `app ops package args remap nested attribution source state chain`() {
+        val child = FakeAttributionSourceState().apply {
+            uid = 2000
+            packageName = "com.multiapp.instance.a734"
+        }
+        val source = FakeAttributionSourceState().apply {
+            uid = 1000
+            packageName = "com.other"
+            next = child
+        }
+        val args = arrayOf<Any?>(source)
+
+        val remapped = IntentRemapDiagnostics.remapAppOpsPackageArgs(
+            methodName = "checkOperation",
+            args = args,
+            sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+            hostPackageName = "com.multiapp.app",
+            runtimeUid = 10466
+        )
+
+        val remappedState = remapped[0] as FakeAttributionSourceState
+        assertNotSame(source, remappedState)
+        assertEquals("com.other", remappedState.packageName)
+        assertEquals(1000, remappedState.uid)
+        assertNotSame(child, remappedState.next)
+        assertEquals("com.multiapp.app", remappedState.next?.packageName)
+        assertEquals(10466, remappedState.next?.uid)
+        assertEquals("com.multiapp.instance.a734", child.packageName)
+        assertEquals(2000, child.uid)
+    }
+
+    @Test
+    fun `app ops package args remap attribution source state arrays`() {
+        val source = FakeAttributionSourceState().apply {
+            uid = 1000
+            packageName = "li.songe.gkd"
+        }
+        val other = FakeAttributionSourceState().apply {
+            uid = 2000
+            packageName = "com.other"
+        }
+        val states = arrayOf(source, other)
+        val args = arrayOf<Any?>(states)
+
+        val remapped = IntentRemapDiagnostics.remapAppOpsPackageArgs(
+            methodName = "checkPackage",
+            args = args,
+            sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+            hostPackageName = "com.multiapp.app",
+            runtimeUid = 10466
+        )
+
+        val remappedStates = remapped[0] as Array<*>
+        val remappedSource = remappedStates[0] as FakeAttributionSourceState
+        val remappedOther = remappedStates[1] as FakeAttributionSourceState
+        assertNotSame(states, remappedStates)
+        assertNotSame(source, remappedSource)
+        assertSame(other, remappedOther)
+        assertEquals("com.multiapp.app", remappedSource.packageName)
+        assertEquals(10466, remappedSource.uid)
+        assertEquals("com.other", remappedOther.packageName)
+        assertEquals(2000, remappedOther.uid)
     }
 
     @Test
@@ -1981,5 +2071,11 @@ class VirtualContextWrapperTest {
             lastPackageName = packageName
             return 7
         }
+    }
+
+    private class FakeAttributionSourceState {
+        var uid: Int = 0
+        var packageName: String? = null
+        var next: FakeAttributionSourceState? = null
     }
 }

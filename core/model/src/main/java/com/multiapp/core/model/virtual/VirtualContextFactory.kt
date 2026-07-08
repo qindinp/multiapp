@@ -36,7 +36,9 @@ data class VirtualContextConfig(
     /** Android split names corresponding to split APK paths. */
     val splitNames: List<String> = packageSnapshot?.splitNames.orEmpty(),
     /** Whether the package requests isolated split loading. */
-    val isolatedSplits: Boolean = packageSnapshot?.isolatedSplits ?: false
+    val isolatedSplits: Boolean = packageSnapshot?.isolatedSplits ?: false,
+    /** Real host Android process slot currently owning this virtual runtime. */
+    val processSlot: String? = null
 ) {
     /** Code paths for class loading: base APK first, then split APKs. */
     val codeSourceDirs: List<String>

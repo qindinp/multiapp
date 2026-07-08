@@ -28,11 +28,34 @@ object ProxyActivitySlots {
         }
     }
 
-    fun processNameByClassName(hostPackageName: String): Map<String, String> =
-        classNames(hostPackageName).mapIndexed { index, className ->
-            className to "$hostPackageName:v$index"
-        }.toMap()
+    fun processNameByClassName(hostPackageName: String): Map<String, String> = buildMap {
+        repeat(SLOT_COUNT) { index ->
+            val processName = "$hostPackageName:v$index"
+            put("$hostPackageName.container.ProxyActivity$index", processName)
+            put("$hostPackageName.container.ProxyActivitySingleTop$index", processName)
+            put("$hostPackageName.container.ProxyActivitySingleTask$index", processName)
+        }
+    }
 
     fun processNameForClassName(hostPackageName: String, className: String): String? =
         processNameByClassName(hostPackageName)[className]
+
+    fun classNamesForProcessSlot(hostPackageName: String, processSlot: String?): List<String> {
+        val index = processSlotIndex(hostPackageName, processSlot) ?: return classNames(hostPackageName)
+        return listOf(
+            "$hostPackageName.container.ProxyActivity$index",
+            "$hostPackageName.container.ProxyActivitySingleTop$index",
+            "$hostPackageName.container.ProxyActivitySingleTask$index"
+        )
+    }
+
+    fun processSlotIndex(hostPackageName: String, processSlot: String?): Int? {
+        if (processSlot.isNullOrBlank()) return null
+        val expectedPrefix = "$hostPackageName:v"
+        if (!processSlot.startsWith(expectedPrefix)) return null
+        return processSlot
+            .removePrefix(expectedPrefix)
+            .toIntOrNull()
+            ?.takeIf { it in 0 until SLOT_COUNT }
+    }
 }

@@ -278,5 +278,5 @@ object AppModule {
         }
     }
 
-    private const val PROCESS_SLOT_COUNT = 24
+    private const val PROCESS_SLOT_COUNT = 8
 }
