@@ -173,7 +173,7 @@ class DefaultVirtualAmsComponentDispatcher(
             reason = "missingPackageSnapshot"
         )
         val manager = VirtualServiceManager(hostPackageName = hostPackageName)
-        val request = if (foreground) {
+        val resolvedRequest = if (foreground) {
             manager.resolveStartForegroundService(snapshot, intent)
         } else {
             manager.resolveStartService(snapshot, intent)
@@ -183,6 +183,7 @@ class DefaultVirtualAmsComponentDispatcher(
                 foreground = foreground,
                 reason = "unsupportedServiceIntent"
             )
+        val request = resolvedRequest.copy(processSlot = processRuntime.get(resolvedRequest.instanceId)?.result?.processSlot ?: processSlot)
         val proxyIntent = serviceProxyIntentFactory(manager, request)
         return VirtualContextWrapper.StartServiceMappingResult.Remapped(
             sourceIntent = intent,
@@ -241,14 +242,17 @@ class DefaultVirtualAmsComponentDispatcher(
             serviceResolved = false
         )
         val serviceManager = VirtualServiceManager(hostPackageName = hostPackageName)
-        val startRequest = serviceManager.resolveStartService(snapshot, intent)
-        if (startRequest == null) {
+        val resolvedStartRequest = serviceManager.resolveStartService(snapshot, intent)
+        if (resolvedStartRequest == null) {
             return VirtualServiceBindDispatchResult.Blocked(
                 sourceIntent = intent,
                 reason = "unsupportedServiceIntent",
                 serviceResolved = false
             )
         }
+        val startRequest = resolvedStartRequest.copy(
+            processSlot = processRuntime.get(resolvedStartRequest.instanceId)?.result?.processSlot ?: processSlot
+        )
         val bindRequest = VirtualServiceRuntimeBindRequest(
             startRequest = startRequest,
             guestContext = virtualContext,

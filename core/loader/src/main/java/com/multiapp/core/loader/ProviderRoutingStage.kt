@@ -1,5 +1,7 @@
 package com.multiapp.core.loader
 
+import com.multiapp.core.identity.ProviderRouteTokenRegistry
+
 class ProviderRoutingStage(
     private val hostPackageName: String?,
     private val providerHookInstallEnabled: Boolean,
@@ -24,8 +26,10 @@ class ProviderRoutingStage(
         val providerRoutingPlan = routingPlanFactory.create(
             snapshot = packageSnapshot,
             hostPackageName = hostPackageName,
+            processSlot = input.processSlot,
             passThroughHookAllowed = providerHookInstallEnabled
         )
+        ProviderRouteTokenRegistry.rememberProcessSlot(packageSnapshot.instanceId, input.processSlot)
         val providerHookInstallResult = if (providerHookInstallEnabled) {
             providerHookInstaller.install(providerRoutingPlan)
         } else {

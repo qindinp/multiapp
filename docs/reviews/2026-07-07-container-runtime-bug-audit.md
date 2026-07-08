@@ -765,6 +765,58 @@ the local 180s tool timeout, so it was split by module and then passed.
 
 - This is still not device proof. Need evidence that standard/singleTop/
   singleTask launches for one instance remain in the same `:vN` process.
-- Provider/Service/Broadcast owning-process routing is still incomplete.
+- Provider/Service/Broadcast owning-process routing is still incomplete. The
+  next slice starts Provider/Service slot-aware Android entry components, but
+  device evidence and Broadcast routing remain open.
 - LoadedApk/Application equivalence remains incomplete and still blocks
   commercial compatibility claims.
+
+## Execution Update - 2026-07-08 Provider/Service Slot Entry
+
+### Implemented in this pass
+
+- Provider route tokens now optionally bind `processSlot`, and validation can
+  reject an otherwise valid token when the expected slot does not match.
+- `ProviderRoutingStage` stores `instanceId -> processSlot` before installing
+  provider routing, so both baseline and hook-enabled URI rewrite paths can
+  issue slot-bound provider tokens.
+- Provider URI/extras rewrite now carries `multiapp_processSlot`; guest URI and
+  extras conversion removes it before dispatch to guest provider code.
+- Added `StubContentProviderV0..V7` manifest provider entries with unique
+  authorities `${applicationId}.multiapp.provider.stub.vN` and matching
+  `android:process=":vN"`.
+- `VirtualProviderManager` resolves slot-specific proxy authorities when a
+  process slot is known, and `HostedProviderRuntimeBinder` passes that slot
+  into hosted runtime bootstrap.
+- Added `StubServiceV0..V7` manifest service entries bound to `:v0..:v7`.
+- `VirtualServiceStartRequest` and `VirtualServiceProxySpec` now carry
+  `processSlot`; `VirtualServiceManager` maps slot-aware starts to the matching
+  `StubServiceVN` instead of the default-process fallback.
+- `HostedServiceRuntimeBinder` passes the service process slot into hosted
+  runtime bootstrap and rejects cached runtime results from a different slot.
+- Service/provider evidence records the runtime-bind process slot.
+
+### Verification
+
+```bash
+./gradlew :app:testDebugUnitTest --tests "com.multiapp.app.container.HostedProviderRuntimeBinderTest" --tests "com.multiapp.app.container.HostedServiceRuntimeBinderTest" --tests "com.multiapp.app.container.StubContentProviderRouteTokenTest" --tests "com.multiapp.app.container.ProviderProxyUriTest" --tests "com.multiapp.app.container.ProxyActivityClassParityTest" :core:identity:testDebugUnitTest --tests "com.multiapp.core.identity.ContentProviderHookUriRewriteTest" :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ProviderRoutingStageTest" --tests "com.multiapp.core.loader.VirtualServiceManagerTest" --tests "com.multiapp.core.loader.VirtualProviderManagerTest" --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ProviderRoutingStageTest" --tests "com.multiapp.core.loader.VirtualServiceManagerTest" --tests "com.multiapp.core.loader.VirtualProviderManagerTest" --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :app:assembleDebug --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+```
+
+The combined command reached a JVM test failure in loader because the test used
+unmocked `android.net.Uri.parse`; app target tests had already passed. The
+loader test was corrected to assert pure provider resolution, and the focused
+loader command then passed. `:app:assembleDebug` also passed; the existing AGP
+8.7.3 / `compileSdk=36` compatibility warning remains.
+
+### Still BLOCK
+
+- Provider/Service slot-aware entry is locally covered but not device-proven.
+  Device evidence must show the actual Android process name for provider and
+  service dispatch is the expected `:vN` and not the default host process.
+- Broadcast still has no slot-aware gateway and remains process-local.
+- `EngineRuntimeRegistry.global`, `VirtualProcessRuntime.global`, and
+  component record managers remain per-process memory state; cross-process
+  runtime truth still needs a durable/binder-backed strategy.
+- LoadedApk/Application equivalence remains incomplete.

@@ -36,7 +36,7 @@ class HostedProviderRuntimeBinderTest {
         var bootstrapCalls = 0
         val binder = HostedProviderRuntimeBinder(
             runtime = runtime,
-            bootstrapRunner = { _, _ ->
+            bootstrapRunner = { _, _, _ ->
                 bootstrapCalls += 1
                 hostedResult("inst-001")
             }
@@ -60,9 +60,10 @@ class HostedProviderRuntimeBinderTest {
         var bootstrapCalls = 0
         val binder = HostedProviderRuntimeBinder(
             runtime = runtime,
-            bootstrapRunner = { _, instanceId ->
+            bootstrapRunner = { _, instanceId, processSlot ->
                 bootstrapCalls += 1
                 assertEquals("inst-001", instanceId)
+                assertEquals(null, processSlot)
                 bootstrapped
             }
         )
@@ -82,7 +83,7 @@ class HostedProviderRuntimeBinderTest {
     fun `ensureBound reports bootstrap failure`() {
         val binder = HostedProviderRuntimeBinder(
             runtime = VirtualProcessRuntime(),
-            bootstrapRunner = { _, _ -> error("boom") }
+            bootstrapRunner = { _, _, _ -> error("boom") }
         )
 
         val result = binder.ensureBound(hostContext(), proxyUri())
@@ -97,6 +98,47 @@ class HostedProviderRuntimeBinderTest {
         assertEquals("boom", failed.errorMessage)
     }
 
+    @Test
+    fun `ensureBound passes provider route process slot into bootstrap`() {
+        val runtime = VirtualProcessRuntime()
+        val processSlot = "com.multiapp.app:v3"
+        val bootstrapped = hostedResult("inst-001", processSlot = processSlot)
+        var capturedProcessSlot: String? = null
+        val binder = HostedProviderRuntimeBinder(
+            runtime = runtime,
+            bootstrapRunner = { _, instanceId, requestedProcessSlot ->
+                assertEquals("inst-001", instanceId)
+                capturedProcessSlot = requestedProcessSlot
+                bootstrapped
+            }
+        )
+
+        val result = binder.ensureBound(hostContext(), proxyUri(processSlot = processSlot))
+
+        val bound = result as HostedProviderRuntimeBindResult.Bound
+        assertEquals(processSlot, capturedProcessSlot)
+        assertEquals(processSlot, bound.processSlot)
+        assertEquals(processSlot, runtime.get("inst-001")?.result?.processSlot)
+    }
+
+    @Test
+    fun `ensureBound rejects cached runtime from another process slot`() {
+        val runtime = VirtualProcessRuntime()
+        runtime.bindApplication("inst-001") {
+            hostedResult("inst-001", processSlot = "com.multiapp.app:v1")
+        }
+        val binder = HostedProviderRuntimeBinder(
+            runtime = runtime,
+            bootstrapRunner = { _, _, _ -> error("should not bootstrap") }
+        )
+
+        val result = binder.ensureBound(hostContext(), proxyUri(processSlot = "com.multiapp.app:v3"))
+
+        val failed = result as HostedProviderRuntimeBindResult.Failed
+        assertEquals("runtimeProcessSlotMismatch", failed.detail)
+        assertEquals("com.multiapp.app:v3", failed.processSlot)
+    }
+
     private fun hostContext(): Context = mockk(relaxed = true) {
         every { packageName } returns "com.multiapp.app"
         every { filesDir } returns File("build/tmp/hosted-provider-runtime-binder-test")
@@ -105,17 +147,23 @@ class HostedProviderRuntimeBinderTest {
 
     private fun proxyUri(
         instanceId: String? = "inst-001",
-        guestAuthority: String? = "com.example.app.probe"
+        guestAuthority: String? = "com.example.app.probe",
+        processSlot: String? = null
     ): Uri = mockk(relaxed = true) {
         every { getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID) } returns instanceId
         every { getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY) } returns guestAuthority
+        every { getQueryParameter(VirtualProviderManager.PROXY_PROCESS_SLOT) } returns processSlot
     }
 
-    private fun hostedResult(instanceId: String): HostedBootstrapResult = HostedBootstrapResult(
+    private fun hostedResult(
+        instanceId: String,
+        processSlot: String? = null
+    ): HostedBootstrapResult = HostedBootstrapResult(
         instanceId = instanceId,
         installId = "com.example.app",
         originPackageName = "com.example.app",
         virtualPackageName = "com.multiapp.instance.example",
+        processSlot = processSlot,
         originApkPath = "/tmp/base.apk",
         dataRoot = "/tmp/$instanceId",
         guestClassLoader = ClassLoader.getSystemClassLoader(),

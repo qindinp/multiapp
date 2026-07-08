@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -79,6 +80,17 @@ class VirtualProviderManagerTest {
     }
 
     @Test
+    fun `resolve targets process slot provider authority when instance process slot is known`() {
+        val snapshot = snapshot(instanceId = "provider-manager-slot-inst")
+        ProviderRouteTokenRegistry.rememberProcessSlot(snapshot.instanceId, "com.multiapp.app:v3")
+
+        val resolution = VirtualProviderManager("com.multiapp.app").resolve(snapshot, "com.test.minimal.probe")
+
+        assertNotNull(resolution)
+        assertEquals("com.multiapp.app.multiapp.provider.stub.v3", resolution.proxyAuthority)
+    }
+
+    @Test
     fun `unknown authority does not resolve or rewrite authority`() {
         val manager = VirtualProviderManager("com.multiapp.app")
 
@@ -137,8 +149,8 @@ class VirtualProviderManagerTest {
         assertEquals("PROVIDER_NOT_FOUND", missing.reason)
     }
 
-    private fun snapshot() = VirtualPackageSnapshot(
-        instanceId = "inst-001",
+    private fun snapshot(instanceId: String = "inst-001") = VirtualPackageSnapshot(
+        instanceId = instanceId,
         originPackageName = "com.test.minimal",
         virtualPackageName = "com.multiapp.instance.abc",
         applicationLabel = "MinimalTest",

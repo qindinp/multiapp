@@ -50,6 +50,31 @@ class StubContentProviderRouteTokenTest {
     }
 
     @Test
+    fun `provider route gate canonical query uses token process slot`() {
+        val route = ProviderRouteTokenRegistry.issue(
+            callerInstanceId = "inst-001",
+            targetInstanceId = "inst-001",
+            authority = "com.test.minimal.probe",
+            operation = "query",
+            processSlot = "com.multiapp.app:v3"
+        )
+
+        val canonicalQuery = ProviderRouteTokenGate.canonicalEncodedQueryForTest(
+            encodedQuery = "bookId=123&multiapp_processSlot=com.multiapp.app%3Av7",
+            route = route
+        )
+
+        assertEquals(
+            "bookId=123" +
+                "&multiapp_instanceId=inst-001" +
+                "&multiapp_guestAuthority=com.test.minimal.probe" +
+                "&multiapp_processSlot=com.multiapp.app:v3" +
+                "&multiapp_routeToken=${route.token}",
+            canonicalQuery
+        )
+    }
+
+    @Test
     fun `stub route token is bound to operation`() {
         val route = ProviderRouteTokenRegistry.issue(
             callerInstanceId = "inst-001",
@@ -104,6 +129,27 @@ class StubContentProviderRouteTokenTest {
         )
 
         assertEquals("invalid route token:AUTHORITY_MISMATCH", status)
+    }
+
+    @Test
+    fun `stub route token is bound to process slot when expected`() {
+        val route = ProviderRouteTokenRegistry.issue(
+            callerInstanceId = "inst-001",
+            targetInstanceId = "inst-001",
+            authority = "com.test.minimal.probe",
+            operation = "query",
+            processSlot = "com.multiapp.app:v1"
+        )
+
+        val status = StubContentProvider().routeTokenStatusForTest(
+            token = route.token,
+            instanceId = "inst-001",
+            guestAuthority = "com.test.minimal.probe",
+            operationName = "query",
+            expectedProcessSlot = "com.multiapp.app:v2"
+        )
+
+        assertEquals("invalid route token:PROCESS_SLOT_MISMATCH", status)
     }
 
     @Test

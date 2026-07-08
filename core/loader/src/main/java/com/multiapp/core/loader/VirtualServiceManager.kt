@@ -16,7 +16,8 @@ data class VirtualServiceStartRequest(
     val sourceIntent: Intent,
     val reason: String,
     val foreground: Boolean = false,
-    val proxyToken: String? = null
+    val proxyToken: String? = null,
+    val processSlot: String? = null
 )
 
 data class VirtualServiceStopRequest(
@@ -35,7 +36,8 @@ data class VirtualServiceProxySpec(
     val originPackageName: String,
     val guestServiceClassName: String,
     val reason: String,
-    val foreground: Boolean = false
+    val foreground: Boolean = false,
+    val processSlot: String? = null
 )
 
 /**
@@ -58,6 +60,7 @@ class VirtualServiceManager(
         const val EXTRA_SERVICE_START_REASON = "multiapp.serviceStartReason"
         const val EXTRA_ORIGINAL_GUEST_INTENT = "multiapp.originalGuestServiceIntent"
         const val EXTRA_FOREGROUND_SERVICE = "multiapp.foregroundService"
+        const val EXTRA_PROCESS_SLOT = "multiapp.processSlot"
     }
 
     fun resolveStartService(snapshot: VirtualPackageSnapshot, intent: Intent): VirtualServiceStartRequest? {
@@ -151,6 +154,9 @@ class VirtualServiceManager(
             putExtra(EXTRA_GUEST_SERVICE_CLASS_NAME, spec.guestServiceClassName)
             putExtra(EXTRA_SERVICE_START_REASON, spec.reason)
             putExtra(EXTRA_FOREGROUND_SERVICE, spec.foreground)
+            if (!spec.processSlot.isNullOrBlank()) {
+                putExtra(EXTRA_PROCESS_SLOT, spec.processSlot)
+            }
             VirtualServiceIntentStore.remember(spec.token, request.sourceIntent)
         }
     }
@@ -162,6 +168,7 @@ class VirtualServiceManager(
         if (instanceId.isBlank() || originPackageName.isBlank() || guestServiceClassName.isBlank()) return null
         val reason = proxyIntent.getStringExtra(EXTRA_SERVICE_START_REASON).orEmpty().ifBlank { "explicit" }
         val proxyToken = proxyIntent.getStringExtra(EXTRA_VIRTUAL_SERVICE_TOKEN)
+        val processSlot = proxyIntent.getStringExtra(EXTRA_PROCESS_SLOT)?.takeIf { it.isNotBlank() }
         val sourceIntent = VirtualServiceIntentStore.find(proxyToken)
             ?: legacyOriginalGuestIntent(proxyIntent)
             ?: Intent().setComponent(ComponentName(originPackageName, guestServiceClassName))
@@ -172,20 +179,27 @@ class VirtualServiceManager(
             sourceIntent = sourceIntent,
             reason = reason,
             foreground = proxyIntent.getBooleanExtra(EXTRA_FOREGROUND_SERVICE, false),
-            proxyToken = proxyToken
+            proxyToken = proxyToken,
+            processSlot = processSlot
         )
     }
 
     fun createProxySpec(request: VirtualServiceStartRequest): VirtualServiceProxySpec = VirtualServiceProxySpec(
         hostPackageName = hostPackageName,
-        stubServiceClassName = stubServiceClassName,
+        stubServiceClassName = stubServiceClassNameForProcessSlot(request.processSlot) ?: stubServiceClassName,
         token = UUID.randomUUID().toString(),
         instanceId = request.instanceId,
         originPackageName = request.originPackageName,
         guestServiceClassName = request.guestServiceClassName,
         reason = request.reason,
-        foreground = request.foreground
+        foreground = request.foreground,
+        processSlot = request.processSlot
     )
+
+    fun stubServiceClassNameForProcessSlot(processSlot: String?): String? {
+        val index = ProxyActivitySlots.processSlotIndex(hostPackageName, processSlot) ?: return null
+        return "$hostPackageName.container.StubServiceV$index"
+    }
 
     private fun normalizeServiceClassName(packageName: String, className: String): String = when {
         className.startsWith(".") -> packageName + className

@@ -1,6 +1,7 @@
 package com.multiapp.core.loader
 
 import com.multiapp.core.hook.HookEngine
+import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.mockk
@@ -24,7 +25,11 @@ class ProviderRoutingStageTest {
         )
 
         val output = stage.execute(
-            BootstrapStageInput(instanceId = snapshot.instanceId, packageSnapshot = snapshot)
+            BootstrapStageInput(
+                instanceId = snapshot.instanceId,
+                processSlot = "com.multiapp.app:v3",
+                packageSnapshot = snapshot
+            )
         )
 
         assertEquals(RuntimeStage.GUEST_CONTEXT, output.result.stage)
@@ -32,9 +37,11 @@ class ProviderRoutingStageTest {
         assertEquals(8L, output.result.durationMs)
         val plan = assertNotNull(output.context.providerRoutingPlan)
         assertTrue(plan.enabled)
+        assertEquals("com.multiapp.app:v3", plan.processSlot)
         assertEquals("AUTHORITY_MAP_READY", plan.reason)
         val evidence = output.result.evidence.associate { it.key to it.value }
         assertEquals("true", evidence["providerRoutingEnabled"])
+        assertEquals("com.multiapp.app:v3", evidence["providerRoutingProcessSlot"])
         assertEquals("AUTHORITY_MAP_READY", evidence["providerRoutingReason"])
         assertEquals("ACTIVITY_THREAD_PROVIDER_ACQUISITION_PROXY", evidence["providerRoutingPrimary"])
         assertEquals("NONE", evidence["providerRoutingFallback"])
@@ -48,6 +55,7 @@ class ProviderRoutingStageTest {
         assertEquals("CONTENT_RESOLVER_HOOK_DISABLED", evidence["providerOperationGrantUriPermissionStatus"])
         assertEquals("SKIPPED", evidence["providerHookInstallStatus"])
         assertEquals("PROFILE_DISABLED", evidence["providerHookInstallReason"])
+        assertEquals("com.multiapp.app:v3", ProviderRouteTokenRegistry.processSlotForInstance(snapshot.instanceId))
     }
 
     @Test
@@ -99,7 +107,7 @@ class ProviderRoutingStageTest {
     }
 
     private fun snapshotWithProvider() = VirtualPackageSnapshot(
-        instanceId = "inst-001",
+        instanceId = "provider-stage-inst-001",
         originPackageName = "com.example.app",
         virtualPackageName = "com.multiapp.instance.abc123",
         applicationLabel = "Example App",

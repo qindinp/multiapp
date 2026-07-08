@@ -71,6 +71,29 @@ class ProxyActivityClassParityTest {
         }
     }
 
+    @Test
+    fun `manifest service process entries match proxy process slots`() {
+        val manifest = loadStubServiceManifestEntries()
+
+        assertEquals(ProxyActivitySlots.SLOT_COUNT, manifest.size)
+        manifest.forEachIndexed { index, entry ->
+            assertEquals("com.multiapp.app.container.StubServiceV$index", entry.className)
+            assertEquals(":v$index", entry.processName)
+        }
+    }
+
+    @Test
+    fun `manifest provider process entries match proxy process slots`() {
+        val manifest = loadStubProviderManifestEntries()
+
+        assertEquals(ProxyActivitySlots.SLOT_COUNT, manifest.size)
+        manifest.forEachIndexed { index, entry ->
+            assertEquals("com.multiapp.app.container.StubContentProviderV$index", entry.className)
+            assertEquals("\${applicationId}.multiapp.provider.stub.v$index", entry.authority)
+            assertEquals(":v$index", entry.processName)
+        }
+    }
+
     private fun Class<*>.isAssignableTo(baseClass: Class<*>): Boolean =
         baseClass.isAssignableFrom(this)
 
@@ -121,6 +144,41 @@ class ProxyActivityClassParityTest {
         }
     }
 
+    private fun loadStubServiceManifestEntries(): List<ManifestServiceEntry> {
+        val manifestFile = findManifestFile()
+        val document = DocumentBuilderFactory.newInstance()
+            .newDocumentBuilder()
+            .parse(manifestFile)
+        val services = document.getElementsByTagName("service")
+        return (0 until services.length).mapNotNull { index ->
+            val element = services.item(index)
+            val name = element.attributes.getNamedItem("android:name")?.nodeValue.orEmpty()
+            if (!name.startsWith(".container.StubServiceV")) return@mapNotNull null
+            ManifestServiceEntry(
+                className = "com.multiapp.app${name}",
+                processName = element.attributes.getNamedItem("android:process")?.nodeValue.orEmpty()
+            )
+        }
+    }
+
+    private fun loadStubProviderManifestEntries(): List<ManifestProviderEntry> {
+        val manifestFile = findManifestFile()
+        val document = DocumentBuilderFactory.newInstance()
+            .newDocumentBuilder()
+            .parse(manifestFile)
+        val providers = document.getElementsByTagName("provider")
+        return (0 until providers.length).mapNotNull { index ->
+            val element = providers.item(index)
+            val name = element.attributes.getNamedItem("android:name")?.nodeValue.orEmpty()
+            if (!name.startsWith(".container.StubContentProviderV")) return@mapNotNull null
+            ManifestProviderEntry(
+                className = "com.multiapp.app${name}",
+                authority = element.attributes.getNamedItem("android:authorities")?.nodeValue.orEmpty(),
+                processName = element.attributes.getNamedItem("android:process")?.nodeValue.orEmpty()
+            )
+        }
+    }
+
     private fun findManifestFile(): File {
         val candidates = generateSequence(File(".").absoluteFile) { file -> file.parentFile }
             .flatMap { dir ->
@@ -146,5 +204,16 @@ class ProxyActivityClassParityTest {
         val launchMode: String,
         val processName: String,
         val excludeFromRecents: Boolean
+    )
+
+    private data class ManifestServiceEntry(
+        val className: String,
+        val processName: String
+    )
+
+    private data class ManifestProviderEntry(
+        val className: String,
+        val authority: String,
+        val processName: String
     )
 }

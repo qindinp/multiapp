@@ -12,6 +12,7 @@ class ProviderProxyUriTest {
             "multiapp_instanceId=inst-001" +
                 "&bookId=123" +
                 "&multiapp_guestAuthority=com.test.minimal.probe" +
+                "&multiapp_processSlot=com.multiapp.app%3Av3" +
                 "&multiapp_routeToken=route-token-001" +
                 "&token=a%3Db" +
                 "&bookId=456" +

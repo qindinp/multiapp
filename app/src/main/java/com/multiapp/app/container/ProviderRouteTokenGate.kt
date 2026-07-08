@@ -15,6 +15,8 @@ internal object ProviderRouteTokenGate {
     ): ProviderRouteTokenGateResult {
         val instanceId = uri.getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID)
         val guestAuthority = uri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+        val expectedProcessSlot = uri.getQueryParameter(VirtualProviderManager.PROXY_PROCESS_SLOT)
+            ?.takeIf { it.isNotBlank() }
         val token = uri.getQueryParameter(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN)
 
         if (instanceId.isNullOrBlank()) {
@@ -34,6 +36,7 @@ internal object ProviderRouteTokenGate {
             targetInstanceId = instanceId,
             authority = guestAuthority,
             operation = operationName,
+            expectedProcessSlot = expectedProcessSlot,
             nowMillis = nowMillis
         )
         if (!result.isValid) {
@@ -67,6 +70,9 @@ internal object ProviderRouteTokenGate {
             preservedGuestQuery,
             "${VirtualProviderManager.PROXY_INSTANCE_ID}=${route.targetInstanceId}",
             "${VirtualProviderManager.PROXY_GUEST_AUTHORITY}=${route.authority}",
+            route.processSlot?.takeIf { it.isNotBlank() }?.let {
+                "${VirtualProviderManager.PROXY_PROCESS_SLOT}=$it"
+            },
             "${ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN}=${route.token}"
         ).joinToString("&")
     }

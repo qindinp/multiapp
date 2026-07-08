@@ -25,7 +25,7 @@ import java.io.FileNotFoundException
  * rewritten to this stub authority and then dispatched to the process-local
  * virtual provider runtime.
  */
-class StubContentProvider : ContentProvider() {
+open class StubContentProvider : ContentProvider() {
 
     override fun onCreate(): Boolean {
         Log.i(TAG, "StubContentProvider created: authority=${context?.packageName}.multiapp.provider.stub")
@@ -285,12 +285,19 @@ class StubContentProvider : ContentProvider() {
         val routeToken = extras.getString(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN)
             ?.takeIf { it.isNotBlank() }
             ?: return null
+        val processSlot = extras.getString(VirtualProviderManager.PROXY_PROCESS_SLOT)
+            ?.takeIf { it.isNotBlank() }
         val hostPackageName = context?.packageName ?: return null
         val proxyUri = Uri.Builder()
             .scheme("content")
-            .authority("$hostPackageName.multiapp.provider.stub")
+            .authority(stubAuthority(hostPackageName, processSlot))
             .appendQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID, instanceId)
             .appendQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY, guestAuthority)
+            .apply {
+                if (!processSlot.isNullOrBlank()) {
+                    appendQueryParameter(VirtualProviderManager.PROXY_PROCESS_SLOT, processSlot)
+                }
+            }
             .appendQueryParameter(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN, routeToken)
             .build()
         return ProviderCallRoute(proxyUri, arg)
@@ -301,8 +308,16 @@ class StubContentProvider : ContentProvider() {
         instanceId: String?,
         guestAuthority: String?,
         operationName: String,
+        expectedProcessSlot: String? = null,
         nowMillis: Long = System.currentTimeMillis()
-    ): String = validateRouteTokenFields(token, instanceId, guestAuthority, operationName, nowMillis)?.reason
+    ): String = validateRouteTokenFields(
+        token = token,
+        instanceId = instanceId,
+        guestAuthority = guestAuthority,
+        operationName = operationName,
+        expectedProcessSlot = expectedProcessSlot,
+        nowMillis = nowMillis
+    )?.reason
         ?: "VALID"
 
     private fun validateRouteToken(uri: Uri, operationName: String): ProviderRouteTokenGateResult {
@@ -314,6 +329,7 @@ class StubContentProvider : ContentProvider() {
         instanceId: String?,
         guestAuthority: String?,
         operationName: String,
+        expectedProcessSlot: String? = null,
         nowMillis: Long = System.currentTimeMillis()
     ): VirtualProviderDispatchResult.InvalidProxyUri? {
         if (instanceId.isNullOrBlank()) {
@@ -328,6 +344,7 @@ class StubContentProvider : ContentProvider() {
             targetInstanceId = instanceId,
             authority = guestAuthority,
             operation = operationName,
+            expectedProcessSlot = expectedProcessSlot,
             nowMillis = nowMillis
         )
         return if (result.isValid) {
@@ -346,6 +363,7 @@ class StubContentProvider : ContentProvider() {
         return Bundle(this).apply {
             remove(VirtualProviderManager.PROXY_INSTANCE_ID)
             remove(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+            remove(VirtualProviderManager.PROXY_PROCESS_SLOT)
             remove(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN)
         }
     }
@@ -412,6 +430,7 @@ class StubContentProvider : ContentProvider() {
                         ?: uri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
                         ?: ""
                     ),
+                "providerRuntimeBindProcessSlot" to result.processSlotForEvidence().orEmpty(),
                 "detail" to result.detail
             )
             ContainerRuntimeEvidenceWriter.write(
@@ -527,6 +546,7 @@ class StubContentProvider : ContentProvider() {
             "originPackageName" to originPackageNameForEvidence().orEmpty(),
             "virtualPackageName" to virtualPackageNameForEvidence().orEmpty(),
             "guestAuthority" to guestAuthorityForEvidence().orEmpty(),
+            "processSlot" to uri.getQueryParameter(VirtualProviderManager.PROXY_PROCESS_SLOT).orEmpty(),
             "providerClassName" to providerClassNameForEvidence().orEmpty(),
             "proxyAuthority" to methodEvidence.proxyAuthority.orEmpty(),
             "evidenceOperation" to methodEvidence.operation.name,
@@ -664,6 +684,12 @@ class StubContentProvider : ContentProvider() {
         is HostedProviderRuntimeBindResult.NotRequested -> null
     }
 
+    private fun HostedProviderRuntimeBindResult.processSlotForEvidence(): String? = when (this) {
+        is HostedProviderRuntimeBindResult.Bound -> processSlot
+        is HostedProviderRuntimeBindResult.Failed -> processSlot
+        is HostedProviderRuntimeBindResult.NotRequested -> null
+    }
+
     private fun HostedProviderRuntimeBindResult.errorClassNameForEvidence(): String? = when (this) {
         is HostedProviderRuntimeBindResult.Failed -> errorClassName
         else -> null
@@ -676,6 +702,13 @@ class StubContentProvider : ContentProvider() {
 
     companion object {
         private const val TAG = "StubContentProvider"
+
+        private fun stubAuthority(hostPackageName: String, processSlot: String?): String {
+            val base = "$hostPackageName.multiapp.provider.stub"
+            val index = com.multiapp.core.loader.ProxyActivitySlots.processSlotIndex(hostPackageName, processSlot)
+                ?: return base
+            return "$base.v$index"
+        }
 
         private fun Uri.withoutRouteToken(): Uri {
             return buildUpon()
@@ -692,3 +725,12 @@ class StubContentProvider : ContentProvider() {
         }
     }
 }
+
+class StubContentProviderV0 : StubContentProvider()
+class StubContentProviderV1 : StubContentProvider()
+class StubContentProviderV2 : StubContentProvider()
+class StubContentProviderV3 : StubContentProvider()
+class StubContentProviderV4 : StubContentProvider()
+class StubContentProviderV5 : StubContentProvider()
+class StubContentProviderV6 : StubContentProvider()
+class StubContentProviderV7 : StubContentProvider()

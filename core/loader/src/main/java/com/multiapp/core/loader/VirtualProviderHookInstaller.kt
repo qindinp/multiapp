@@ -30,7 +30,8 @@ class VirtualProviderHookInstaller(
                 ProviderAuthorityHookConfig(
                     instanceId = plan.instanceId,
                     originalPackageName = plan.originPackageName,
-                    authorityMap = plan.authorityMap
+                    authorityMap = plan.authorityMap,
+                    processSlot = plan.processSlot
                 ),
                 hookEngine
             )

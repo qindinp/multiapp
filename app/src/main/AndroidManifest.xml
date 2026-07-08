@@ -530,12 +530,92 @@
             android:name=".container.StubService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".container.StubServiceV0"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v0" />
+        <service
+            android:name=".container.StubServiceV1"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v1" />
+        <service
+            android:name=".container.StubServiceV2"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v2" />
+        <service
+            android:name=".container.StubServiceV3"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v3" />
+        <service
+            android:name=".container.StubServiceV4"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v4" />
+        <service
+            android:name=".container.StubServiceV5"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v5" />
+        <service
+            android:name=".container.StubServiceV6"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v6" />
+        <service
+            android:name=".container.StubServiceV7"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v7" />
 
         <!-- v2 hosted Provider proxy slot. Guest Provider dispatch is partial/evidence-gated. -->
         <provider
             android:name=".container.StubContentProvider"
             android:authorities="${applicationId}.multiapp.provider.stub"
             android:exported="false" />
+        <provider
+            android:name=".container.StubContentProviderV0"
+            android:authorities="${applicationId}.multiapp.provider.stub.v0"
+            android:exported="false"
+            android:process=":v0" />
+        <provider
+            android:name=".container.StubContentProviderV1"
+            android:authorities="${applicationId}.multiapp.provider.stub.v1"
+            android:exported="false"
+            android:process=":v1" />
+        <provider
+            android:name=".container.StubContentProviderV2"
+            android:authorities="${applicationId}.multiapp.provider.stub.v2"
+            android:exported="false"
+            android:process=":v2" />
+        <provider
+            android:name=".container.StubContentProviderV3"
+            android:authorities="${applicationId}.multiapp.provider.stub.v3"
+            android:exported="false"
+            android:process=":v3" />
+        <provider
+            android:name=".container.StubContentProviderV4"
+            android:authorities="${applicationId}.multiapp.provider.stub.v4"
+            android:exported="false"
+            android:process=":v4" />
+        <provider
+            android:name=".container.StubContentProviderV5"
+            android:authorities="${applicationId}.multiapp.provider.stub.v5"
+            android:exported="false"
+            android:process=":v5" />
+        <provider
+            android:name=".container.StubContentProviderV6"
+            android:authorities="${applicationId}.multiapp.provider.stub.v6"
+            android:exported="false"
+            android:process=":v6" />
+        <provider
+            android:name=".container.StubContentProviderV7"
+            android:authorities="${applicationId}.multiapp.provider.stub.v7"
+            android:exported="false"
+            android:process=":v7" />
 
         <!-- FileProvider for sharing Stub APK with system installer -->
         <provider

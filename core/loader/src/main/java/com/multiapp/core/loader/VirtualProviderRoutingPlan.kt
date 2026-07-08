@@ -15,6 +15,7 @@ data class VirtualProviderRoutingPlan(
     val instanceId: String,
     val originPackageName: String,
     val hostPackageName: String?,
+    val processSlot: String? = null,
     val providerCount: Int,
     val authorityCount: Int,
     val authorityMap: Map<String, String>,
@@ -32,7 +33,8 @@ data class VirtualProviderRoutingPlan(
         BootstrapEvidence("providerCount", providerCount.toString(), SOURCE),
         BootstrapEvidence("providerAuthorityCount", authorityCount.toString(), SOURCE),
         BootstrapEvidence("providerAuthorityMapSize", authorityMap.size.toString(), SOURCE),
-        BootstrapEvidence("providerHostPackage", hostPackageName ?: "", SOURCE)
+        BootstrapEvidence("providerHostPackage", hostPackageName ?: "", SOURCE),
+        BootstrapEvidence("providerRoutingProcessSlot", processSlot.orEmpty(), SOURCE)
     ) + policySummary.toEvidence() + VirtualProviderOperationCapability.toEvidence(
         plan = this,
         contentResolverHookInstalled = contentResolverHookInstalled
@@ -129,6 +131,7 @@ class VirtualProviderRoutingPlanFactory(
     fun create(
         snapshot: VirtualPackageSnapshot,
         hostPackageName: String?,
+        processSlot: String? = null,
         passThroughHookAllowed: Boolean = false
     ): VirtualProviderRoutingPlan {
         val authorities = snapshot.providers.flatMap { it.authorities }.distinct()
@@ -138,6 +141,7 @@ class VirtualProviderRoutingPlanFactory(
                 instanceId = snapshot.instanceId,
                 originPackageName = snapshot.originPackageName,
                 hostPackageName = hostPackageName,
+                processSlot = processSlot,
                 providerCount = snapshot.providers.size,
                 authorityCount = authorities.size,
                 authorityMap = emptyMap(),
@@ -154,6 +158,7 @@ class VirtualProviderRoutingPlanFactory(
                 instanceId = snapshot.instanceId,
                 originPackageName = snapshot.originPackageName,
                 hostPackageName = hostPackageName,
+                processSlot = processSlot,
                 providerCount = snapshot.providers.size,
                 authorityCount = authorities.size,
                 authorityMap = emptyMap(),
@@ -181,6 +186,7 @@ class VirtualProviderRoutingPlanFactory(
             instanceId = snapshot.instanceId,
             originPackageName = snapshot.originPackageName,
             hostPackageName = hostPackageName,
+            processSlot = processSlot,
             providerCount = snapshot.providers.size,
             authorityCount = authorities.size,
             authorityMap = authorityMap,

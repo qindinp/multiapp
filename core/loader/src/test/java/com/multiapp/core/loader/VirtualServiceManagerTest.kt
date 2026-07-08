@@ -72,6 +72,22 @@ class VirtualServiceManagerTest {
     }
 
     @Test
+    fun `create proxy spec targets process slot StubService when process slot is present`() {
+        val manager = VirtualServiceManager(hostPackageName = "com.multiapp.app")
+        val request = manager.resolveExplicitService(
+            snapshot = snapshot(),
+            packageName = "com.test.minimal",
+            className = "com.test.minimal.SyncService",
+            sourceIntent = mockk(relaxed = true)
+        )!!.copy(processSlot = "com.multiapp.app:v3")
+
+        val spec = manager.createProxySpec(request)
+
+        assertEquals("com.multiapp.app.container.StubServiceV3", spec.stubServiceClassName)
+        assertEquals("com.multiapp.app:v3", spec.processSlot)
+    }
+
+    @Test
     fun `resolve explicit foreground Service intent marks foreground request`() {
         val manager = VirtualServiceManager(hostPackageName = "com.multiapp.app")
         val intent = mockk<Intent>(relaxed = true)
@@ -172,12 +188,13 @@ class VirtualServiceManagerTest {
             packageName = "com.test.minimal",
             className = "com.test.minimal.SyncService",
             sourceIntent = sourceIntent
-        )!!
+        )!!.copy(processSlot = "com.multiapp.app:v3")
         val proxyIntent = mockk<Intent>(relaxed = true)
         every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_INSTANCE_ID) } returns request.instanceId
         every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_ORIGIN_PACKAGE_NAME) } returns request.originPackageName
         every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_GUEST_SERVICE_CLASS_NAME) } returns request.guestServiceClassName
         every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_SERVICE_START_REASON) } returns request.reason
+        every { proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_PROCESS_SLOT) } returns request.processSlot
         every { proxyIntent.getParcelableExtra<Intent>(VirtualServiceManager.EXTRA_ORIGINAL_GUEST_INTENT) } returns sourceIntent
         every { proxyIntent.getBooleanExtra(VirtualServiceManager.EXTRA_FOREGROUND_SERVICE, false) } returns false
 
@@ -188,6 +205,7 @@ class VirtualServiceManagerTest {
         assertEquals(request.originPackageName, decoded.originPackageName)
         assertEquals(request.guestServiceClassName, decoded.guestServiceClassName)
         assertEquals(request.reason, decoded.reason)
+        assertEquals("com.multiapp.app:v3", decoded.processSlot)
         assertFalse(decoded.foreground)
     }
 

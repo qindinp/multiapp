@@ -4,8 +4,14 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.BeforeEach
 
 class ContentProviderHookUriRewriteTest {
+
+    @BeforeEach
+    fun clearRouteTokens() {
+        ProviderRouteTokenRegistry.clearForTest()
+    }
 
     @Test
     fun `provider hook query rewrite appends stub routing parameters`() {
@@ -28,6 +34,7 @@ class ContentProviderHookUriRewriteTest {
         val rewritten = ContentProviderHook.rewriteEncodedQueryForProviderHook(
             encodedQuery = "multiapp_instanceId=old" +
                 "&multiapp_guestAuthority=old.authority" +
+                "&multiapp_processSlot=old.slot" +
                 "&multiapp_routeToken=old-token" +
                 "&multiapp_instanceIdExtra=keep" +
                 "&multiapp_guestAuthorityExtra=keep" +
@@ -42,6 +49,27 @@ class ContentProviderHookUriRewriteTest {
                 "&token=a%26b" +
                 "&multiapp_instanceId=inst-002" +
                 "&multiapp_guestAuthority=com.test.minimal.probe",
+            rewritten
+        )
+    }
+
+    @Test
+    fun `provider hook query rewrite appends remembered process slot`() {
+        ProviderRouteTokenRegistry.rememberProcessSlot("inst-slot-001", "com.multiapp.app:v3")
+
+        val rewritten = ContentProviderHook.rewriteEncodedQueryForProviderHook(
+            encodedQuery = "bookId=123",
+            instanceId = "inst-slot-001",
+            guestAuthority = "com.test.minimal.probe",
+            routeToken = "route-token-001"
+        )
+
+        assertEquals(
+            "bookId=123" +
+                "&multiapp_instanceId=inst-slot-001" +
+                "&multiapp_guestAuthority=com.test.minimal.probe" +
+                "&multiapp_processSlot=com.multiapp.app:v3" +
+                "&multiapp_routeToken=route-token-001",
             rewritten
         )
     }
@@ -81,6 +109,7 @@ class ContentProviderHookUriRewriteTest {
             "multiapp_instanceId=inst-001" +
                 "&bookId=123" +
                 "&multiapp_guestAuthority=com.test.minimal.probe" +
+                "&multiapp_processSlot=com.multiapp.app%3Av3" +
                 "&multiapp_routeToken=route-token-001" +
                 "&token=a%3Db" +
                 "&bookId=456" +

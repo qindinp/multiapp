@@ -19,7 +19,7 @@ import com.multiapp.core.loader.VirtualProcessRuntime
 import com.multiapp.core.loader.VirtualServiceStartRequest
 
 /** Host-declared Service proxy slot for v2 hosted containers. */
-class StubService : Service() {
+open class StubService : Service() {
     private val mainHandler by lazy(LazyThreadSafetyMode.NONE) {
         Handler(Looper.getMainLooper())
     }
@@ -109,6 +109,7 @@ class StubService : Service() {
                 }.getOrElse { error ->
                     HostedServiceRuntimeBindResult.Failed(
                         instanceId = instanceId,
+                        processSlot = startRequest?.processSlot,
                         errorClassName = error.javaClass.name,
                         errorMessage = error.message,
                         detail = "runtimeBindCrashed"
@@ -212,6 +213,7 @@ class StubService : Service() {
                     "foregroundStatus" to evidence.foregroundStatus,
                     "runtimeBindStatus" to evidence.runtimeBindStatus,
                     "runtimeBindDetail" to evidence.runtimeBindDetail,
+                    "runtimeBindProcessSlot" to evidence.runtimeBindProcessSlot.orEmpty(),
                     "runtimeBindErrorClassName" to evidence.runtimeBindErrorClassName,
                     "runtimeBindErrorMessage" to evidence.runtimeBindErrorMessage,
                     "foregroundHeld" to evidence.foregroundHeld,
@@ -425,6 +427,7 @@ class StubService : Service() {
             foregroundStatus = foregroundStatus,
             runtimeBindStatus = runtimeBindResult.status,
             runtimeBindDetail = runtimeBindResult.detail,
+            runtimeBindProcessSlot = runtimeBindResult.processSlotForEvidence() ?: request?.processSlot,
             runtimeBindErrorClassName = (runtimeBindResult as? HostedServiceRuntimeBindResult.Failed)?.errorClassName,
             runtimeBindErrorMessage = (runtimeBindResult as? HostedServiceRuntimeBindResult.Failed)?.errorMessage,
             startId = startId,
@@ -474,6 +477,7 @@ class StubService : Service() {
         val foregroundStatus: String,
         val runtimeBindStatus: String,
         val runtimeBindDetail: String,
+        val runtimeBindProcessSlot: String?,
         val runtimeBindErrorClassName: String?,
         val runtimeBindErrorMessage: String?,
         val foregroundHeld: Boolean,
@@ -528,6 +532,12 @@ class StubService : Service() {
         }
     }
 
+    private fun HostedServiceRuntimeBindResult.processSlotForEvidence(): String? = when (this) {
+        is HostedServiceRuntimeBindResult.Bound -> processSlot
+        is HostedServiceRuntimeBindResult.Failed -> processSlot
+        is HostedServiceRuntimeBindResult.NotRequested -> null
+    }
+
     private fun enterForegroundIfNeeded(foreground: Boolean): String {
         if (!foreground) return "SKIPPED"
         return runCatching {
@@ -573,3 +583,12 @@ class StubService : Service() {
             .build()
     }
 }
+
+class StubServiceV0 : StubService()
+class StubServiceV1 : StubService()
+class StubServiceV2 : StubService()
+class StubServiceV3 : StubService()
+class StubServiceV4 : StubService()
+class StubServiceV5 : StubService()
+class StubServiceV6 : StubService()
+class StubServiceV7 : StubService()

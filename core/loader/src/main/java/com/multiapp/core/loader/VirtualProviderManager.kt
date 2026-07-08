@@ -16,7 +16,8 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
  */
 class VirtualProviderManager(
     private val hostPackageName: String,
-    private val stubAuthorityPrefix: String = "$hostPackageName.multiapp.provider.stub"
+    private val stubAuthorityPrefix: String = "$hostPackageName.multiapp.provider.stub",
+    private val processSlot: String? = null
 ) {
     fun resolve(snapshot: VirtualPackageSnapshot, authority: String): VirtualProviderResolution? {
         val provider = snapshot.providers.firstOrNull { authority in it.authorities } ?: return null
@@ -38,16 +39,23 @@ class VirtualProviderManager(
     ): VirtualProviderUriRewrite? {
         val authority = uri.authority ?: return null
         val resolution = resolve(snapshot, authority) ?: return null
+        val resolvedProcessSlot = processSlotForSnapshot(snapshot)
         val routeToken = ProviderRouteTokenRegistry.issue(
             callerInstanceId = snapshot.instanceId,
             targetInstanceId = snapshot.instanceId,
             authority = authority,
-            operation = operation
+            operation = operation,
+            processSlot = resolvedProcessSlot
         ).token
         val rewritten = uri.buildUpon()
             .authority(resolution.proxyAuthority)
             .appendQueryParameter(PROXY_INSTANCE_ID, snapshot.instanceId)
             .appendQueryParameter(PROXY_GUEST_AUTHORITY, authority)
+            .apply {
+                if (!resolvedProcessSlot.isNullOrBlank()) {
+                    appendQueryParameter(PROXY_PROCESS_SLOT, resolvedProcessSlot)
+                }
+            }
             .appendQueryParameter(PROXY_ROUTE_TOKEN, routeToken)
             .build()
         return VirtualProviderUriRewrite(
@@ -63,13 +71,22 @@ class VirtualProviderManager(
         return VirtualProviderOpenResult.Resolved(resolution)
     }
 
-    private fun proxyAuthority(snapshot: VirtualPackageSnapshot, guestAuthority: String): String {
-        return stubAuthorityPrefix
+    private fun proxyAuthority(snapshot: VirtualPackageSnapshot, guestAuthority: String): String =
+        proxyAuthorityForProcessSlot(processSlotForSnapshot(snapshot))
+
+    private fun processSlotForSnapshot(snapshot: VirtualPackageSnapshot): String? =
+        processSlot?.takeIf { it.isNotBlank() }
+            ?: ProviderRouteTokenRegistry.processSlotForInstance(snapshot.instanceId)
+
+    private fun proxyAuthorityForProcessSlot(processSlot: String?): String {
+        val index = ProxyActivitySlots.processSlotIndex(hostPackageName, processSlot) ?: return stubAuthorityPrefix
+        return "$stubAuthorityPrefix.v$index"
     }
 
     companion object {
         const val PROXY_INSTANCE_ID = "multiapp_instanceId"
         const val PROXY_GUEST_AUTHORITY = "multiapp_guestAuthority"
+        const val PROXY_PROCESS_SLOT = "multiapp_processSlot"
         const val PROXY_ROUTE_TOKEN = ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN
     }
 

@@ -555,6 +555,64 @@ Remaining gate for this slice:
 - Provider/Service/Broadcast still need owning-process binding instead of
   default-process bootstrap.
 
+## Execution Update - 2026-07-08 Provider/Service Slot Entry Slice
+
+This slice starts closing the owning-process gap for non-Activity components.
+The goal is to stop Provider and Service cold-start paths from losing
+`processSlot` and silently bootstrapping guest runtime in the default host
+process.
+
+Implemented:
+
+- `ProviderRouteTokenRegistry` now stores optional `processSlot` on route
+  tokens and validates an expected slot when supplied.
+- `ProviderRoutingStage` records `instanceId -> processSlot` before provider
+  hook installation, so baseline and hook-enabled paths share one route source.
+- Provider URI/extras rewrite now carries `multiapp_processSlot`; guest URI and
+  extras conversion strips it before dispatching to guest code.
+- `VirtualProviderManager` resolves slot-specific stub authorities such as
+  `${applicationId}.multiapp.provider.stub.v3` when an instance process slot is
+  known.
+- Added `StubContentProviderV0..V7` and manifest provider declarations bound to
+  `:v0..:v7`.
+- `HostedProviderRuntimeBinder` passes the validated process slot into
+  `runHostedRuntimeBootstrap(...)` and rejects cached runtimes from a different
+  process slot.
+- `VirtualServiceStartRequest` / `VirtualServiceProxySpec` now carry
+  `processSlot`.
+- `VirtualServiceManager` maps slot-aware requests to
+  `StubServiceV0..V7`, with legacy `StubService` kept as no-slot fallback.
+- Added manifest service declarations for `StubServiceV0..V7`, each bound to
+  its matching `:vN`.
+- `HostedServiceRuntimeBinder` passes service process slot into bootstrap and
+  rejects cached runtime slot mismatches.
+- Service/provider evidence now records the runtime-bind process slot.
+
+Verification:
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.container.HostedProviderRuntimeBinderTest" --tests "com.multiapp.app.container.HostedServiceRuntimeBinderTest" --tests "com.multiapp.app.container.StubContentProviderRouteTokenTest" --tests "com.multiapp.app.container.ProviderProxyUriTest" --tests "com.multiapp.app.container.ProxyActivityClassParityTest" :core:identity:testDebugUnitTest --tests "com.multiapp.core.identity.ContentProviderHookUriRewriteTest" :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ProviderRoutingStageTest" --tests "com.multiapp.core.loader.VirtualServiceManagerTest" --tests "com.multiapp.core.loader.VirtualProviderManagerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ProviderRoutingStageTest" --tests "com.multiapp.core.loader.VirtualServiceManagerTest" --tests "com.multiapp.core.loader.VirtualProviderManagerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- App target tests passed before the combined command reached the later
+  loader failure.
+- The loader failure was a JVM test using unmocked `android.net.Uri.parse`;
+  the test was corrected to assert pure provider resolution instead.
+- Retried core loader target tests passed.
+- `:app:assembleDebug` passed in 1m 34s. Known warning remains: AGP `8.7.3`
+  was tested up to `compileSdk=35`, while the project uses `compileSdk=36`.
+
+Remaining gate for this slice:
+
+- Device evidence must prove provider and service requests enter the expected
+  `:vN` process and do not bootstrap the same instance in the default process.
+- Broadcast remains process-local dispatch only; slot-aware broadcast gateway
+  and ordered/sticky/result semantics are still open.
+
 ## Not Complete Yet
 
 The following items from the plan are still open and must not be marked `DONE`:
@@ -578,7 +636,9 @@ The following items from the plan are still open and must not be marked `DONE`:
   permissions, and `IntentFilter.match()` fidelity.
 - Complete AMS/ATM activity stack semantics:
   `launchMode/taskAffinity/onNewIntent/result/finish/back stack`.
-- Service foreground/sticky/bind semantics.
+- Service foreground/sticky/bind semantics and device proof for slot-aware
+  service stubs.
+- Device proof for slot-aware provider stubs and provider operations.
 - Ordered/sticky broadcast/result receiver semantics.
 - Notification/AppOps/Clipboard/Account/Alarm/Job/Shortcut service proxy
   registry.
