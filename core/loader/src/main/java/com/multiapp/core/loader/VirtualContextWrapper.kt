@@ -173,6 +173,8 @@ open class VirtualContextWrapper(
 
     override fun getPackageName(): String = config.originPackageName
 
+    override fun getOpPackageName(): String = base.packageName
+
     override fun getApplicationContext(): Context = this
 
     override fun getBaseContext(): Context = this
@@ -199,7 +201,15 @@ open class VirtualContextWrapper(
         if (name == Context.LAYOUT_INFLATER_SERVICE) {
             return (base.getSystemService(name) as? LayoutInflater)?.cloneInContext(this)
         }
-        return base.getSystemService(name)
+        val service = base.getSystemService(name)
+        if (name == Context.APP_OPS_SERVICE) {
+            IntentRemapDiagnostics.installAppOpsManagerPackageProxy(
+                appOpsManager = service,
+                sourcePackages = listOf(config.originPackageName, config.virtualPackageName),
+                hostPackageName = base.packageName
+            )
+        }
+        return service
     }
 
     override fun getPackageManager(): PackageManager = virtualPackageManager ?: base.packageManager

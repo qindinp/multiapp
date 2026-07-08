@@ -2,13 +2,16 @@ package com.multiapp.app.container
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.Application
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import com.multiapp.core.engine.HostedRuntimeEngine
+import com.multiapp.core.engine.HostedRuntimeBindOutcome
 import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.ProxyActivitySlots
@@ -19,7 +22,6 @@ import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
-import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
@@ -55,10 +57,14 @@ internal sealed class BootstrapCompletionAction {
  * to a real host ProxyActivity slot. This starts the move toward
  * ProxyActivity + Instrumentation/ActivityThread virtualization.
  */
-class ContainerActivity : Activity() {
+open class ContainerActivity : Activity() {
 
     private val hostedRuntimeEngine: HostedRuntimeEngine by lazy(LazyThreadSafetyMode.NONE) {
         hostedRuntimeEngineFrom(this)
+    }
+
+    private val mainHandler: Handler by lazy(LazyThreadSafetyMode.NONE) {
+        Handler(Looper.getMainLooper())
     }
 
     companion object {
@@ -166,6 +172,12 @@ class ContainerActivity : Activity() {
                 evidence["installRecordActivityCount"]?.takeIf { it.isNotBlank() }?.let {
                     add("installRecordActivityCount=$it")
                 }
+                evidence["cloneStubDetected"]?.takeIf { it == "true" }?.let {
+                    add("cloneStubDetected=true")
+                }
+                evidence["unsupportedReason"]?.takeIf { it.isNotBlank() }?.let {
+                    add("unsupportedReason=$it")
+                }
                 evidence["candidateLauncherActivities"]?.takeIf { it.isNotBlank() }?.let {
                     add("candidates=$it")
                 }
@@ -252,6 +264,10 @@ class ContainerActivity : Activity() {
         val providerHookEnabled = intent.getBooleanExtra(EXTRA_ENABLE_PROVIDER_HOOK, true)
         val engineProcessSlot = intent.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROCESS_SLOT)
         val engineProxySlot = intent.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT)
+        if (!verifyProcessSlotBinding(instanceId, engineProcessSlot, engineProxySlot)) {
+            finish()
+            return
+        }
         Log.i(
             TAG,
             "Container launch started: instanceId=$instanceId, " +
@@ -259,36 +275,135 @@ class ContainerActivity : Activity() {
                 "engineProcessSlot=$engineProcessSlot, engineProxySlot=$engineProxySlot"
         )
 
-        startBootstrap(instanceId, providerHookEnabled, engineProcessSlot)
-        finish()
-        overridePendingTransition(0, 0)
+        startBootstrap(instanceId, providerHookEnabled, engineProcessSlot, engineProxySlot)
+    }
+
+    private fun verifyProcessSlotBinding(
+        instanceId: String,
+        engineProcessSlot: String?,
+        engineProxySlot: String?
+    ): Boolean {
+        val actualProcessName = currentProcessName().orEmpty()
+        if (engineProcessSlot.isNullOrBlank()) {
+            writeProcessSlotEvidence(
+                instanceId = instanceId,
+                status = "SKIPPED",
+                detail = "engine process slot missing",
+                engineProcessSlot = "",
+                engineProxySlot = engineProxySlot,
+                actualProcessName = actualProcessName
+            )
+            return true
+        }
+        val matches = actualProcessName == engineProcessSlot
+        writeProcessSlotEvidence(
+            instanceId = instanceId,
+            status = if (matches) "PASS" else "FAIL",
+            detail = if (matches) "process slot bound to Android process" else "process slot mismatch",
+            engineProcessSlot = engineProcessSlot,
+            engineProxySlot = engineProxySlot,
+            actualProcessName = actualProcessName
+        )
+        if (!matches) {
+            Log.e(
+                TAG,
+                "Process slot mismatch: instanceId=$instanceId, expected=$engineProcessSlot, actual=$actualProcessName"
+            )
+        }
+        return matches
+    }
+
+    private fun currentProcessName(): String? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            Application.getProcessName()?.takeIf { it.isNotBlank() }?.let { return it }
+        }
+        return runCatching {
+            File("/proc/self/cmdline").readText()
+                .substringBefore('\u0000')
+                .takeIf { it.isNotBlank() }
+        }.getOrNull()
     }
 
     private fun startBootstrap(
         instanceId: String,
         providerHookEnabled: Boolean,
-        engineProcessSlot: String?
+        engineProcessSlot: String?,
+        engineProxySlot: String?
     ) {
         val hostContext = applicationContext ?: this
-        hostedRuntimeEngine.reusableResult(instanceId)?.let { cached ->
-            writeBootstrapEvidence(hostContext, instanceId, cached)
-            handleBootstrapOutcome(instanceId, Result.success(cached))
-            return
-        }
-
+        writeBootstrapProgressEvidence(
+            context = hostContext,
+            instanceId = instanceId,
+            status = "STARTED",
+            stage = "bootstrap-start",
+            detail = "background bootstrap scheduled",
+            engineProcessSlot = engineProcessSlot,
+            engineProxySlot = engineProxySlot
+        )
         Thread(
             {
                 prepareBackgroundLooperIfNeeded()
+                val startedAtMs = System.currentTimeMillis()
                 val outcome = runCatching {
+                    hostedRuntimeEngine.reusableResult(instanceId)?.let { cached ->
+                        writeBootstrapProgressEvidence(
+                            context = hostContext,
+                            instanceId = instanceId,
+                            status = "CACHE_HIT",
+                            stage = "bootstrap-cache",
+                            detail = "reusing hosted runtime",
+                            engineProcessSlot = engineProcessSlot,
+                            engineProxySlot = engineProxySlot,
+                            elapsedMs = System.currentTimeMillis() - startedAtMs
+                        )
+                        writeBootstrapEvidence(hostContext, instanceId, cached)
+                        return@runCatching HostedRuntimeBindOutcome(
+                            result = cached,
+                            ranBootstrapOnThisThread = false
+                        )
+                    }
+                    writeBootstrapProgressEvidence(
+                        context = hostContext,
+                        instanceId = instanceId,
+                        status = "BIND_STARTED",
+                        stage = "bootstrap-bind",
+                        detail = "binding guest Application",
+                        engineProcessSlot = engineProcessSlot,
+                        engineProxySlot = engineProxySlot,
+                        elapsedMs = System.currentTimeMillis() - startedAtMs
+                    )
                     hostedRuntimeEngine.bindApplication(
                         instanceId = instanceId,
                         providerHookEnabled = providerHookEnabled,
                         processSlot = engineProcessSlot
+                    ).also { bindOutcome ->
+                        writeBootstrapProgressEvidence(
+                            context = hostContext,
+                            instanceId = instanceId,
+                            status = "BIND_FINISHED",
+                            stage = "bootstrap-bind",
+                            detail = "bindApplication returned",
+                            engineProcessSlot = engineProcessSlot,
+                            engineProxySlot = engineProxySlot,
+                            elapsedMs = System.currentTimeMillis() - startedAtMs
+                        )
+                        writeBootstrapEvidence(hostContext, instanceId, bindOutcome.result)
+                    }
+                }.onFailure { error ->
+                    writeBootstrapProgressEvidence(
+                        context = hostContext,
+                        instanceId = instanceId,
+                        status = "FAIL",
+                        stage = "bootstrap-exception",
+                        detail = error.message ?: error.javaClass.name,
+                        engineProcessSlot = engineProcessSlot,
+                        engineProxySlot = engineProxySlot,
+                        elapsedMs = System.currentTimeMillis() - startedAtMs
                     )
                 }
                 val resultOutcome = outcome.map { it.result }
-                Handler(Looper.getMainLooper()).post {
-                    handleBootstrapOutcome(instanceId, resultOutcome)
+                mainHandler.post {
+                    handleBootstrapOutcome(instanceId, resultOutcome, engineProxySlot)
                 }
                 val bindOutcome = outcome.getOrNull()
                 if (bindOutcome?.ranBootstrapOnThisThread == true && bindOutcome.result.guestApplication != null) {
@@ -329,7 +444,8 @@ class ContainerActivity : Activity() {
 
     private fun handleBootstrapOutcome(
         instanceId: String,
-        outcome: Result<HostedBootstrapResult>
+        outcome: Result<HostedBootstrapResult>,
+        engineProxySlot: String?
     ) {
         val evidenceContext = applicationContext ?: this
         val result = outcome.getOrElse { error ->
@@ -363,7 +479,8 @@ class ContainerActivity : Activity() {
                     originPackageName = action.originPackageName,
                     guestActivityClassName = action.guestActivityClassName,
                     launchMode = action.launchMode,
-                    taskAffinity = action.taskAffinity
+                    taskAffinity = action.taskAffinity,
+                    engineProxySlot = engineProxySlot
                 )
                 if (proxyLaunchResult.isFailure) {
                     writeLaunchEvidence(
@@ -394,7 +511,8 @@ class ContainerActivity : Activity() {
         originPackageName: String,
         guestActivityClassName: String,
         launchMode: String?,
-        taskAffinity: String?
+        taskAffinity: String?,
+        engineProxySlot: String?
     ): Result<com.multiapp.core.model.virtual.VirtualActivityRecord> {
         Log.i(TAG, "Launching proxy Activity for guest: $guestActivityClassName")
         val slotAssignmentStore =
@@ -403,17 +521,15 @@ class ContainerActivity : Activity() {
             instanceId = instanceId,
             slotAssignmentStore = slotAssignmentStore
         )
-        bindEngineProxySlotIfPresent(
-            slotAssignmentStore = slotAssignmentStore,
+        val candidateProxyActivityClassNames = proxyActivityCandidatesFromEngineSlot(
             instanceId = instanceId,
-            originPackageName = originPackageName,
-            launchMode = launchMode,
-            taskAffinity = taskAffinity
-        )
+            engineProxySlot = engineProxySlot,
+            launchMode = launchMode
+        ).getOrElse { error -> return Result.failure(error) }
         val manager = VirtualActivityManager(
             context = applicationContext ?: this,
             proxyActivityRegistry = ProxyActivityRegistry(
-                proxyActivityClassNames,
+                candidateProxyActivityClassNames,
                 proxyLaunchModeByClassName,
                 slotAssignmentStore
             )
@@ -427,43 +543,56 @@ class ContainerActivity : Activity() {
         )
     }
 
-    private fun bindEngineProxySlotIfPresent(
-        slotAssignmentStore: FileBackedProxyActivitySlotAssignmentStore,
+    private fun proxyActivityCandidatesFromEngineSlot(
         instanceId: String,
-        originPackageName: String,
-        launchMode: String?,
-        taskAffinity: String?
-    ) {
-        val engineProxySlot = intent
-            ?.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT)
-            ?.takeIf { it.isNotBlank() }
-            ?: return
+        engineProxySlot: String?,
+        launchMode: String?
+    ): Result<List<String>> {
+        if (engineProxySlot.isNullOrBlank()) {
+            writeEngineProxySlotEvidence(
+                instanceId = instanceId,
+                status = "FALLBACK",
+                detail = "engine proxy slot missing; using full proxy registry",
+                engineProxySlot = "",
+                launchMode = launchMode
+            )
+            return Result.success(proxyActivityClassNames)
+        }
         if (engineProxySlot !in proxyActivityClassNames) {
-            Log.w(TAG, "Ignoring unknown engine proxy slot: $engineProxySlot")
-            return
+            val detail = "unknown engine proxy slot: $engineProxySlot"
+            Log.w(TAG, detail)
+            writeEngineProxySlotEvidence(
+                instanceId = instanceId,
+                status = "FAIL",
+                detail = detail,
+                engineProxySlot = engineProxySlot,
+                launchMode = launchMode
+            )
+            return Result.failure(IllegalStateException(detail))
         }
         val normalizedLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(launchMode)
         val proxyLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(proxyLaunchModeByClassName[engineProxySlot])
         if (proxyLaunchMode != normalizedLaunchMode) {
-            Log.w(
-                TAG,
-                "Ignoring engine proxy slot with incompatible launchMode: slot=$engineProxySlot, " +
-                    "slotMode=${proxyLaunchMode ?: "standard"}, requested=${normalizedLaunchMode ?: "standard"}"
-            )
-            return
-        }
-        val taskKey = taskAffinity ?: "$originPackageName:$instanceId"
-        val reserved = slotAssignmentStore.reserve(
-            key = ProxyActivitySlotKey(
+            val detail = "engine proxy slot launchMode mismatch: slot=$engineProxySlot, " +
+                "slotMode=${proxyLaunchMode ?: "standard"}, requested=${normalizedLaunchMode ?: "standard"}"
+            Log.w(TAG, detail)
+            writeEngineProxySlotEvidence(
                 instanceId = instanceId,
-                launchMode = normalizedLaunchMode,
-                taskKey = taskKey
-            ),
-            candidateProxyActivityClassNames = listOf(engineProxySlot)
-        )
-        if (reserved == null) {
-            Log.w(TAG, "Engine proxy slot is already owned by another task: $engineProxySlot")
+                status = "FAIL",
+                detail = detail,
+                engineProxySlot = engineProxySlot,
+                launchMode = launchMode
+            )
+            return Result.failure(IllegalStateException(detail))
         }
+        writeEngineProxySlotEvidence(
+            instanceId = instanceId,
+            status = "PASS",
+            detail = "engine proxy slot accepted",
+            engineProxySlot = engineProxySlot,
+            launchMode = launchMode
+        )
+        return Result.success(listOf(engineProxySlot))
     }
 
     private fun pruneProxyActivitySlotAssignments(
@@ -610,6 +739,92 @@ class ContainerActivity : Activity() {
         }
     }
 
+    private fun writeBootstrapProgressEvidence(
+        context: Context,
+        instanceId: String,
+        status: String,
+        stage: String,
+        detail: String,
+        engineProcessSlot: String?,
+        engineProxySlot: String?,
+        elapsedMs: Long? = null
+    ) {
+        runCatching {
+            ContainerRuntimeEvidenceWriter.write(
+                context = context,
+                instanceId = instanceId,
+                component = "bootstrap-progress",
+                fields = linkedMapOf(
+                    "status" to status,
+                    "stage" to stage,
+                    "detail" to detail,
+                    "engineProcessSlot" to engineProcessSlot.orEmpty(),
+                    "engineProxySlot" to engineProxySlot.orEmpty(),
+                    "threadName" to Thread.currentThread().name,
+                    "elapsedMs" to (elapsedMs?.toString() ?: "")
+                )
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write bootstrap progress evidence for instanceId=$instanceId", error)
+        }
+    }
+
+    private fun writeProcessSlotEvidence(
+        instanceId: String,
+        status: String,
+        detail: String,
+        engineProcessSlot: String,
+        engineProxySlot: String?,
+        actualProcessName: String
+    ) {
+        runCatching {
+            ContainerRuntimeEvidenceWriter.write(
+                context = applicationContext ?: this,
+                instanceId = instanceId,
+                component = "activity-process-slot",
+                fields = linkedMapOf(
+                    "status" to status,
+                    "stage" to "ACTIVITY_PROCESS_SLOT",
+                    "detail" to detail,
+                    "engineProcessSlot" to engineProcessSlot,
+                    "engineProxySlot" to engineProxySlot.orEmpty(),
+                    "actualProcessName" to actualProcessName,
+                    "containerActivityClassName" to javaClass.name
+                )
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write process slot evidence for instanceId=$instanceId", error)
+        }
+    }
+
+    private fun writeEngineProxySlotEvidence(
+        instanceId: String,
+        status: String,
+        detail: String,
+        engineProxySlot: String,
+        launchMode: String?
+    ) {
+        val normalizedLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(launchMode)
+        val slotLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(proxyLaunchModeByClassName[engineProxySlot])
+        runCatching {
+            ContainerRuntimeEvidenceWriter.write(
+                context = applicationContext ?: this,
+                instanceId = instanceId,
+                component = "activity-engine-proxy-slot",
+                fields = linkedMapOf(
+                    "status" to status,
+                    "stage" to "ACTIVITY_PROXY_SLOT",
+                    "detail" to detail,
+                    "engineProxySlot" to engineProxySlot,
+                    "requestedLaunchMode" to (normalizedLaunchMode ?: "standard"),
+                    "engineProxySlotLaunchMode" to (slotLaunchMode ?: "standard")
+                )
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write engine proxy slot evidence for instanceId=$instanceId", error)
+        }
+    }
+
     private fun writeProxySlotPruneEvidence(
         instanceId: String,
         removedAssignments: Int,
@@ -655,3 +870,28 @@ class ContainerActivity : Activity() {
         }
     }
 }
+
+class ContainerActivityV0 : ContainerActivity()
+class ContainerActivityV1 : ContainerActivity()
+class ContainerActivityV2 : ContainerActivity()
+class ContainerActivityV3 : ContainerActivity()
+class ContainerActivityV4 : ContainerActivity()
+class ContainerActivityV5 : ContainerActivity()
+class ContainerActivityV6 : ContainerActivity()
+class ContainerActivityV7 : ContainerActivity()
+class ContainerActivityV8 : ContainerActivity()
+class ContainerActivityV9 : ContainerActivity()
+class ContainerActivityV10 : ContainerActivity()
+class ContainerActivityV11 : ContainerActivity()
+class ContainerActivityV12 : ContainerActivity()
+class ContainerActivityV13 : ContainerActivity()
+class ContainerActivityV14 : ContainerActivity()
+class ContainerActivityV15 : ContainerActivity()
+class ContainerActivityV16 : ContainerActivity()
+class ContainerActivityV17 : ContainerActivity()
+class ContainerActivityV18 : ContainerActivity()
+class ContainerActivityV19 : ContainerActivity()
+class ContainerActivityV20 : ContainerActivity()
+class ContainerActivityV21 : ContainerActivity()
+class ContainerActivityV22 : ContainerActivity()
+class ContainerActivityV23 : ContainerActivity()

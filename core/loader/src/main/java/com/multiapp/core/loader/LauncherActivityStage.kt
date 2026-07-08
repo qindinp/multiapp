@@ -92,6 +92,9 @@ class LauncherActivityStage(
         val hasHighFidelityPackageMetadata = input.resolvedPackage != null ||
             packageResolverResult != null ||
             input.packageSnapshot != null
+        val resolvedFromInstallRecord = runCatching {
+            launcherActivityResolver(installRecord)
+        }.getOrNull()
 
         val resolutions = buildList {
             input.resolvedPackage?.let { resolvedPackage ->
@@ -106,12 +109,9 @@ class LauncherActivityStage(
                 addPackageSnapshotCandidates(snapshot)
             }
 
-            if (!hasHighFidelityPackageMetadata) {
-                val resolvedFromInstallRecord = runCatching {
-                    launcherActivityResolver(installRecord)
-                }.getOrNull()
-                addCandidate(resolvedFromInstallRecord, INSTALL_RECORD)
+            addCandidate(resolvedFromInstallRecord, INSTALL_RECORD)
 
+            if (!hasHighFidelityPackageMetadata) {
                 addInstallRecordCandidates(installRecord.activities)
             }
         }.preferAliasTargets()
@@ -120,7 +120,9 @@ class LauncherActivityStage(
             resolutions = resolutions,
             resolvedPackageLauncherActivityName = resolvedPackageLauncherActivityName,
             packageSnapshotLauncherActivityName = packageSnapshotLauncherActivityName,
-            candidateLauncherActivities = resolutions.toCandidateEvidence()
+            candidateLauncherActivities = resolutions.toCandidateEvidence(),
+            installRecordPackageName = installRecord.packageName,
+            cloneStubDetected = installRecord.packageName.isCloneStubPackageName()
         )
     }
 
@@ -379,6 +381,11 @@ class LauncherActivityStage(
         add(BootstrapEvidence("resolver", resolution.source))
         add(BootstrapEvidence("loadable", resolution.loadable.toString()))
         add(BootstrapEvidence("preflightBypassed", (!resolution.loadable).toString()))
+        add(BootstrapEvidence("originPackageName", launcherCandidates.installRecordPackageName))
+        add(BootstrapEvidence("cloneStubDetected", launcherCandidates.cloneStubDetected.toString()))
+        if (launcherCandidates.cloneStubDetected && !resolution.loadable) {
+            add(BootstrapEvidence("unsupportedReason", "CLONE_STUB_LAUNCHER_NOT_LOADABLE"))
+        }
         add(BootstrapEvidence("candidateCount", resolution.candidateCount.toString()))
         add(
             BootstrapEvidence(
@@ -404,6 +411,12 @@ class LauncherActivityStage(
         BootstrapEvidence("packageSnapshotLauncherActivityName", launcherCandidates.packageSnapshotLauncherActivityName.orEmpty()),
         BootstrapEvidence("aliasTargetActivityClass", ""),
         BootstrapEvidence("candidateLauncherActivities", launcherCandidates.candidateLauncherActivities.joinToString(",")),
+        BootstrapEvidence("originPackageName", installRecord.packageName),
+        BootstrapEvidence("cloneStubDetected", launcherCandidates.cloneStubDetected.toString()),
+        BootstrapEvidence(
+            "unsupportedReason",
+            if (launcherCandidates.cloneStubDetected) "CLONE_STUB_NO_LAUNCHER" else ""
+        ),
         BootstrapEvidence("resolvedPackageActivityCount", (input.resolvedPackage?.activities?.size ?: 0).toString()),
         BootstrapEvidence("packageSnapshotActivityCount", (input.packageSnapshot?.activities?.size ?: 0).toString()),
         BootstrapEvidence("installRecordActivityCount", installRecord.activities.size.toString())
@@ -421,7 +434,9 @@ class LauncherActivityStage(
         val resolutions: List<LauncherResolution>,
         val resolvedPackageLauncherActivityName: String?,
         val packageSnapshotLauncherActivityName: String?,
-        val candidateLauncherActivities: List<String>
+        val candidateLauncherActivities: List<String>,
+        val installRecordPackageName: String,
+        val cloneStubDetected: Boolean
     )
 
     private data class LauncherResolution(
@@ -454,6 +469,10 @@ class LauncherActivityStage(
         private const val MAX_EVIDENCE_CANDIDATES = 16
     }
 }
+
+private fun String.isCloneStubPackageName(): Boolean =
+    contains(".clonestub_", ignoreCase = true) ||
+        endsWith(".clonestub", ignoreCase = true)
 
 private fun String.heuristicSiblingActivityClassNames(): List<String> {
     val normalized = trim()

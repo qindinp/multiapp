@@ -28,6 +28,7 @@ class ProxyActivityClassParityTest {
         val hostPackageName = "com.multiapp.app"
         val expectedClassNames = ProxyActivitySlots.classNames(hostPackageName)
         val launchModeByClassName = ProxyActivitySlots.launchModeByClassName(hostPackageName)
+        val processNameByClassName = ProxyActivitySlots.processNameByClassName(hostPackageName)
 
         assertEquals(expectedClassNames, manifest.map { entry -> entry.className })
         assertEquals(24, manifest.map { entry -> entry.taskAffinity }.distinct().size)
@@ -36,10 +37,28 @@ class ProxyActivityClassParityTest {
         manifest.forEach { entry ->
             val expectedLaunchMode = launchModeByClassName.getValue(entry.className) ?: "standard"
             assertEquals(expectedLaunchMode, entry.launchMode, "launchMode mismatch for ${entry.className}")
+            assertEquals(
+                processNameByClassName.getValue(entry.className).removePrefix(hostPackageName),
+                entry.processName,
+                "process mismatch for ${entry.className}"
+            )
             assertTrue(
                 entry.taskAffinity.startsWith("\${applicationId}.multiapp.task."),
                 "Proxy taskAffinity must stay host-scoped and unique: ${entry.className}"
             )
+        }
+    }
+
+    @Test
+    fun `manifest container process entries match proxy process slots`() {
+        val manifest = loadContainerActivityManifestEntries()
+
+        assertEquals(24, manifest.size)
+        manifest.forEachIndexed { index, entry ->
+            assertEquals("com.multiapp.app.container.ContainerActivityV$index", entry.className)
+            assertEquals(":v$index", entry.processName)
+            assertTrue(entry.excludeFromRecents)
+            assertEquals("standard", entry.launchMode)
         }
     }
 
@@ -59,7 +78,31 @@ class ProxyActivityClassParityTest {
             ManifestProxyActivityEntry(
                 className = "com.multiapp.app${name}",
                 launchMode = element.attributes.getNamedItem("android:launchMode")?.nodeValue.orEmpty(),
+                processName = element.attributes.getNamedItem("android:process")?.nodeValue.orEmpty(),
                 taskAffinity = element.attributes.getNamedItem("android:taskAffinity")?.nodeValue.orEmpty(),
+                excludeFromRecents = element.attributes
+                    .getNamedItem("android:excludeFromRecents")
+                    ?.nodeValue
+                    ?.toBooleanStrictOrNull()
+                    ?: false
+            )
+        }
+    }
+
+    private fun loadContainerActivityManifestEntries(): List<ManifestContainerActivityEntry> {
+        val manifestFile = findManifestFile()
+        val document = DocumentBuilderFactory.newInstance()
+            .newDocumentBuilder()
+            .parse(manifestFile)
+        val activities = document.getElementsByTagName("activity")
+        return (0 until activities.length).mapNotNull { index ->
+            val element = activities.item(index)
+            val name = element.attributes.getNamedItem("android:name")?.nodeValue.orEmpty()
+            if (!name.startsWith(".container.ContainerActivityV")) return@mapNotNull null
+            ManifestContainerActivityEntry(
+                className = "com.multiapp.app${name}",
+                launchMode = element.attributes.getNamedItem("android:launchMode")?.nodeValue.orEmpty(),
+                processName = element.attributes.getNamedItem("android:process")?.nodeValue.orEmpty(),
                 excludeFromRecents = element.attributes
                     .getNamedItem("android:excludeFromRecents")
                     ?.nodeValue
@@ -84,7 +127,15 @@ class ProxyActivityClassParityTest {
     private data class ManifestProxyActivityEntry(
         val className: String,
         val launchMode: String,
+        val processName: String,
         val taskAffinity: String,
+        val excludeFromRecents: Boolean
+    )
+
+    private data class ManifestContainerActivityEntry(
+        val className: String,
+        val launchMode: String,
+        val processName: String,
         val excludeFromRecents: Boolean
     )
 }

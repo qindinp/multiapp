@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextParams
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.AttributionSource
 import android.os.Build
 import android.os.UserHandle
 import androidx.annotation.RequiresApi
@@ -41,6 +42,12 @@ open class VirtualContextWrapperApi34(
     amsDispatcher = amsDispatcher
 ) {
     override fun createContext(contextParams: ContextParams): Context = this
+
+    override fun getAttributionSource(): AttributionSource {
+        return AttributionSource.Builder(super.getAttributionSource())
+            .setPackageName(opPackageName)
+            .build()
+    }
 
     override fun bindService(
         service: Intent,

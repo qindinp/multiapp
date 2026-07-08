@@ -242,6 +242,30 @@ class NativeHookBridgeTest {
     }
 
     @Test
+    fun `setupGuestPrivatePathRedirections redirects root private dirs without trailing slash`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+
+        assertEquals("/sandbox/example", bridge.translatePath("/data/data/com.example.app"))
+        assertEquals("/sandbox/example", bridge.translatePath("/data/user/0/com.example.app"))
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections does not match package prefix siblings`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+
+        val sibling = "/data/data/com.example.application/files/config.json"
+        assertEquals(sibling, bridge.translatePath(sibling))
+    }
+
+    @Test
+    fun `setupGuestPrivatePathRedirections does not treat backslash as private path boundary`() {
+        bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
+
+        val backslashSibling = "/data/data/com.example.app\\evil"
+        assertEquals(backslashSibling, bridge.translatePath(backslashSibling))
+    }
+
+    @Test
     fun `setupGuestPrivatePathRedirections creates only private path rules`() {
         val ruleCount = bridge.setupGuestPrivatePathRedirections(
             "com.example.app",
@@ -249,8 +273,8 @@ class NativeHookBridgeTest {
             "/sandbox/example"
         )
 
-        assertEquals(2, ruleCount)
-        assertEquals(2, bridge.getRedirectionCount())
+        assertEquals(4, ruleCount)
+        assertEquals(4, bridge.getRedirectionCount())
     }
 
     @Test

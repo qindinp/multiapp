@@ -13,6 +13,7 @@ import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.VirtualInstallService
+import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -126,7 +127,8 @@ internal class DefaultVirtualizationEngineCore(
 
         val runtime = runCatching {
             pruneRuntimeSlots()
-            buildRuntime(instance, installRecord, request.profile)
+            val refreshedInstallRecord = refreshInstallRecord(installRecord)
+            buildRuntime(instance, refreshedInstallRecord, request.profile)
         }.getOrElse { error ->
             if (error is EngineRuntimeSlotExhaustedException) {
                 return EngineResult.unsupported(
@@ -185,11 +187,14 @@ internal class DefaultVirtualizationEngineCore(
         installRecord: InstallRecord,
         profile: EngineProfile
     ): VirtualInstanceRuntime {
+        val snapshot = buildSnapshot(instance, installRecord)
+        val launcherComponent = launcherComponent(snapshot)
+        val proxyCandidates = proxySlotCandidatesForLaunchMode(launcherComponent?.launchMode)
         val slots = slotStore.assign(
             instanceId = instance.instanceId,
             originPackageName = instance.originPackageName,
-            processCandidates = processSlotCandidates(),
-            proxyCandidates = standardProxySlotCandidates()
+            processCandidates = processSlotCandidatesForProxySlots(proxyCandidates),
+            proxyCandidates = proxyCandidates
         )
         return VirtualInstanceRuntime(
             instanceId = instance.instanceId,
@@ -197,7 +202,7 @@ internal class DefaultVirtualizationEngineCore(
             originPackageName = instance.originPackageName,
             virtualPackageName = instance.virtualPackageName,
             dataRoot = instance.dataRoot,
-            packageSnapshot = buildSnapshot(instance, installRecord),
+            packageSnapshot = snapshot,
             profile = profile,
             processSlot = slots.processSlot,
             proxySlot = slots.proxySlot,
@@ -243,28 +248,61 @@ internal class DefaultVirtualizationEngineCore(
                 name = component.name,
                 exported = component.exported,
                 permission = component.permission,
-                grantUriPermissions = component.grantUriPermissions
+                grantUriPermissions = component.grantUriPermissions,
+                launchMode = component.launchMode,
+                processName = component.processName,
+                taskAffinity = component.taskAffinity,
+                themeId = component.themeId,
+                targetActivityName = component.targetActivityName
             )
         }
+
+    private fun refreshInstallRecord(installRecord: InstallRecord): InstallRecord {
+        virtualInstallService.importFromMetadata(
+            packageName = installRecord.packageName,
+            originApkPath = installRecord.originApkPath,
+            versionCode = installRecord.versionCode,
+            versionName = installRecord.versionName,
+            targetSdk = installRecord.targetSdk,
+            minSdk = installRecord.minSdk,
+            applicationClassName = installRecord.applicationClassName,
+            packageLabel = installRecord.packageLabel
+        ).getOrNull() ?: return installRecord
+        return virtualInstallService.getInstallRecord(installRecord.packageName) ?: installRecord
+    }
+
+    private fun launcherComponent(snapshot: VirtualPackageSnapshot): ResolvedComponent? {
+        val launcherName = snapshot.launcherActivityName?.takeIf { it.isNotBlank() }
+        return snapshot.activities.firstOrNull { component ->
+            component.name == launcherName || component.targetActivityName == launcherName
+        } ?: snapshot.activities.firstOrNull()
+    }
 
     private fun pruneRuntimeSlots() {
         val validInstanceIds = instanceManager.listInstances().mapTo(linkedSetOf()) { it.instanceId }
         slotStore.prune(validInstanceIds)
     }
 
-    private fun processSlotCandidates(): List<String> =
-        (0 until PROCESS_SLOT_COUNT).map { index -> "${hostPackageName}:v$index" }
+    private fun processSlotCandidatesForProxySlots(proxyCandidates: List<String>): List<String> =
+        proxyCandidates.map { proxySlot ->
+            ProxyActivitySlots.processNameForClassName(hostPackageName, proxySlot)
+                ?: error("No process slot mapped for proxy slot: $proxySlot")
+        }
 
-    private fun standardProxySlotCandidates(): List<String> =
-        ProxyActivitySlots.classNames(hostPackageName)
-            .filter { className -> ProxyActivitySlots.launchModeByClassName(hostPackageName)[className] == null }
+    private fun proxySlotCandidatesForLaunchMode(launchMode: String?): List<String> {
+        val normalizedLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(launchMode)
+        val launchModesByClassName = ProxyActivitySlots.launchModeByClassName(hostPackageName)
+        return ProxyActivitySlots.classNames(hostPackageName)
+            .filter { className ->
+                ProxyActivityRegistry.normalizeLaunchMode(launchModesByClassName[className]) == normalizedLaunchMode
+            }
+    }
 
     companion object {
         private const val OP_INSTALL = "installOrRefreshPackage"
         private const val OP_CREATE = "createInstance"
         private const val OP_LAUNCH = "launchInstance"
         private const val OP_STOP = "stopInstance"
-        private const val PROCESS_SLOT_COUNT = 8
     }
 }
 

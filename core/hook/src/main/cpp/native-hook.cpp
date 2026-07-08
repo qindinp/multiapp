@@ -318,6 +318,16 @@ static bool rule_matches_active_scope(const PathRedirectRule& rule) {
            rule.instance_id == g_active_redirect_instance_id;
 }
 
+static bool rule_matches_path(const std::string& path, const std::string& prefix) {
+    if (prefix.empty()) return false;
+    if (path.compare(0, prefix.length(), prefix) != 0) return false;
+    if (path.length() == prefix.length()) return true;
+    char last_prefix_char = prefix[prefix.length() - 1];
+    if (last_prefix_char == '/') return true;
+    char next_path_char = path[prefix.length()];
+    return next_path_char == '/';
+}
+
 static bool validate_redirect_result(RedirectResult& result, bool creates_path) {
     if (!result.redirected) return true;
     if (path_has_parent_traversal(result.source) || path_has_parent_traversal(result.path)) {
@@ -368,7 +378,7 @@ static RedirectResult redirect_path(const char* path) {
     for (const auto& entry : g_path_redirects) {
         const PathRedirectRule& rule = entry.second;
         if (!rule_matches_active_scope(rule)) continue;
-        if (path_str.compare(0, rule.source.length(), rule.source) == 0) {
+        if (rule_matches_path(path_str, rule.source)) {
             if (best_rule == nullptr || rule.source.length() > best_rule->source.length()) {
                 best_rule = &rule;
             }

@@ -437,6 +437,37 @@ class LauncherActivityStageTest {
     }
 
     @Test
+    fun `execute uses install record resolver when resolved launcher is not loadable`() {
+        val stage = LauncherActivityStage(
+            packageResolver = null,
+            launcherActivityResolver = { "java.lang.StringBuilder" },
+            clock = fixedClock(395L, 407L)
+        )
+
+        val output = stage.execute(
+            stageInput(
+                resolvedPackage = resolvedPackage(
+                    launcherActivityName = "com.example.MissingLauncher",
+                    activities = listOf(
+                        ResolvedComponent(name = "com.example.MissingLauncher", exported = true)
+                    )
+                )
+            )
+        )
+
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals("java.lang.StringBuilder", output.context.launcherActivityClassName)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("InstallRecord", evidence["resolver"])
+        assertEquals("true", evidence["loadable"])
+        assertTrue(
+            evidence["attemptedLauncherActivities"]
+                .orEmpty()
+                .contains("InstallRecord:java.lang.StringBuilder")
+        )
+    }
+
+    @Test
     fun `execute fails non terminal and clears launcher when preflight is not loadable`() {
         val stage = LauncherActivityStage(
             packageResolver = null,
@@ -459,6 +490,29 @@ class LauncherActivityStageTest {
         assertEquals("false", evidence["loadable"])
         assertEquals("true", evidence["preflightBypassed"])
         assertFalse(output.isTerminalFailure)
+    }
+
+    @Test
+    fun `execute records clone stub unsupported reason when launcher is not loadable`() {
+        val stage = LauncherActivityStage(
+            packageResolver = null,
+            launcherActivityResolver = { "com.qq.reader.activity.launch.DefaultAliasSplashActivity" },
+            clock = fixedClock(414L, 421L)
+        )
+
+        val output = stage.execute(
+            stageInput(
+                installRecord = installRecord(
+                    packageName = "com.qq.reader.clonestub_c9f8edb61aa74290a477823cf99c0ba8"
+                )
+            )
+        )
+
+        assertEquals(BootstrapStatus.FAILED, output.result.status)
+        assertNull(output.context.launcherActivityClassName)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("true", evidence["cloneStubDetected"])
+        assertEquals("CLONE_STUB_LAUNCHER_NOT_LOADABLE", evidence["unsupportedReason"])
     }
 
     @Test
@@ -614,9 +668,10 @@ class LauncherActivityStageTest {
     )
 
     private fun installRecord(
+        packageName: String = "com.example.app",
         activities: List<ComponentInfo> = emptyList()
     ) = InstallRecord(
-        packageName = "com.example.app",
+        packageName = packageName,
         originApkPath = "/artifact/com.example.app.apk",
         originApkSha256 = "sha256",
         originCertSha256 = "cert-sha256",

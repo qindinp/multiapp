@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.app.AppOpsManager
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -12,6 +13,7 @@ import android.content.ServiceConnection
 import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
+import android.os.IInterface
 import android.os.UserHandle
 import android.view.LayoutInflater
 import com.multiapp.core.model.virtual.ResolvedComponent
@@ -28,6 +30,7 @@ import java.util.concurrent.Executor
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -102,6 +105,120 @@ class VirtualContextWrapperTest {
 
         assertEquals("com.test.minimal", wrapper.packageName)
         assertEquals("com.test.minimal", wrapper.applicationInfo.packageName)
+    }
+
+    @Test
+    fun `system app-ops identity uses host package`() {
+        val wrapper = wrapper()
+
+        assertEquals("com.multiapp.app", wrapper.opPackageName)
+    }
+
+    @Test
+    fun `app ops service lookup keeps guest identity and returns host service`() {
+        val base = baseContext()
+        val appOpsManager = mockk<AppOpsManager>(relaxed = true)
+        every { base.getSystemService(Context.APP_OPS_SERVICE) } returns appOpsManager
+        val wrapper = wrapper(base = base)
+
+        val service = wrapper.getSystemService(Context.APP_OPS_SERVICE)
+
+        assertSame(appOpsManager, service)
+        assertEquals("com.test.minimal", wrapper.packageName)
+        assertEquals("com.multiapp.app", wrapper.opPackageName)
+        verify(exactly = 1) { base.getSystemService(Context.APP_OPS_SERVICE) }
+    }
+
+    @Test
+    fun `app ops package args remap origin and virtual package for current uid`() {
+        val currentUid = 10466
+        val checkArgs = arrayOf<Any?>("android:fine_location", currentUid, "li.songe.gkd", null)
+        val virtualArgs = arrayOf<Any?>("android:fine_location", currentUid, "com.multiapp.instance.a734", null)
+
+        val remappedCheck = IntentRemapDiagnostics.remapAppOpsPackageArgs(
+            methodName = "checkOperationRawForDevice",
+            args = checkArgs,
+            sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+            hostPackageName = "com.multiapp.app",
+            runtimeUid = currentUid
+        )
+        val remappedVirtual = IntentRemapDiagnostics.remapAppOpsPackageArgs(
+            methodName = "getAppOpMode",
+            args = virtualArgs,
+            sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+            hostPackageName = "com.multiapp.app",
+            runtimeUid = currentUid
+        )
+
+        assertEquals("com.multiapp.app", remappedCheck[2])
+        assertEquals("com.multiapp.app", remappedVirtual[2])
+        assertEquals(currentUid, remappedCheck[1])
+        assertEquals(currentUid, remappedVirtual[1])
+        assertEquals("li.songe.gkd", checkArgs[2])
+        assertEquals("com.multiapp.instance.a734", virtualArgs[2])
+    }
+
+    @Test
+    fun `app ops package args remap uid paired with guest package to host uid`() {
+        val args = arrayOf<Any?>("android:fine_location", 1000, "li.songe.gkd", null)
+
+        val remapped = IntentRemapDiagnostics.remapAppOpsPackageArgs(
+            methodName = "checkOperationRawForDevice",
+            args = args,
+            sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+            hostPackageName = "com.multiapp.app",
+            runtimeUid = 10466
+        )
+
+        assertEquals(10466, remapped[1])
+        assertEquals("com.multiapp.app", remapped[2])
+        assertEquals(1000, args[1])
+        assertEquals("li.songe.gkd", args[2])
+    }
+
+    @Test
+    fun `app ops package arrays preserve string array type when remapped`() {
+        val packages = arrayOf("li.songe.gkd", "com.other")
+        val args = arrayOf<Any?>(packages)
+
+        val remapped = IntentRemapDiagnostics.remapAppOpsPackageArgs(
+            methodName = "getOpsForPackage",
+            args = args,
+            sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+            hostPackageName = "com.multiapp.app",
+            runtimeUid = 10466
+        )
+
+        val remappedPackages = remapped[0] as Array<*>
+        assertEquals(String::class.java, remappedPackages.javaClass.componentType)
+        assertEquals("com.multiapp.app", remappedPackages[0])
+        assertEquals("com.other", remappedPackages[1])
+        assertEquals("li.songe.gkd", packages[0])
+    }
+
+    @Test
+    fun `app ops ServiceManager binder proxy returns package rewriting local interface`() {
+        val baseBinder = mockk<IBinder>(relaxed = true)
+        val baseService = RecordingAppOpsService()
+
+        val proxyBinder = assertNotNull(
+            IntentRemapDiagnostics.createAppOpsServiceManagerBinderProxy(
+                baseBinder = baseBinder,
+                baseService = baseService,
+                appOpsInterface = FakeAppOpsService::class.java,
+                sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+                hostPackageName = "com.multiapp.app",
+                runtimeUidProvider = { 10466 }
+            )
+        )
+        val service = proxyBinder.queryLocalInterface("com.android.internal.app.IAppOpsService") as FakeAppOpsService
+
+        val result = service.checkOperation("android:fine_location", 1000, "li.songe.gkd")
+
+        assertEquals(7, result)
+        assertEquals("android:fine_location", baseService.lastOp)
+        assertEquals(10466, baseService.lastUid)
+        assertEquals("com.multiapp.app", baseService.lastPackageName)
     }
 
     @Test
@@ -1844,6 +1961,25 @@ class VirtualContextWrapperTest {
         override fun onReceive(context: Context, intent: Intent) {
             this.context = context
             this.intent = intent
+        }
+    }
+
+    private interface FakeAppOpsService : IInterface {
+        fun checkOperation(op: String, uid: Int, packageName: String): Int
+    }
+
+    private class RecordingAppOpsService : FakeAppOpsService {
+        var lastOp: String? = null
+        var lastUid: Int? = null
+        var lastPackageName: String? = null
+
+        override fun asBinder(): IBinder? = null
+
+        override fun checkOperation(op: String, uid: Int, packageName: String): Int {
+            lastOp = op
+            lastUid = uid
+            lastPackageName = packageName
+            return 7
         }
     }
 }

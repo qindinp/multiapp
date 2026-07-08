@@ -3,26 +3,32 @@
 **Date:** 2026-07-07
 **Branch:** `container-runtime-refactor`
 **Mode:** read-only multi-agent review
-**Decision:** **BLOCK**
+**Decision:** **BLOCK — P0 provider/native mitigations landed; P1/P2 architecture blockers remain**
 **Scope:** Android general app container runtime, not only QQ / QQ Reader compatibility.
 
 ## Executive Summary
 
 This review treats MultiApp as a **general Android app container**. The current branch should not be merged as-is. The implementation has made progress on hosted Activity, Provider, Service, PackageManager, native path redirection, and evidence capture, but several fundamentals required by a VirtualApp / DroidPlugin / BlackBox-style runtime are still incomplete.
 
-The most important issues are not isolated QQ bugs. They are container architecture defects:
+Current gate interpretation:
 
-1. Cross-instance Provider routing can be forged by same-process guest code.
-2. Native private path redirection is global per package name and can overwrite routes for another instance.
-3. Native path rewriting is vulnerable to `..` / symlink escape because it concatenates strings without canonical containment checks.
-4. Split APK / dynamic feature / multidex support is incomplete.
-5. Guest `Application` is not created through a full `LoadedApk` / `ActivityThread` equivalent path.
+- The three original P0 provider/native findings are **mitigated in the current dirty tree** and are no longer documented as open CRITICAL blockers.
+- The review decision remains **BLOCK** because HIGH P1/P2 runtime fidelity, module boundary, loading model, component semantics, and device evidence gaps still prevent a general-commercial-container claim.
+- The mitigated P0 items remain mandatory regression gates; future PRs must not weaken token routing, process-slot-scoped native redirect, or native containment checks.
+
+The most important open issues are not isolated QQ bugs. They are container architecture and runtime fidelity defects:
+
+1. Split APK / dynamic feature / multidex support is only partially implemented and lacks end-to-end behavior proof.
+2. Guest `Application` is still reflectively constructed/attached rather than created through a full `LoadedApk` / `ActivityThread` equivalent path.
+3. Guest `Application.attachBaseContext()` / `onCreate()` can still run on a custom prewarm Looper instead of a controlled virtual main-thread model.
+4. `:app` still imports loader/hook primitives directly instead of routing all runtime control through `:core:engine` facades.
+5. `:core:model` still contains Android framework types, so it is not yet a pure model/contract module.
 6. Provider, Service, and Broadcast lifecycle semantics diverge from Android framework behavior.
 7. Tests still verify evidence strings more often than actual guest behavior.
 
 These defects explain the observed device failures:
 
-- QQ Reader clone resolves `com.qq.reader.activity.launch.DefaultAliasSplashActivity` but the runtime `PathClassLoader` only sees the base/origin APK, causing `ClassNotFoundException`.
+- QQ Reader clone resolves `com.qq.reader.activity.launch.DefaultAliasSplashActivity` but the runtime class/resource/split model is not yet proven end-to-end, causing `ClassNotFoundException` risk for classes outside the base path.
 - QQ clone spends time in `DexFile.openDexFileNative` and Tencent `RFix/QFix` `attachBaseContext`, because heavy and framework-sensitive guest bootstrap still does not have a full virtual Android runtime context.
 
 ## Review Inputs
@@ -43,21 +49,41 @@ The review used GitHub/code search against known Android container/plugin/runtim
 - LoadedApk plugin frameworks using `ActivityThread.mPackages` / `getPackageInfoNoCheck`
 - RePlugin / Small-style `splitSourceDirs` and `ApplicationInfo` handling references
 
+Caveat: these references are behavior/architecture comparisons, not an implementation decision or license clearance. Before porting or copying any approach, separately confirm license compatibility, Android API-level behavior, hidden-API risk, ROM variance, and maintenance cost. Until that confirmation is complete, the plan should reference these projects only as design precedents for runtime semantics.
+
 ## Severity Summary
 
 | Severity | Count | Merge impact |
 |---|---:|---|
-| CRITICAL | 3 confirmed | Block |
+| CRITICAL | 0 open / 3 mitigated in current dirty tree | No open CRITICAL; keep P0 regression gates and continue P1/P2 before commercial claim |
 | HIGH | 20+ confirmed / plausible | Block |
-| MEDIUM | Several | Track after P0/P1 |
+| MEDIUM | Several | Track after P1 |
 | LOW | Not prioritized | Track later |
 
-## P0 / CRITICAL Findings
+## Implementation Update — 2026-07-07
 
-### 1. Cross-instance Provider access can be forged by same-process guest code
+The original P0 provider/native findings are no longer accurate as open CRITICAL blockers in the current dirty tree:
 
-**Severity:** CRITICAL
-**Status:** CONFIRMED by security-reviewer
+- Provider routing now requires an unguessable `multiapp_routeToken` issued by `ProviderRouteTokenRegistry`, bound to caller/target instance, authority, operation, and expiry. `StubContentProvider` canonicalizes the proxy URI from the token-backed route before dispatching.
+- Native private path redirection now records `processSlot + instanceId + dataRoot`, installs scoped rules through `NativeHookBridge.setupGuestPrivatePathRedirections(...)`, and same-origin engine runtime slots are assigned per process slot.
+- Native path validation now rejects parent traversal and performs canonical containment checks for existing paths plus parent-directory containment checks for create operations.
+- This update adds private-root rules without trailing slashes (`/data/data/<pkg>` and `/data/user/0/<pkg>`) and segment-boundary path matching so `/data/data/com.foo` cannot match `/data/data/com.foobar`.
+
+Remaining blockers are architectural P1/P2 items, especially:
+
+- `:app` still directly installs/uses loader/hook primitives (`VirtualInstrumentationInstaller`, `NativeHookBridge`, `VirtualProvider*`, `VirtualService*`) instead of routing all runtime control through `:core:engine` facades.
+- `:core:model` is still an Android library and still contains Android framework types, so it is not yet a pure model/contract module.
+- `HostedRuntimeEngine` / app container binders still expose or consume `core:loader` bootstrap types.
+- Full LoadedApk/Application equivalence, Provider pre-install ordering, Service/Broadcast fidelity, PMS signatures/typed meta-data, and commercial device evidence remain P1/P2 work.
+
+## P0 / CRITICAL Findings — Mitigated in current dirty tree
+
+The following findings were CRITICAL when found. They are no longer documented as open CRITICAL blockers in the current dirty tree, but remain mandatory regression gates.
+
+### 1. Cross-instance Provider access could be forged by same-process guest code
+
+**Severity when found:** CRITICAL
+**Status:** MITIGATED in current dirty tree; regression gate remains
 **Primary files:**
 
 - [StubContentProvider.kt:251-259](../../app/src/main/java/com/multiapp/app/container/StubContentProvider.kt#L251-L259)
@@ -66,18 +92,26 @@ The review used GitHub/code search against known Android container/plugin/runtim
 - [VirtualProviderManager.kt:54-60](../../core/loader/src/main/java/com/multiapp/core/loader/VirtualProviderManager.kt#L54-L60)
 - [ContentProviderHook.kt:836-847](../../core/identity/src/main/java/com/multiapp/core/identity/ContentProviderHook.kt#L836-L847)
 
-#### Evidence
+#### Pre-mitigation evidence
 
-`StubContentProvider` trusts route data supplied in URI query parameters or `call()` extras:
+Before the current mitigation, `StubContentProvider` trusted route data supplied in URI query parameters or `call()` extras:
 
 - `multiapp_instanceId`
 - `multiapp_guestAuthority`
 
-`VirtualProviderDispatcher.dispatch(uri)` reads those values directly and routes to that instance/provider. `HostedProviderRuntimeBinder.ensureBound()` can even bootstrap the target instance using the forged `instanceId` from the URI.
+`VirtualProviderDispatcher.dispatch(uri)` read those values directly and routed to that instance/provider. `HostedProviderRuntimeBinder.ensureBound()` could bootstrap the target instance using the forged `instanceId` from the URI.
 
 `StubContentProvider` is `exported=false`, which reduces external app attack surface, but does not protect against code already running inside the host UID/process.
 
-#### Failure / attack scenario
+#### Current mitigation evidence
+
+The current dirty tree adds a token-backed route gate:
+
+- [ContentProviderHook.kt](../../core/identity/src/main/java/com/multiapp/core/identity/ContentProviderHook.kt) defines `ProviderRouteTokenRegistry`, issues 32-byte unguessable tokens, and validates caller instance, target instance, authority, operation, and expiry.
+- [ProviderRouteTokenGate.kt](../../app/src/main/java/com/multiapp/app/container/ProviderRouteTokenGate.kt) rejects missing/invalid tokens and rebuilds the canonical proxy URI from the registry route.
+- [StubContentProvider.kt](../../app/src/main/java/com/multiapp/app/container/StubContentProvider.kt) calls `validateRouteToken(...)` before dispatch and removes route tokens before forwarding guest URIs/extras.
+
+#### Failure / attack scenario guarded by regression tests
 
 Guest instance A constructs a direct stub URI:
 
@@ -85,15 +119,11 @@ Guest instance A constructs a direct stub URI:
 content://<host>.multiapp.provider.stub/path?multiapp_instanceId=<instanceB>&multiapp_guestAuthority=<providerB>
 ```
 
-Then calls `query`, `insert`, `update`, `delete`, `openFile`, or `call`. Because the URI already uses the stub authority, `ContentProviderHook` does not rewrite or sanitize it. The dispatcher routes to instance B.
+Then calls `query`, `insert`, `update`, `delete`, `openFile`, or `call`. Without the token gate, the dispatcher routes to instance B. With the current mitigation, direct stub URI without a valid operation-bound token must fail.
 
-This violates the core isolation guarantee of a multi-instance app container.
+#### Implemented mitigation / remaining validation
 
-#### Required fix
-
-Do not treat `instanceId` or `guestAuthority` as authorization data.
-
-Recommended approach:
+Implemented main-path mitigation:
 
 1. Generate an unguessable route token when the host-side hook rewrites a legitimate guest URI.
 2. Store token metadata in a process-local registry:
@@ -101,67 +131,94 @@ Recommended approach:
    - target instance
    - guest authority
    - allowed operation
-   - expiry / one-shot policy
+   - expiry
 3. Stub provider accepts only valid tokens.
-4. Direct stub URI without a valid token must fail.
-5. `exported=false`, provider permissions, and URI grants must be enforced in virtual policy.
+4. Direct stub URI without a valid token fails.
 
-### 2. Native private path redirects are global per package and overwrite another instance
+Remaining regression gates:
 
-**Severity:** CRITICAL
+- forged URI without token must fail for `query/insert/update/delete/call/openFile`.
+- expired token, wrong-operation token, wrong-authority token, and cross-instance token reuse must fail.
+- Provider `exported`, permission, and URI-grant fidelity remain P1/P2 runtime policy work; they are no longer part of the original direct-route-forgery CRITICAL blocker.
+
+### 2. Native private path redirects were global per package and could overwrite another instance
+
+**Severity when found:** CRITICAL
+**Status:** MITIGATED in current dirty tree; main path uses process-slot-scoped guest private redirection
 **Primary files:**
 
 - [NativeHookBridge.kt:868-879](../../core/hook/src/main/java/com/multiapp/core/hook/NativeHookBridge.kt#L868-L879)
 - [native-hook.cpp:90-91](../../core/hook/src/main/cpp/native-hook.cpp#L90-L91)
 
-#### Evidence
+#### Pre-mitigation evidence
 
-`setupGuestPrivatePathRedirections()` accepts `instanceId`, but installs rules only by `guestPackageName`:
+`setupGuestPrivatePathRedirections()` accepted `instanceId`, but installed rules only by `guestPackageName`:
 
 ```text
 /data/data/<guestPackage>/ -> <dataRoot>/
 /data/user/0/<guestPackage>/ -> <dataRoot>/
 ```
 
-The native layer stores these in a process-global `g_path_redirects` map.
+The native layer stored these in a process-global `g_path_redirects` map.
 
-#### Failure scenario
+#### Current mitigation evidence
 
-Two instances of the same original package run in the same host process:
+The current dirty tree adds process-slot scoped private path redirects:
+
+- [NativePrivatePathRedirectInstaller.kt](../../core/loader/src/main/java/com/multiapp/core/loader/NativePrivatePathRedirectInstaller.kt) records `instanceId`, `originPackageName`, canonical `dataRoot`, and `processSlot`; evidence declares `processSlot+instanceId+dataRoot` binding.
+- [NativeHookBridge.kt](../../core/hook/src/main/java/com/multiapp/core/hook/NativeHookBridge.kt) sets the active native redirect scope and stores scoped rules with `processSlot`, `instanceId`, and `dataRoot`.
+- [native-hook.cpp](../../core/hook/src/main/cpp/native-hook.cpp) stores `PathRedirectRule.process_slot`, `instance_id`, `data_root`, and matches scoped rules only against the active process slot/instance.
+- Engine runtime allocation assigns same-origin instances to separate process slots in the main path.
+
+#### Failure scenario guarded by regression tests
+
+Two instances of the same original package must not share package-name-only native redirect state:
 
 ```text
 Instance A: /data/data/com.foo/ -> A/dataRoot
 Instance B: /data/data/com.foo/ -> B/dataRoot
 ```
 
-After B installs its rules, A's native file access to `/data/data/com.foo/...` resolves into B's sandbox. This causes cross-instance data leakage and corruption.
+With package-name-only redirect, B can overwrite A's sandbox mapping. With the current main-path mitigation, same-origin instances must use distinct process slots and native private redirects must match `processSlot + instanceId`.
 
-#### Required fix
+#### Implemented mitigation / remaining hardening
 
-One of these must be implemented before treating this as a general container:
+Implemented main-path mitigation:
 
-- isolate same-origin instances into separate processes; or
-- make native redirection scoped by current virtual instance; or
-- enforce a strict single-active-instance model per host process with safe rule switching and no concurrent guest execution.
+- same-origin multi-instance runtime allocation is process-slot based.
+- native private redirect rules are scoped by `processSlot + instanceId + dataRoot`.
+- evidence records the binding scope and installed private path prefixes.
 
-Package-name-only native redirect is not compatible with multi-instance isolation.
+Remaining regression gates:
 
-### 3. Native path rewrite can escape sandbox via `..` or symlink
+- same-origin dual-instance concurrency must verify storage, provider, service, broadcast, activity slot, and native redirect isolation.
+- legacy unscoped `NativeHookBridge.addPathRedirection(...)` still exists; it must not be used for guest private data prefixes and should be retired, compat-profile-gated, or reject private data prefixes.
 
-**Severity:** CRITICAL
+### 3. Native path rewrite could escape sandbox via `..` or symlink
+
+**Severity when found:** CRITICAL
+**Status:** MITIGATED in current dirty tree; native containment checks added
 **Primary file:** [native-hook.cpp:197-231](../../core/hook/src/main/cpp/native-hook.cpp#L197-L231)
 
-#### Evidence
+#### Pre-mitigation evidence
 
-`redirect_path()` performs a prefix match and then string concatenation:
+`redirect_path()` performed a prefix match and then string concatenation:
 
 ```cpp
 return best_to + path_str.substr(best_from.length());
 ```
 
-It does not reject `..`, does not canonicalize the destination, and does not verify the final target remains under `dataRoot`.
+It did not reject `..`, did not canonicalize the destination, and did not verify the final target stayed under `dataRoot`.
 
-#### Failure scenario
+#### Current mitigation evidence
+
+The current dirty tree adds main-path containment checks:
+
+- [native-hook.cpp](../../core/hook/src/main/cpp/native-hook.cpp) rejects parent traversal in source/result paths, canonicalizes existing redirected paths, validates canonical containment under `dataRoot`, and validates the parent directory for create operations.
+- [NativeHookBridge.kt](../../core/hook/src/main/java/com/multiapp/core/hook/NativeHookBridge.kt) rejects parent traversal in Java-side scoped rules and uses segment-boundary prefix matching.
+- [NativePrivatePathRedirectInstaller.kt](../../core/loader/src/main/java/com/multiapp/core/loader/NativePrivatePathRedirectInstaller.kt) canonicalizes `dataRoot` and now installs both trailing-slash and no-trailing-slash private root prefixes for `/data/data/<pkg>` and `/data/user/0/<pkg>`.
+
+#### Failure scenario guarded by regression tests
 
 A guest/native library can request:
 
@@ -169,22 +226,28 @@ A guest/native library can request:
 /data/data/<pkg>/files/../../../../...
 ```
 
-or use symlinks under the sandbox. The Java layer has scoped canonical checks, but native file APIs bypass those Java checks.
+or use symlinks under the sandbox. Native file APIs bypass Java-level checks, so native containment must be enforced at the hook boundary. With the current mitigation, parent traversal and out-of-root canonical targets must fail.
 
-#### Required fix
+#### Implemented mitigation / remaining native coverage
 
-Native path resolution must enforce containment:
+Implemented main-path mitigation:
 
-- reject unsafe segments such as `..`
-- canonicalize existing paths and verify they are still under the target data root
-- for `O_CREAT`, canonicalize and validate the parent directory
-- handle symlinks using no-follow/openat-style constraints where possible
+- reject unsafe segments such as `..`.
+- canonicalize existing paths and verify they remain under the target data root.
+- for `O_CREAT` / create-like modes, canonicalize and validate the parent directory.
+- use no-trailing-slash root rules plus segment-boundary matching so `/data/data/com.foo` cannot match `/data/data/com.foobar`.
+
+Remaining P2/native compatibility work:
+
+- device probes must cover all claimed API families, including `open64`, `stat64`, `lstat64`, `fopen64`, `faccessat`, `newfstatat`, `fstatat64`, `mkdirat`, `unlinkat`, `renameat`, `renameat2`, `rmdir`, `remove`, and bionic/fortify wrappers.
+- symlink/no-follow/openat-style hardening should continue where Android API support permits.
 
 ## P1 / HIGH Runtime and Loading Findings
 
-### 4. Split APK / dynamic feature / multidex paths are missing
+### 4. Split APK / dynamic feature / multidex paths are partially implemented but not proven end-to-end
 
 **Severity:** HIGH
+**Status:** PARTIALLY IMPLEMENTED; remains HIGH until split/multidex fixture and device evidence pass
 **Primary files:**
 
 - [InstallRecord.kt:35](../../core/model/src/main/java/com/multiapp/core/model/installer/InstallRecord.kt#L35)
@@ -194,7 +257,14 @@ Native path resolution must enforce containment:
 
 #### Evidence
 
-The runtime records and loads a single APK path. `ApplicationInfo` does not carry `splitSourceDirs`, and `PathClassLoader` receives only one path.
+The original review found a single-APK runtime path. The current dirty tree has partial split support:
+
+- [InstallRecord.kt](../../core/model/src/main/java/com/multiapp/core/model/installer/InstallRecord.kt) stores `splitApkPaths`, `splitPublicSourceDirs`, `splitNames`, and exposes `codeSourceDirs` / `publicResourceDirs`.
+- [VirtualPackageSnapshot.kt](../../core/model/src/main/java/com/multiapp/core/model/virtual/VirtualPackageSnapshot.kt) stores split source/public dirs and exposes runtime path lists.
+- [VirtualPackageInfoFactory.kt](../../core/loader/src/main/java/com/multiapp/core/loader/VirtualPackageInfoFactory.kt) fills `ApplicationInfo.splitSourceDirs`, `splitPublicSourceDirs`, and `splitNames`.
+- [VirtualResourcesManager.kt](../../core/loader/src/main/java/com/multiapp/core/loader/VirtualResourcesManager.kt), `VirtualProviderDispatcher`, `VirtualServiceManager`, `VirtualInstrumentation`, and launch-record patching now pass split fields through several runtime paths.
+
+Remaining gap: the branch still lacks end-to-end behavior proof that Activity, Provider, Service, resources, and native libraries loaded from split/dynamic-feature/multidex fixtures work on device.
 
 #### Failure scenario
 
@@ -485,14 +555,15 @@ Implement or explicitly fail:
 
 32-bit protected libraries, SQLite, C++ filesystem, or bionic wrappers can bypass current redirect hooks.
 
-### 18. Root package data dir without trailing slash is not redirected
+### 18. Root package data dir without trailing slash was not redirected — mitigated
 
-**Severity:** HIGH
+**Severity when found:** HIGH
+**Status:** MITIGATED in current dirty tree; pending device probes
 **Primary file:** [NativeHookBridge.kt:875-877](../../core/hook/src/main/java/com/multiapp/core/hook/NativeHookBridge.kt#L875-L877)
 
-#### Evidence
+#### Pre-mitigation evidence
 
-Only these are registered:
+Only these were registered:
 
 ```text
 /data/data/<pkg>/
@@ -506,9 +577,22 @@ Not:
 /data/user/0/<pkg>
 ```
 
-#### Failure scenario
+#### Current mitigation evidence
 
-Shell/native code doing `stat("/data/data/<pkg>")` or `realpath("/data/data/<pkg>")` sees the real system path, not the sandbox.
+[NativePrivatePathRedirectInstaller.kt](../../core/loader/src/main/java/com/multiapp/core/loader/NativePrivatePathRedirectInstaller.kt) now installs four private path prefixes:
+
+```text
+/data/data/<pkg>
+/data/data/<pkg>/
+/data/user/0/<pkg>
+/data/user/0/<pkg>/
+```
+
+[NativeHookBridge.kt](../../core/hook/src/main/java/com/multiapp/core/hook/NativeHookBridge.kt) and [native-hook.cpp](../../core/hook/src/main/cpp/native-hook.cpp) also use segment-boundary matching so a no-slash root prefix does not match sibling package names.
+
+#### Remaining validation
+
+Shell/native code doing `stat("/data/data/<pkg>")`, `realpath("/data/data/<pkg>")`, or equivalent no-trailing-slash probes must redirect to the sandbox on device. This is tracked as a regression probe, not an open HIGH design blocker.
 
 ### 19. Guest `/data/data/<pkg>/lib` does not map to ABI-specific native library dir
 
@@ -543,13 +627,13 @@ Priority missing tests:
 
 ## Recommended Fix Plan
 
-### Phase 0 — Stop unsafe routes
+### Phase 0 — P0 regression gates, main mitigations landed
 
-1. Disable direct stub provider routing without token.
-2. Add route token registry and enforcement.
-3. Enforce virtual Provider `exported` and permission policy.
-4. Block or isolate same-origin multi-instance native redirect until scoped redirect exists.
-5. Add native canonical containment checks.
+1. Keep direct stub provider routing disabled without a valid route token.
+2. Preserve route token registry enforcement for caller/target instance, authority, operation, and expiry.
+3. Preserve process-slot-scoped native private redirection for same-origin multi-instance isolation.
+4. Preserve native canonical containment checks, parent-traversal rejection, create-parent containment, and segment-boundary prefix matching.
+5. Add/keep behavior and device regression tests for forged provider routes, native root/no-slash paths, traversal attempts, and same-origin dual-instance isolation.
 
 ### Phase 1 — Make loading model real
 
@@ -596,7 +680,47 @@ Native-specific validation should include device probes for all claimed operatio
 
 ## Current Status
 
-- Code modified by this review: none.
-- Build/test run by this review: none.
-- Review decision: **BLOCK**.
-- First repair target: Provider route token + native multi-instance redirect isolation.
+- Code modified after this review: native private-path redirect root mapping, segment-boundary matching, and related unit tests.
+- Current dirty tree also contains provider route-token enforcement, process-slot scoped native private redirects, partial split-path model/runtime propagation, default guest `Application` creation, and launch-record patch readiness guards.
+- Validated locally:
+  - `./gradlew :core:hook:testDebugUnitTest --tests "com.multiapp.core.hook.NativeHookBridgeTest" --tests "com.multiapp.core.hook.PathTrieTest"`
+  - `./gradlew :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.NativePrivatePathRedirectInstallerTest" --tests "com.multiapp.core.loader.NativeLibrariesStageTest"`
+- Review decision remains: **BLOCK** until P1/P2 commercial runtime blockers are closed.
+- Next repair target: move app/container direct loader/hook access behind `:core:engine` facades, make `:core:model` a pure contract/model module, close LoadedApk/Application equivalence, and add behavior-first device evidence.
+
+## Execution Update - 2026-07-08
+
+### Implemented in this pass
+
+- Added AppOps package/uid rewrite on the hosted baseline path, following the VirtualApp-style rule: guest/origin/virtual package arguments are rewritten to the host package when crossing AppOps binder-facing APIs, and the adjacent AppOps uid is rewritten to the real runtime uid. This targets the observed GKD failure class: `Specified package "li.songe.gkd" under uid ... but it is not`.
+- Added a ServiceManager-level AppOps binder proxy for `ServiceManager.sCache["appops"]`. This covers direct `IAppOpsService.Stub.asInterface(ServiceManager.getService("appops"))` callers that bypass `Context.getSystemService(Context.APP_OPS_SERVICE)`.
+- `VirtualContextWrapper` keeps guest-facing `getPackageName()` as origin identity but exposes host identity through `getOpPackageName()`, and API 34+ `getAttributionSource()` is rewritten to the host package.
+- `VirtualPackageManagerProxyStage` records AppOps proxy evidence beside PMS/Notification proxy evidence: `appOpsPackageProxyStatus`, `appOpsServiceManagerProxyStatus`, source packages, host package, mode, and failure reason fields.
+- Added Application bootstrap progress evidence (`application-progress`) so QQ/QQ Reader style stalls can be split into class load, constructor, context creation, attach, runtime publication, and `onCreate` phases.
+- Process slots are no longer only evidence strings. Each proxy Activity slot is mapped to a concrete Android process (`:v0` through `:v23`), and each matching `ContainerActivityV*` entry is declared in the same process so guest bootstrap and hosted proxy run in the same process slot.
+- Engine process/proxy allocation is now paired: `runtime.processSlot` is derived from the selected `runtime.proxySlot`, preventing the old state where evidence could say one process slot while the selected proxy belongs to another.
+- `ContainerActivity` writes `activity-process-slot` evidence and aborts early if the actual process name does not match `engineProcessSlot`.
+
+### Open-source references used for this pass
+
+- VirtualApp AppOps proxy precedent: `AppOpsManagerStub` rewrites AppOps package/uid at the system-service boundary.
+- DroidPlugin ActivityManager proxy precedent: central AMS proxying instead of scattered per-call patches.
+
+### Verification
+
+```bash
+./gradlew :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :app:assembleDebug --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+```
+
+All four commands passed. A combined loader/engine/app unit-test invocation exceeded the local 180s command timeout, so the gate was split by module. After adding the ServiceManager AppOps proxy, `:core:loader:testDebugUnitTest` passed again in 1m 27s. `:app:assembleDebug` completed in 2m 50s and still emits the existing AGP 8.7.3 / `compileSdk=36` compatibility warning.
+
+### Still BLOCK
+
+- AppOps now covers both `AppOpsManager.mService` and `ServiceManager.sCache["appops"]` paths, but it still needs device proof and does not yet rewrite nested `AttributionSourceState` / parcelable internals.
+- Process slots now bind hosted Activity bootstrap to real Android processes, but Provider/Service/Broadcast stubs are not yet fully per-process and per-instance.
+- Per-process globals (`EngineRuntimeRegistry.global`, `VirtualProcessRuntime.global`, `VirtualActivityRecordManager.global`) must be audited because real process slots mean memory singletons are no longer shared across all slots.
+- LoadedApk/Application equivalence remains incomplete: progress evidence improved observability, but this is not yet a full `LoadedApk.makeApplication()` / `ActivityThread` model.
+- Device evidence is still required before any `DONE` claim: `logcat`, `dumpsys activity exit-info`, `dumpsys activity recents`, `run-as com.multiapp.app files/hosted_launch_evidence`, and `files/instances`.

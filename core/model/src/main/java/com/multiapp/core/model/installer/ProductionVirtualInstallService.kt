@@ -213,6 +213,13 @@ class ProductionVirtualInstallService(
     private fun InstallRecord.matchesInstallMetadata(metadata: InstallMetadata): Boolean {
         return nativeLibraries == metadata.nativeLibraries &&
             abiList == metadata.abiList &&
+            permissions == metadata.permissions &&
+            activities == metadata.activities &&
+            services == metadata.services &&
+            receivers == metadata.receivers &&
+            providers == metadata.providers &&
+            splitApkPaths == metadata.splitApkPaths &&
+            splitPublicSourceDirs == metadata.splitPublicSourceDirs &&
             splitNames == metadata.splitNames &&
             isolatedSplits == metadata.isolatedSplits
     }

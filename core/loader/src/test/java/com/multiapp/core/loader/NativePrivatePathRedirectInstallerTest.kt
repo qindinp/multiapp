@@ -36,12 +36,14 @@ class NativePrivatePathRedirectInstallerTest {
         )
 
         assertFalse(result.hookInstalled)
-        assertEquals(2, result.ruleCount)
+        assertEquals(4, result.ruleCount)
         assertEquals("UNSUPPORTED", result.verdict)
         assertEquals(
             File(dataRoot, "files/config.json").canonicalPath,
             File(bridge.translatePath("/data/data/com.example.app/files/config.json")).canonicalPath
         )
+        assertEquals(dataRoot.canonicalPath, File(bridge.translatePath("/data/data/com.example.app")).canonicalPath)
+        assertEquals(dataRoot.canonicalPath, File(bridge.translatePath("/data/user/0/com.example.app")).canonicalPath)
         val evidence = result.evidence().associate { it.key to it.value }
         assertEquals("inst-001", evidence["nativeRedirectInstanceId"])
         assertEquals("com.multiapp.app:v0", evidence["nativeRedirectProcessSlot"])
@@ -127,7 +129,7 @@ class NativePrivatePathRedirectInstallerTest {
     fun `evidence marks realpath partial until device io probe verifies redirect`() {
         val result = NativePrivatePathRedirectInstallResult(
             hookInstalled = true,
-            ruleCount = 2,
+            ruleCount = 4,
             reason = "PATH_HOOK_INSTALLED_NEEDS_DEVICE_IO_PROBE"
         )
 

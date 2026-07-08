@@ -210,17 +210,24 @@ private fun assignFrom(
         .map { it.proxySlot }
         .toSet()
 
-    val processSlot = chooseSlot(
-        candidates = processCandidates,
-        used = usedProcessSlots,
-        key = "$originPackageName:$instanceId"
-    ) ?: throw EngineRuntimeSlotExhaustedException(
-        instanceId = instanceId,
-        originPackageName = originPackageName,
-        slotType = "process",
-        candidateCount = processCandidates.size
-    )
-    val proxySlot = chooseSlot(
+    val pairedMode = processCandidates.size == proxyCandidates.size
+    val pairedSlot = if (pairedMode) {
+        choosePairedSlot(
+            processCandidates = processCandidates,
+            proxyCandidates = proxyCandidates,
+            usedProcessSlots = usedProcessSlots,
+            usedProxySlots = usedProxySlots,
+            key = instanceId
+        ) ?: throw EngineRuntimeSlotExhaustedException(
+            instanceId = instanceId,
+            originPackageName = originPackageName,
+            slotType = if (proxyCandidates.all { it in usedProxySlots }) "proxy" else "process",
+            candidateCount = proxyCandidates.size
+        )
+    } else {
+        null
+    }
+    val proxySlot = pairedSlot?.proxySlot ?: chooseSlot(
         candidates = proxyCandidates,
         used = usedProxySlots,
         key = instanceId
@@ -230,6 +237,16 @@ private fun assignFrom(
         slotType = "proxy",
         candidateCount = proxyCandidates.size
     )
+    val processSlot = pairedSlot?.processSlot ?: chooseSlot(
+        candidates = processCandidates,
+        used = usedProcessSlots,
+        key = "$originPackageName:$instanceId"
+    ) ?: throw EngineRuntimeSlotExhaustedException(
+        instanceId = instanceId,
+        originPackageName = originPackageName,
+        slotType = "process",
+        candidateCount = processCandidates.size
+    )
 
     return EngineRuntimeSlotAssignment(
         instanceId = instanceId,
@@ -238,6 +255,35 @@ private fun assignFrom(
         proxySlot = proxySlot,
         updatedAtMs = nowMs
     )
+}
+
+private data class PairedRuntimeSlot(
+    val processSlot: String,
+    val proxySlot: String
+)
+
+private fun choosePairedSlot(
+    processCandidates: List<String>,
+    proxyCandidates: List<String>,
+    usedProcessSlots: Set<String>,
+    usedProxySlots: Set<String>,
+    key: String
+): PairedRuntimeSlot? {
+    if (processCandidates.size != proxyCandidates.size) return null
+    val start = stableSlotIndex(key, proxyCandidates.size)
+    return proxyCandidates.indices
+        .asSequence()
+        .map { offset -> (start + offset) % proxyCandidates.size }
+        .map { index ->
+            PairedRuntimeSlot(
+                processSlot = processCandidates[index],
+                proxySlot = proxyCandidates[index]
+            )
+        }
+        .firstOrNull { candidate ->
+            candidate.processSlot !in usedProcessSlots &&
+                candidate.proxySlot !in usedProxySlots
+        }
 }
 
 private fun chooseSlot(candidates: List<String>, used: Set<String>, key: String): String? {

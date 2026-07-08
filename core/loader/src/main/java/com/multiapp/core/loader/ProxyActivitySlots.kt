@@ -27,4 +27,12 @@ object ProxyActivitySlots {
             put("$hostPackageName.container.ProxyActivitySingleTask$index", "singleTask")
         }
     }
+
+    fun processNameByClassName(hostPackageName: String): Map<String, String> =
+        classNames(hostPackageName).mapIndexed { index, className ->
+            className to "$hostPackageName:v$index"
+        }.toMap()
+
+    fun processNameForClassName(hostPackageName: String, className: String): String? =
+        processNameByClassName(hostPackageName)[className]
 }

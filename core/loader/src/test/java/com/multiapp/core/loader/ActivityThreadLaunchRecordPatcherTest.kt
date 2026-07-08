@@ -21,7 +21,7 @@ class ActivityThreadLaunchRecordPatcherTest {
     }
 
     @Test
-    fun `patchLaunchRecord rewrites legacy ActivityClientRecord before attach`() {
+    fun `patchLaunchRecord keeps proxy record when package snapshot is missing`() {
         VirtualActivityIntentStore.setIntentCopierForTest { it }
         val proxyIntent = proxyIntent(token = "token-001")
         val originalGuestIntent = mockk<Intent>(relaxed = true)
@@ -37,15 +37,15 @@ class ActivityThreadLaunchRecordPatcherTest {
         val result = ActivityThreadLaunchRecordPatcher.patchLaunchRecord(record)
 
         assertTrue(result.observedProxyLaunch)
-        assertTrue("intent" in result.patchedFields)
-        assertTrue("activityInfo" in result.patchedFields)
-        assertSame(originalGuestIntent, record.intent)
-        assertEquals("com.test.minimal", record.activityInfo?.packageName)
-        assertEquals("com.test.minimal.MainActivity", record.activityInfo?.name)
+        assertEquals("PACKAGE_SNAPSHOT_MISSING", result.skippedReason)
+        assertTrue(result.patchedFields.isEmpty())
+        assertSame(proxyIntent, record.intent)
+        assertEquals("com.multiapp.app", record.activityInfo?.packageName)
+        assertEquals("com.multiapp.app.container.ProxyActivity0", record.activityInfo?.name)
     }
 
     @Test
-    fun `patchMessageObject rewrites LaunchActivityItem inside client transaction`() {
+    fun `patchMessageObject keeps LaunchActivityItem proxy when package snapshot is missing`() {
         VirtualActivityIntentStore.setIntentCopierForTest { it }
         val proxyIntent = proxyIntent(token = "token-002")
         val originalGuestIntent = mockk<Intent>(relaxed = true)
@@ -62,16 +62,16 @@ class ActivityThreadLaunchRecordPatcherTest {
         val result = ActivityThreadLaunchRecordPatcher.patchMessageObject(transaction)
 
         assertTrue(result.observedProxyLaunch)
-        assertEquals(1, result.patchedRecordCount)
-        assertTrue("mIntent" in result.patchedFields)
-        assertTrue("mInfo" in result.patchedFields)
-        assertSame(originalGuestIntent, launchItem.mIntent)
-        assertEquals("com.test.minimal", launchItem.mInfo?.packageName)
-        assertEquals("com.test.minimal.MainActivity", launchItem.mInfo?.name)
+        assertEquals("PACKAGE_SNAPSHOT_MISSING", result.skippedReason)
+        assertEquals(0, result.patchedRecordCount)
+        assertTrue(result.patchedFields.isEmpty())
+        assertSame(proxyIntent, launchItem.mIntent)
+        assertEquals("com.multiapp.app", launchItem.mInfo?.packageName)
+        assertEquals("com.multiapp.app.container.ProxyActivity1", launchItem.mInfo?.name)
     }
 
     @Test
-    fun `patchMessageObject rewrites LaunchActivityItem from transaction items field`() {
+    fun `patchMessageObject keeps transaction items proxy when package snapshot is missing`() {
         VirtualActivityIntentStore.setIntentCopierForTest { it }
         val proxyIntent = proxyIntent(token = "token-003")
         val originalGuestIntent = mockk<Intent>(relaxed = true)
@@ -88,10 +88,11 @@ class ActivityThreadLaunchRecordPatcherTest {
         val result = ActivityThreadLaunchRecordPatcher.patchMessageObject(transaction)
 
         assertTrue(result.observedProxyLaunch)
-        assertEquals(1, result.patchedRecordCount)
-        assertSame(originalGuestIntent, launchItem.mIntent)
-        assertEquals("com.test.minimal", launchItem.mInfo?.packageName)
-        assertEquals("com.test.minimal.MainActivity", launchItem.mInfo?.name)
+        assertEquals("PACKAGE_SNAPSHOT_MISSING", result.skippedReason)
+        assertEquals(0, result.patchedRecordCount)
+        assertSame(proxyIntent, launchItem.mIntent)
+        assertEquals("com.multiapp.app", launchItem.mInfo?.packageName)
+        assertEquals("com.multiapp.app.container.ProxyActivity2", launchItem.mInfo?.name)
     }
 
     @Test

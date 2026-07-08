@@ -26,7 +26,8 @@ class EngineRuntimeRegistry {
                 "virtualPackageName" to runtime.virtualPackageName,
                 "dataRoot" to runtime.dataRoot,
                 "processSlot" to runtime.processSlot,
-                "proxySlot" to runtime.proxySlot
+                "proxySlot" to runtime.proxySlot,
+                "processSlotBindingMode" to "proxy-activity-android-process"
             )
         )
         return runtime

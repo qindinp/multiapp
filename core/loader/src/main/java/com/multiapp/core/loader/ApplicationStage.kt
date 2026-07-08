@@ -58,10 +58,29 @@ class ApplicationStage(
         val applicationThread = currentApplicationThreadEvidence()
 
         var runtimePublishedBeforeOnCreate = false
+        fun progress(status: String, detail: String, extra: Map<String, String> = emptyMap()) {
+            HostedRuntimeProgressEvidenceWriter.write(
+                context = hostContext,
+                instanceId = input.instanceId,
+                component = "application-progress",
+                fields = linkedMapOf(
+                    "status" to status,
+                    "stage" to "APPLICATION",
+                    "detail" to detail,
+                    "applicationClass" to appClassName,
+                    "applicationClassSource" to appClassSource,
+                    "originPackageName" to instance.originPackageName,
+                    "virtualPackageName" to instance.virtualPackageName,
+                    "threadName" to Thread.currentThread().name,
+                    "elapsedMs" to (System.currentTimeMillis() - startMs).toString()
+                ) + extra
+            )
+        }
 
         return runCatching {
             val context = hostContext
                 ?: throw IllegalStateException("hostContext is required for Application creation")
+            progress("STARTED", "guest Application creation started")
             val virtualContextConfig = VirtualContextConfig(
                 instanceId = input.instanceId,
                 originPackageName = instance.originPackageName,
@@ -83,12 +102,21 @@ class ApplicationStage(
                     applicationClassSource = appClassSource,
                     hostContext = context,
                     virtualContextConfig = virtualContextConfig,
-                    guestClassLoader = guestClassLoader
+                    guestClassLoader = guestClassLoader,
+                    progress = { status, detail, extra -> progress(status, detail, extra) }
                 )
+            )
+            progress(
+                "APPLICATION_ATTACHED",
+                "guest Application attachBaseContext returned",
+                mapOf("attachedContextPackageName" to creation.attachedContextPackageName.orEmpty())
             )
             publishRuntimeBeforeOnCreate(input, creation.application)
             runtimePublishedBeforeOnCreate = true
+            progress("RUNTIME_PUBLISHED", "runtime published before Application.onCreate")
+            progress("ON_CREATE_STARTED", "guest Application.onCreate started")
             creation.application.onCreate()
+            progress("ON_CREATE_FINISHED", "guest Application.onCreate returned")
             creation
         }.fold(
             onSuccess = { creation ->
@@ -220,7 +248,8 @@ data class GuestApplicationCreateRequest(
     val applicationClassSource: String,
     val hostContext: Context,
     val virtualContextConfig: VirtualContextConfig,
-    val guestClassLoader: ClassLoader
+    val guestClassLoader: ClassLoader,
+    val progress: (status: String, detail: String, extra: Map<String, String>) -> Unit = { _, _, _ -> }
 )
 
 data class GuestApplicationCreateResult(
@@ -231,13 +260,20 @@ data class GuestApplicationCreateResult(
 
 class ReflectiveGuestApplicationCreator : GuestApplicationCreator {
     override fun create(request: GuestApplicationCreateRequest): GuestApplicationCreateResult {
+        request.progress("LOAD_CLASS_STARTED", "loading guest Application class", emptyMap())
         val appClass = request.guestClassLoader.loadClass(request.applicationClassName)
+        request.progress("LOAD_CLASS_FINISHED", "guest Application class loaded", mapOf("loadedClass" to appClass.name))
+        request.progress("CONSTRUCTOR_STARTED", "constructing guest Application", emptyMap())
         val guestApplication = appClass.getDeclaredConstructor().newInstance() as Application
+        request.progress("CONSTRUCTOR_FINISHED", "guest Application constructed", mapOf("actualClass" to guestApplication.javaClass.name))
+        request.progress("CONTEXT_CREATE_STARTED", "creating virtual Application context", emptyMap())
         val guestContext = VirtualContextWrappers.create(
             base = request.hostContext,
             config = request.virtualContextConfig,
             guestClassLoader = request.guestClassLoader
         )
+        request.progress("CONTEXT_CREATE_FINISHED", "virtual Application context created", mapOf("contextPackageName" to guestContext.packageName))
+        request.progress("ATTACH_STARTED", "calling Application.attachBaseContext", mapOf("contextPackageName" to guestContext.packageName))
         val attachMethod = findAttachBaseContextMethod(guestApplication.javaClass)
         attachMethod.isAccessible = true
         attachMethod.invoke(guestApplication, guestContext)

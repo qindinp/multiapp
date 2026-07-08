@@ -748,13 +748,22 @@ class NativeHookBridge {
         var bestRule: PathRedirectionRule? = null
         for (rule in pathRedirections.values) {
             if (!rule.scoped || !rule.matchesScope(processSlot, instanceId)) continue
-            if (originalPath.startsWith(rule.fromPrefix) &&
+            if (pathMatchesPrefix(originalPath, rule.fromPrefix) &&
                 rule.fromPrefix.length > (bestRule?.fromPrefix?.length ?: -1)
             ) {
                 bestRule = rule
             }
         }
         return bestRule?.let { secureScopedTranslation(it, originalPath) }
+    }
+
+    private fun pathMatchesPrefix(path: String, prefix: String): Boolean {
+        if (!path.startsWith(prefix)) return false
+        if (!path.startsWith("/")) return true
+        return prefix.length == path.length ||
+            prefix.isEmpty() ||
+            prefix.last() == '/' ||
+            path[prefix.length] == '/'
     }
 
     private fun rebuildPrefixIndex() {
@@ -1099,9 +1108,16 @@ class NativeHookBridge {
             )
             return 0
         }
-        val targetRoot = dataRoot.trimEnd('/') + "/"
+        val targetRootWithoutSlash = dataRoot.trimEnd('/', '\\')
+        val targetRoot = "$targetRootWithoutSlash/"
         var ruleCount = 0
+        if (addScopedPathRedirection("/data/data/$guestPackageName", targetRootWithoutSlash, processSlot, instanceId, dataRoot)) {
+            ruleCount++
+        }
         if (addScopedPathRedirection("/data/data/$guestPackageName/", targetRoot, processSlot, instanceId, dataRoot)) {
+            ruleCount++
+        }
+        if (addScopedPathRedirection("/data/user/0/$guestPackageName", targetRootWithoutSlash, processSlot, instanceId, dataRoot)) {
             ruleCount++
         }
         if (addScopedPathRedirection("/data/user/0/$guestPackageName/", targetRoot, processSlot, instanceId, dataRoot)) {
@@ -1422,11 +1438,21 @@ class NativeHookBridge {
             for (ch in path) {
                 val child = node.children[ch] ?: break
                 node = child
-                if (node.replacement != null && node.prefixLength > bestPrefixLength) {
+                if (node.replacement != null &&
+                    node.prefixLength > bestPrefixLength &&
+                    matchesPathBoundary(path, node.prefixLength)
+                ) {
                     bestReplacement = node.replacement; bestPrefixLength = node.prefixLength
                 }
             }
             return bestReplacement?.let { it + path.substring(bestPrefixLength) }
+        }
+        private fun matchesPathBoundary(path: String, prefixLength: Int): Boolean {
+            if (!path.startsWith("/")) return true
+            return prefixLength == path.length ||
+                prefixLength == 0 ||
+                path[prefixLength - 1] == '/' ||
+                path[prefixLength] == '/'
         }
         fun clear() { root.children.clear() }
     }

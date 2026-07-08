@@ -1,5 +1,6 @@
 package com.multiapp.core.engine
 
+import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.model.InstallArtifactManifest
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.VirtualPackageRecord
@@ -94,6 +95,44 @@ class DefaultVirtualizationEngineTest {
         assertEquals(listOf(baseApk, splitArm64, splitFeature), snapshot.codeSourceDirs)
         assertEquals(listOf(baseApk, publicSplitArm64, publicSplitFeature), snapshot.publicResourceDirs)
         assertEquals(File(instance.dataRoot, "lib").absolutePath, snapshot.nativeLibraryDir)
+    }
+
+    @Test
+    fun `launch assigns proxy slot matching launcher launch mode`() {
+        val instance = instance()
+        val launches = mutableListOf<EngineLaunchSpec>()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(
+                installRecord(
+                    activities = listOf(
+                        ComponentInfo(
+                            name = "com.test.app.MainActivity",
+                            exported = true,
+                            launchMode = "singleTop",
+                            taskAffinity = "com.test.app.main"
+                        )
+                    )
+                )
+            ),
+            activityLauncher = EngineActivityLauncher { launches += it },
+            evidenceSessionFactory = { "evidence-single-top" }
+        )
+
+        val runtime = assertNotNull(
+            engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId)).runtime
+        )
+
+        assertTrue(runtime.proxySlot.contains(".container.ProxyActivitySingleTop"))
+        assertTrue(launches.single().proxySlot.contains(".container.ProxyActivitySingleTop"))
+        assertEquals(
+            ProxyActivitySlots.processNameForClassName("com.multiapp.app", runtime.proxySlot),
+            runtime.processSlot
+        )
+        assertEquals(runtime.processSlot, launches.single().processSlot)
+        assertEquals("singleTop", runtime.packageSnapshot.activities.single().launchMode)
+        assertEquals("com.test.app.main", runtime.packageSnapshot.activities.single().taskAffinity)
     }
 
     @Test
@@ -303,7 +342,8 @@ class DefaultVirtualizationEngineTest {
         splitApkPaths: List<String> = emptyList(),
         splitPublicSourceDirs: List<String> = emptyList(),
         splitNames: List<String> = emptyList(),
-        isolatedSplits: Boolean = false
+        isolatedSplits: Boolean = false,
+        activities: List<ComponentInfo> = listOf(ComponentInfo("com.test.app.MainActivity", exported = true))
     ) = InstallRecord(
         packageName = "com.test.app",
         originApkPath = originApkPath,
@@ -320,7 +360,7 @@ class DefaultVirtualizationEngineTest {
         minSdk = 28,
         applicationClassName = null,
         packageLabel = "Test",
-        activities = listOf(ComponentInfo("com.test.app.MainActivity", exported = true)),
+        activities = activities,
         installTimeMs = 1L
     )
 

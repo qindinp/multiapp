@@ -69,6 +69,8 @@ class VirtualPackageManagerProxyStageTest {
                 capturedHostPackageName = hostPackageName
                 true
             },
+            appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
+            appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
             runtimeUidProvider = { RUNTIME_UID },
             clock = fixedClock(100L, 109L)
         )
@@ -83,6 +85,84 @@ class VirtualPackageManagerProxyStageTest {
         assertEquals("com.test.minimal,com.multiapp.instance.abc", evidence["notificationPackageProxySourcePackages"])
         assertEquals("com.multiapp.app", evidence["notificationPackageProxyHostPackage"])
         assertEquals("guest-to-host-package-args", evidence["notificationPackageProxyMode"])
+    }
+
+    @Test
+    fun `execute installs app ops package proxy for origin and virtual package aliases`() {
+        val snapshot = snapshot()
+        val hostContext = mockk<Context>()
+        var capturedSourcePackages = emptyList<String>()
+        var capturedHostPackageName = ""
+        every { hostContext.packageName } returns "com.multiapp.app"
+        val stage = VirtualPackageManagerProxyStage(
+            hostContext = hostContext,
+            installer = VirtualPackageManagerGlobalInstallAction { _, _, _ ->
+                installResult(
+                    status = VirtualPackageManagerGlobalInstallStatus.INSTALLED,
+                    sPackageManagerRead = true,
+                    sPackageManagerPatched = true
+                )
+            },
+            notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { _, _ -> true },
+            appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { sourcePackages, hostPackageName ->
+                capturedSourcePackages = sourcePackages.toList()
+                capturedHostPackageName = hostPackageName
+                true
+            },
+            appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            runtimeUidProvider = { RUNTIME_UID },
+            clock = fixedClock(100L, 109L)
+        )
+
+        val output = stage.execute(BootstrapStageInput(instanceId = snapshot.instanceId, packageSnapshot = snapshot))
+
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(listOf("com.test.minimal", "com.multiapp.instance.abc"), capturedSourcePackages)
+        assertEquals("com.multiapp.app", capturedHostPackageName)
+        assertEquals("INSTALLED", evidence["appOpsPackageProxyStatus"])
+        assertEquals("com.test.minimal,com.multiapp.instance.abc", evidence["appOpsPackageProxySourcePackages"])
+        assertEquals("com.multiapp.app", evidence["appOpsPackageProxyHostPackage"])
+        assertEquals("guest-to-host-package-args", evidence["appOpsPackageProxyMode"])
+    }
+
+    @Test
+    fun `execute installs app ops ServiceManager binder proxy for origin and virtual package aliases`() {
+        val snapshot = snapshot()
+        val hostContext = mockk<Context>()
+        var capturedSourcePackages = emptyList<String>()
+        var capturedHostPackageName = ""
+        every { hostContext.packageName } returns "com.multiapp.app"
+        val stage = VirtualPackageManagerProxyStage(
+            hostContext = hostContext,
+            installer = VirtualPackageManagerGlobalInstallAction { _, _, _ ->
+                installResult(
+                    status = VirtualPackageManagerGlobalInstallStatus.INSTALLED,
+                    sPackageManagerRead = true,
+                    sPackageManagerPatched = true
+                )
+            },
+            notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { _, _ -> true },
+            appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
+            appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { sourcePackages, hostPackageName ->
+                capturedSourcePackages = sourcePackages.toList()
+                capturedHostPackageName = hostPackageName
+                true
+            },
+            runtimeUidProvider = { RUNTIME_UID },
+            clock = fixedClock(100L, 109L)
+        )
+
+        val output = stage.execute(BootstrapStageInput(instanceId = snapshot.instanceId, packageSnapshot = snapshot))
+
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(listOf("com.test.minimal", "com.multiapp.instance.abc"), capturedSourcePackages)
+        assertEquals("com.multiapp.app", capturedHostPackageName)
+        assertEquals("INSTALLED", evidence["appOpsServiceManagerProxyStatus"])
+        assertEquals("com.test.minimal,com.multiapp.instance.abc", evidence["appOpsServiceManagerProxySourcePackages"])
+        assertEquals("com.multiapp.app", evidence["appOpsServiceManagerProxyHostPackage"])
+        assertEquals("servicemanager-appops-binder", evidence["appOpsServiceManagerProxyMode"])
     }
 
     @Test

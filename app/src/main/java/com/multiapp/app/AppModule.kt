@@ -65,6 +65,9 @@ object AppModule {
                 instanceId = spec.instanceId,
                 providerHookEnabled = spec.providerRoutingEnabled
             ).apply {
+                processSlotContainerActivityClassName(appContext.packageName, spec.processSlot)?.let { className ->
+                    setClassName(appContext.packageName, className)
+                }
                 putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROFILE, spec.profile.name)
                 putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROCESS_SLOT, spec.processSlot)
                 putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT, spec.proxySlot)
@@ -79,6 +82,14 @@ object AppModule {
     @Singleton
     fun provideEngineRuntimeSlotStore(@ApplicationContext context: Context): EngineRuntimeSlotStore {
         return FileBackedEngineRuntimeSlotStore(ContainerRuntimePaths.engineRuntimeSlotsFile(context))
+    }
+
+    private fun processSlotContainerActivityClassName(hostPackageName: String, processSlot: String): String? {
+        val index = processSlot.substringAfterLast(":v", missingDelimiterValue = "")
+            .toIntOrNull()
+            ?.takeIf { it in 0 until PROCESS_SLOT_COUNT }
+            ?: return null
+        return "$hostPackageName.container.ContainerActivityV$index"
     }
 
     @Provides
@@ -193,7 +204,12 @@ object AppModule {
                     name = name,
                     exported = component.exported,
                     permission = component.componentPermission(),
-                    grantUriPermissions = (component as? ProviderInfo)?.grantUriPermissions ?: false
+                    grantUriPermissions = (component as? ProviderInfo)?.grantUriPermissions ?: false,
+                    launchMode = (component as? ActivityInfo)?.launchModeString(),
+                    processName = component.processName?.takeIf { it.isNotBlank() },
+                    taskAffinity = (component as? ActivityInfo)?.taskAffinity?.takeIf { it.isNotBlank() },
+                    themeId = (component as? ActivityInfo)?.theme ?: 0,
+                    targetActivityName = (component as? ActivityInfo)?.targetActivity?.takeIf { it.isNotBlank() }
                 )
             }
         }.orEmpty()
@@ -213,7 +229,12 @@ object AppModule {
                 ComponentInfo(
                     name = name,
                     exported = component.exported,
-                    permission = component.permission
+                    permission = component.permission,
+                    launchMode = component.launchMode,
+                    processName = component.process,
+                    taskAffinity = component.taskAffinity,
+                    themeId = component.themeId,
+                    targetActivityName = normalizeManifestComponentName(packageName, component.targetActivityName)
                 )
             }
         }
@@ -236,6 +257,14 @@ object AppModule {
         else -> null
     }?.takeIf { it.isNotBlank() }
 
+    private fun ActivityInfo.launchModeString(): String? = when (launchMode) {
+        ActivityInfo.LAUNCH_SINGLE_TOP -> "singleTop"
+        ActivityInfo.LAUNCH_SINGLE_TASK -> "singleTask"
+        ActivityInfo.LAUNCH_SINGLE_INSTANCE -> "singleInstance"
+        4 -> "singleInstancePerTask"
+        else -> null
+    }
+
     private fun ProviderInfo.providerPermission(): String? {
         val readPermission = readPermission?.takeIf { it.isNotBlank() }
         val writePermission = writePermission?.takeIf { it.isNotBlank() }
@@ -248,4 +277,6 @@ object AppModule {
             ).joinToString(";")
         }
     }
+
+    private const val PROCESS_SLOT_COUNT = 24
 }

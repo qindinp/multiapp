@@ -4,7 +4,12 @@ data class ComponentInfo(
     val name: String,
     val exported: Boolean = false,
     val permission: String? = null,
-    val grantUriPermissions: Boolean = false
+    val grantUriPermissions: Boolean = false,
+    val launchMode: String? = null,
+    val processName: String? = null,
+    val taskAffinity: String? = null,
+    val themeId: Int = 0,
+    val targetActivityName: String? = null
 ) {
     init {
         require(name.isNotBlank()) { "component name must not be blank" }

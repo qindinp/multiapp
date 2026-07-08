@@ -42,6 +42,23 @@ class EngineRuntimeSlotStoreTest {
     }
 
     @Test
+    fun `paired candidates keep process slot aligned with proxy slot`() {
+        val store = InMemoryEngineRuntimeSlotStore()
+        val processCandidates = listOf("host:v0", "host:v1", "host:v2")
+        val proxyCandidates = listOf("Proxy0", "Proxy1", "Proxy2")
+
+        val assigned = store.assign(
+            instanceId = "inst_001",
+            originPackageName = "com.example.app",
+            processCandidates = processCandidates,
+            proxyCandidates = proxyCandidates
+        )
+        val proxyIndex = proxyCandidates.indexOf(assigned.proxySlot)
+
+        assertEquals(processCandidates[proxyIndex], assigned.processSlot)
+    }
+
+    @Test
     fun `reassigning same instance keeps stable slots`() {
         val store = InMemoryEngineRuntimeSlotStore()
         val first = store.assign(

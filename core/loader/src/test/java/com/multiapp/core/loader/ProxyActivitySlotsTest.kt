@@ -11,9 +11,11 @@ class ProxyActivitySlotsTest {
         val hostPackageName = "com.multiapp.app"
         val classNames = ProxyActivitySlots.classNames(hostPackageName)
         val launchModes = ProxyActivitySlots.launchModeByClassName(hostPackageName)
+        val processNames = ProxyActivitySlots.processNameByClassName(hostPackageName)
 
         assertEquals(24, classNames.size)
         assertEquals(24, launchModes.size)
+        assertEquals(24, processNames.size)
         assertEquals("$hostPackageName.container.ProxyActivity0", classNames[0])
         assertEquals("$hostPackageName.container.ProxyActivity7", classNames[7])
         assertEquals("$hostPackageName.container.ProxyActivitySingleTop0", classNames[8])
@@ -23,5 +25,8 @@ class ProxyActivitySlotsTest {
         assertNull(launchModes["$hostPackageName.container.ProxyActivity0"])
         assertEquals("singleTop", launchModes["$hostPackageName.container.ProxyActivitySingleTop7"])
         assertEquals("singleTask", launchModes["$hostPackageName.container.ProxyActivitySingleTask7"])
+        assertEquals("$hostPackageName:v0", processNames["$hostPackageName.container.ProxyActivity0"])
+        assertEquals("$hostPackageName:v8", processNames["$hostPackageName.container.ProxyActivitySingleTop0"])
+        assertEquals("$hostPackageName:v23", processNames["$hostPackageName.container.ProxyActivitySingleTask7"])
     }
 }

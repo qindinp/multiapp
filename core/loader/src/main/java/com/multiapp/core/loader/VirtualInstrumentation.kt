@@ -4,9 +4,11 @@ package com.multiapp.core.loader
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.Application
 import android.app.Fragment
 import android.app.Instrumentation
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.os.Bundle
 import android.os.IBinder
@@ -75,6 +77,16 @@ open class VirtualInstrumentation(
             val shortInstanceId = instanceId.take(8).ifBlank { instanceId }
             return "$originPackageName #$shortInstanceId"
         }
+    }
+
+    override fun newApplication(cl: ClassLoader, className: String, context: Context): Application {
+        val applicationContext = hostedApplicationContextForFrameworkApp(context, cl, "newApplication")
+        return base.newApplication(cl, className, applicationContext)
+    }
+
+    override fun callApplicationOnCreate(app: Application) {
+        injectHostedApplicationContextIfNeeded(app)
+        base.callApplicationOnCreate(app)
     }
 
     override fun newActivity(
@@ -1004,6 +1016,114 @@ open class VirtualInstrumentation(
             splitNames = result.packageSnapshot?.splitNames.orEmpty(),
             isolatedSplits = result.packageSnapshot?.isolatedSplits ?: false
         )
+    }
+
+    private fun injectHostedApplicationContextIfNeeded(application: Application) {
+        val currentBase = runCatching { application.baseContext }.getOrNull() ?: return
+        if (currentBase is VirtualContextWrapper) return
+        val classLoader = runCatching { application.classLoader }.getOrNull()
+            ?: application.javaClass.classLoader
+            ?: VirtualInstrumentation::class.java.classLoader!!
+        val guestContext = hostedApplicationContextForFrameworkApp(
+            context = currentBase,
+            guestClassLoader = classLoader,
+            phase = "callApplicationOnCreate"
+        )
+        if (guestContext === currentBase) return
+        replaceContextWrapperBase(application, guestContext)
+    }
+
+    private fun hostedApplicationContextForFrameworkApp(
+        context: Context,
+        guestClassLoader: ClassLoader,
+        phase: String
+    ): Context {
+        if (context is VirtualContextWrapper) return context
+        val packageNames = listOfNotNull(
+            runCatching { context.packageName }.getOrNull(),
+            runCatching { context.applicationInfo?.packageName }.getOrNull()
+        ).filter { it.isNotBlank() }.distinct()
+        val snapshot = packageNames.firstNotNullOfOrNull { packageName ->
+            VirtualPackageRegistry.global.getByPackageName(packageName)
+        } ?: return context
+        val hostContext = hostContextForFrameworkApplication(context, snapshot) ?: run {
+            Log.w(
+                TAG,
+                "Unable to virtualize framework Application context at $phase: host context unavailable, " +
+                    "observedPackages=${packageNames.joinToString(",")}, instanceId=${snapshot.instanceId}"
+            )
+            return context
+        }
+        val runtime = VirtualProcessRuntime.global.get(snapshot.instanceId)?.result
+        val config = VirtualContextConfig(
+            instanceId = snapshot.instanceId,
+            originPackageName = snapshot.originPackageName,
+            virtualPackageName = snapshot.virtualPackageName,
+            dataDir = snapshot.dataDir,
+            sourceDir = snapshot.sourceDir,
+            nativeLibraryDir = snapshot.nativeLibraryDir,
+            classLoader = runtime?.guestClassLoader ?: guestClassLoader,
+            applicationLabel = snapshot.applicationLabel,
+            packageSnapshot = snapshot,
+            splitSourceDirs = snapshot.splitSourceDirs,
+            splitPublicSourceDirs = snapshot.splitPublicSourceDirs,
+            splitNames = snapshot.splitNames,
+            isolatedSplits = snapshot.isolatedSplits
+        )
+        Log.i(
+            TAG,
+            "Virtualized framework Application context at $phase: instanceId=${snapshot.instanceId}, " +
+                "origin=${snapshot.originPackageName}, virtual=${snapshot.virtualPackageName}, " +
+                "host=${runCatching { hostContext.packageName }.getOrNull().orEmpty()}"
+        )
+        return VirtualContextWrappers.create(
+            base = hostContext,
+            config = config,
+            guestClassLoader = config.classLoader
+        )
+    }
+
+    private fun hostContextForFrameworkApplication(
+        context: Context,
+        snapshot: com.multiapp.core.model.virtual.VirtualPackageSnapshot
+    ): Context? {
+        val currentApplication = runCatching { ActivityThreadCompat.currentApplication() }.getOrNull()
+        if (currentApplication != null && !snapshot.matchesPackageName(
+                runCatching { currentApplication.packageName }.getOrNull()
+            )
+        ) {
+            return currentApplication
+        }
+        val applicationContext = runCatching { context.applicationContext }.getOrNull()
+        if (applicationContext != null && !snapshot.matchesPackageName(
+                runCatching { applicationContext.packageName }.getOrNull()
+            )
+        ) {
+            return applicationContext
+        }
+        return null
+    }
+
+    private fun replaceContextWrapperBase(target: ContextWrapper, context: Context): Boolean {
+        return runCatching {
+            val field = findContextWrapperBaseField()
+                ?: error("ContextWrapper.mBase not found")
+            field.set(target, context)
+            true
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to replace Application base context: ${target.javaClass.name}", error)
+        }.getOrDefault(false)
+    }
+
+    private fun findContextWrapperBaseField(): java.lang.reflect.Field? {
+        var current: Class<*>? = ContextWrapper::class.java
+        while (current != null) {
+            runCatching {
+                return current.getDeclaredField("mBase").apply { isAccessible = true }
+            }
+            current = current.superclass
+        }
+        return null
     }
 
     private fun writeProtectedDiagnosticsEvidence(filesDir: File, result: HostedBootstrapResult) {

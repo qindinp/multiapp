@@ -1,7 +1,11 @@
 package com.multiapp.core.loader
 
+import android.content.Context
 import android.content.ComponentName
 import android.content.Intent
+import android.os.IBinder
+import android.os.IInterface
+import android.os.Process
 import android.util.Log
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
@@ -19,7 +23,10 @@ import java.lang.reflect.Proxy
 object IntentRemapDiagnostics {
 
     private const val TAG = "IntentRemapDiag"
+    private const val APP_OPS_SERVICE_NAME = "appops"
+    private const val APP_OPS_DESCRIPTOR = "com.android.internal.app.IAppOpsService"
     private val notificationProxyLock = Any()
+    private val appOpsProxyLock = Any()
 
     /**
      * 重写 Intent 中的包名：component.packageName 和 intent.package。
@@ -276,6 +283,221 @@ object IntentRemapDiagnostics {
         }
     }
 
+    fun remapAppOpsPackageArgs(
+        methodName: String,
+        args: Array<Any?>,
+        sourcePackages: Collection<String>,
+        hostPackageName: String,
+        runtimeUid: Int = Process.myUid()
+    ): Array<Any?> {
+        val aliases = sourcePackages
+            .filter { it.isNotBlank() && it != hostPackageName }
+            .toSet()
+        if (hostPackageName.isBlank() || aliases.isEmpty() || !isAppOpsPackageMethod(methodName)) {
+            return args
+        }
+        var changed = false
+        val patched = args.copyOf()
+        for (index in patched.indices) {
+            val value = patched[index]
+            when (value) {
+                is String -> {
+                    if (value in aliases) {
+                        patched[index] = hostPackageName
+                        val uidIndex = appOpsUidIndexBeforePackage(methodName, patched, index)
+                        if (uidIndex != null && patched[uidIndex] != runtimeUid) {
+                            patched[uidIndex] = runtimeUid
+                        }
+                        changed = true
+                    }
+                }
+                is Array<*> -> {
+                    if (value.javaClass.componentType == String::class.java) {
+                        @Suppress("UNCHECKED_CAST")
+                        val strings = value as Array<String>
+                        val rewritten = strings.copyOf()
+                        var arrayChanged = false
+                        for (itemIndex in rewritten.indices) {
+                            if (rewritten[itemIndex] in aliases) {
+                                rewritten[itemIndex] = hostPackageName
+                                arrayChanged = true
+                            }
+                        }
+                        if (arrayChanged) {
+                            patched[index] = rewritten
+                            changed = true
+                        }
+                    }
+                }
+            }
+        }
+        if (changed) {
+            safeLogD("AppOps.$methodName package args remapped to $hostPackageName")
+        }
+        return if (changed) patched else args
+    }
+
+    fun installAppOpsManagerPackageProxy(
+        context: Context?,
+        sourcePackages: Collection<String>,
+        hostPackageName: String
+    ): Boolean {
+        val appOpsManager = runCatching {
+            context?.getSystemService(Context.APP_OPS_SERVICE)
+        }.getOrNull() ?: return false
+        return installAppOpsManagerPackageProxy(appOpsManager, sourcePackages, hostPackageName)
+    }
+
+    fun installAppOpsManagerPackageProxy(
+        appOpsManager: Any?,
+        sourcePackages: Collection<String>,
+        hostPackageName: String
+    ): Boolean {
+        val aliases = sourcePackages
+            .filter { it.isNotBlank() && it != hostPackageName }
+            .toSet()
+        if (appOpsManager == null || hostPackageName.isBlank() || aliases.isEmpty()) {
+            safeLogW("AppOps package proxy skipped: empty manager, host, or aliases")
+            return false
+        }
+        return synchronized(appOpsProxyLock) {
+            try {
+                val serviceField = findAppOpsServiceField(appOpsManager)
+                    ?: run {
+                        safeLogW("AppOps package proxy skipped: IAppOpsService field not found")
+                        return false
+                    }
+                val base = serviceField.get(appOpsManager)
+                    ?: run {
+                        safeLogW("AppOps package proxy skipped: service is null")
+                        return false
+                    }
+                if (Proxy.isProxyClass(base.javaClass)) {
+                    val handler = runCatching { Proxy.getInvocationHandler(base) }.getOrNull()
+                    if (handler is AppOpsPackageInvocationHandler) {
+                        handler.addAliases(aliases, hostPackageName)
+                        safeLogD("AppOps package proxy aliases updated: ${aliases.joinToString(",")} -> $hostPackageName")
+                        return true
+                    }
+                }
+
+                val iface = Class.forName("com.android.internal.app.IAppOpsService")
+                val proxy = Proxy.newProxyInstance(
+                    iface.classLoader,
+                    arrayOf(iface),
+                    AppOpsPackageInvocationHandler(base, hostPackageName, aliases)
+                )
+                serviceField.set(appOpsManager, proxy)
+                safeLogD("AppOps package proxy installed: ${aliases.joinToString(",")} -> $hostPackageName")
+                true
+            } catch (e: Throwable) {
+                safeLogW("AppOps package proxy failed: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+        }
+    }
+
+    fun installAppOpsServiceManagerPackageProxy(
+        sourcePackages: Collection<String>,
+        hostPackageName: String
+    ): Boolean {
+        val aliases = sourcePackages
+            .filter { it.isNotBlank() && it != hostPackageName }
+            .toSet()
+        if (hostPackageName.isBlank() || aliases.isEmpty()) {
+            safeLogW("AppOps ServiceManager proxy skipped: empty host or aliases")
+            return false
+        }
+        return synchronized(appOpsProxyLock) {
+            try {
+                val serviceManagerClass = Class.forName("android.os.ServiceManager")
+                val cacheField = serviceManagerClass.getDeclaredField("sCache").apply {
+                    isAccessible = true
+                }
+                @Suppress("UNCHECKED_CAST")
+                val cache = cacheField.get(null) as? MutableMap<String, Any?>
+                    ?: run {
+                        safeLogW("AppOps ServiceManager proxy skipped: sCache unavailable")
+                        return false
+                    }
+                var baseBinder = cache[APP_OPS_SERVICE_NAME] as? IBinder
+                if (baseBinder == null) {
+                    baseBinder = serviceManagerClass.getDeclaredMethod("getService", String::class.java).apply {
+                        isAccessible = true
+                    }.invoke(null, APP_OPS_SERVICE_NAME) as? IBinder
+                }
+                if (baseBinder == null) {
+                    safeLogW("AppOps ServiceManager proxy skipped: base binder is null")
+                    return false
+                }
+                if (Proxy.isProxyClass(baseBinder.javaClass)) {
+                    val handler = runCatching { Proxy.getInvocationHandler(baseBinder) }.getOrNull()
+                    if (handler is AppOpsServiceManagerBinderInvocationHandler) {
+                        handler.addAliases(aliases, hostPackageName)
+                        safeLogD("AppOps ServiceManager proxy aliases updated: ${aliases.joinToString(",")} -> $hostPackageName")
+                        return true
+                    }
+                }
+                val appOpsInterface = Class.forName(APP_OPS_DESCRIPTOR)
+                val stubClass = Class.forName("$APP_OPS_DESCRIPTOR\$Stub")
+                val baseService = stubClass.getDeclaredMethod("asInterface", IBinder::class.java).apply {
+                    isAccessible = true
+                }.invoke(null, baseBinder)
+                    ?: run {
+                        safeLogW("AppOps ServiceManager proxy skipped: base service is null")
+                        return false
+                    }
+                val proxyBinder = createAppOpsServiceManagerBinderProxy(
+                    baseBinder = baseBinder,
+                    baseService = baseService,
+                    appOpsInterface = appOpsInterface,
+                    sourcePackages = aliases,
+                    hostPackageName = hostPackageName
+                ) ?: return false
+                cache[APP_OPS_SERVICE_NAME] = proxyBinder
+                safeLogD("AppOps ServiceManager proxy installed: ${aliases.joinToString(",")} -> $hostPackageName")
+                true
+            } catch (e: Throwable) {
+                safeLogW("AppOps ServiceManager proxy failed: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
+        }
+    }
+
+    internal fun createAppOpsServiceManagerBinderProxy(
+        baseBinder: IBinder,
+        baseService: Any,
+        appOpsInterface: Class<*>,
+        sourcePackages: Collection<String>,
+        hostPackageName: String,
+        runtimeUidProvider: () -> Int = { Process.myUid() }
+    ): IBinder? {
+        if (!IInterface::class.java.isAssignableFrom(appOpsInterface)) {
+            safeLogW("AppOps ServiceManager proxy skipped: service interface is not IInterface")
+            return null
+        }
+        val aliases = sourcePackages
+            .filter { it.isNotBlank() && it != hostPackageName }
+            .toSet()
+        if (hostPackageName.isBlank() || aliases.isEmpty()) return null
+        val serviceHandler = AppOpsPackageInvocationHandler(
+            base = baseService,
+            hostPackageName = hostPackageName,
+            initialAliases = aliases,
+            runtimeUidProvider = runtimeUidProvider
+        )
+        val serviceProxy = Proxy.newProxyInstance(
+            appOpsInterface.classLoader,
+            arrayOf(appOpsInterface),
+            serviceHandler
+        ) as IInterface
+        return Proxy.newProxyInstance(
+            IBinder::class.java.classLoader,
+            arrayOf(IBinder::class.java),
+            AppOpsServiceManagerBinderInvocationHandler(baseBinder, serviceProxy, serviceHandler, hostPackageName, aliases)
+        ) as IBinder
+    }
+
     private class NotificationPackageInvocationHandler(
         private val base: Any,
         private var hostPackageName: String,
@@ -305,6 +527,137 @@ object IntentRemapDiagnostics {
                 throw e.targetException
             }
         }
+    }
+
+    private class AppOpsPackageInvocationHandler(
+        private val base: Any,
+        private var hostPackageName: String,
+        initialAliases: Collection<String>,
+        private val runtimeUidProvider: () -> Int = { Process.myUid() }
+    ) : InvocationHandler {
+        private val aliases = linkedSetOf<String>()
+
+        init {
+            addAliases(initialAliases, hostPackageName)
+        }
+
+        fun addAliases(sourcePackages: Collection<String>, hostPackageName: String) {
+            synchronized(aliases) {
+                this.hostPackageName = hostPackageName
+                aliases += sourcePackages.filter { it.isNotBlank() && it != hostPackageName }
+            }
+        }
+
+        override fun invoke(proxy: Any, method: java.lang.reflect.Method, args: Array<Any?>?): Any? {
+            val currentAliases = synchronized(aliases) { aliases.toSet() }
+            val patchedArgs = args?.let {
+                remapAppOpsPackageArgs(method.name, it, currentAliases, hostPackageName, runtimeUidProvider())
+            }
+            return try {
+                method.invoke(base, *(patchedArgs ?: emptyArray()))
+            } catch (e: InvocationTargetException) {
+                throw e.targetException
+            }
+        }
+    }
+
+    private class AppOpsServiceManagerBinderInvocationHandler(
+        private val baseBinder: IBinder,
+        private val serviceProxy: IInterface,
+        private val serviceHandler: AppOpsPackageInvocationHandler,
+        private var hostPackageName: String,
+        initialAliases: Collection<String>
+    ) : InvocationHandler {
+        private val aliases = linkedSetOf<String>()
+
+        init {
+            addAliases(initialAliases, hostPackageName)
+        }
+
+        fun addAliases(sourcePackages: Collection<String>, hostPackageName: String) {
+            synchronized(aliases) {
+                this.hostPackageName = hostPackageName
+                aliases += sourcePackages.filter { it.isNotBlank() && it != hostPackageName }
+            }
+            serviceHandler.addAliases(sourcePackages, hostPackageName)
+        }
+
+        override fun invoke(proxy: Any, method: java.lang.reflect.Method, args: Array<Any?>?): Any? {
+            if (method.declaringClass == Any::class.java) {
+                return invokeObjectMethod(proxy, method, args)
+            }
+            if (method.name == "queryLocalInterface") {
+                val descriptor = args?.firstOrNull() as? String
+                if (descriptor == APP_OPS_DESCRIPTOR) {
+                    return serviceProxy
+                }
+            }
+            return try {
+                method.invoke(baseBinder, *(args ?: emptyArray()))
+            } catch (e: InvocationTargetException) {
+                throw e.targetException
+            }
+        }
+    }
+
+    private fun findAppOpsServiceField(appOpsManager: Any): java.lang.reflect.Field? {
+        var current: Class<*>? = appOpsManager.javaClass
+        while (current != null) {
+            val fields = runCatching { current.declaredFields.toList() }.getOrDefault(emptyList())
+            fields.firstOrNull { field ->
+                field.name == "mService" || field.type.name == "com.android.internal.app.IAppOpsService"
+            }?.let { field ->
+                field.isAccessible = true
+                return field
+            }
+            current = current.superclass
+        }
+        return null
+    }
+
+    private fun isAppOpsPackageMethod(methodName: String): Boolean {
+        val lower = methodName.lowercase()
+        return lower.contains("op") ||
+            lower.contains("package") ||
+            lower.contains("mode") ||
+            lower.contains("watch")
+    }
+
+    private fun appOpsUidIndexBeforePackage(
+        methodName: String,
+        args: Array<Any?>,
+        packageIndex: Int
+    ): Int? {
+        if (!appOpsMethodHasUidBeforePackage(methodName)) return null
+        for (index in packageIndex - 1 downTo 0) {
+            if (args[index] is Int) return index
+        }
+        return null
+    }
+
+    private fun appOpsMethodHasUidBeforePackage(methodName: String): Boolean {
+        val lower = methodName.lowercase()
+        if (lower.contains("watch")) return false
+        return lower.contains("operation") ||
+            lower.contains("package") ||
+            lower.contains("mode") ||
+            lower.contains("active")
+    }
+
+    private fun invokeObjectMethod(proxy: Any, method: java.lang.reflect.Method, args: Array<Any?>?): Any? =
+        when (method.name) {
+            "toString" -> "MultiAppAppOpsServiceManagerBinderProxy(${System.identityHashCode(proxy)})"
+            "hashCode" -> System.identityHashCode(proxy)
+            "equals" -> proxy === args?.firstOrNull()
+            else -> null
+        }
+
+    private fun safeLogD(message: String) {
+        runCatching { Log.d(TAG, message) }
+    }
+
+    private fun safeLogW(message: String) {
+        runCatching { Log.w(TAG, message) }
     }
 
     private fun installActivityManagerSingletonProxy(

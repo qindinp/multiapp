@@ -447,6 +447,57 @@ Result:
 - Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
   the project uses `compileSdk=36`.
 
+## Execution Update - 2026-07-08 Runtime Identity Baseline
+
+This slice moves the hosted runtime closer to the VirtualApp/DroidPlugin model
+without claiming device-level compatibility yet.
+
+Implemented:
+
+- Bound `ProxyActivity` slots to real Android process names `:v0` through
+  `:v23`, and added matching `ContainerActivityV0` through
+  `ContainerActivityV23` manifest entries.
+- Derived engine `processSlot` from the selected `proxySlot`, so native redirect
+  and evidence no longer disagree about the runtime process.
+- Added `activity-process-slot` evidence in `ContainerActivity`, including a
+  fail-fast check when the actual process name does not match
+  `engineProcessSlot`.
+- Rewrote AppOps identity at two levels:
+  - `VirtualContextWrapper.getOpPackageName()` and API 34
+    `getAttributionSource()` expose the host package for binder validation.
+  - `AppOpsManager.mService` and `ServiceManager.sCache["appops"]` are proxied
+    so direct `IAppOpsService` callers rewrite origin/virtual package arguments
+    to the host package and adjacent uid arguments to `Process.myUid()`.
+- Added Application bootstrap progress evidence for class load, constructor,
+  context creation, attach, runtime publication, and `onCreate` phases.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+git diff --check
+```
+
+Result:
+
+- Full `:core:loader:testDebugUnitTest` passed.
+- Full `:core:engine:testDebugUnitTest` passed.
+- Full `:app:testDebugUnitTest` passed.
+- `:app:assembleDebug` passed.
+- `git diff --check` passed with only existing CRLF normalization warnings.
+
+Remaining gate for this slice:
+
+- Install on device and capture `logcat`, `dumpsys activity exit-info`,
+  `dumpsys activity recents`, `files/hosted_launch_evidence`, and
+  `files/instances`.
+- Confirm `activity-process-slot=PASS`, `appOpsPackageProxyStatus=INSTALLED`,
+  `appOpsServiceManagerProxyStatus=INSTALLED`, and no AppOps
+  uid/package mismatch during GKD, QQ, WeChat, and QQ Reader launches.
+
 ## Not Complete Yet
 
 The following items from the plan are still open and must not be marked `DONE`:

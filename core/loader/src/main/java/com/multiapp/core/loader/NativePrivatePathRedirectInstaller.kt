@@ -80,7 +80,9 @@ internal data class NativePrivatePathRedirectConfig(
                     dataRoot = canonicalDataRoot,
                     processSlot = normalizedProcessSlot,
                     privatePathPrefixes = listOf(
+                        "/data/data/$originPackageName",
                         "/data/data/$originPackageName/",
+                        "/data/user/0/$originPackageName",
                         "/data/user/0/$originPackageName/"
                     )
                 )
@@ -150,7 +152,7 @@ internal data class NativePrivatePathRedirectInstallResult(
     }
 
     companion object {
-        const val EXPECTED_RULE_COUNT = 2
+        const val EXPECTED_RULE_COUNT = 4
         val PATH_REDIRECT_OPERATIONS: List<String> = listOf(
             "open",
             "openat",

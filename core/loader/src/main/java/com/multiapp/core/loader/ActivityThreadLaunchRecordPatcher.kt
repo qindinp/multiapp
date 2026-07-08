@@ -69,7 +69,32 @@ object ActivityThreadLaunchRecordPatcher {
             )
 
         val snapshot = VirtualPackageRegistry.global.getByInstanceId(spec.instanceId)
-        val state = buildRuntimeState(spec, proxyIntent, snapshot)
+            ?: return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = "PACKAGE_SNAPSHOT_MISSING"
+            )
+        if (snapshot.sourceDir.isBlank()) {
+            return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = "PACKAGE_SNAPSHOT_SOURCE_DIR_MISSING"
+            )
+        }
+        val classLoader = VirtualProcessRuntime.global.get(spec.instanceId)?.result?.guestClassLoader
+            ?: return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = "GUEST_CLASS_LOADER_MISSING"
+            )
+        val state = buildRuntimeState(spec, proxyIntent, snapshot, classLoader)
+        if (state.loadedApk == null) {
+            return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = state.loadedApkSkippedReason ?: "LOADED_APK_PRELAUNCH_UNAVAILABLE"
+            )
+        }
         val patch = ActivityClientRecordBridge.patch(
             record = record,
             state = ActivityClientRecordRuntimeState(
@@ -100,25 +125,24 @@ object ActivityThreadLaunchRecordPatcher {
     private fun buildRuntimeState(
         spec: LaunchSpec,
         proxyIntent: Intent,
-        snapshot: VirtualPackageSnapshot?
+        snapshot: VirtualPackageSnapshot,
+        classLoader: ClassLoader
     ): LaunchRuntimeState {
-        val runtime = VirtualProcessRuntime.global.get(spec.instanceId)?.result
-        val classLoader = runtime?.guestClassLoader
         val hostApplication = runCatching { ActivityThreadCompat.currentApplication() }.getOrNull()
         val config = VirtualContextConfig(
             instanceId = spec.instanceId,
             originPackageName = spec.originPackageName,
-            virtualPackageName = snapshot?.virtualPackageName ?: spec.originPackageName,
-            dataDir = snapshot?.dataDir.orEmpty(),
-            sourceDir = snapshot?.sourceDir.orEmpty(),
-            nativeLibraryDir = snapshot?.nativeLibraryDir,
-            classLoader = classLoader ?: hostApplication?.classLoader ?: ActivityThreadLaunchRecordPatcher::class.java.classLoader!!,
-            applicationLabel = snapshot?.applicationLabel,
+            virtualPackageName = snapshot.virtualPackageName,
+            dataDir = snapshot.dataDir,
+            sourceDir = snapshot.sourceDir,
+            nativeLibraryDir = snapshot.nativeLibraryDir,
+            classLoader = classLoader,
+            applicationLabel = snapshot.applicationLabel,
             packageSnapshot = snapshot,
-            splitSourceDirs = snapshot?.splitSourceDirs.orEmpty(),
-            splitPublicSourceDirs = snapshot?.splitPublicSourceDirs.orEmpty(),
-            splitNames = snapshot?.splitNames.orEmpty(),
-            isolatedSplits = snapshot?.isolatedSplits ?: false
+            splitSourceDirs = snapshot.splitSourceDirs,
+            splitPublicSourceDirs = snapshot.splitPublicSourceDirs,
+            splitNames = snapshot.splitNames,
+            isolatedSplits = snapshot.isolatedSplits
         )
         val resourceBundle = hostApplication?.let { VirtualResourcesManager(it).create(config) }
         val applicationInfo = resourceBundle
@@ -150,7 +174,7 @@ object ActivityThreadLaunchRecordPatcher {
             if (!spec.taskAffinity.isNullOrBlank()) taskAffinity = spec.taskAffinity
         }
         val guestIntent = buildGuestIntent(spec, proxyIntent)
-        val loadedApk = if (classLoader != null && resourceBundle != null) {
+        val loadedApk = if (resourceBundle != null) {
             installLoadedApk(spec, applicationInfo, resourceBundle, classLoader)
         } else {
             null
@@ -160,8 +184,32 @@ object ActivityThreadLaunchRecordPatcher {
             guestIntent = guestIntent,
             loadedApk = loadedApk?.loadedApk,
             loadedApkSource = loadedApk?.source?.name,
-            loadedApkSkippedReason = if (loadedApk == null) "LOADED_APK_PRELAUNCH_RUNTIME_UNAVAILABLE" else loadedApk.skippedReason
+            loadedApkSkippedReason = if (loadedApk == null) {
+                "LOADED_APK_PRELAUNCH_RESOURCE_BUNDLE_UNAVAILABLE"
+            } else {
+                loadedApk.skippedReason
+            }
         )
+    }
+
+    private fun skippedPrelaunchPatch(
+        record: Any,
+        spec: LaunchSpec,
+        reason: String
+    ): ActivityThreadLaunchRecordPatchResult {
+        val result = ActivityThreadLaunchRecordPatchResult(
+            targetClassName = record.javaClass.name,
+            observedProxyLaunch = true,
+            skippedReason = reason,
+            instanceId = spec.instanceId,
+            guestActivityClassName = spec.guestActivityClassName,
+            token = spec.token
+        )
+        safeLogWarning(
+            "Skipped prelaunch guest record patch: instance=${spec.instanceId}, " +
+                "guest=${spec.guestActivityClassName}, reason=$reason"
+        )
+        return result.also { writeEvidence(it) }
     }
 
     private fun buildGuestIntent(spec: LaunchSpec, proxyIntent: Intent): Intent {
