@@ -356,6 +356,17 @@ class VirtualActivityRecordManagerTest {
             )
         )
         assertNull(manager.conflictingProxyOwner(owner))
+        assertSame(
+            owner,
+            manager.conflictingProxyOwner(
+                record(
+                    token = "token-owner",
+                    proxyActivityClassName = "ProxyActivity0",
+                    launchMode = "singleTop",
+                    taskAffinity = "com.evil.task"
+                )
+            )
+        )
 
         manager.finish("token-owner")
 

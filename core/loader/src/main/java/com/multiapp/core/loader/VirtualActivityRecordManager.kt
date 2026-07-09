@@ -58,7 +58,7 @@ class VirtualActivityRecordManager {
         .filter { it.isActive() }
         .firstOrNull { owner ->
             if (owner.token == record.token) {
-                !owner.matchesRecordOwner(record)
+                !(owner.matchesRecordOwner(record) && owner.matchesProxySlotOwner(record))
             } else {
                 !owner.matchesProxySlotOwner(record)
             }
