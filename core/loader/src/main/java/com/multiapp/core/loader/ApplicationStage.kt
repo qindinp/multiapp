@@ -8,7 +8,7 @@ import com.multiapp.core.model.virtual.VirtualContextConfig
 class ApplicationStage(
     private val hostContext: Context?,
     private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String?,
-    private val guestApplicationCreator: GuestApplicationCreator = ReflectiveGuestApplicationCreator(),
+    private val guestApplicationCreator: GuestApplicationCreator = LoadedApkGuestApplicationCreator(),
     private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
@@ -217,6 +217,7 @@ class ApplicationStage(
                 originPackageName = instance.originPackageName,
                 virtualPackageName = instance.virtualPackageName,
                 applicationLabel = snapshot.applicationLabel,
+                processSlot = input.processSlot,
                 originApkPath = input.originApkPath,
                 dataRoot = instance.dataRoot,
                 guestClassLoader = guestClassLoader,
@@ -238,6 +239,141 @@ class ApplicationStage(
         val isMain: Boolean,
         val looperProbeSkippedReason: String?
     )
+}
+
+class LoadedApkGuestApplicationCreator(
+    private val fallback: GuestApplicationCreator = ReflectiveGuestApplicationCreator(),
+    private val activityThreadProvider: () -> Any = { ActivityThreadCompat.currentActivityThread() },
+    private val instrumentationProvider: (Any) -> android.app.Instrumentation = { activityThread ->
+        ActivityThreadCompat.getInstrumentation(activityThread)
+    },
+    private val loadedApkInstaller: (
+        activityThread: Any,
+        state: LoadedApkRuntimeState,
+        packageAliases: Collection<String>
+    ) -> ActivityThreadLoadedApkInstallResult = { activityThread, state, aliases ->
+        ActivityThreadLoadedApkInstaller.installGuestSandbox(
+            activityThread = activityThread,
+            state = state,
+            packageAliases = aliases
+        )
+    },
+    private val resourceBundleProvider: (Context, VirtualContextConfig) -> VirtualResourceBundle =
+        { context, config -> VirtualResourcesManager(context).create(config) },
+    private val makeApplicationInvoker: (Any, android.app.Instrumentation) -> Application =
+        { loadedApk, instrumentation -> invokeMakeApplication(loadedApk, instrumentation) }
+) : GuestApplicationCreator {
+    override fun create(request: GuestApplicationCreateRequest): GuestApplicationCreateResult {
+        val loadedApkAttempt = runCatching { createWithLoadedApk(request) }
+        return loadedApkAttempt.getOrElse { error ->
+            request.progress(
+                "LOADED_APK_CREATE_FALLBACK",
+                "LoadedApk makeApplication failed; falling back to reflective attach",
+                mapOf(
+                    "loadedApkCreateErrorClass" to error.javaClass.name,
+                    "loadedApkCreateErrorMessage" to error.message.orEmpty()
+                )
+            )
+            val fallbackResult = fallback.create(request)
+            fallbackResult.copy(
+                evidence = fallbackResult.evidence + listOf(
+                    BootstrapEvidence("loadedApkApplicationCreatorStatus", "FALLBACK"),
+                    BootstrapEvidence("loadedApkApplicationCreatorFallbackReason", error.message ?: error.javaClass.name),
+                    BootstrapEvidence("loadedApkApplicationCreatorErrorClass", error.javaClass.name)
+                )
+            )
+        }
+    }
+
+    private fun createWithLoadedApk(request: GuestApplicationCreateRequest): GuestApplicationCreateResult {
+        val snapshot = request.virtualContextConfig.packageSnapshot
+            ?: throw IllegalStateException("packageSnapshot is required for LoadedApk Application creation")
+        request.progress("LOADED_APK_CREATE_STARTED", "creating guest LoadedApk sandbox", emptyMap())
+        val activityThread = activityThreadProvider()
+        val resourceBundle = resourceBundleProvider(request.hostContext, request.virtualContextConfig)
+        val applicationInfo = VirtualPackageInfoFactory.applicationInfo(snapshot).apply {
+            className = request.applicationClassName.takeUnless { it == Application::class.java.name }
+            name = className
+        }
+        val state = LoadedApkRuntimeState(
+            packageName = snapshot.virtualPackageName,
+            applicationInfo = applicationInfo,
+            resources = resourceBundle.resources,
+            classLoader = request.guestClassLoader,
+            application = null
+        )
+        val aliases = listOf(snapshot.originPackageName, snapshot.virtualPackageName)
+        val installResult = loadedApkInstaller(activityThread, state, aliases)
+        val loadedApk = installResult.loadedApk
+            ?: throw IllegalStateException(
+                "LoadedApk unavailable: ${installResult.skippedReason ?: "UNKNOWN"}"
+            )
+        request.progress(
+            "LOADED_APK_CREATE_FINISHED",
+            "guest LoadedApk sandbox installed",
+            mapOf(
+                "loadedApkSource" to installResult.source.name,
+                "loadedApkAliasCount" to installResult.installedAliasCount.toString()
+            )
+        )
+        val instrumentation = instrumentationProvider(activityThread)
+        request.progress("MAKE_APPLICATION_STARTED", "calling LoadedApk.makeApplication", emptyMap())
+        val application = makeApplicationInvoker(loadedApk, instrumentation)
+        request.progress(
+            "MAKE_APPLICATION_FINISHED",
+            "LoadedApk.makeApplication returned",
+            mapOf("actualClass" to application.javaClass.name)
+        )
+        val bindResult = ActivityThreadLoadedApkInstaller.bindApplication(
+            installResult = installResult,
+            state = state,
+            application = application
+        )
+        val contextPackageName = runCatching { application.packageName }.getOrNull()
+        return GuestApplicationCreateResult(
+            application = application,
+            attachedContextPackageName = contextPackageName,
+            evidence = listOf(
+                BootstrapEvidence("applicationCreator", "LOADED_APK_MAKE_APPLICATION"),
+                BootstrapEvidence("applicationRequestedClassSource", request.applicationClassSource),
+                BootstrapEvidence("loadedApkApplicationCreatorStatus", "PASS"),
+                BootstrapEvidence("loadedApkApplicationCreatorSource", installResult.source.name),
+                BootstrapEvidence("loadedApkApplicationCreatorTargetClass", installResult.targetClassName),
+                BootstrapEvidence("loadedApkApplicationCreatorPatchedFields", installResult.patchResult.patchedFields.joinToString(",")),
+                BootstrapEvidence("loadedApkApplicationCreatorSkippedFields", installResult.patchResult.skippedFieldReasons.joinToString(",")),
+                BootstrapEvidence("loadedApkApplicationCreatorInstalledAliasCount", installResult.installedAliasCount.toString()),
+                BootstrapEvidence("loadedApkApplicationCreatorBindPatchedFields", bindResult.patchedFields.joinToString(",")),
+                BootstrapEvidence("loadedApkApplicationCreatorBindSkippedFields", bindResult.skippedFieldReasons.joinToString(","))
+            )
+        )
+    }
+
+    companion object {
+        private fun invokeMakeApplication(
+            loadedApk: Any,
+            instrumentation: android.app.Instrumentation
+        ): Application {
+            val method = findMakeApplicationMethod(loadedApk.javaClass)
+                ?: throw NoSuchMethodException("LoadedApk.makeApplication(boolean, Instrumentation)")
+            method.isAccessible = true
+            return method.invoke(loadedApk, false, instrumentation) as? Application
+                ?: throw IllegalStateException("LoadedApk.makeApplication returned null")
+        }
+
+        private fun findMakeApplicationMethod(type: Class<*>): java.lang.reflect.Method? {
+            var current: Class<*>? = type
+            while (current != null) {
+                current.declaredMethods.firstOrNull { method ->
+                    method.name == "makeApplication" &&
+                        method.parameterTypes.size == 2 &&
+                        method.parameterTypes[0] == java.lang.Boolean.TYPE &&
+                        android.app.Instrumentation::class.java.isAssignableFrom(method.parameterTypes[1])
+                }?.let { return it }
+                current = current.superclass
+            }
+            return null
+        }
+    }
 }
 
 fun interface GuestApplicationCreator {

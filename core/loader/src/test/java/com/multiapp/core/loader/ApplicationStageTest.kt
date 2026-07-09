@@ -1,9 +1,11 @@
 package com.multiapp.core.loader
 
 import android.app.Application
+import android.content.pm.ApplicationInfo
 import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
+import android.content.res.Resources
 import android.database.Cursor
 import android.net.Uri
 import com.multiapp.core.model.instance.CompatibilityMode
@@ -11,6 +13,7 @@ import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import com.multiapp.core.model.virtual.VirtualContextConfig
 import io.mockk.mockk
 import org.junit.jupiter.api.Test
 import kotlin.test.assertEquals
@@ -154,6 +157,7 @@ class ApplicationStageTest {
         assertEquals("inst-001", result.instanceId)
         assertEquals("com.example.app", result.originPackageName)
         assertEquals("com.multiapp.instance.abc123", result.virtualPackageName)
+        assertEquals("com.multiapp.app:v2", result.processSlot)
         assertSame(ClassLoader.getSystemClassLoader(), result.guestClassLoader)
         assertSame(output.context.guestApplication, result.guestApplication)
         assertSame(result, TestApplicationWithOnCreate.runtimeSeenDuringOnCreate)
@@ -198,11 +202,86 @@ class ApplicationStageTest {
         assertIs<VirtualProviderDispatchResult.ProviderReady>(ProviderDispatchApplication.providerResult)
     }
 
+    @Test
+    fun `loadedApk application creator installs sandbox and calls makeApplication`() {
+        val snapshot = packageSnapshot()
+        val application = TestApplication()
+        val loadedApk = Any()
+        var capturedState: LoadedApkRuntimeState? = null
+        var capturedAliases: Collection<String>? = null
+        val progressStatuses = mutableListOf<String>()
+        val creator = LoadedApkGuestApplicationCreator(
+            activityThreadProvider = { Any() },
+            instrumentationProvider = { mockk(relaxed = true) },
+            resourceBundleProvider = { _, _ ->
+                VirtualResourceBundle(
+                    applicationInfo = ApplicationInfo(),
+                    resources = mockk<Resources>(relaxed = true),
+                    source = ResourceSource.HOST_FALLBACK
+                )
+            },
+            loadedApkInstaller = { _, state, aliases ->
+                capturedState = state
+                capturedAliases = aliases
+                ActivityThreadLoadedApkInstallResult(
+                    targetClassName = "FakeLoadedApk",
+                    aliases = aliases.toList(),
+                    patchResult = LoadedApkPatchResult(
+                        targetClassName = "FakeLoadedApk",
+                        patchedFields = listOf("mApplicationInfo", "mClassLoader"),
+                        skippedFields = emptyList()
+                    ),
+                    installedAliasesByField = mapOf("mPackages" to aliases.toList()),
+                    source = LoadedApkInstallSource.GUEST_SANDBOX,
+                    loadedApk = loadedApk
+                )
+            },
+            makeApplicationInvoker = { actualLoadedApk, _ ->
+                assertSame(loadedApk, actualLoadedApk)
+                application
+            }
+        )
+        val config = VirtualContextConfig(
+            instanceId = "inst-001",
+            originPackageName = snapshot.originPackageName,
+            virtualPackageName = snapshot.virtualPackageName,
+            dataDir = snapshot.dataDir,
+            sourceDir = snapshot.sourceDir,
+            nativeLibraryDir = "/data/instances/inst-001/lib",
+            classLoader = ClassLoader.getSystemClassLoader(),
+            packageSnapshot = snapshot,
+            processSlot = "com.multiapp.app:v2"
+        )
+
+        val result = creator.create(
+            GuestApplicationCreateRequest(
+                applicationClassName = TestApplication::class.java.name,
+                applicationClassSource = "MANIFEST",
+                hostContext = mockk(relaxed = true),
+                virtualContextConfig = config,
+                guestClassLoader = ClassLoader.getSystemClassLoader(),
+                progress = { status, _, _ -> progressStatuses += status }
+            )
+        )
+
+        assertSame(application, result.application)
+        assertEquals(snapshot.virtualPackageName, capturedState?.packageName)
+        assertEquals(TestApplication::class.java.name, capturedState?.applicationInfo?.className)
+        assertEquals(listOf(snapshot.originPackageName, snapshot.virtualPackageName), capturedAliases?.toList())
+        assertTrue("LOADED_APK_CREATE_STARTED" in progressStatuses)
+        assertTrue("MAKE_APPLICATION_FINISHED" in progressStatuses)
+        val evidence = result.evidence.associate { it.key to it.value }
+        assertEquals("LOADED_APK_MAKE_APPLICATION", evidence["applicationCreator"])
+        assertEquals("PASS", evidence["loadedApkApplicationCreatorStatus"])
+        assertEquals("GUEST_SANDBOX", evidence["loadedApkApplicationCreatorSource"])
+    }
+
     private fun stageInput(packageSnapshot: VirtualPackageSnapshot = packageSnapshot()) = BootstrapStageInput(
         instanceId = "inst-001",
         instance = instanceRecord(),
         originApkPath = "/artifact/com.example.app.apk",
         nativeLibraryDir = "/data/instances/inst-001/lib",
+        processSlot = "com.multiapp.app:v2",
         packageSnapshot = packageSnapshot,
         guestClassLoader = ClassLoader.getSystemClassLoader()
     )

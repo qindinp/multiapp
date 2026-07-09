@@ -655,6 +655,58 @@ Recommended next slice:
    resources, provider, service, and native library loading from splits.
 3. Add behavior tests for same-origin dual-instance isolation across storage,
    provider, service, and native redirect.
-4. Replace the reflective Application creator with a device-tested
-   `LoadedApk.makeApplication()`-equivalent creator behind the new
-   `GuestApplicationCreator` seam.
+4. Add Provider pre-install before guest `Application.onCreate()`, then close
+   Broadcast slot-aware gateway and ordered/sticky/result semantics.
+
+## Execution Update - 2026-07-09 LoadedApk-First Application Creation
+
+This slice moves the hosted Application bootstrap from reflective-first toward
+the VirtualApp/BlackBox-style `LoadedApk.makeApplication()` path. It is still a
+local foundation slice, not a device-proven commercial compatibility claim.
+
+Implemented:
+
+- `ApplicationStage` now defaults to `LoadedApkGuestApplicationCreator` instead
+  of reflective construction.
+- `HostedRuntimeBootstrap` now uses the same LoadedApk-first creator on the
+  production hosted runtime path.
+- `LoadedApkGuestApplicationCreator` installs a guest sandbox LoadedApk through
+  `ActivityThreadLoadedApkInstaller.installGuestSandbox(...)`, calls
+  `LoadedApk.makeApplication(false, instrumentation)`, then binds the returned
+  Application back into the installed LoadedApk through
+  `ActivityThreadLoadedApkInstaller.bindApplication(...)`.
+- If the LoadedApk path is unavailable, the creator falls back to the existing
+  reflective attach path and records explicit fallback evidence instead of
+  pretending the LoadedApk path passed.
+- Application runtime publication now preserves the engine-selected
+  `processSlot`, so Application `onCreate()` observers see the same slot as the
+  hosted launch path.
+- Added focused JVM coverage for the LoadedApk-first creator using injected
+  fake ActivityThread/LoadedApk/makeApplication seams.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --tests "com.multiapp.core.loader.ActivityThreadLoadedApkInstallerTest" --tests "com.multiapp.core.loader.LoadedApkBridgeTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --tests "com.multiapp.core.loader.HostedRuntimeBootstrapTest" --tests "com.multiapp.core.loader.ActivityThreadLoadedApkInstallerTest" --tests "com.multiapp.core.loader.LoadedApkBridgeTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- All three focused loader commands passed.
+- Full `:core:loader:testDebugUnitTest` passed.
+- `:app:assembleDebug` passed.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
+Remaining gate for this slice:
+
+- Device evidence must show `applicationCreator=LOADED_APK_MAKE_APPLICATION`
+  and `loadedApkApplicationCreatorStatus=PASS` for real hosted launches before
+  this can be marked `PASS`.
+- JVM fallback evidence is expected in local unit tests; it is not sufficient
+  for commercial readiness.
+- Provider pre-install before guest `Application.onCreate()` is still open.

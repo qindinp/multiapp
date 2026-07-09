@@ -98,7 +98,7 @@ class HostedRuntimeBootstrap(
     private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String? = { cl, path ->
         resolveApplicationClassNameFromManifest(hostContext, path)
     },
-    private val guestApplicationCreator: GuestApplicationCreator = ReflectiveGuestApplicationCreator(),
+    private val guestApplicationCreator: GuestApplicationCreator = LoadedApkGuestApplicationCreator(),
     private val packageResolver: VirtualPackageResolver? = hostContext?.let { ManifestVirtualPackageResolver(it) },
     private val launcherActivityResolver: (InstallRecord) -> String? = { record ->
         resolveLauncherFromActivities(record.activities)

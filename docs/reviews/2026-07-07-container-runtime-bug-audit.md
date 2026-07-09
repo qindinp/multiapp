@@ -820,3 +820,47 @@ loader command then passed. `:app:assembleDebug` also passed; the existing AGP
   component record managers remain per-process memory state; cross-process
   runtime truth still needs a durable/binder-backed strategy.
 - LoadedApk/Application equivalence remains incomplete.
+
+## Execution Update - 2026-07-09 LoadedApk-First Application Creation
+
+### Implemented in this pass
+
+- `ApplicationStage` and the production `HostedRuntimeBootstrap` path now
+  default to `LoadedApkGuestApplicationCreator` instead of reflective-first
+  Application construction.
+- The new creator installs a guest sandbox LoadedApk through
+  `ActivityThreadLoadedApkInstaller.installGuestSandbox(...)`, invokes
+  `LoadedApk.makeApplication(false, instrumentation)`, and patches the returned
+  guest Application back into the installed LoadedApk through
+  `ActivityThreadLoadedApkInstaller.bindApplication(...)`.
+- Fallback is explicit: if the LoadedApk path is unavailable, the old
+  reflective attach creator is used and evidence records
+  `loadedApkApplicationCreatorStatus=FALLBACK` plus the failure class/reason.
+- Application runtime publication now carries the engine `processSlot`, so
+  guest `Application.onCreate()` sees the same hosted runtime slot as the
+  Activity/Provider/Service path.
+- Focused JVM tests cover the LoadedApk-first creator with injected fake
+  ActivityThread, LoadedApk, resource bundle, and `makeApplication` seams.
+
+### Verification
+
+```bash
+./gradlew :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --tests "com.multiapp.core.loader.ActivityThreadLoadedApkInstallerTest" --tests "com.multiapp.core.loader.LoadedApkBridgeTest" --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --tests "com.multiapp.core.loader.HostedRuntimeBootstrapTest" --tests "com.multiapp.core.loader.ActivityThreadLoadedApkInstallerTest" --tests "com.multiapp.core.loader.LoadedApkBridgeTest" --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :app:assembleDebug --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+```
+
+All three focused loader commands passed. Full `:core:loader:testDebugUnitTest`
+and `:app:assembleDebug` also passed.
+
+### Still BLOCK
+
+- This is not device proof. Real hosted launches must show
+  `applicationCreator=LOADED_APK_MAKE_APPLICATION` and
+  `loadedApkApplicationCreatorStatus=PASS` in `files/hosted_launch_evidence`
+  before the Application model can be marked `PASS`.
+- Provider pre-install before guest `Application.onCreate()` remains open.
+- Application main-thread/prewarm semantics still need device validation for
+  QQ/WeChat/QQ Reader style heavy bootstrap paths.
