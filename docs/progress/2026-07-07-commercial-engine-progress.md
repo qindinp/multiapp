@@ -710,3 +710,46 @@ Remaining gate for this slice:
 - JVM fallback evidence is expected in local unit tests; it is not sufficient
   for commercial readiness.
 - Provider pre-install before guest `Application.onCreate()` is still open.
+
+## Execution Update - 2026-07-09 Provider Preinstall Ordering
+
+This slice adds the first same-process provider preinstall path between guest
+Application attach/runtime publish and guest `Application.onCreate()`.
+
+Implemented:
+
+- Added `GuestProviderPreinstaller` as the single preinstall seam for
+  same-process guest providers.
+- `ApplicationStage` now runs provider preinstall after publishing the reusable
+  runtime and before calling guest `Application.onCreate()`.
+- Same-process filtering follows Android's default process rule: providers
+  without a custom `processName` are preinstalled in the Application process;
+  providers declaring a different process are skipped for this slice.
+- Provider creation uses the existing `VirtualProviderManager` resolution and
+  `VirtualProviderRuntime.getOrCreate(...)`, so preinstall shares the same
+  provider cache as later stub-provider dispatch.
+- Application stage evidence now records `providerPreinstallStatus`, provider
+  counts, installed/cached/failed authorities, and skipped/failure reasons.
+- Added a JVM ordering test proving the sequence:
+  runtime published -> provider attached -> guest `Application.onCreate()`.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Targeted `ApplicationStageTest` passed.
+- Full `:core:loader:testDebugUnitTest` passed.
+- `:app:assembleDebug` passed.
+
+Remaining gate for this slice:
+
+- Device evidence must prove same-process provider attach happens before
+  guest `Application.onCreate()` in a real hosted launch.
+- Custom-process providers are still skipped; process-name-aware provider
+  runtime remains part of the broader multi-process container work.

@@ -864,3 +864,41 @@ and `:app:assembleDebug` also passed.
 - Provider pre-install before guest `Application.onCreate()` remains open.
 - Application main-thread/prewarm semantics still need device validation for
   QQ/WeChat/QQ Reader style heavy bootstrap paths.
+
+## Execution Update - 2026-07-09 Provider Preinstall Ordering
+
+### Implemented in this pass
+
+- Added `GuestProviderPreinstaller` for same-process guest provider preinstall.
+- `ApplicationStage` now runs provider preinstall after runtime publication and
+  before guest `Application.onCreate()`, matching Android's
+  `makeApplication -> installContentProviders -> callApplicationOnCreate`
+  ordering.
+- The preinstall path uses `VirtualProviderManager` and
+  `VirtualProviderRuntime.getOrCreate(...)`, so preinstalled providers share
+  the same runtime cache as later stub-provider dispatch.
+- Application evidence now records `providerPreinstallStatus`, total/attempted/
+  installed/cached/failed/skipped counts, authorities, and failure/skipped
+  reasons.
+- A JVM ordering test proves runtime publication happens before provider attach
+  and provider attach happens before guest `Application.onCreate()`.
+
+### Verification
+
+```bash
+./gradlew :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ApplicationStageTest" --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+./gradlew :app:assembleDebug --no-daemon --console=plain --max-workers=1 -Dkotlin.compiler.execution.strategy=in-process -Dkotlin.incremental=false -Pksp.incremental=false
+```
+
+The targeted `ApplicationStageTest`, full `:core:loader:testDebugUnitTest`, and
+`:app:assembleDebug` commands passed.
+
+### Still BLOCK
+
+- This is same-process provider preinstall only. Custom provider processes are
+  skipped until process-name-aware virtual process routing is completed.
+- Device evidence must prove provider attach occurs before guest
+  `Application.onCreate()` for real hosted launches.
+- Provider operation semantics and return-value behavior still need broader
+  behavior tests beyond evidence fields.

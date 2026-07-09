@@ -203,6 +203,53 @@ class ApplicationStageTest {
     }
 
     @Test
+    fun `same process providers are preinstalled before application onCreate`() {
+        ProviderPreinstallOrderApplication.reset()
+        val snapshot = packageSnapshot(
+            providers = listOf(
+                ResolvedComponent(
+                    name = ProviderPreinstallOrderProvider::class.java.name,
+                    exported = false,
+                    authorities = listOf("com.example.app.preinstall")
+                )
+            )
+        )
+        val providerRuntime = VirtualProviderRuntime(
+            providerFactory = ProviderFactory { _, _ -> ProviderPreinstallOrderProvider() },
+            providerAttacher = ProviderAttacher { _, _, info ->
+                ProviderPreinstallOrderApplication.events += "providerAttach:${info.authority}"
+            }
+        )
+        val hostContext: Context = mockk(relaxed = true)
+        val stage = ApplicationStage(
+            hostContext = hostContext,
+            applicationClassNameResolver = { _, _ -> ProviderPreinstallOrderApplication::class.java.name },
+            guestApplicationCreator = GuestApplicationCreator {
+                GuestApplicationCreateResult(
+                    application = ProviderPreinstallOrderApplication(),
+                    attachedContextPackageName = "com.example.app",
+                    evidence = listOf(BootstrapEvidence("applicationCreator", "TEST_CREATOR"))
+                )
+            },
+            providerPreinstaller = GuestProviderPreinstaller(providerRuntime = providerRuntime),
+            runtimePublisher = { _, _ -> ProviderPreinstallOrderApplication.events += "runtimePublished" },
+            clock = fixedClock(700L, 733L)
+        )
+
+        val output = stage.execute(stageInput(packageSnapshot = snapshot))
+
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(
+            listOf("runtimePublished", "providerAttach:com.example.app.preinstall", "onCreate"),
+            ProviderPreinstallOrderApplication.events
+        )
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("PASS", evidence["providerPreinstallStatus"])
+        assertEquals("1", evidence["providerPreinstallInstalledCount"])
+        assertEquals("com.example.app.preinstall", evidence["providerPreinstallInstalledAuthorities"])
+    }
+
+    @Test
     fun `loadedApk application creator installs sandbox and calls makeApplication`() {
         val snapshot = packageSnapshot()
         val application = TestApplication()
@@ -343,6 +390,41 @@ class ProviderDispatchApplication : Application() {
 }
 
 class StageProbeProvider : ContentProvider() {
+    override fun onCreate(): Boolean = true
+    override fun query(
+        uri: Uri,
+        projection: Array<out String>?,
+        selection: String?,
+        selectionArgs: Array<out String>?,
+        sortOrder: String?
+    ): Cursor? = null
+
+    override fun getType(uri: Uri): String? = null
+    override fun insert(uri: Uri, values: ContentValues?): Uri? = null
+    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
+    override fun update(
+        uri: Uri,
+        values: ContentValues?,
+        selection: String?,
+        selectionArgs: Array<out String>?
+    ): Int = 0
+}
+
+class ProviderPreinstallOrderApplication : Application() {
+    override fun onCreate() {
+        events += "onCreate"
+    }
+
+    companion object {
+        val events = mutableListOf<String>()
+
+        fun reset() {
+            events.clear()
+        }
+    }
+}
+
+class ProviderPreinstallOrderProvider : ContentProvider() {
     override fun onCreate(): Boolean = true
     override fun query(
         uri: Uri,

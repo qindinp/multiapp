@@ -9,6 +9,7 @@ class ApplicationStage(
     private val hostContext: Context?,
     private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String?,
     private val guestApplicationCreator: GuestApplicationCreator = LoadedApkGuestApplicationCreator(),
+    private val providerPreinstaller: GuestProviderPreinstaller = GuestProviderPreinstaller(),
     private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
@@ -58,6 +59,7 @@ class ApplicationStage(
         val applicationThread = currentApplicationThreadEvidence()
 
         var runtimePublishedBeforeOnCreate = false
+        var providerPreinstallEvidence = emptyList<BootstrapEvidence>()
         fun progress(status: String, detail: String, extra: Map<String, String> = emptyMap()) {
             HostedRuntimeProgressEvidenceWriter.write(
                 context = hostContext,
@@ -115,6 +117,21 @@ class ApplicationStage(
             publishRuntimeBeforeOnCreate(input, creation.application)
             runtimePublishedBeforeOnCreate = true
             progress("RUNTIME_PUBLISHED", "runtime published before Application.onCreate")
+            val providerPreinstallResult = providerPreinstaller.preinstall(
+                GuestProviderPreinstallRequest(
+                    hostPackageName = runCatching { context.packageName }.getOrNull().orEmpty(),
+                    snapshot = packageSnapshot,
+                    application = creation.application,
+                    guestClassLoader = guestClassLoader,
+                    config = virtualContextConfig
+                )
+            )
+            providerPreinstallEvidence = providerPreinstallResult.toEvidence()
+            progress(
+                "PROVIDER_PREINSTALL_FINISHED",
+                "same-process provider preinstall finished before Application.onCreate",
+                providerPreinstallEvidence.associate { it.key to it.value }
+            )
             progress("ON_CREATE_STARTED", "guest Application.onCreate started")
             creation.application.onCreate()
             progress("ON_CREATE_FINISHED", "guest Application.onCreate returned")
@@ -145,7 +162,7 @@ class ApplicationStage(
                             BootstrapEvidence("contextPackageName", creation.attachedContextPackageName.orEmpty()),
                             BootstrapEvidence("originPackageName", instance.originPackageName),
                             BootstrapEvidence("virtualPackageName", instance.virtualPackageName)
-                        ) + creation.evidence,
+                        ) + creation.evidence + providerPreinstallEvidence,
                         durationMs = clock() - startMs
                     ),
                     terminalFailure = false
