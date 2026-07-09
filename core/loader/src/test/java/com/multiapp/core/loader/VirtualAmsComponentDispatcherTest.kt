@@ -153,6 +153,21 @@ class VirtualAmsComponentDispatcherTest {
     }
 
     @Test
+    fun `resolveStartServiceIntent uses injected process runtime slot`() {
+        val processRuntime = VirtualProcessRuntime()
+        processRuntime.bindApplication("inst-001") {
+            hostedResult(processSlot = "com.multiapp.app:v3")
+        }
+        val dispatcher = dispatcher(processRuntime = processRuntime)
+        val intent = explicitIntent("com.test.minimal", "com.test.minimal.SyncService")
+
+        val result = dispatcher.resolveStartServiceIntent(intent, foreground = false)
+
+        val remapped = assertIs<VirtualContextWrapper.StartServiceMappingResult.Remapped>(result)
+        assertEquals("com.multiapp.app:v3", remapped.startRequest.processSlot)
+    }
+
+    @Test
     fun `resolveStartServiceIntent remaps implicit service through snapshot resolver`() {
         val dispatcher = dispatcher()
         val intent = mockk<Intent>(relaxed = true) {
@@ -346,6 +361,7 @@ class VirtualAmsComponentDispatcherTest {
     private fun dispatcher(
         activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager(),
         serviceRuntime: VirtualServiceRuntime = VirtualServiceRuntime(recordManager = VirtualServiceRecordManager()),
+        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime(),
         broadcastManager: VirtualBroadcastManager = VirtualBroadcastManager(),
         proxyActivityRegistry: ProxyActivityRegistry = ProxyActivityRegistry(listOf("com.multiapp.app.container.ProxyActivity0"))
     ): VirtualAmsComponentDispatcher {
@@ -356,6 +372,7 @@ class VirtualAmsComponentDispatcherTest {
             proxyActivityRegistry = proxyActivityRegistry,
             servicePackageRegistry = VirtualPackageRegistry().apply { register(snapshot()) },
             serviceRuntime = serviceRuntime,
+            processRuntime = processRuntime,
             broadcastManager = broadcastManager,
             serviceProxyIntentFactory = { _, request -> serviceProxyIntent(request) },
             activityProxyIntentFactory = { record, sourceIntent -> activityProxyIntent(record, sourceIntent) }
@@ -430,6 +447,26 @@ class VirtualAmsComponentDispatcherTest {
             ResolvedComponent(name = "com.test.minimal.BootReceiver", exported = false)
         )
     )
+
+    private fun hostedResult(processSlot: String?): HostedBootstrapResult =
+        HostedBootstrapResult(
+            instanceId = "inst-001",
+            installId = "com.test.minimal",
+            originPackageName = "com.test.minimal",
+            virtualPackageName = "com.multiapp.instance.abc",
+            processSlot = processSlot,
+            originApkPath = "/data/minimal.apk",
+            dataRoot = "/data/inst",
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            guestApplication = null,
+            installRecord = null,
+            packageSnapshot = snapshot(),
+            launcherActivityClassName = null,
+            stageResults = emptyList(),
+            summary = emptyList<BootstrapResult>().toSummary(),
+            success = true,
+            diagnostics = null
+        )
 
     private fun serviceRecord(service: Service) = VirtualServiceRecord(
         instanceId = "inst-001",

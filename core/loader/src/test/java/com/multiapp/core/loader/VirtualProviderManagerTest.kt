@@ -3,6 +3,7 @@ package com.multiapp.core.loader
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.identity.ProviderRouteTokenRegistry
+import com.multiapp.core.model.engine.ProviderRouteContract
 import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -12,6 +13,14 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class VirtualProviderManagerTest {
+
+    @Test
+    fun `proxy query constants delegate to provider route contract`() {
+        assertEquals(ProviderRouteContract.PROXY_INSTANCE_ID, VirtualProviderManager.PROXY_INSTANCE_ID)
+        assertEquals(ProviderRouteContract.PROXY_GUEST_AUTHORITY, VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+        assertEquals(ProviderRouteContract.PROXY_PROCESS_SLOT, VirtualProviderManager.PROXY_PROCESS_SLOT)
+        assertEquals(ProviderRouteContract.PROXY_ROUTE_TOKEN, VirtualProviderManager.PROXY_ROUTE_TOKEN)
+    }
 
     @Test
     fun `resolve maps guest authority to stable proxy authority`() {

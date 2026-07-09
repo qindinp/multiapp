@@ -5,10 +5,12 @@ import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.io.TempDir
 
 class EngineRuntimeRegistryTest {
 
@@ -249,6 +251,44 @@ class EngineRuntimeRegistryTest {
         assertTrue(registry.evidence(first.instanceId).operationEvidence.isEmpty())
         assertEquals(EngineResultStatus.PASS, registry.evidence(second.instanceId).status)
         assertEquals(second, registry.get(second.instanceId))
+    }
+
+    @Test
+    fun `runtime state restores from file backed store after registry rebuild`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val firstRegistry = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val runtime = runtime(
+            instanceId = "instance-1",
+            processSlot = "com.multiapp.app:v4",
+            proxySlot = "com.multiapp.app.container.ProxyActivity4"
+        )
+        firstRegistry.register(runtime)
+
+        val rebuiltRegistry = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val restored = rebuiltRegistry.get(runtime.instanceId)
+        val restoredReport = rebuiltRegistry.evidence(runtime.instanceId)
+
+        assertEquals(runtime.instanceId, restored?.instanceId)
+        assertEquals(runtime.processSlot, restored?.processSlot)
+        assertEquals(runtime.proxySlot, restored?.proxySlot)
+        assertEquals(runtime.runtimeEpoch, restored?.runtimeEpoch)
+        assertEquals("durable", restoredReport.entries["runtimeStateSource"])
+        assertEquals(runtime.processSlot, restoredReport.entries["processSlot"])
+        assertEquals(EngineResultStatus.PASS, restoredReport.status)
+    }
+
+    @Test
+    fun `stop removes file backed runtime state`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val registry = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val runtime = runtime()
+        registry.register(runtime)
+
+        assertTrue(registry.stop(runtime.instanceId))
+
+        val rebuiltRegistry = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        assertEquals(null, rebuiltRegistry.get(runtime.instanceId))
+        assertEquals(EngineResultStatus.FAIL, rebuiltRegistry.evidence(runtime.instanceId).status)
     }
 
     private fun operationEvidence(verdict: EngineResultStatus) = EngineOperationEvidence(

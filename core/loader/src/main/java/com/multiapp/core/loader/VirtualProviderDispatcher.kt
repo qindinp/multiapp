@@ -10,6 +10,7 @@ class VirtualProviderDispatcher(
     private val packageRegistry: VirtualPackageRegistry = VirtualPackageRegistry.global,
     private val providerManager: VirtualProviderManager = VirtualProviderManager(hostPackageName),
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+    private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val providerRuntime: VirtualProviderRuntime = VirtualProviderRuntime.global,
     private val hostContext: Context? = null
 ) {
@@ -82,7 +83,9 @@ class VirtualProviderDispatcher(
         val guestContext = VirtualContextWrappers.create(
             base = context,
             config = config,
-            guestClassLoader = guestClassLoader
+            guestClassLoader = guestClassLoader,
+            activityRecordManager = activityRecordManager,
+            processRuntime = processRuntime
         )
 
         return when (val provider = providerRuntime.getOrCreate(

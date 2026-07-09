@@ -13,6 +13,7 @@ class VirtualContextWrapperApi36(
     activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     servicePackageRegistry: VirtualPackageRegistry = VirtualPackageRegistry.global,
     serviceRuntime: VirtualServiceRuntime = VirtualServiceRuntime.global,
+    processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
     broadcastManager: VirtualBroadcastManager = VirtualBroadcastManager(),
     dynamicReceiverRegistry: VirtualDynamicReceiverRegistry = VirtualDynamicReceiverRegistry.global,
     serviceProxyIntentFactory: (VirtualServiceManager, VirtualServiceStartRequest) -> Intent = { manager, request ->
@@ -26,6 +27,7 @@ class VirtualContextWrapperApi36(
     activityRecordManager = activityRecordManager,
     servicePackageRegistry = servicePackageRegistry,
     serviceRuntime = serviceRuntime,
+    processRuntime = processRuntime,
     broadcastManager = broadcastManager,
     dynamicReceiverRegistry = dynamicReceiverRegistry,
     serviceProxyIntentFactory = serviceProxyIntentFactory,

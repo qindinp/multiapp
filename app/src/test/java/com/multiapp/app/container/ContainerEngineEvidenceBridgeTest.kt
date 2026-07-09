@@ -1,9 +1,11 @@
 package com.multiapp.app.container
 
 import com.multiapp.core.engine.EngineRuntimeRegistry
-import com.multiapp.core.loader.VirtualStorageDiagnosticKind
-import com.multiapp.core.loader.VirtualStorageDiagnosticStatus
-import com.multiapp.core.loader.VirtualStoragePathDiagnostic
+import com.multiapp.core.engine.EngineStorageDiagnosticKind
+import com.multiapp.core.engine.EngineStorageDiagnosticStatus
+import com.multiapp.core.engine.EngineStoragePathDiagnostic
+import com.multiapp.core.engine.DefaultEngineOperationEvidenceSink
+import com.multiapp.core.engine.RegistryBackedVirtualRuntimeService
 import com.multiapp.core.model.engine.EngineEvidenceReport
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineProfile
@@ -24,6 +26,7 @@ class ContainerEngineEvidenceBridgeTest {
         @TempDir filesDir: File
     ) {
         val registry = registryWithRuntime(filesDir)
+        val sink = sinkFor(registry)
 
         val accepted = ContainerEngineEvidenceBridge.recordProviderOperation(
             instanceId = INSTANCE_ID,
@@ -40,7 +43,7 @@ class ContainerEngineEvidenceBridgeTest {
                 "detail" to "credential=plain-credential",
                 "guestAuthority" to "com.test.app.provider"
             ),
-            registry = registry
+            sink = sink
         )
 
         val evidence = registry.evidence(INSTANCE_ID).operationEntries("provider", "query").single()
@@ -71,6 +74,8 @@ class ContainerEngineEvidenceBridgeTest {
         assertTrue(exported.contains("status=PASS"))
         assertTrue(exported.contains("profile=BASELINE"))
         assertTrue(exported.contains("hostPackageName=com.multiapp.app"))
+        assertTrue(exported.contains("subsystemVerdicts.runtime=PASS"))
+        assertTrue(exported.contains("subsystemVerdicts.evidence=PASS"))
         assertTrue(exported.contains("operationEvidence.provider.query.0.verdict=PASS"))
         assertTrue(exported.contains("operationEvidence.provider.query.0.entry.guestAuthority=com.test.app.provider"))
         listOf(
@@ -90,9 +95,10 @@ class ContainerEngineEvidenceBridgeTest {
     ) {
         val dataRoot = ContainerRuntimePaths.instanceDataRoot(filesDir, INSTANCE_ID).absolutePath
         val registry = registryWithRuntime(filesDir)
-        val diagnostic = VirtualStoragePathDiagnostic(
-            kind = VirtualStorageDiagnosticKind.NATIVE_IO,
-            status = VirtualStorageDiagnosticStatus.UNCHANGED,
+        val sink = sinkFor(registry)
+        val diagnostic = EngineStoragePathDiagnostic(
+            kind = EngineStorageDiagnosticKind.NATIVE_IO,
+            status = EngineStorageDiagnosticStatus.UNCHANGED,
             instanceId = INSTANCE_ID,
             originPackageName = ORIGIN_PACKAGE,
             virtualPackageName = VIRTUAL_PACKAGE,
@@ -111,7 +117,7 @@ class ContainerEngineEvidenceBridgeTest {
         val accepted = ContainerEngineEvidenceBridge.recordNativeStorageDiagnostic(
             diagnostic = diagnostic,
             fields = ContainerStorageDiagnosticsEvidence.fieldsForDiagnostic(diagnostic),
-            registry = registry
+            sink = sink
         )
         val report = registry.evidence(INSTANCE_ID)
         val evidence = report.operationEntries("native", "openat").single()
@@ -136,6 +142,7 @@ class ContainerEngineEvidenceBridgeTest {
     @Test
     fun `provider runtime bind evidence records successful bound and cached status as pass`() {
         val registry = registryWithRuntime()
+        val sink = sinkFor(registry)
 
         val accepted = listOf("BOUND", "CACHED").map { status ->
             ContainerEngineEvidenceBridge.recordProviderOperation(
@@ -146,7 +153,7 @@ class ContainerEngineEvidenceBridgeTest {
                     "providerRuntimeBindStatus" to status,
                     "providerRuntimeBindDetail" to "runtimeBoundForProviderProxy"
                 ),
-                registry = registry
+                sink = sink
             )
         }
         val report = registry.evidence(INSTANCE_ID)
@@ -162,6 +169,7 @@ class ContainerEngineEvidenceBridgeTest {
     @Test
     fun `provider runtime not bound evidence cannot be promoted to pass by inconsistent success fields`() {
         val registry = registryWithRuntime()
+        val sink = sinkFor(registry)
 
         val accepted = ContainerEngineEvidenceBridge.recordProviderOperation(
             instanceId = INSTANCE_ID,
@@ -171,7 +179,7 @@ class ContainerEngineEvidenceBridgeTest {
                 "evidenceSuccess" to true,
                 "cached" to true
             ),
-            registry = registry
+            sink = sink
         )
         val report = registry.evidence(INSTANCE_ID)
         val evidence = report.operationEntries("provider", "query").single()
@@ -184,12 +192,13 @@ class ContainerEngineEvidenceBridgeTest {
     @Test
     fun `operation evidence is rejected when engine runtime is missing`() {
         val registry = EngineRuntimeRegistry()
+        val sink = sinkFor(registry)
 
         val accepted = ContainerEngineEvidenceBridge.recordProviderOperation(
             instanceId = INSTANCE_ID,
             operationName = "query",
             fields = mapOf("status" to "PROVIDER_CREATED", "evidenceSuccess" to true),
-            registry = registry
+            sink = sink
         )
 
         assertFalse(accepted)
@@ -202,13 +211,14 @@ class ContainerEngineEvidenceBridgeTest {
         @TempDir filesDir: File
     ) {
         val registry = registryWithRuntime(filesDir)
+        val sink = sinkFor(registry)
         registry.stop(INSTANCE_ID)
 
         val accepted = ContainerEngineEvidenceBridge.recordProviderOperation(
             instanceId = INSTANCE_ID,
             operationName = "query",
             fields = mapOf("status" to "PROVIDER_CREATED", "evidenceSuccess" to true),
-            registry = registry
+            sink = sink
         )
 
         assertFalse(accepted)
@@ -283,6 +293,9 @@ class ContainerEngineEvidenceBridgeTest {
     private fun engineReportFile(filesDir: File): File {
         return File(filesDir, "hosted_launch_evidence/$INSTANCE_ID.engine-report.properties")
     }
+
+    private fun sinkFor(registry: EngineRuntimeRegistry): DefaultEngineOperationEvidenceSink =
+        DefaultEngineOperationEvidenceSink(RegistryBackedVirtualRuntimeService(registry))
 
     private companion object {
         const val INSTANCE_ID = "inst-001"

@@ -2,9 +2,10 @@ package com.multiapp.app.container
 
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
-import com.multiapp.core.engine.EngineRuntimeRegistry
-import com.multiapp.core.loader.VirtualStorageDiagnosticKind
-import com.multiapp.core.loader.VirtualStoragePathDiagnostic
+import com.multiapp.core.engine.EngineOperationEvidenceSink
+import com.multiapp.core.engine.EngineOperationEvidenceSinks
+import com.multiapp.core.engine.EngineStorageDiagnosticKind
+import com.multiapp.core.engine.EngineStoragePathDiagnostic
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineResultStatus
 
@@ -14,11 +15,11 @@ internal object ContainerEngineEvidenceBridge {
         instanceId: String,
         operationName: String,
         fields: Map<String, Any?>,
-        registry: EngineRuntimeRegistry = EngineRuntimeRegistry.global
+        sink: EngineOperationEvidenceSink = EngineOperationEvidenceSinks.global
     ): Boolean {
         if (instanceId.isBlank()) return false
         return registerOperationEvidence(
-            registry = registry,
+            sink = sink,
             instanceId = instanceId,
             evidence = EngineOperationEvidence(
                 component = COMPONENT_PROVIDER,
@@ -30,14 +31,14 @@ internal object ContainerEngineEvidenceBridge {
     }
 
     fun recordNativeStorageDiagnostic(
-        diagnostic: VirtualStoragePathDiagnostic,
+        diagnostic: EngineStoragePathDiagnostic,
         fields: Map<String, Any?>,
-        registry: EngineRuntimeRegistry = EngineRuntimeRegistry.global
+        sink: EngineOperationEvidenceSink = EngineOperationEvidenceSinks.global
     ): Boolean {
-        if (diagnostic.kind != VirtualStorageDiagnosticKind.NATIVE_IO) return false
+        if (diagnostic.kind != EngineStorageDiagnosticKind.NATIVE_IO) return false
         if (diagnostic.instanceId.isBlank()) return false
         return registerOperationEvidence(
-            registry = registry,
+            sink = sink,
             instanceId = diagnostic.instanceId,
             evidence = EngineOperationEvidence(
                 component = COMPONENT_NATIVE,
@@ -51,11 +52,11 @@ internal object ContainerEngineEvidenceBridge {
     fun recordNativeBootstrapUnsupported(
         instanceId: String,
         fields: Map<String, Any?>,
-        registry: EngineRuntimeRegistry = EngineRuntimeRegistry.global
+        sink: EngineOperationEvidenceSink = EngineOperationEvidenceSinks.global
     ): Boolean {
         if (instanceId.isBlank()) return false
         return registerOperationEvidence(
-            registry = registry,
+            sink = sink,
             instanceId = instanceId,
             evidence = EngineOperationEvidence(
                 component = COMPONENT_NATIVE,
@@ -67,22 +68,23 @@ internal object ContainerEngineEvidenceBridge {
     }
 
     private fun registerOperationEvidence(
-        registry: EngineRuntimeRegistry,
+        sink: EngineOperationEvidenceSink,
         instanceId: String,
         evidence: EngineOperationEvidence
     ): Boolean {
-        val accepted = registry.registerOperationEvidence(
+        val result = sink.record(
             instanceId = instanceId,
             evidence = evidence
         )
-        if (accepted) {
+        val report = result.report
+        if (result.accepted && report != null) {
             runCatching {
-                ContainerEngineEvidenceReportExporter.write(registry.evidence(instanceId))
+                ContainerEngineEvidenceReportExporter.write(report)
             }.onFailure { error ->
                 Log.w(TAG, "Unable to export engine evidence report for instanceId=$instanceId", error)
             }
         }
-        return accepted
+        return result.accepted
     }
 
     private fun providerVerdict(fields: Map<String, Any?>): EngineResultStatus {

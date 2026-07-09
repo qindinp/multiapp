@@ -25,15 +25,64 @@ enum class EngineResultStatus {
     UNSUPPORTED
 }
 
+enum class EngineSubsystem {
+    RUNTIME,
+    PACKAGE,
+    ACTIVITY,
+    PROVIDER,
+    SERVICE,
+    BROADCAST,
+    STORAGE,
+    NATIVE,
+    EVIDENCE
+}
+
+enum class VirtualRuntimeState {
+    CREATED,
+    PREWARMED,
+    RUNNING,
+    STOPPED,
+    DEAD
+}
+
+enum class EngineTaskPolicy {
+    DEFAULT,
+    NEW_TASK,
+    REUSE_EXISTING
+}
+
+enum class EnginePrewarmPolicy {
+    DEFAULT,
+    REQUIRED,
+    DISABLED
+}
+
+enum class EngineEvidenceMode {
+    DEFAULT,
+    FULL,
+    MINIMAL
+}
+
 data class LaunchInstanceRequest(
     val instanceId: String,
     val profile: EngineProfile = EngineProfile.BASELINE,
     val requestedLauncherActivityClass: String? = null,
-    val reason: String = "user"
+    val reason: String = "user",
+    val targetComponentClassName: String? = null,
+    val launchFlags: Int = 0,
+    val taskPolicy: EngineTaskPolicy = EngineTaskPolicy.DEFAULT,
+    val prewarmPolicy: EnginePrewarmPolicy = EnginePrewarmPolicy.DEFAULT,
+    val evidenceMode: EngineEvidenceMode = EngineEvidenceMode.DEFAULT
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
         require(reason.isNotBlank()) { "reason must not be blank" }
+        require(requestedLauncherActivityClass?.isNotBlank() ?: true) {
+            "requestedLauncherActivityClass must not be blank"
+        }
+        require(targetComponentClassName?.isNotBlank() ?: true) {
+            "targetComponentClassName must not be blank"
+        }
     }
 }
 
@@ -47,7 +96,12 @@ data class VirtualInstanceRuntime(
     val profile: EngineProfile,
     val processSlot: String,
     val proxySlot: String,
-    val evidenceSessionId: String
+    val evidenceSessionId: String,
+    val runtimeEpoch: Long = 1L,
+    val engineSessionId: String = evidenceSessionId,
+    val processId: Int? = null,
+    val processName: String? = null,
+    val state: VirtualRuntimeState = VirtualRuntimeState.CREATED
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
@@ -58,6 +112,10 @@ data class VirtualInstanceRuntime(
         require(processSlot.isNotBlank()) { "processSlot must not be blank" }
         require(proxySlot.isNotBlank()) { "proxySlot must not be blank" }
         require(evidenceSessionId.isNotBlank()) { "evidenceSessionId must not be blank" }
+        require(runtimeEpoch > 0L) { "runtimeEpoch must be positive" }
+        require(engineSessionId.isNotBlank()) { "engineSessionId must not be blank" }
+        require(processId == null || processId > 0) { "processId must be positive" }
+        require(processName?.isNotBlank() ?: true) { "processName must not be blank" }
     }
 }
 
@@ -150,7 +208,8 @@ data class EngineEvidenceReport(
     val status: EngineResultStatus,
     val profile: EngineProfile,
     val entries: Map<String, String> = emptyMap(),
-    val operationEvidence: Map<String, Map<String, List<EngineOperationEvidence>>> = emptyMap()
+    val operationEvidence: Map<String, Map<String, List<EngineOperationEvidence>>> = emptyMap(),
+    val subsystemVerdicts: Map<EngineSubsystem, EngineResultStatus> = emptyMap()
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
@@ -170,6 +229,13 @@ data class EngineEvidenceReport(
         return copy(
             status = status.merge(evidence.verdict),
             operationEvidence = operationEvidence + (evidence.component to mergedComponentEvidence)
+        )
+    }
+
+    fun withSubsystemVerdict(subsystem: EngineSubsystem, verdict: EngineResultStatus): EngineEvidenceReport {
+        return copy(
+            status = status.merge(verdict),
+            subsystemVerdicts = subsystemVerdicts + (subsystem to verdict)
         )
     }
 

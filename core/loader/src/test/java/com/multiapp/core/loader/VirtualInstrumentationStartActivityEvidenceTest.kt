@@ -1,14 +1,21 @@
 package com.multiapp.core.loader
 
 import android.app.Activity
+import android.app.Application
 import android.app.Instrumentation
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.util.Log
+import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualActivityStack
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.mockkStatic
+import io.mockk.unmockkObject
+import io.mockk.unmockkStatic
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.AfterTest
@@ -25,6 +32,11 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     fun tearDown() {
         VirtualActivityIntentStore.clearAll()
         VirtualActivityIntentStore.resetIntentCopierForTest()
+        VirtualActivityRecordManager.global.clearAll()
+        VirtualProcessRuntime.global.clearAll()
+        VirtualPackageRegistry.global.clear()
+        unmockkObject(ActivityThreadCompat)
+        unmockkStatic(Log::class)
     }
 
     @Test
@@ -338,6 +350,73 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     }
 
     @Test
+    fun `remap start activity uses instrumentation activity record manager`(@TempDir filesDir: File) {
+        val recordManager = VirtualActivityRecordManager()
+        val processRuntime = VirtualProcessRuntime()
+        val instrumentation = VirtualInstrumentation(
+            base = mockk<Instrumentation>(relaxed = true),
+            processRuntime = processRuntime,
+            activityRecordManager = recordManager
+        )
+        val snapshot = snapshotForInstance(
+            instanceId = "inst-001",
+            virtualPackageName = "com.multiapp.instance.minimal"
+        ).copy(
+            activities = listOf(
+                ResolvedComponent(
+                    name = "com.test.minimal.DetailActivity",
+                    taskAffinity = "com.test.minimal.task"
+                )
+            )
+        )
+        val hostApplication = mockk<Application>(relaxed = true) {
+            every { packageName } returns "com.multiapp.app"
+            every { this@mockk.filesDir } returns filesDir
+        }
+        VirtualPackageRegistry.global.register(snapshot)
+        mockkStatic(Log::class)
+        every { Log.i(any(), any()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } returns 0
+        rememberHostedRuntime(
+            instrumentation = instrumentation,
+            instanceId = "inst-001",
+            hostApplication = hostApplication,
+            result = hostedBootstrapResult(snapshot = snapshot)
+        )
+        val who = mockk<Context>(relaxed = true) {
+            every { packageName } returns "com.multiapp.instance.minimal"
+        }
+        val component = mockk<ComponentName>(relaxed = true) {
+            every { packageName } returns "com.test.minimal"
+            every { className } returns "com.test.minimal.DetailActivity"
+        }
+        val intent = mockk<Intent>(relaxed = true) {
+            every { this@mockk.component } returns component
+            every { selector } returns null
+            every { `package` } returns null
+            every { flags } returns Intent.FLAG_ACTIVITY_NEW_TASK
+            every { action } returns null
+            every { dataString } returns null
+            every { categories } returns emptySet()
+            every { extras } returns null
+        }
+
+        instrumentation.remapStartActivityIntent(
+            target = null,
+            who = who,
+            intent = intent,
+            api = "execStartActivity:test",
+            requestCode = -1
+        )
+
+        val record = assertNotNull(recordManager.list().singleOrNull())
+        assertEquals("com.test.minimal.DetailActivity", record.guestActivityClassName)
+        assertSame(record, recordManager.resolveByProxy(record.proxyActivityClassName))
+        assertTrue(VirtualActivityRecordManager.global.list().isEmpty())
+    }
+
+    @Test
     fun `activity record recovery restores missing proxy record during substitution`() {
         val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
         val recordManager = VirtualActivityRecordManager()
@@ -372,6 +451,36 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         assertEquals(1, record.taskId)
         assertSame(record, recordManager.resolveByProxy("com.multiapp.app.container.ProxyActivity0"))
         assertEquals(false, recordManager.lastLaunchResult()?.reused)
+    }
+
+    @Test
+    fun `activity record recovery defaults to instrumentation record manager`() {
+        val recordManager = VirtualActivityRecordManager()
+        val instrumentation = VirtualInstrumentation(
+            base = mockk<Instrumentation>(relaxed = true),
+            activityRecordManager = recordManager
+        )
+        val originalGuestIntent = sourceIntentForRecovery(
+            flags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK,
+            action = "com.test.OPEN"
+        )
+        val proxyIntent = proxyIntentForRecordRecovery(originalGuestIntent = originalGuestIntent)
+        val guestIntent = guestIntentForRecovery()
+        VirtualActivityIntentStore.setIntentCopierForTest { it }
+        VirtualActivityIntentStore.remember("token-001", originalGuestIntent)
+
+        val result = instrumentation.restoreActivityRecordFromProxyIntentIfMissing(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntent,
+            guestIntent = guestIntent,
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity"
+        )
+
+        val record = assertNotNull(recordManager.resolve("token-001"))
+        assertTrue(result.activityRecordRecovered)
+        assertEquals("com.test.minimal.MainActivity", record.guestActivityClassName)
+        assertSame(record, recordManager.resolveByProxy("com.multiapp.app.container.ProxyActivity0"))
     }
 
     @Test
@@ -506,6 +615,44 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         every { this@mockk.dataString } returns dataString
         every { this@mockk.categories } returns emptySet()
         every { this@mockk.extras } returns null
+    }
+
+    private fun hostedBootstrapResult(snapshot: VirtualPackageSnapshot): HostedBootstrapResult {
+        val stageResult = BootstrapResult.success(RuntimeStage.CONFIG, "test runtime")
+        return HostedBootstrapResult(
+            instanceId = snapshot.instanceId,
+            installId = snapshot.originPackageName,
+            originPackageName = snapshot.originPackageName,
+            virtualPackageName = snapshot.virtualPackageName,
+            applicationLabel = snapshot.applicationLabel,
+            processSlot = "com.multiapp.app:v0",
+            originApkPath = snapshot.sourceDir,
+            dataRoot = snapshot.dataDir,
+            guestClassLoader = javaClass.classLoader,
+            guestApplication = null,
+            packageSnapshot = snapshot,
+            launcherActivityClassName = snapshot.launcherActivityName,
+            stageResults = listOf(stageResult),
+            summary = listOf(stageResult).toSummary(),
+            success = true
+        )
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun rememberHostedRuntime(
+        instrumentation: VirtualInstrumentation,
+        instanceId: String,
+        hostApplication: Application,
+        result: HostedBootstrapResult
+    ) {
+        val runtimeClass = Class.forName("${VirtualInstrumentation::class.java.name}\$HostedActivityRuntime")
+        val constructor = runtimeClass.getDeclaredConstructor(Application::class.java, HostedBootstrapResult::class.java)
+        constructor.isAccessible = true
+        val runtime = constructor.newInstance(hostApplication, result)
+        val cacheField = VirtualInstrumentation::class.java.getDeclaredField("hostedRuntimeCache")
+        cacheField.isAccessible = true
+        val cache = cacheField.get(instrumentation) as MutableMap<String, Any>
+        cache[instanceId] = runtime
     }
 
     private fun snapshotForInstance(

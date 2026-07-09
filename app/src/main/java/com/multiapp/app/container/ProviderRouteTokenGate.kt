@@ -1,10 +1,10 @@
 package com.multiapp.app.container
 
 import android.net.Uri
+import com.multiapp.core.engine.EngineProviderDispatchResult
 import com.multiapp.core.identity.ProviderRouteToken
 import com.multiapp.core.identity.ProviderRouteTokenRegistry
-import com.multiapp.core.loader.VirtualProviderDispatchResult
-import com.multiapp.core.loader.VirtualProviderManager
+import com.multiapp.core.model.engine.ProviderRouteContract
 
 internal object ProviderRouteTokenGate {
 
@@ -13,20 +13,20 @@ internal object ProviderRouteTokenGate {
         operationName: String,
         nowMillis: Long = System.currentTimeMillis()
     ): ProviderRouteTokenGateResult {
-        val instanceId = uri.getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID)
-        val guestAuthority = uri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
-        val expectedProcessSlot = uri.getQueryParameter(VirtualProviderManager.PROXY_PROCESS_SLOT)
+        val instanceId = uri.getQueryParameter(ProviderRouteContract.PROXY_INSTANCE_ID)
+        val guestAuthority = uri.getQueryParameter(ProviderRouteContract.PROXY_GUEST_AUTHORITY)
+        val expectedProcessSlot = uri.getQueryParameter(ProviderRouteContract.PROXY_PROCESS_SLOT)
             ?.takeIf { it.isNotBlank() }
-        val token = uri.getQueryParameter(ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN)
+        val token = uri.getQueryParameter(ProviderRouteContract.PROXY_ROUTE_TOKEN)
 
         if (instanceId.isNullOrBlank()) {
             return ProviderRouteTokenGateResult.Invalid(
-                VirtualProviderDispatchResult.InvalidProxyUri("missing instanceId")
+                EngineProviderDispatchResult.InvalidProxyUri("missing instanceId")
             )
         }
         if (guestAuthority.isNullOrBlank()) {
             return ProviderRouteTokenGateResult.Invalid(
-                VirtualProviderDispatchResult.InvalidProxyUri("missing guestAuthority")
+                EngineProviderDispatchResult.InvalidProxyUri("missing guestAuthority")
             )
         }
 
@@ -41,12 +41,12 @@ internal object ProviderRouteTokenGate {
         )
         if (!result.isValid) {
             return ProviderRouteTokenGateResult.Invalid(
-                VirtualProviderDispatchResult.InvalidProxyUri("invalid route token:${result.status.name}")
+                EngineProviderDispatchResult.InvalidProxyUri("invalid route token:${result.status.name}")
             )
         }
 
         val route = result.route ?: return ProviderRouteTokenGateResult.Invalid(
-            VirtualProviderDispatchResult.InvalidProxyUri("invalid route token:ROUTE_MISSING")
+            EngineProviderDispatchResult.InvalidProxyUri("invalid route token:ROUTE_MISSING")
         )
         return ProviderRouteTokenGateResult.Valid(
             route = route,
@@ -68,12 +68,12 @@ internal object ProviderRouteTokenGate {
         val preservedGuestQuery = ProviderProxyUri.rewriteEncodedQuery(encodedQuery)
         return listOfNotNull(
             preservedGuestQuery,
-            "${VirtualProviderManager.PROXY_INSTANCE_ID}=${route.targetInstanceId}",
-            "${VirtualProviderManager.PROXY_GUEST_AUTHORITY}=${route.authority}",
+            "${ProviderRouteContract.PROXY_INSTANCE_ID}=${route.targetInstanceId}",
+            "${ProviderRouteContract.PROXY_GUEST_AUTHORITY}=${route.authority}",
             route.processSlot?.takeIf { it.isNotBlank() }?.let {
-                "${VirtualProviderManager.PROXY_PROCESS_SLOT}=$it"
+                "${ProviderRouteContract.PROXY_PROCESS_SLOT}=$it"
             },
-            "${ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN}=${route.token}"
+            "${ProviderRouteContract.PROXY_ROUTE_TOKEN}=${route.token}"
         ).joinToString("&")
     }
 }
@@ -85,6 +85,6 @@ internal sealed class ProviderRouteTokenGateResult {
     ) : ProviderRouteTokenGateResult()
 
     data class Invalid(
-        val result: VirtualProviderDispatchResult.InvalidProxyUri
+        val result: EngineProviderDispatchResult.InvalidProxyUri
     ) : ProviderRouteTokenGateResult()
 }

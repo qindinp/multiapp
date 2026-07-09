@@ -7,6 +7,7 @@ import com.multiapp.core.model.VirtualPackageRecord
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResultStatus
+import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceDataRoot
@@ -49,11 +50,32 @@ class DefaultVirtualizationEngineTest {
         assertEquals(EngineResultStatus.PASS, result.status)
         assertEquals(instance.instanceId, result.runtime?.instanceId)
         assertEquals("evidence-1", result.runtime?.evidenceSessionId)
+        assertEquals("engine-evidence-1", result.runtime?.engineSessionId)
+        assertEquals(VirtualRuntimeState.CREATED, result.runtime?.state)
+        assertEquals(result.runtime?.processSlot, result.runtime?.processName)
+        assertNotNull(result.runtime?.runtimeEpoch)
         assertEquals(1, launches.size)
         assertEquals(instance.instanceId, launches.single().instanceId)
         assertEquals(EngineProfile.BASELINE, launches.single().profile)
         assertTrue(launches.single().providerRoutingEnabled)
         assertNotNull(registry.get(instance.instanceId))
+        assertEquals("engine-evidence-1", registry.evidence(instance.instanceId).entries["engineSessionId"])
+        assertEquals("CREATED", registry.evidence(instance.instanceId).entries["runtimeState"])
+        assertEquals("PASS", registry.evidence(instance.instanceId).entries["virtualSystemServerStatus"])
+        assertEquals(
+            "BASELINE",
+            registry.evidence(instance.instanceId)
+                .operationEntries("hook-profile", "profile-gate")
+                .single()
+                .entries["profile"]
+        )
+        assertEquals(
+            "false",
+            registry.evidence(instance.instanceId)
+                .operationEntries("hook-profile", "profile-gate")
+                .single()
+                .entries["lsplantEnabled"]
+        )
         assertEquals(1, instances.launchUpdates)
     }
 
@@ -190,6 +212,7 @@ class DefaultVirtualizationEngineTest {
         assertEquals(EngineResultStatus.PARTIAL, report.status)
         assertEquals(
             listOf(
+                "hook-profile:profile-gate:PASS",
                 "native:path-redirect:PARTIAL",
                 "provider:route-token:PASS"
             ),
@@ -236,6 +259,42 @@ class DefaultVirtualizationEngineTest {
 
         assertEquals(EngineResultStatus.UNSUPPORTED, result.status)
         assertNull(engine.queryRuntimeState("instance-1"))
+    }
+
+    @Test
+    fun `compat hook launch uses engine hook runtime when allow listed`() {
+        val instance = instance()
+        val decisions = mutableListOf<EngineProfileDecision>()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { },
+            profilePolicy = CompatibilityProfilePolicy(
+                allowList = setOf(
+                    EngineProfileAllowKey(
+                        originPackageName = instance.originPackageName,
+                        instanceId = instance.instanceId,
+                        profile = EngineProfile.COMPAT_HOOK
+                    )
+                )
+            ),
+            hookRuntime = RecordingHookRuntime(decisions),
+            evidenceSessionFactory = { "compat-evidence" }
+        )
+
+        val result = engine.launchInstance(
+            LaunchInstanceRequest(instanceId = instance.instanceId, profile = EngineProfile.COMPAT_HOOK)
+        )
+        val hookEvidence = result.evidence
+            ?.operationEntries("hook-profile", "profile-gate")
+            ?.single()
+
+        assertEquals(EngineResultStatus.PASS, result.status)
+        assertEquals(listOf(EngineProfile.COMPAT_HOOK), decisions.map { it.profile })
+        assertEquals(EngineResultStatus.PARTIAL, hookEvidence?.verdict)
+        assertEquals("true", hookEvidence?.entries?.get("lsplantEnabled"))
+        assertEquals("core:engine-test", hookEvidence?.entries?.get("hookRuntimeOwner"))
     }
 
     @Test
@@ -423,5 +482,19 @@ class DefaultVirtualizationEngineTest {
         override fun deleteInstallRecord(packageName: String): Boolean = false
 
         override fun hasInstallRecord(packageName: String): Boolean = record.packageName == packageName
+    }
+
+    private class RecordingHookRuntime(
+        private val decisions: MutableList<EngineProfileDecision>
+    ) : EngineHookRuntime {
+        override fun profileEvidence(decision: EngineProfileDecision): EngineOperationEvidence {
+            decisions += decision
+            val evidence = EngineHookRuntimeEvidence.profileEvidence(
+                decision = decision,
+                hookEngineTouched = decision.lsplantEnabled,
+                hookCount = "0"
+            )
+            return evidence.copy(entries = evidence.entries + ("hookRuntimeOwner" to "core:engine-test"))
+        }
     }
 }

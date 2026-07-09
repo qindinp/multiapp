@@ -4,6 +4,8 @@
 
 This document records the current progress against `D:\Downloads\PLAN.md` and
 `docs/reviews/2026-07-07-container-runtime-bug-audit.md`.
+Open-source route comparison is tracked in
+`docs/reviews/2026-07-09-open-source-engine-comparison.md`.
 
 Baseline saved before this implementation:
 
@@ -284,6 +286,52 @@ Limit:
   isolation, stopped-runtime evidence rejection without clearing sibling
   runtimes, provider cache isolation by instance id, and base/split path
   ordering.
+
+### Engine Boundary Facades
+
+- Added engine-owned provider dispatch DTOs so `StubContentProvider` and
+  `ProviderRouteTokenGate` no longer consume loader `VirtualProvider*` result
+  types directly.
+- Added engine-owned service dispatch DTOs and evidence-field mapping so
+  `StubService` no longer switches on loader `VirtualServiceDispatchResult` in
+  the app layer.
+- Added `EngineHostedBootstrapResult` as the app-visible hosted bootstrap
+  wrapper. `HostedRuntimeEngine`, hosted runtime binders, and
+  `ContainerActivity` now exchange the engine wrapper instead of exposing
+  loader `HostedBootstrapResult` across the app boundary.
+- Added `EngineActivityRuntime` facades for proxy Activity slots, launcher
+  dispatch, proxy record observation/recovery, and stale proxy-record pruning.
+  `ContainerActivity` and `ProxyActivityBase` no longer import loader
+  `ProxyActivitySlots`, `VirtualActivityManager`,
+  `VirtualActivityRecordManager`, or `VirtualActivityIntentStore` directly.
+- Engine storage/provider evidence facades accept the wrapper and unwrap it
+  inside `:core:engine`, keeping app/container on the engine facade path.
+- `EngineBoundaryTest` was tightened by removing the migrated
+  `HostedBootstrapResult`, `VirtualServiceDispatchResult`,
+  `VirtualProviderDispatchResult`, `VirtualProviderEvidence`, and Activity
+  slot/record primitive app-side allowances.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+git diff --check
+```
+
+Result:
+
+- Unified local engine/app test and debug build gate passed.
+- `git diff --check` passed with only existing CRLF normalization warnings.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
+Limit:
+
+- This is a boundary cleanup and ownership step, not a new compatibility proof.
+  `ContainerActivity` still reads loader bootstrap stage primitives
+  (`BootstrapResult` / `RuntimeStage`) for launch evidence; moving those to an
+  engine evidence DTO is the next small boundary slice. Device verification for
+  this specific boundary-facade batch is still pending.
 
 ## Verification
 
@@ -753,3 +801,641 @@ Remaining gate for this slice:
   guest `Application.onCreate()` in a real hosted launch.
 - Custom-process providers are still skipped; process-name-aware provider
   runtime remains part of the broader multi-process container work.
+
+## Execution Update - 2026-07-09 VirtualSystemServer Boundary
+
+This slice starts the commercial-engine boundary required by the VirtualApp /
+BlackBox-style plan. It does not claim full VPMS/VAMS completion; it creates
+the engine-owned service boundary and freezes new app-side direct runtime
+imports so later slices can migrate behavior behind `:core:engine`.
+
+Implemented:
+
+- Extended the public engine contract with runtime lifecycle metadata:
+  `runtimeEpoch`, `engineSessionId`, `processId`, `processName`, and
+  `VirtualRuntimeState`.
+- Extended `LaunchInstanceRequest` with pure-model launch controls:
+  `targetComponentClassName`, `launchFlags`, `EngineTaskPolicy`,
+  `EnginePrewarmPolicy`, and `EngineEvidenceMode`.
+- Added `EngineSubsystem` and subsystem verdict aggregation to
+  `EngineEvidenceReport`.
+- Added `VirtualSystemServer` plus typed engine subsystem facades for runtime,
+  package, activity, provider, service, broadcast, storage, native, and
+  evidence.
+- Routed `DefaultVirtualizationEngineCore` runtime registration, query, stop,
+  and evidence export through `VirtualSystemServer.runtimeService` instead of
+  directly touching `EngineRuntimeRegistry`.
+- Engine reports now export runtime lifecycle fields and subsystem verdicts.
+- Added an app boundary freeze test: existing direct `:app -> loader/hook`
+  imports are treated as a migration baseline, and any new direct runtime
+  import must fail the test until it goes through engine facades.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest --tests "com.multiapp.core.model.engine.VirtualizationEngineModelTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.DefaultVirtualizationEngineTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --tests "com.multiapp.app.container.ContainerEngineEvidenceBridgeTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `:core:model` and `:core:engine` tests passed.
+- Focused `:app` boundary/exporter tests passed.
+
+Remaining gate for this slice:
+
+- Existing app/container direct imports are still a migration baseline, not a
+  solved boundary.
+- At the time of this slice, `VirtualSystemServer` had only the runtime facade
+  wired to existing behavior; later slices add first-stage package/runtime
+  state recovery, but VAMS/Provider/Service/Broadcast/Storage/Native services
+  still need real implementations and device evidence.
+
+## Execution Update - 2026-07-09 Durable Runtime State
+
+This slice starts P0-B cross-process/process-death recovery work. It does not
+create a full binder-backed virtual system server yet; it makes the current
+engine runtime identity durable enough for hosted processes to recover
+`instanceId + processSlot + proxySlot + runtimeEpoch` after engine recreation.
+
+Implemented:
+
+- Added `EngineRuntimeStateStore` with in-memory and file-backed
+  implementations.
+- Persisted `VirtualInstanceRuntime` identity and the package snapshot fields
+  needed for first-stage recovery:
+  `originPackageName`, `virtualPackageName`, `dataRoot`, source/split paths,
+  native library directory, application class, permissions, certificate hash,
+  `processSlot`, `proxySlot`, `runtimeEpoch`, `engineSessionId`, process name,
+  and runtime state.
+- `EngineRuntimeRegistry` now writes runtime state on register, restores from
+  the durable store on lookup/evidence, and removes durable state on stop.
+- Production `DefaultVirtualizationEngine` and `DefaultHostedRuntimeEngine`
+  attach the shared file store at
+  `files/engine_runtime_state.properties`.
+- Hosted bootstrap now falls back to durable runtime state for `processSlot`
+  resolution instead of requiring an in-memory `EngineRuntimeRegistry.global`
+  hit.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineRuntimeStateStoreTest" --tests "com.multiapp.core.engine.EngineRuntimeRegistryTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.DefaultVirtualizationEngineTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `:core:engine` runtime state and system-server tests passed.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
+Remaining gate for this slice:
+
+- The durable state currently stores runtime identity and package snapshot
+  fields, including component declarations. Task stacks, provider/service
+  lifecycles, broadcast state, URI grants, observer state, and native runtime
+  bindings are still not durable.
+- Device evidence is still required to prove process-death recents recovery and
+  hosted-process bootstrap after kill/restart.
+
+## Execution Update - 2026-07-09 VPMS Snapshot Facade
+
+This slice starts the `VirtualPackageService` side of the engine-owned virtual
+system server. It does not implement full Android `PackageManager` parity yet;
+it creates the first package-query facade backed by the same runtime snapshot
+that launch, LoadedApk, Context, Resources, and future PMS hooks must share.
+
+Implemented:
+
+- `VirtualPackageService` now exposes:
+  - `queryPackageSnapshot(instanceId)`
+  - `queryPackageIdentity(instanceId)`
+- Added `VirtualPackageIdentity` as a small identity view over
+  `VirtualInstanceRuntime + VirtualPackageSnapshot`.
+- `DefaultVirtualSystemServer` now wires `packageService` to
+  `RegistryBackedVirtualPackageService`, so package queries read through the
+  engine runtime service rather than a separate app/container cache.
+- File-backed runtime state now preserves package-level `metaData` and declared
+  `activities`, `services`, `receivers`, and `providers`, including resolved
+  intent filters, authorities, launch mode, process name, task affinity,
+  permissions, grant-URI flag, component meta-data, and alias target.
+- The app boundary test now freezes direct runtime references by
+  `kind + path + fqcn + count` and also scans fully-qualified direct usages,
+  not only `import` statements. Existing references remain migration debt, and
+  new bypasses must go through `:core:engine`.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineRuntimeStateStoreTest" --tests "com.multiapp.core.engine.VirtualPackageServiceTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineRuntimeRegistryTest" --tests "com.multiapp.core.engine.DefaultVirtualizationEngineTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --tests "com.multiapp.app.container.ContainerEngineEvidenceBridgeTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused engine runtime-state/package/system-server tests passed.
+- Focused app boundary/exporter tests passed.
+- Known warning remains: AGP `8.7.3` was tested up to `compileSdk=35`, while
+  the project uses `compileSdk=36`.
+
+Remaining gate for this slice:
+
+- This is snapshot-backed VPMS foundation only. It still does not answer real
+  Android `PackageInfo`, `ApplicationInfo`, `ProviderInfo`,
+  `ResolveInfo`, signing, permissions, or intent matching requests.
+- Device evidence still has to prove exported engine reports contain package
+  subsystem verdicts for real launches.
+
+## Execution Update - 2026-07-09 VPMS Component Resolver
+
+This slice expands `VirtualPackageService` from package identity lookup into
+the first engine-owned component resolver. It follows the VirtualApp /
+DroidPlugin direction: component lookup must be answered from the central
+virtual package snapshot rather than from ad-hoc app/container state.
+
+Implemented:
+
+- Added `VirtualPackageComponentType` for `ACTIVITY`, `SERVICE`, `RECEIVER`,
+  and `PROVIDER`.
+- `VirtualPackageService` now supports:
+  - explicit component lookup by class name
+  - alias target lookup through `targetActivityName`
+  - provider lookup by authority
+  - basic intent resolution by action, category, and data scheme
+- The resolver works after file-backed runtime state restore, so component
+  queries do not depend on the original in-memory runtime object surviving.
+- Tests cover missing-runtime behavior, restored Activity/Service/Receiver/
+  Provider lookup, launcher intent matching, service data-scheme matching,
+  receiver action matching, provider authority matching, and wrong-category
+  rejection.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.VirtualPackageServiceTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused VPMS component resolver tests passed.
+
+Remaining gate for this slice:
+
+- Intent matching is still a deliberately small subset. MIME type, host, port,
+  path, priority, preferred activities, permissions, disabled components, and
+  per-user enabled state are not complete.
+- The app/container runtime is not yet migrated to use this resolver for all
+  Activity/Provider/Service/Broadcast dispatch paths.
+
+## Execution Update - 2026-07-09 Engine Container Dispatch Facades
+
+This slice starts migrating the real Android app/container stubs behind
+`:core:engine` dispatch facades. It follows the same boundary direction as the
+open-source comparison: app owns manifest-declared Android stub components, but
+runtime dispatch decisions should move into the engine layer.
+
+Implemented:
+
+- Added `EngineProviderDispatcher` / `DefaultEngineProviderDispatcher` and
+  `EngineProviderDispatchRequest` in `:core:engine`.
+- Added `EngineServiceDispatcher` / `DefaultEngineServiceDispatcher` and
+  `EngineServiceDispatchRequest` in `:core:engine`.
+- `StubContentProvider` no longer constructs `VirtualProviderDispatcher`
+  directly; after route-token validation and hosted runtime binding, it calls
+  the engine provider facade.
+- `StubService` no longer constructs `VirtualServiceDispatcher` directly; after
+  hosted runtime binding, it calls the engine service facade.
+- `EngineBoundaryTest` migration baseline was reduced by removing the old
+  direct `VirtualProviderDispatcher` and `VirtualServiceDispatcher` imports.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused engine dispatch facade test passed.
+- Focused app boundary test passed after serial rerun.
+
+Remaining gate for this slice:
+
+- The engine facades still wrap loader primitives and return loader result
+  types. This is a boundary migration step, not the final pure-engine DTO
+  shape.
+- `StubContentProvider`, `StubService`, binders, `ContainerActivity`, and
+  proxy activities still import other loader primitives. Those direct imports
+  remain migration debt and are intentionally tracked by `EngineBoundaryTest`.
+
+## Execution Update - 2026-07-09 Runtime Binder Engine Boundary
+
+This slice removes the app/container runtime binders' direct dependency on
+`VirtualProcessRuntime.global`. Activity, Provider, and Service proxy binders
+now bind through `HostedRuntimeEngine`, keeping the process-local loader
+registry behind the engine boundary.
+
+Implemented:
+
+- `HostedActivityRuntimeBinder` now calls `HostedRuntimeEngine.reusableResult`
+  and `HostedRuntimeEngine.bindApplication` instead of directly using
+  `VirtualProcessRuntime`.
+- `HostedProviderRuntimeBinder` now uses the same engine runtime entrypoint
+  while preserving provider route `instanceId`, `guestAuthority`, and
+  `processSlot` validation.
+- `HostedServiceRuntimeBinder` now consumes `EngineServiceStartRoute`, and
+  `StubService` routes proxy-intent decoding, reusable-runtime checks, and
+  proxy-token cleanup through `DefaultEngineServiceRouter`.
+- Added `EngineServiceStartRoute`, `EngineServiceLaunchInfo`, and
+  `EngineServiceRouter` in `:core:engine` as the first Service-specific route
+  facade over the existing loader primitive.
+- `EngineBoundaryTest` was tightened by removing the legacy
+  `VirtualProcessRuntime` allow-list entries for Activity/Provider/Service
+  binders and the old `VirtualServiceManager` / `VirtualServiceStartRequest` /
+  `VirtualServiceIntentStore` entries from `StubService` and
+  `HostedServiceRuntimeBinder`.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.container.HostedActivityRuntimeBinderTest" --tests "com.multiapp.app.container.HostedProviderRuntimeBinderTest" --tests "com.multiapp.app.container.HostedServiceRuntimeBinderTest" --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused engine dispatcher test passed.
+- Focused Activity/Provider/Service binder tests passed.
+- Focused app boundary test passed.
+
+Remaining gate for this slice:
+
+- Provider route parameter names still come from `VirtualProviderManager`.
+  Extracting an engine/model route contract is the next small boundary slice.
+- Activity launch primitives in `ContainerActivity` / `ProxyActivityBase` still
+  have direct loader references; migrating task/record/proxy-slot control to an
+  engine Activity facade is the next high-risk boundary slice.
+
+## Execution Update - 2026-07-09 Container Facade Contract Batch
+
+This batch continues the app/container boundary shrink after the runtime binder
+slice. The work was batched before running Gradle so the local verification cost
+stays closer to a team-style integration gate instead of testing after every
+small edit.
+
+Implemented:
+
+- Added `ProviderRouteContract` in `:core:model` and migrated provider proxy
+  URI, route-token gate, hosted provider binder, and stub provider code to use
+  that shared contract. `VirtualProviderManager` keeps compatibility forwards
+  for loader-side callers.
+- Added `ProxySlotContract` in `:core:model` and routed app/loader proxy-slot
+  file naming through the same constant to avoid path drift.
+- Added `EngineProviderRouteSlots.stubAuthority(...)` so
+  `StubContentProvider` no longer reaches directly into `ProxyActivitySlots`
+  for process-slot authority selection.
+- Added engine AMS/Broadcast evidence DTOs and recorder adapters. App-side
+  `ContainerAmsApiEvidenceRecorder` and `ContainerBroadcastEvidenceRecorder`
+  now consume engine records instead of loader records.
+- Added `EngineRuntimeInstallers` so `MultiAppApplication` installs
+  instrumentation and AMS/Broadcast recorders through `:core:engine` rather
+  than importing loader installer singletons directly.
+- Added `EngineProviderOperationEvidenceFacade` so
+  `ContainerProviderOperationEvidence` only writes file-backed evidence batches;
+  bootstrap/result field extraction now lives behind the engine facade.
+- Tightened `EngineBoundaryTest` by removing migrated allow-list entries for
+  AMS/Broadcast recorder imports, provider operation bootstrap import, and
+  app-level instrumentation/evidence installer imports.
+
+Verification:
+
+```powershell
+git diff --check
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `git diff --check` passed with only existing Windows CRLF normalization
+  warnings.
+- The `core:model/core:engine/core:loader` test batch passed.
+- The `app:testDebugUnitTest` + `app:assembleDebug` batch passed.
+- Known warnings remain: AGP `8.7.3` is still newer-compileSdk-warning-prone
+  for `compileSdk=36`, Gradle reports deprecated features, and
+  `generateLoaderDex` still prints invalid-locals warnings from dependency
+  bytecode.
+
+Remaining gate for this slice:
+
+- This is still a boundary migration. Several app/container files intentionally
+  keep tracked migration-debt imports for `ContainerActivity`, proxy Activity,
+  storage diagnostics, and loader dispatch result DTOs.
+- Device evidence was not collected in this batch. QQ/WeChat/QQ Reader/GKD
+  compatibility remains unproven until a fresh install/manual launch cycle
+  exports logcat, exit-info, recents, hosted launch evidence, and instances.
+
+## Execution Update - 2026-07-09 Storage Diagnostics Engine Facade
+
+This batch migrates PR-10 storage/native diagnostics behind `:core:engine`.
+It follows the VirtualApp / BlackBox direction that app-side Android stubs
+should write evidence and host components, while the engine owns runtime and
+native/storage decisions.
+
+Implemented:
+
+- Added `EngineStorageDiagnosticsFacade` plus engine-owned storage diagnostic
+  DTOs and evidence entries.
+- Moved Java absolute-path diagnostic planning, native IO unsupported/probe
+  decisions, native runtime verdict fields, and component naming from
+  `app/container` into `:core:engine`.
+- `ContainerStorageDiagnosticsEvidence` is now a thin file-backed writer. It
+  accepts the hosted bootstrap object as an opaque value, asks the engine facade
+  for a plan, writes isolation markers, and records engine evidence.
+- `ContainerEngineEvidenceBridge` now accepts engine storage diagnostics instead
+  of loader `VirtualStoragePathDiagnostic`.
+- Updated app tests to use engine storage DTOs and added focused engine tests
+  for bootstrap-unsupported and native-fail planning.
+- Tightened `EngineBoundaryTest` by removing migrated app-side storage and
+  `NativeHookBridge` allow-list entries.
+
+Verification:
+
+```powershell
+git diff --check
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineStorageDiagnosticsEvidenceTest" :app:testDebugUnitTest --tests "com.multiapp.app.container.ContainerStorageDiagnosticsEvidenceTest" --tests "com.multiapp.app.container.ContainerEngineEvidenceBridgeTest" --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `git diff --check` passed with only existing Windows CRLF normalization
+  warnings.
+- Focused engine storage facade, app storage evidence, engine evidence bridge,
+  and boundary tests passed.
+
+Remaining gate for this slice:
+
+- This is still a facade/boundary step. Real native IO redirect still needs
+  device evidence for `open/openat/stat/access/fopen/realpath`, namespace,
+  `findLibrary`, and `nativeLoad`.
+- `ContainerActivity`, `ProxyActivityBase`, provider/service dispatch result
+  DTOs, and hosted bootstrap result exposure remain app/container migration
+  debt.
+
+## Execution Update - 2026-07-09 Bootstrap Stage Engine DTO Batch
+
+This batch keeps the verification cadence coarse: the code and tests were
+updated together, then one local gate was run. No device install or manual
+runtime test was performed in this slice.
+
+Implemented:
+
+- Added engine-owned bootstrap stage/status/result DTOs on top of
+  `EngineHostedBootstrapResult`.
+- Moved `ContainerActivity` package-manager, application, and launcher evidence
+  lookup to engine bootstrap DTOs instead of app-side `BootstrapResult` /
+  `RuntimeStage` imports.
+- Tightened `EngineBoundaryTest` again so app main code no longer has an
+  allow-list for `ContainerActivity -> BootstrapResult/RuntimeStage`.
+- Added engine tests for loader-to-engine bootstrap DTO conversion and launcher
+  failure evidence preservation.
+- App main direct runtime reference scan now only shows the existing
+  `AppModule.kt -> HookEngine` DI entry.
+
+Verification:
+
+```powershell
+git diff --check
+rg -n "import com\.multiapp\.core\.(loader|hook|xposed)\.|com\.multiapp\.core\.(loader|hook|xposed)\." app/src/main/java -S
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `git diff --check` passed with only Windows CRLF normalization warnings.
+- The app main direct runtime reference scan returned only
+  `app/src/main/java/com/multiapp/app/AppModule.kt -> HookEngine`.
+- The Gradle gate passed in `2m 34s`.
+- Known warnings remain: AGP `8.7.3` compileSdk 36 compatibility warning,
+  deprecated `ActivityManager.TaskDescription(String)`,
+  `generateLoaderDex` invalid locals warning, and Gradle deprecated features.
+
+Remaining gate for this slice:
+
+- This is still structural boundary work. It does not prove QQ/WeChat/QQ
+  Reader/GKD runtime compatibility.
+- `AppModule.kt -> HookEngine` is still app-side migration debt until hook
+  profile wiring is fully owned by engine DI.
+
+## Execution Update - 2026-07-09 Hook Profile Engine Facade
+
+This batch removes the last app/main direct runtime primitive reference. Hook
+capability remains available, but the app no longer provides or imports
+`HookEngine`; hook/profile evidence now belongs to `:core:engine`.
+
+Implemented:
+
+- Added `EngineHookRuntime` and `DefaultEngineHookRuntime` in `:core:engine`.
+- Added `hook-profile/profile-gate` operation evidence with profile flags for
+  LSPlant, Xposed, proc/maps spoof, signature fake, business wrappers, no-op
+  patches, native hook enhancement, and diagnostics observe-only mode.
+- `DefaultVirtualizationEngine` now injects the engine hook runtime and records
+  hook profile evidence during launch after runtime registration.
+- Baseline and diagnostics profiles do not touch the `HookEngine` singleton.
+  Allow-listed `COMPAT_HOOK` is reported as `PARTIAL` until the real hook init
+  path has runtime/device evidence.
+- Removed `AppModule.provideHookEngine()` and tightened `EngineBoundaryTest` to
+  zero allowed app/main `core.loader/core.hook/core.xposed` direct references.
+- Added tests for hook profile evidence and allow-listed compat-hook launch
+  routing through the engine hook runtime.
+
+Verification:
+
+```powershell
+git diff --check
+rg -n "import com\.multiapp\.core\.(loader|hook|xposed)\.|com\.multiapp\.core\.(loader|hook|xposed)\." app/src/main/java -S
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `git diff --check` passed with only Windows CRLF normalization warnings.
+- The app main direct runtime reference scan returned no matches.
+- The Gradle gate exited successfully within the 180s timeout.
+
+Remaining gate for this slice:
+
+- This is profile ownership and boundary cleanup only. It does not initialize
+  LSPlant for guest apps and does not prove QQ/WeChat/QQ Reader compatibility.
+- Next engine slices should keep moving provider/service/broadcast/native
+  runtime primitives behind `VirtualSystemServer` and replace in-process global
+  state with recoverable runtime state.
+
+## Execution Update - 2026-07-09 Engine Evidence Sink
+
+This batch removes the app/container default dependency on
+`EngineRuntimeRegistry.global` for operation evidence writes. The direction is
+closer to the VirtualApp/BlackBox model: app Android stubs may collect local
+facts and write files, but engine runtime truth is reached through an engine
+service facade.
+
+Implemented:
+
+- Added `EngineOperationEvidenceSink` and
+  `DefaultEngineOperationEvidenceSink` in `:core:engine`.
+- The default sink routes operation evidence through
+  `DefaultVirtualSystemServer(EngineRuntimeRegistry.global).runtimeService`
+  inside `:core:engine`.
+- `ContainerEngineEvidenceBridge` now depends on
+  `EngineOperationEvidenceSink` / `EngineOperationEvidenceSinks.global`
+  instead of defaulting to `EngineRuntimeRegistry.global`.
+- Engine evidence export now uses the report returned by the sink, so app code
+  no longer reads the global registry to fetch the updated report.
+- Added engine tests for accepted/missing-runtime sink behavior and migrated app
+  evidence bridge tests to explicit injected sinks.
+
+Verification:
+
+```powershell
+git diff --check
+rg -n "EngineRuntimeRegistry\.global|registry: EngineRuntimeRegistry =|import com\.multiapp\.core\.(loader|hook|xposed)\.|com\.multiapp\.core\.(loader|hook|xposed)\." app/src/main/java -S
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `git diff --check` passed with only Windows CRLF normalization warnings.
+- The app/main direct global-registry and loader/hook/xposed scan returned no
+  matches.
+- The first Gradle run failed on a Kotlin smart-cast in
+  `ContainerEngineEvidenceBridge`; this was fixed by assigning
+  `result.report` to a local `report` before export.
+- The second Gradle gate passed in `2m 7s`.
+
+Remaining gate for this slice:
+
+- `EngineOperationEvidenceSinks.global` still wraps the process global registry
+  inside `:core:engine`; later work should bind this to a real durable/IPC
+  system-server service instead of process-local singleton state.
+- Hosted runtime bootstrap still uses `VirtualProcessRuntime.global` in engine
+  adapter code, so process-death and cross-process recovery remain open.
+
+## Execution Update - 2026-07-09 Hosted Process Runtime Facade
+
+This batch moves hosted Application runtime reuse behind an engine facade.
+The goal is to keep following the VirtualApp/BlackBox-style engine boundary:
+Android stubs and loader primitives may still exist, but process runtime truth
+should be reached through `:core:engine` rather than scattered direct global
+lookups.
+
+Implemented:
+
+- Added `EngineHostedProcessRuntime` and `DefaultEngineHostedProcessRuntime`
+  in `:core:engine`.
+- `DefaultHostedRuntimeEngine` now uses the engine process-runtime facade for
+  reusable runtime lookup, Application binding, and early Application runtime
+  publication.
+- `HostedRuntimeBootstrap` now accepts an injected `runtimePublisher`; loader
+  no longer hardcodes `VirtualProcessRuntime.global` inside
+  `attachAndLaunch()`.
+- `DefaultEngineServiceRouter` now checks reusable runtime through the engine
+  facade instead of directly depending on `VirtualProcessRuntime.global`.
+- Added focused tests for engine process-runtime reuse/bind behavior and loader
+  bootstrap publisher injection.
+
+Verification:
+
+```powershell
+git diff --check
+rg -n "VirtualProcessRuntime\.global" core/engine/src/main/java core/loader/src/main/java app/src/main/java -S
+.\gradlew.bat :core:engine:testDebugUnitTest :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `git diff --check` passed with only Windows CRLF normalization warnings.
+- A single full local gate with model/engine/loader/app test plus app assemble
+  exceeded the local 180s command timeout before returning a Gradle failure
+  stack.
+- The affected-module split gate passed:
+  `:core:engine:testDebugUnitTest :core:loader:testDebugUnitTest` in 25s.
+- The app gate passed:
+  `:app:testDebugUnitTest :app:assembleDebug` in 1m 10s.
+- Known warnings remain: AGP `8.7.3` compileSdk 36 compatibility warning and
+  `generateLoaderDex` invalid locals warnings from dependency class metadata.
+
+Remaining gate for this slice:
+
+- `DefaultEngineHostedProcessRuntime` still wraps `VirtualProcessRuntime.global`
+  inside `:core:engine`; this is a containment step, not the final durable/IPC
+  process runtime.
+- Loader still has direct `VirtualProcessRuntime.global` usage in legacy
+  instrumentation, launch-record patching, Provider/Service/AMS dispatchers.
+  Those are separate migration slices and still block commercial readiness.
+
+## Execution Update - 2026-07-09 Process Runtime Injection Path
+
+This batch continues the hosted process runtime migration. The intent is not to
+remove every legacy default in one patch, but to make the active engine and
+guest Context paths carry one shared `VirtualProcessRuntime` explicitly.
+
+Implemented:
+
+- `DefaultEngineProviderDispatcher` and `DefaultEngineServiceDispatcher` now
+  pass the engine-owned loader runtime into `VirtualProviderDispatcher` and
+  `VirtualServiceDispatcher`.
+- `HostedRuntimeBootstrap` passes the same process runtime into
+  `ApplicationStage`.
+- `ApplicationStage`, `GuestApplicationCreateRequest`, reflective Application
+  context creation, `VirtualContextWrappers`, `VirtualContextWrapper`,
+  `VirtualContextWrapperApi34`, and `VirtualContextWrapperApi36` now carry an
+  injectable process runtime.
+- `VirtualProviderDispatcher` and `VirtualServiceDispatcher` pass their
+  process runtime into the guest `VirtualContextWrapper`.
+- `DefaultVirtualAmsComponentDispatcher` already supported process-runtime
+  injection; `VirtualContextWrapper` now forwards its injected runtime into the
+  default dispatcher, so guest `startService()` / `bindService()` can reuse the
+  same process slot/application state.
+- `VirtualInstrumentation` and `HostedActivityContextInjector` now carry
+  injectable process runtime instead of hardcoding lookup/bind calls inside
+  hosted Activity context injection.
+- `ActivityThreadLaunchRecordPatcher` now accepts process runtime parameters
+  through its patch entry points and no longer does internal hard global
+  lookups for guest classloader/processSlot.
+- `VirtualInstrumentationInstaller` and `ActivityThreadLaunchCallbackInstaller`
+  now accept and forward the process runtime; `EngineRuntimeInstallers` installs
+  instrumentation with the engine-owned shared loader runtime.
+- `VirtualInstrumentation.createHostedRuntime()` now wires
+  `runtimePublisher = processRuntime::rememberApplication` so early Application
+  publication and the foreground Activity path share the same runtime cache.
+- Added a `VirtualAmsComponentDispatcherTest` case proving service remap uses
+  the injected process runtime slot.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `:core:loader:testDebugUnitTest` passed in 1m 56s.
+- Static scan found no remaining direct
+  `VirtualProcessRuntime.global.get/bindApplication/reusableResult/rememberApplication`
+  calls in `core/loader/src/main/java`, `core/engine/src/main/java`, or
+  `app/src/main/java`.
+- Known warnings remain: AGP `8.7.3` compileSdk 36 compatibility warning and
+  existing deprecated Android API override/test warnings.
+
+Remaining gate for this slice:
+
+- Several loader classes still keep `VirtualProcessRuntime.global` as a
+  compatibility default parameter. The active engine path now passes a shared
+  runtime explicitly, but the old default entry points still need later
+  deprecation or ownership by `:core:engine`.
+- `ActivityThreadLaunchRecordPatcher` and several loader entry points still
+  expose `VirtualProcessRuntime.global` as compatibility defaults. A later
+  engine installer facade should remove or hide those defaults behind a loader
+  owned narrow interface.

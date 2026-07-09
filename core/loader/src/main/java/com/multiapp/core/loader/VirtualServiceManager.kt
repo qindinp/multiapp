@@ -218,6 +218,7 @@ class VirtualServiceDispatcher(
     private val hostContext: Context?,
     private val packageRegistry: VirtualPackageRegistry = VirtualPackageRegistry.global,
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+    private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val serviceManager: VirtualServiceManager = VirtualServiceManager(hostContext?.packageName.orEmpty()),
     private val serviceRuntime: VirtualServiceRuntime = VirtualServiceRuntime.global
 ) {
@@ -260,7 +261,9 @@ class VirtualServiceDispatcher(
         val guestContext = VirtualContextWrappers.create(
             base = context,
             config = config,
-            guestClassLoader = guestClassLoader
+            guestClassLoader = guestClassLoader,
+            activityRecordManager = activityRecordManager,
+            processRuntime = processRuntime
         )
 
         return when (val result = serviceRuntime.start(

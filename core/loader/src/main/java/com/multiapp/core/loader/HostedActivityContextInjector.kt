@@ -62,13 +62,17 @@ internal object HostedActivityContextInjector {
         config: VirtualContextConfig,
         guestApplication: Application?,
         guestClassLoader: ClassLoader,
+        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+        activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
         injectionPhase: String = "preOnCreate",
         allowHostAppCompatFallback: Boolean = false
     ): InjectionResult {
         val guestContext = VirtualContextWrappers.create(
             base = hostContext,
             config = config,
-            guestClassLoader = guestClassLoader
+            guestClassLoader = guestClassLoader,
+            processRuntime = processRuntime,
+            activityRecordManager = activityRecordManager
         )
         val hiddenApiBypassApplied = runCatching { AndroidCompat.bypassHiddenApis() }
             .onFailure { error -> Log.d(TAG, "Hidden API bypass unavailable: ${error.message}") }

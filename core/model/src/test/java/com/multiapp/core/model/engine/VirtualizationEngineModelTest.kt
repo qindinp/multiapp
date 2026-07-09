@@ -1,5 +1,6 @@
 package com.multiapp.core.model.engine
 
+import com.multiapp.core.model.virtual.ProxySlotContract
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -21,6 +22,24 @@ class VirtualizationEngineModelTest {
 
         assertEquals(EngineProfile.BASELINE, request.profile)
         assertEquals("user", request.reason)
+        assertEquals(EngineTaskPolicy.DEFAULT, request.taskPolicy)
+        assertEquals(EnginePrewarmPolicy.DEFAULT, request.prewarmPolicy)
+        assertEquals(EngineEvidenceMode.DEFAULT, request.evidenceMode)
+        assertEquals(0, request.launchFlags)
+        assertEquals(null, request.targetComponentClassName)
+    }
+
+    @Test
+    fun `provider route contract keeps stable proxy parameter names`() {
+        assertEquals("multiapp_instanceId", ProviderRouteContract.PROXY_INSTANCE_ID)
+        assertEquals("multiapp_guestAuthority", ProviderRouteContract.PROXY_GUEST_AUTHORITY)
+        assertEquals("multiapp_processSlot", ProviderRouteContract.PROXY_PROCESS_SLOT)
+        assertEquals("multiapp_routeToken", ProviderRouteContract.PROXY_ROUTE_TOKEN)
+    }
+
+    @Test
+    fun `proxy slot contract keeps stable slot assignment file name`() {
+        assertEquals("proxy_activity_slots.properties", ProxySlotContract.SLOT_ASSIGNMENT_FILE)
     }
 
     @Test
@@ -90,6 +109,24 @@ class VirtualizationEngineModelTest {
         assertEquals(EngineResultStatus.PARTIAL, partial.status)
         assertEquals(EngineResultStatus.UNSUPPORTED, unsupported.status)
         assertEquals(EngineResultStatus.FAIL, failed.status)
+    }
+
+    @Test
+    fun `subsystem verdicts contribute to report status`() {
+        val report = EngineEvidenceReport(
+            instanceId = "instance-1",
+            evidenceSessionId = "evidence-1",
+            status = EngineResultStatus.PASS,
+            profile = EngineProfile.BASELINE
+        )
+
+        val updated = report
+            .withSubsystemVerdict(EngineSubsystem.RUNTIME, EngineResultStatus.PASS)
+            .withSubsystemVerdict(EngineSubsystem.BROADCAST, EngineResultStatus.UNSUPPORTED)
+
+        assertEquals(EngineResultStatus.UNSUPPORTED, updated.status)
+        assertEquals(EngineResultStatus.PASS, updated.subsystemVerdicts[EngineSubsystem.RUNTIME])
+        assertEquals(EngineResultStatus.UNSUPPORTED, updated.subsystemVerdicts[EngineSubsystem.BROADCAST])
     }
 
     @Test

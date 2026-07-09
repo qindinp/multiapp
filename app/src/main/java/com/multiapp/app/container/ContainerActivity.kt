@@ -10,18 +10,18 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.multiapp.core.engine.EngineActivityLaunchRequest
+import com.multiapp.core.engine.EngineActivityProxyLauncher
+import com.multiapp.core.engine.EngineBootstrapStage
+import com.multiapp.core.engine.EngineBootstrapStageResult
+import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.EngineProxyActivityRecords
+import com.multiapp.core.engine.EngineProxyActivitySlots
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.engine.HostedRuntimeBindOutcome
-import com.multiapp.core.loader.BootstrapResult
-import com.multiapp.core.loader.HostedBootstrapResult
-import com.multiapp.core.loader.ProxyActivitySlots
-import com.multiapp.core.loader.RuntimeStage
-import com.multiapp.core.loader.VirtualActivityManager
-import com.multiapp.core.loader.VirtualActivityRecordManager
 import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
-import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
@@ -49,8 +49,7 @@ internal sealed class BootstrapCompletionAction {
  * full Virtual AMS, and does NOT touch QQ-Reader hooks or LSPlant/Xposed.
  *
  * On launch, bootstraps the hosted runtime via [HostedRuntimeEngine]
- * which creates a [VirtualContextWrapper][com.multiapp.core.loader.VirtualContextWrapper]
- * for the guest app and attempts to instantiate the guest
+ * which creates a guest Context wrapper and attempts to instantiate the guest
  * [android.app.Application] class.
  *
  * After successful bootstrap, resolves the guest launcher Activity and maps it
@@ -104,7 +103,7 @@ open class ContainerActivity : Activity() {
                 .putExtra(EXTRA_ENABLE_PROVIDER_HOOK, providerHookEnabled)
         }
 
-        internal fun shouldFinishAfterBootstrap(result: HostedBootstrapResult): Boolean =
+        internal fun shouldFinishAfterBootstrap(result: EngineHostedBootstrapResult): Boolean =
             !result.success || result.guestClassLoader == null
 
         internal fun buildVirtualContextConfig(
@@ -138,29 +137,19 @@ open class ContainerActivity : Activity() {
             )
         }
 
-        internal fun packageManagerProxyStageResult(result: HostedBootstrapResult): BootstrapResult? =
-            result.stageResults.firstOrNull { it.stage == RuntimeStage.PACKAGE_MANAGER_PROXY }
+        internal fun packageManagerProxyStageResult(result: EngineHostedBootstrapResult): EngineBootstrapStageResult? =
+            result.firstStageResult(EngineBootstrapStage.PACKAGE_MANAGER_PROXY)
 
-        internal fun launcherActivityStageResult(result: HostedBootstrapResult): BootstrapResult? =
-            result.stageResults.lastOrNull { it.stage == RuntimeStage.LAUNCHER_ACTIVITY }
+        internal fun launcherActivityStageResult(result: EngineHostedBootstrapResult): EngineBootstrapStageResult? =
+            result.lastStageResult(EngineBootstrapStage.LAUNCHER_ACTIVITY)
 
-        internal fun packageManagerProxyEvidenceFields(result: BootstrapResult): Map<String, String> {
-            return buildMap {
-                put("stage", result.stage.name)
-                put("status", result.status.name)
-                put("message", result.message)
-                put("durationMs", result.durationMs.toString())
-                result.errorClass?.let { put("errorClass", it) }
-                result.errorMessage?.let { put("errorMessage", it) }
-                result.rollbackNote?.let { put("rollbackNote", it) }
-                result.evidence.forEach { evidence -> put(evidence.key, evidence.value) }
-            }
-        }
+        internal fun packageManagerProxyEvidenceFields(result: EngineBootstrapStageResult): Map<String, String> =
+            result.toEvidenceFields()
 
-        internal fun launcherActivityFailureDetail(result: HostedBootstrapResult): String {
-            val launcherStage = result.stageResults.lastOrNull { it.stage == RuntimeStage.LAUNCHER_ACTIVITY }
+        internal fun launcherActivityFailureDetail(result: EngineHostedBootstrapResult): String {
+            val launcherStage = result.lastStageResult(EngineBootstrapStage.LAUNCHER_ACTIVITY)
                 ?: return "no launcher Activity"
-            val evidence = launcherStage.evidence.associate { it.key to it.value }
+            val evidence = launcherStage.evidence
             return buildList {
                 add(launcherStage.message.ifBlank { "no launcher Activity" })
                 evidence["resolver"]?.takeIf { it.isNotBlank() }?.let { add("resolver=$it") }
@@ -186,7 +175,7 @@ open class ContainerActivity : Activity() {
             }.joinToString("; ")
         }
 
-        internal fun bootstrapCompletionAction(result: HostedBootstrapResult): BootstrapCompletionAction {
+        internal fun bootstrapCompletionAction(result: EngineHostedBootstrapResult): BootstrapCompletionAction {
             if (!result.success) {
                 return BootstrapCompletionAction.FinishWithEvidence(
                     status = "FAIL",
@@ -245,11 +234,11 @@ open class ContainerActivity : Activity() {
     }
 
     private val proxyActivityClassNames by lazy(LazyThreadSafetyMode.NONE) {
-        ProxyActivitySlots.classNames(packageName)
+        EngineProxyActivitySlots.classNames(packageName)
     }
 
     private val proxyLaunchModeByClassName by lazy(LazyThreadSafetyMode.NONE) {
-        ProxyActivitySlots.launchModeByClassName(packageName)
+        EngineProxyActivitySlots.launchModeByClassName(packageName)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -425,7 +414,7 @@ open class ContainerActivity : Activity() {
     private fun writeBootstrapEvidence(
         hostContext: Context,
         instanceId: String,
-        result: HostedBootstrapResult
+        result: EngineHostedBootstrapResult
     ) {
         writePackageManagerProxyEvidence(hostContext, instanceId, result)
         writeApplicationEvidence(hostContext, instanceId, result)
@@ -446,7 +435,7 @@ open class ContainerActivity : Activity() {
 
     private fun handleBootstrapOutcome(
         instanceId: String,
-        outcome: Result<HostedBootstrapResult>,
+        outcome: Result<EngineHostedBootstrapResult>,
         engineProxySlot: String?
     ) {
         val evidenceContext = applicationContext ?: this
@@ -528,20 +517,18 @@ open class ContainerActivity : Activity() {
             engineProxySlot = engineProxySlot,
             launchMode = launchMode
         ).getOrElse { error -> return Result.failure(error) }
-        val manager = VirtualActivityManager(
-            context = applicationContext ?: this,
-            proxyActivityRegistry = ProxyActivityRegistry(
-                candidateProxyActivityClassNames,
-                proxyLaunchModeByClassName,
-                slotAssignmentStore
+        return EngineActivityProxyLauncher().launchGuestLauncher(
+            EngineActivityLaunchRequest(
+                hostContext = applicationContext ?: this,
+                candidateProxyActivityClassNames = candidateProxyActivityClassNames,
+                proxyLaunchModeByClassName = proxyLaunchModeByClassName,
+                slotAssignmentStore = slotAssignmentStore,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                guestActivityClassName = guestActivityClassName,
+                launchMode = launchMode,
+                taskAffinity = taskAffinity
             )
-        )
-        return manager.launchGuestLauncher(
-            instanceId = instanceId,
-            originPackageName = originPackageName,
-            guestActivityClassName = guestActivityClassName,
-            launchMode = launchMode,
-            taskAffinity = taskAffinity
         )
     }
 
@@ -572,8 +559,8 @@ open class ContainerActivity : Activity() {
             )
             return Result.failure(IllegalStateException(detail))
         }
-        val normalizedLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(launchMode)
-        val proxyLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(proxyLaunchModeByClassName[engineProxySlot])
+        val normalizedLaunchMode = EngineProxyActivitySlots.normalizeLaunchMode(launchMode)
+        val proxyLaunchMode = EngineProxyActivitySlots.normalizeLaunchMode(proxyLaunchModeByClassName[engineProxySlot])
         if (proxyLaunchMode != normalizedLaunchMode) {
             val detail = "engine proxy slot launchMode mismatch: slot=$engineProxySlot, " +
                 "slotMode=${proxyLaunchMode ?: "standard"}, requested=${normalizedLaunchMode ?: "standard"}"
@@ -613,7 +600,7 @@ open class ContainerActivity : Activity() {
         }
         val knownProxyClasses = proxyActivityClassNames.toSet()
         val liveProxyClasses = liveProxyActivityClassNames(knownProxyClasses)
-        val removedRuntimeRecords = VirtualActivityRecordManager.global.pruneStaleProxyRecords(
+        val removedRuntimeRecords = EngineProxyActivityRecords().pruneStaleProxyRecords(
             knownProxyActivityClassNames = knownProxyClasses,
             liveProxyActivityClassNames = liveProxyClasses
         )
@@ -667,7 +654,7 @@ open class ContainerActivity : Activity() {
     private fun writePackageManagerProxyEvidence(
         context: Context,
         instanceId: String,
-        result: HostedBootstrapResult
+        result: EngineHostedBootstrapResult
     ) {
         val stageResult = packageManagerProxyStageResult(result) ?: return
         runCatching {
@@ -685,9 +672,9 @@ open class ContainerActivity : Activity() {
     private fun writeApplicationEvidence(
         context: Context,
         instanceId: String,
-        result: HostedBootstrapResult
+        result: EngineHostedBootstrapResult
     ) {
-        val stageResult = result.stageResults.firstOrNull { it.stage == RuntimeStage.APPLICATION } ?: return
+        val stageResult = result.firstStageResult(EngineBootstrapStage.APPLICATION) ?: return
         runCatching {
             ContainerRuntimeEvidenceWriter.write(
                 context = context,
@@ -703,7 +690,7 @@ open class ContainerActivity : Activity() {
     private fun writeLauncherActivityEvidence(
         context: Context,
         instanceId: String,
-        result: HostedBootstrapResult
+        result: EngineHostedBootstrapResult
     ) {
         val stageResult = launcherActivityStageResult(result) ?: return
         runCatching {
@@ -806,8 +793,8 @@ open class ContainerActivity : Activity() {
         engineProxySlot: String,
         launchMode: String?
     ) {
-        val normalizedLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(launchMode)
-        val slotLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(proxyLaunchModeByClassName[engineProxySlot])
+        val normalizedLaunchMode = EngineProxyActivitySlots.normalizeLaunchMode(launchMode)
+        val slotLaunchMode = EngineProxyActivitySlots.normalizeLaunchMode(proxyLaunchModeByClassName[engineProxySlot])
         runCatching {
             ContainerRuntimeEvidenceWriter.write(
                 context = applicationContext ?: this,
@@ -856,7 +843,7 @@ open class ContainerActivity : Activity() {
         }
     }
 
-    private fun writeStorageDiagnosticsEvidence(context: Context, result: HostedBootstrapResult) {
+    private fun writeStorageDiagnosticsEvidence(context: Context, result: EngineHostedBootstrapResult) {
         runCatching {
             ContainerStorageDiagnosticsEvidence.write(context, result)
         }.onFailure { error ->
@@ -864,7 +851,7 @@ open class ContainerActivity : Activity() {
         }
     }
 
-    private fun writeProviderOperationEvidence(context: Context, result: HostedBootstrapResult) {
+    private fun writeProviderOperationEvidence(context: Context, result: EngineHostedBootstrapResult) {
         runCatching {
             ContainerProviderOperationEvidence.writeUnsupportedOperations(context, result)
         }.onFailure { error ->

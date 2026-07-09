@@ -3,20 +3,20 @@ package com.multiapp.core.engine
 import android.content.Context
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.HostedRuntimeBootstrap
-import com.multiapp.core.loader.VirtualProcessRuntime
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.installer.InstallRecordStore
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
 interface HostedRuntimeEngine {
-    fun reusableResult(instanceId: String): HostedBootstrapResult?
+    fun reusableResult(instanceId: String): EngineHostedBootstrapResult?
     fun runBootstrap(
         instanceId: String,
         providerHookEnabled: Boolean = true,
         processSlot: String? = null
-    ): HostedBootstrapResult
+    ): EngineHostedBootstrapResult
 
     fun bindApplication(
         instanceId: String,
@@ -26,7 +26,7 @@ interface HostedRuntimeEngine {
 }
 
 data class HostedRuntimeBindOutcome(
-    val result: HostedBootstrapResult,
+    val result: EngineHostedBootstrapResult,
     val ranBootstrapOnThisThread: Boolean
 )
 
@@ -36,26 +36,48 @@ class DefaultHostedRuntimeEngine @Inject constructor(
     private val instanceManager: InstanceManager,
     private val installRecordStore: InstallRecordStore
 ) : HostedRuntimeEngine {
-    private val runtime: VirtualProcessRuntime = VirtualProcessRuntime.global
+    private val processRuntime: EngineHostedProcessRuntime = DefaultEngineHostedProcessRuntime()
     private val hostContext: Context
         get() = context.applicationContext ?: context
+    private val engineRuntimeRegistry: EngineRuntimeRegistry =
+        EngineRuntimeRegistry.global.attachStateStore(
+            FileBackedEngineRuntimeStateStore(
+                File(hostContext.filesDir, DefaultVirtualizationEngine.ENGINE_RUNTIME_STATE_FILE)
+            )
+        )
 
-    override fun reusableResult(instanceId: String): HostedBootstrapResult? =
-        runtime.reusableResult(instanceId)
+    override fun reusableResult(instanceId: String): EngineHostedBootstrapResult? =
+        processRuntime.reusableResult(instanceId)
 
     override fun runBootstrap(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?
+    ): EngineHostedBootstrapResult = EngineHostedBootstrapResult.fromLoader(
+        runBootstrapLoader(instanceId, providerHookEnabled, processSlot)
+    )
+
+    private fun runBootstrapLoader(
         instanceId: String,
         providerHookEnabled: Boolean,
         processSlot: String?
     ): HostedBootstrapResult {
         val resolvedProcessSlot = processSlot
             ?.takeIf { it.isNotBlank() }
-            ?: EngineRuntimeRegistry.global.get(instanceId)?.processSlot
+            ?: engineRuntimeRegistry.runtimeState(instanceId)?.processSlot
         return HostedRuntimeBootstrap(
             instanceManager = instanceManager,
             installRecordStore = installRecordStore,
             hostContext = hostContext,
-            providerHookInstallEnabled = providerHookEnabled
+            providerHookInstallEnabled = providerHookEnabled,
+            processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
+            activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+            runtimePublisher = { publishedInstanceId, result ->
+                processRuntime.rememberApplication(
+                    publishedInstanceId,
+                    EngineHostedBootstrapResult.fromLoader(result)
+                )
+            }
         ).run(instanceId, resolvedProcessSlot)
     }
 
@@ -64,14 +86,10 @@ class DefaultHostedRuntimeEngine @Inject constructor(
         providerHookEnabled: Boolean,
         processSlot: String?
     ): HostedRuntimeBindOutcome {
-        var ranBootstrapOnThisThread = false
-        val result = runtime.bindApplication(instanceId) {
-            ranBootstrapOnThisThread = true
-            runBootstrap(instanceId, providerHookEnabled, processSlot)
+        return processRuntime.bindApplication(instanceId) {
+            EngineHostedBootstrapResult.fromLoader(
+                runBootstrapLoader(instanceId, providerHookEnabled, processSlot)
+            )
         }
-        return HostedRuntimeBindOutcome(
-            result = result,
-            ranBootstrapOnThisThread = ranBootstrapOnThisThread
-        )
     }
 }

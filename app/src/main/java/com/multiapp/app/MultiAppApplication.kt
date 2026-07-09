@@ -3,9 +3,7 @@ package com.multiapp.app
 import android.app.Application
 import com.multiapp.app.container.ContainerAmsApiEvidenceRecorder
 import com.multiapp.app.container.ContainerBroadcastEvidenceRecorder
-import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorders
-import com.multiapp.core.loader.VirtualBroadcastRecorders
-import com.multiapp.core.loader.VirtualInstrumentationInstaller
+import com.multiapp.core.engine.EngineRuntimeInstallers
 import dagger.hilt.android.HiltAndroidApp
 import timber.log.Timber
 
@@ -19,11 +17,11 @@ class MultiAppApplication : Application() {
             Timber.plant(Timber.DebugTree())
         }
 
-        VirtualInstrumentationInstaller.install()
+        EngineRuntimeInstallers.installInstrumentation()
             .onFailure { Timber.e(it, "VirtualInstrumentation install failed") }
 
-        VirtualBroadcastRecorders.install(ContainerBroadcastEvidenceRecorder(this))
-        VirtualAmsApiEvidenceRecorders.install(ContainerAmsApiEvidenceRecorder(this))
+        EngineRuntimeInstallers.installBroadcastRecorder(ContainerBroadcastEvidenceRecorder(this))
+        EngineRuntimeInstallers.installAmsApiEvidenceRecorder(ContainerAmsApiEvidenceRecorder(this))
 
         Timber.d("MultiApp initialized")
     }

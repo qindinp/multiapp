@@ -16,7 +16,6 @@ import com.multiapp.core.engine.EngineActivityLauncher
 import com.multiapp.core.engine.EngineRuntimeSlotStore
 import com.multiapp.core.engine.FileBackedEngineRuntimeSlotStore
 import com.multiapp.core.engine.HostedRuntimeEngine
-import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.engine.VirtualizationEngine
@@ -42,10 +41,6 @@ import javax.inject.Singleton
 @Module
 @InstallIn(SingletonComponent::class)
 object AppModule {
-
-    @Provides
-    @Singleton
-    fun provideHookEngine(): HookEngine = HookEngine.getInstance()
 
     @Provides
     @Singleton

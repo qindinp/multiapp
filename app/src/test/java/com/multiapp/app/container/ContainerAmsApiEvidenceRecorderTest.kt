@@ -2,8 +2,8 @@ package com.multiapp.app.container
 
 import android.content.Context
 import android.util.Log
-import com.multiapp.core.loader.VirtualAmsApiEvidenceComponent
-import com.multiapp.core.loader.VirtualAmsApiEvidenceRecord
+import com.multiapp.core.engine.EngineAmsApiEvidenceComponent
+import com.multiapp.core.engine.EngineAmsApiEvidenceRecord
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkStatic
@@ -25,8 +25,8 @@ class ContainerAmsApiEvidenceRecorderTest {
         val recorder = ContainerAmsApiEvidenceRecorder(context)
 
         recorder.record(
-            VirtualAmsApiEvidenceRecord(
-                component = VirtualAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD,
+            EngineAmsApiEvidenceRecord(
+                component = EngineAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD,
                 instanceId = "inst-001",
                 originPackageName = "com.test.minimal",
                 virtualPackageName = "com.multiapp.instance.inst001",
@@ -69,8 +69,8 @@ class ContainerAmsApiEvidenceRecorderTest {
         val recorder = ContainerAmsApiEvidenceRecorder(context)
 
         recorder.record(
-            VirtualAmsApiEvidenceRecord(
-                component = VirtualAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD,
+            EngineAmsApiEvidenceRecord(
+                component = EngineAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD,
                 instanceId = "inst-001",
                 originPackageName = "com.test.minimal",
                 virtualPackageName = "com.multiapp.instance.inst001",
@@ -121,8 +121,8 @@ class ContainerAmsApiEvidenceRecorderTest {
 
             assertDoesNotThrow {
                 recorder.record(
-                    VirtualAmsApiEvidenceRecord(
-                        component = VirtualAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD,
+                    EngineAmsApiEvidenceRecord(
+                        component = EngineAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD,
                         instanceId = "../inst",
                         originPackageName = "com.test.minimal",
                         virtualPackageName = "com.multiapp.instance.inst001",

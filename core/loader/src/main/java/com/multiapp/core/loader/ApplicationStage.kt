@@ -10,6 +10,8 @@ class ApplicationStage(
     private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String?,
     private val guestApplicationCreator: GuestApplicationCreator = LoadedApkGuestApplicationCreator(),
     private val providerPreinstaller: GuestProviderPreinstaller = GuestProviderPreinstaller(),
+    private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+    private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
@@ -106,6 +108,8 @@ class ApplicationStage(
                     hostContext = context,
                     virtualContextConfig = virtualContextConfig,
                     guestClassLoader = guestClassLoader,
+                    processRuntime = processRuntime,
+                    activityRecordManager = activityRecordManager,
                     progress = { status, detail, extra -> progress(status, detail, extra) }
                 )
             )
@@ -403,6 +407,8 @@ data class GuestApplicationCreateRequest(
     val hostContext: Context,
     val virtualContextConfig: VirtualContextConfig,
     val guestClassLoader: ClassLoader,
+    val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+    val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     val progress: (status: String, detail: String, extra: Map<String, String>) -> Unit = { _, _, _ -> }
 )
 
@@ -424,7 +430,9 @@ class ReflectiveGuestApplicationCreator : GuestApplicationCreator {
         val guestContext = VirtualContextWrappers.create(
             base = request.hostContext,
             config = request.virtualContextConfig,
-            guestClassLoader = request.guestClassLoader
+            guestClassLoader = request.guestClassLoader,
+            activityRecordManager = request.activityRecordManager,
+            processRuntime = request.processRuntime
         )
         request.progress("CONTEXT_CREATE_FINISHED", "virtual Application context created", mapOf("contextPackageName" to guestContext.packageName))
         request.progress("ATTACH_STARTED", "calling Application.attachBaseContext", mapOf("contextPackageName" to guestContext.packageName))

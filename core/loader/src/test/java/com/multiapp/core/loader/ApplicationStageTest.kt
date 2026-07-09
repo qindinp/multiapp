@@ -1,10 +1,12 @@
 package com.multiapp.core.loader
 
 import android.app.Application
-import android.content.pm.ApplicationInfo
+import android.content.ComponentName
 import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.res.Resources
 import android.database.Cursor
 import android.net.Uri
@@ -14,8 +16,11 @@ import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.VirtualContextConfig
+import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -161,6 +166,60 @@ class ApplicationStageTest {
         assertSame(ClassLoader.getSystemClassLoader(), result.guestClassLoader)
         assertSame(output.context.guestApplication, result.guestApplication)
         assertSame(result, TestApplicationWithOnCreate.runtimeSeenDuringOnCreate)
+    }
+
+    @Test
+    fun `execute wires activity record manager into guest application context launches`(@TempDir filesDir: File) {
+        TestApplicationWithOnCreate.reset()
+        VirtualActivityRecordManager.global.clearAll()
+        VirtualActivityIntentStore.setIntentCopierForTest { it }
+        try {
+            val recordManager = VirtualActivityRecordManager()
+            val snapshot = packageSnapshot(
+                activities = listOf(ResolvedComponent(name = "com.example.app.DetailActivity", exported = false))
+            )
+            val hostContext: Context = mockk(relaxed = true) {
+                every { packageName } returns "com.multiapp.app"
+                every { this@mockk.filesDir } returns filesDir
+            }
+            val stage = ApplicationStage(
+                hostContext = hostContext,
+                applicationClassNameResolver = { _, _ -> TestApplicationWithOnCreate::class.java.name },
+                guestApplicationCreator = ReflectiveGuestApplicationCreator(),
+                activityRecordManager = recordManager,
+                clock = fixedClock(610L, 633L)
+            )
+
+            val output = stage.execute(stageInput(packageSnapshot = snapshot))
+            val guestContext = assertIs<VirtualContextWrapper>(TestApplicationWithOnCreate.lastAttachedContext)
+            val component = mockk<ComponentName>(relaxed = true) {
+                every { packageName } returns "com.example.app"
+                every { className } returns "com.example.app.DetailActivity"
+            }
+            val intent = mockk<Intent>(relaxed = true) {
+                every { this@mockk.component } returns component
+                every { `package` } returns null
+                every { selector } returns null
+                every { flags } returns 0
+                every { action } returns null
+                every { categories } returns emptySet()
+                every { dataString } returns null
+                every { extras } returns null
+            }
+
+            assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+            runCatching { guestContext.startActivity(intent) }
+            val record = assertNotNull(recordManager.list().singleOrNull())
+            assertEquals("inst-001", record.instanceId)
+            assertEquals("com.example.app.DetailActivity", record.guestActivityClassName)
+            assertSame(record, recordManager.resolveByProxy(record.proxyActivityClassName))
+            assertTrue(VirtualActivityRecordManager.global.list().isEmpty())
+        } finally {
+            VirtualActivityIntentStore.clearAll()
+            VirtualActivityIntentStore.resetIntentCopierForTest()
+            VirtualActivityRecordManager.global.clearAll()
+            TestApplicationWithOnCreate.reset()
+        }
     }
 
     @Test
@@ -346,7 +405,8 @@ class ApplicationStageTest {
     )
 
     private fun packageSnapshot(
-        providers: List<ResolvedComponent> = emptyList()
+        providers: List<ResolvedComponent> = emptyList(),
+        activities: List<ResolvedComponent> = emptyList()
     ) = VirtualPackageSnapshot(
         instanceId = "inst-001",
         originPackageName = "com.example.app",
@@ -358,6 +418,7 @@ class ApplicationStageTest {
         minSdk = 28,
         sourceDir = "/artifact/com.example.app.apk",
         dataDir = "/data/instances/inst-001",
+        activities = activities,
         providers = providers
     )
 

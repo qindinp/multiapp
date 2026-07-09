@@ -31,7 +31,9 @@ import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 open class VirtualInstrumentation(
-    protected val base: Instrumentation
+    protected val base: Instrumentation,
+    private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+    private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global
 ) : Instrumentation() {
 
     private val hostedRuntimeCache = ConcurrentHashMap<String, HostedActivityRuntime>()
@@ -601,7 +603,8 @@ open class VirtualInstrumentation(
             val manager = VirtualActivityManager(
                 context = who,
                 proxyActivityRegistry = registry,
-                hostPackageName = runtime.hostApplication.packageName
+                hostPackageName = runtime.hostApplication.packageName,
+                activityRecordManager = activityRecordManager
             )
             val record = manager.allocateGuestActivity(request)
             manager.createProxyIntent(record, request.sourceIntent).apply {
@@ -698,7 +701,8 @@ open class VirtualInstrumentation(
             val manager = VirtualActivityManager(
                 context = who,
                 proxyActivityRegistry = registry,
-                hostPackageName = runtime.hostApplication.packageName
+                hostPackageName = runtime.hostApplication.packageName,
+                activityRecordManager = activityRecordManager
             )
             val proxyIntents = requests.filterNotNull().map { request ->
                 val record = manager.allocateGuestActivity(request)
@@ -793,7 +797,11 @@ open class VirtualInstrumentation(
                 hostPackageName = hostPackageName,
                 config = config,
                 guestApplication = runtime.result.guestApplication,
-                guestClassLoader = runtime.result.guestClassLoader!!,
+                guestClassLoader = requireNotNull(runtime.result.guestClassLoader) {
+                    "Hosted bootstrap returned null guestClassLoader"
+                },
+                processRuntime = processRuntime,
+                activityRecordManager = activityRecordManager,
                 injectionPhase = injectionPhase,
                 allowHostAppCompatFallback = allowHostAppCompatFallback
             )
@@ -852,11 +860,6 @@ open class VirtualInstrumentation(
                 "Hosted bootstrap returned null guestClassLoader"
             }
             val guestIntent = buildGuestActivityIntent(intent, instanceId, guestActivityClassName)
-            val activity = base.newActivity(
-                guestClassLoader,
-                guestActivityClassName,
-                guestIntent
-            )
             val recovery = restoreActivityRecordFromProxyIntentIfMissing(
                 proxyClassName = proxyClassName,
                 proxyIntent = intent,
@@ -864,6 +867,14 @@ open class VirtualInstrumentation(
                 instanceId = instanceId,
                 guestActivityClassName = guestActivityClassName,
                 fallbackOriginPackageName = result.originPackageName ?: result.packageSnapshot?.originPackageName
+            )
+            require(!recovery.isRejected) {
+                "Proxy Activity record ownership rejected: ${recovery.skippedReason}"
+            }
+            val activity = base.newActivity(
+                guestClassLoader,
+                guestActivityClassName,
+                guestIntent
             )
             writeSubstitutionEvidence(
                 filesDir = runtime.hostApplication.filesDir,
@@ -947,7 +958,7 @@ open class VirtualInstrumentation(
         hostedRuntimeCache[instanceId]?.let { return it }
 
         val hostApplication = ActivityThreadCompat.currentApplication()
-        val reusableResult = VirtualProcessRuntime.global.reusableResult(instanceId)
+        val reusableResult = processRuntime.reusableResult(instanceId)
         if (shouldBlockForegroundRuntimeBootstrap(isMainThread(), reusableResult != null)) {
             writeForegroundBootstrapBlockedEvidence(
                 filesDir = hostApplication.filesDir,
@@ -978,9 +989,12 @@ open class VirtualInstrumentation(
             instanceManager = instanceManager,
             installRecordStore = installRecordStore,
             hostContext = hostApplication,
-            providerHookInstallEnabled = true
+            providerHookInstallEnabled = true,
+            processRuntime = processRuntime,
+            activityRecordManager = activityRecordManager,
+            runtimePublisher = processRuntime::rememberApplication
         )
-        val result = VirtualProcessRuntime.global.bindApplication(instanceId) {
+        val result = processRuntime.bindApplication(instanceId) {
             bootstrap.run(instanceId)
         }
         writeProtectedDiagnosticsEvidence(hostApplication.filesDir, result)
@@ -1061,7 +1075,7 @@ open class VirtualInstrumentation(
             )
             return context
         }
-        val runtime = VirtualProcessRuntime.global.get(snapshot.instanceId)?.result
+        val runtime = processRuntime.get(snapshot.instanceId)?.result
         val config = VirtualContextConfig(
             instanceId = snapshot.instanceId,
             originPackageName = snapshot.originPackageName,
@@ -1087,7 +1101,9 @@ open class VirtualInstrumentation(
         return VirtualContextWrappers.create(
             base = hostContext,
             config = config,
-            guestClassLoader = config.classLoader
+            guestClassLoader = config.classLoader,
+            processRuntime = processRuntime,
+            activityRecordManager = activityRecordManager
         )
     }
 
@@ -1319,7 +1335,7 @@ open class VirtualInstrumentation(
         instanceId: String,
         guestActivityClassName: String,
         fallbackOriginPackageName: String? = null,
-        activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global
+        activityRecordManager: VirtualActivityRecordManager = this.activityRecordManager
     ): ActivityRecordRecoveryResult {
         val token = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
             ?: guestIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
@@ -1328,19 +1344,24 @@ open class VirtualInstrumentation(
         }
 
         activityRecordManager.resolve(token)?.let { existing ->
+            if (!existing.matchesRecordOwner(
+                    instanceId = instanceId,
+                    guestActivityClassName = guestActivityClassName,
+                    proxyActivityClassName = proxyClassName,
+                    originPackageName = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME) ?: fallbackOriginPackageName
+                )
+            ) {
+                return ActivityRecordRecoveryResult(
+                    record = existing,
+                    activityRecordFound = false,
+                    skippedReason = "TOKEN_OWNER_MISMATCH",
+                    isRejected = true
+                )
+            }
             return ActivityRecordRecoveryResult(
                 record = existing,
                 activityRecordFound = true,
                 skippedReason = "ALREADY_REGISTERED"
-            )
-        }
-
-        val currentProxyOwner = activityRecordManager.resolveByProxy(proxyClassName)
-        if (currentProxyOwner != null && currentProxyOwner.token != token) {
-            return ActivityRecordRecoveryResult(
-                record = currentProxyOwner,
-                activityRecordFound = true,
-                skippedReason = "PROXY_SLOT_ALREADY_OWNED"
             )
         }
 
@@ -1365,6 +1386,14 @@ open class VirtualInstrumentation(
                 taskAffinity = proxyIntent.getStringExtra(EXTRA_GUEST_TASK_AFFINITY)?.takeIf { it.isNotBlank() },
                 state = VirtualActivityState.RESUMED
             )
+            activityRecordManager.conflictingProxyOwner(record)?.let { owner ->
+                return ActivityRecordRecoveryResult(
+                    record = owner,
+                    activityRecordFound = false,
+                    skippedReason = "PROXY_SLOT_ALREADY_OWNED",
+                    isRejected = true
+                )
+            }
             val launched = activityRecordManager.registerLaunch(
                 record = record,
                 intentFlags = sourceIntent.safeFlags(),
@@ -1381,11 +1410,23 @@ open class VirtualInstrumentation(
         }
     }
 
+    private fun VirtualActivityRecord.matchesRecordOwner(
+        instanceId: String,
+        originPackageName: String?,
+        guestActivityClassName: String,
+        proxyActivityClassName: String
+    ): Boolean =
+        this.instanceId == instanceId &&
+            this.originPackageName == originPackageName &&
+            this.guestActivityClassName == guestActivityClassName &&
+            this.proxyActivityClassName == proxyActivityClassName
+
     internal data class ActivityRecordRecoveryResult(
         val record: VirtualActivityRecord? = null,
         val activityRecordFound: Boolean = false,
         val activityRecordRecovered: Boolean = false,
-        val skippedReason: String = ""
+        val skippedReason: String = "",
+        val isRejected: Boolean = false
     )
 
     private fun findExecStartActivityWithUserMethod(targetType: Class<*>): java.lang.reflect.Method {
@@ -1655,7 +1696,7 @@ open class VirtualInstrumentation(
 
     private fun writeLifecycleEvidence(activity: Activity, event: String) {
         val activityIdentity = activity.hostedActivityIdentity() ?: return
-        val record = VirtualActivityRecordManager.global.resolve(activityIdentity.token)
+        val record = activityRecordManager.resolve(activityIdentity.token)
         val reason = when {
             activityIdentity.token.isBlank() -> "TOKEN_MISSING"
             record == null -> "ACTIVITY_RECORD_MISSING"
@@ -1683,7 +1724,7 @@ open class VirtualInstrumentation(
 
     private fun writeNewIntentEvidence(activity: Activity, intent: Intent) {
         val activityIdentity = activity.hostedActivityIdentity() ?: return
-        val pending = VirtualActivityRecordManager.global.consumePendingNewIntent(activityIdentity.token)
+        val pending = activityRecordManager.consumePendingNewIntent(activityIdentity.token)
         val reason = when {
             activityIdentity.token.isBlank() -> "TOKEN_MISSING"
             pending == null -> "NO_PENDING_NEW_INTENT_RECORD"
@@ -1762,7 +1803,7 @@ open class VirtualInstrumentation(
     private fun markActivityFinishedIfNeeded(activity: Activity) {
         if (!activity.isFinishing) return
         val token = activity.hostedActivityIdentity()?.token ?: return
-        VirtualActivityRecordManager.global.finish(token)
+        activityRecordManager.finish(token)
     }
 
     private fun Activity.hostedActivityIdentity(): HostedActivityIdentity? {

@@ -7,11 +7,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.multiapp.core.loader.VirtualActivityIntentStore
-import com.multiapp.core.loader.VirtualActivityRecordManager
-import com.multiapp.core.loader.VirtualActivityManager
-import com.multiapp.core.model.virtual.VirtualActivityRecord
-import com.multiapp.core.model.virtual.VirtualActivityState
+import com.multiapp.core.engine.EngineProxyActivityObserveRequest
+import com.multiapp.core.engine.EngineProxyActivityRecords
 
 abstract class ProxyActivityBase : Activity() {
 
@@ -46,20 +43,16 @@ abstract class ProxyActivityBase : Activity() {
         val token = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN).orEmpty()
         val guestActivity = proxyIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME).orEmpty()
         val originPackage = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME).orEmpty()
-        val manager = VirtualActivityRecordManager.global
-        val existingRecord = manager.resolve(token)
-        val recoveredRecord = existingRecord ?: recoverActivityRecord(
-            manager = manager,
-            proxyIntent = proxyIntent,
-            instanceId = instanceId,
-            token = token,
-            guestActivity = guestActivity,
-            originPackage = originPackage
+        val observation = EngineProxyActivityRecords().observeProxyIntent(
+            EngineProxyActivityObserveRequest(
+                proxyActivityClassName = javaClass.name,
+                proxyIntent = proxyIntent,
+                instanceId = instanceId,
+                token = token,
+                guestActivityClassName = guestActivity,
+                originPackageName = originPackage
+            )
         )
-        val recordRecovered = existingRecord == null && recoveredRecord != null
-        val observedRecord = recoveredRecord ?: existingRecord
-        val pendingNewIntent = observedRecord?.pendingNewIntents?.firstOrNull()
-        val result = observedRecord?.result
         val recoveryAttempt = proxyIntent.getIntExtra(EXTRA_PROXY_RECOVERY_ATTEMPT, 0)
 
         if (instanceId.isNullOrBlank()) {
@@ -83,7 +76,7 @@ abstract class ProxyActivityBase : Activity() {
             TAG,
             "Proxy resumed: proxy=${javaClass.name}, lifecycle=$lifecycleEvent, instanceId=$instanceId, " +
                 "token=$token, origin=$originPackage, guest=$guestActivity, " +
-                "recordFound=${existingRecord != null}, recordRecovered=$recordRecovered, " +
+                "recordFound=${observation.recordFound}, recordRecovered=${observation.recordRecovered}, " +
                 "recoveryAttempt=$recoveryAttempt, fallbackAction=$fallbackAction"
         )
         val taskDescriptionLabel = ProxyTaskDescriptions.label(
@@ -98,10 +91,10 @@ abstract class ProxyActivityBase : Activity() {
                 token = token,
                 originPackageName = originPackage,
                 guestActivityClassName = guestActivity,
-                recordFound = existingRecord != null,
-                recordRecovered = recordRecovered,
-                pendingNewIntent = pendingNewIntent,
-                result = result,
+                recordFound = observation.recordFound,
+                recordRecovered = observation.recordRecovered,
+                pendingNewIntent = observation.pendingNewIntent,
+                result = observation.result,
                 pendingNewIntentConsumed = false,
                 resultConsumed = false,
                 lifecycleEvent = lifecycleEvent,
@@ -217,48 +210,6 @@ abstract class ProxyActivityBase : Activity() {
         )
         finish()
     }
-
-    private fun recoverActivityRecord(
-        manager: VirtualActivityRecordManager,
-        proxyIntent: Intent,
-        instanceId: String?,
-        token: String,
-        guestActivity: String,
-        originPackage: String
-    ): VirtualActivityRecord? {
-        if (instanceId.isNullOrBlank() || token.isBlank() || guestActivity.isBlank() || originPackage.isBlank()) {
-            return null
-        }
-        return runCatching {
-            val launchMode = proxyIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_LAUNCH_MODE)
-            val taskAffinity = proxyIntent.getStringExtra(EXTRA_GUEST_TASK_AFFINITY)
-            val record = VirtualActivityRecord(
-                token = token,
-                instanceId = instanceId,
-                originPackageName = originPackage,
-                guestActivityClassName = guestActivity,
-                proxyActivityClassName = javaClass.name,
-                launchMode = launchMode,
-                taskAffinity = taskAffinity,
-                state = VirtualActivityState.RESUMED
-            )
-            manager.registerLaunch(
-                record = record,
-                intentFlags = originalGuestIntent(proxyIntent)?.flags ?: 0
-            ).activity
-        }.onFailure { error ->
-            Log.w(TAG, "Unable to recover proxy Activity record from intent extras: token=$token", error)
-        }.getOrNull()
-    }
-
-    @Suppress("DEPRECATION")
-    private fun originalGuestIntent(proxyIntent: Intent): Intent? =
-        VirtualActivityIntentStore.find(proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN))
-            ?: runCatching {
-                proxyIntent.getParcelableExtra<Intent>(VirtualActivityManager.EXTRA_ORIGINAL_GUEST_INTENT)
-            }.onFailure { error ->
-                Log.w(TAG, "Unable to read legacy original guest Activity intent extra", error)
-            }.getOrNull()
 
     private fun applyTaskDescription(label: String) {
         runCatching {

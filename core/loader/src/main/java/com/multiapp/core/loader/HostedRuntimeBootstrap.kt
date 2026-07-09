@@ -107,6 +107,9 @@ class HostedRuntimeBootstrap(
     private val providerHookInstaller: VirtualProviderHookInstaller = VirtualProviderHookInstaller(),
     private val packageManagerProxyInstaller: VirtualPackageManagerGlobalInstallAction = VirtualPackageManagerGlobalInstaller(),
     private val runtimeUidProvider: () -> Int = { runCatching { android.os.Process.myUid() }.getOrDefault(0) },
+    private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+    private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
+    private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
 
@@ -379,7 +382,9 @@ class HostedRuntimeBootstrap(
             hostContext = hostContext,
             applicationClassNameResolver = applicationClassNameResolver,
             guestApplicationCreator = guestApplicationCreator,
-            runtimePublisher = VirtualProcessRuntime.global::rememberApplication,
+            processRuntime = processRuntime,
+            activityRecordManager = activityRecordManager,
+            runtimePublisher = runtimePublisher,
             clock = clock
         ).execute(preparedContext)
         stageResults.add(applicationOutput.result)

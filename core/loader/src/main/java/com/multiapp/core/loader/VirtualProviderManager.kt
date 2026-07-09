@@ -3,6 +3,7 @@ package com.multiapp.core.loader
 import android.content.pm.ProviderInfo
 import android.net.Uri
 import com.multiapp.core.identity.ProviderRouteTokenRegistry
+import com.multiapp.core.model.engine.ProviderRouteContract
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
@@ -84,10 +85,10 @@ class VirtualProviderManager(
     }
 
     companion object {
-        const val PROXY_INSTANCE_ID = "multiapp_instanceId"
-        const val PROXY_GUEST_AUTHORITY = "multiapp_guestAuthority"
-        const val PROXY_PROCESS_SLOT = "multiapp_processSlot"
-        const val PROXY_ROUTE_TOKEN = ProviderRouteTokenRegistry.PROXY_ROUTE_TOKEN
+        const val PROXY_INSTANCE_ID = ProviderRouteContract.PROXY_INSTANCE_ID
+        const val PROXY_GUEST_AUTHORITY = ProviderRouteContract.PROXY_GUEST_AUTHORITY
+        const val PROXY_PROCESS_SLOT = ProviderRouteContract.PROXY_PROCESS_SLOT
+        const val PROXY_ROUTE_TOKEN = ProviderRouteContract.PROXY_ROUTE_TOKEN
     }
 
     private fun providerInfo(

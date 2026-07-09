@@ -13,32 +13,43 @@ object VirtualInstrumentationInstaller {
     @Volatile
     private var originalInstrumentation: Instrumentation? = null
 
-    fun install(): Result<Unit> {
+    fun install(
+        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+        activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global
+    ): Result<Unit> {
         return runCatching {
             val current = ActivityThreadCompat.getInstrumentation()
             if (current is VirtualInstrumentation) {
-                ActivityThreadLaunchCallbackInstaller.install().getOrThrow()
+                ActivityThreadLaunchCallbackInstaller.install(processRuntime).getOrThrow()
                 Log.i(TAG, "VirtualInstrumentation already installed")
                 return@runCatching
             }
             originalInstrumentation = current
-            ActivityThreadCompat.setInstrumentation(createVirtualInstrumentation(current))
-            ActivityThreadLaunchCallbackInstaller.install().getOrThrow()
+            ActivityThreadCompat.setInstrumentation(createVirtualInstrumentation(current, processRuntime, activityRecordManager))
+            ActivityThreadLaunchCallbackInstaller.install(processRuntime).getOrThrow()
             Log.i(TAG, "VirtualInstrumentation installed: base=${current.javaClass.name}")
         }
     }
 
-    private fun createVirtualInstrumentation(base: Instrumentation): VirtualInstrumentation {
+    private fun createVirtualInstrumentation(
+        base: Instrumentation,
+        processRuntime: VirtualProcessRuntime,
+        activityRecordManager: VirtualActivityRecordManager
+    ): VirtualInstrumentation {
         return if (Build.VERSION.SDK_INT >= API_LEVEL_COMPONENT_CALLER) {
-            createApi35VirtualInstrumentation(base)
+            createApi35VirtualInstrumentation(base, processRuntime, activityRecordManager)
         } else {
-            VirtualInstrumentation(base)
+            VirtualInstrumentation(base, processRuntime, activityRecordManager)
         }
     }
 
     @TargetApi(API_LEVEL_COMPONENT_CALLER)
-    private fun createApi35VirtualInstrumentation(base: Instrumentation): VirtualInstrumentation {
-        return VirtualInstrumentationApi35(base)
+    private fun createApi35VirtualInstrumentation(
+        base: Instrumentation,
+        processRuntime: VirtualProcessRuntime,
+        activityRecordManager: VirtualActivityRecordManager
+    ): VirtualInstrumentation {
+        return VirtualInstrumentationApi35(base, processRuntime, activityRecordManager)
     }
 
     fun restore(): Result<Unit> {

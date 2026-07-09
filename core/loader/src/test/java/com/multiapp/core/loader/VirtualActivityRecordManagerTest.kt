@@ -321,6 +321,81 @@ class VirtualActivityRecordManagerTest {
     }
 
     @Test
+    fun `conflictingProxyOwner reports mismatched active slot owner only`() {
+        val manager = VirtualActivityRecordManager()
+        val owner = manager.register(
+            record(
+                token = "token-owner",
+                proxyActivityClassName = "ProxyActivity0",
+                launchMode = "singleTop",
+                taskAffinity = "com.test.minimal:inst-001"
+            )
+        )
+
+        assertSame(
+            owner,
+            manager.conflictingProxyOwner(
+                record(
+                    token = "token-other-instance",
+                    instanceId = "inst-evil",
+                    proxyActivityClassName = "ProxyActivity0",
+                    launchMode = "singleTop",
+                    taskAffinity = "com.test.minimal:inst-001"
+                )
+            )
+        )
+        assertNull(
+            manager.conflictingProxyOwner(
+                record(
+                    token = "token-other-activity",
+                    activity = "DetailActivity",
+                    proxyActivityClassName = "ProxyActivity0",
+                    launchMode = "singleTop",
+                    taskAffinity = "com.test.minimal:inst-001"
+                )
+            )
+        )
+        assertNull(manager.conflictingProxyOwner(owner))
+
+        manager.finish("token-owner")
+
+        assertNull(
+            manager.conflictingProxyOwner(
+                record(
+                    token = "token-other-instance",
+                    instanceId = "inst-evil",
+                    proxyActivityClassName = "ProxyActivity0",
+                    launchMode = "singleTop",
+                    taskAffinity = "com.test.minimal:inst-001"
+                )
+            )
+        )
+    }
+
+    @Test
+    fun `finish latest same owner proxy record keeps older active slot owner mapped`() {
+        val manager = VirtualActivityRecordManager()
+        val older = manager.registerLaunch(
+            record(token = "token-old", activity = "MainActivity", proxyActivityClassName = "ProxyActivity0")
+        ).activity
+        val latest = manager.registerLaunch(
+            record(token = "token-latest", activity = "DetailActivity", proxyActivityClassName = "ProxyActivity0")
+        ).activity
+
+        assertEquals(latest.token, manager.resolveByProxy("ProxyActivity0")?.token)
+
+        manager.finish(latest.token)
+
+        assertEquals(older.token, manager.resolveByProxy("ProxyActivity0")?.token)
+        assertEquals(
+            older.token,
+            manager.conflictingProxyOwner(
+                record(token = "token-evil", instanceId = "inst-evil", proxyActivityClassName = "ProxyActivity0")
+            )?.token
+        )
+    }
+
+    @Test
     fun `clearAll clears records launch evidence and stack`() {
         val manager = VirtualActivityRecordManager()
         manager.registerLaunch(record(token = "token-1", proxyActivityClassName = "ProxyActivity0"))
@@ -338,6 +413,7 @@ class VirtualActivityRecordManagerTest {
         instanceId: String = "inst-001",
         activity: String = "MainActivity",
         launchMode: String? = null,
+        taskAffinity: String? = null,
         proxyActivityClassName: String
     ) = VirtualActivityRecord(
         token = token,
@@ -347,6 +423,7 @@ class VirtualActivityRecordManagerTest {
         guestActivityClassName = "com.test.minimal.$activity",
         proxyActivityClassName = proxyActivityClassName,
         launchMode = launchMode,
+        taskAffinity = taskAffinity,
         createdAtMs = 1000L
     )
 }

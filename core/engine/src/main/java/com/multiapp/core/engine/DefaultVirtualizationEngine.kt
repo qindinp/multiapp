@@ -7,6 +7,7 @@ import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResult
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
+import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
@@ -28,17 +29,25 @@ class DefaultVirtualizationEngine @Inject constructor(
     instanceManager: InstanceManager,
     virtualInstallService: VirtualInstallService,
     activityLauncher: EngineActivityLauncher,
-    slotStore: EngineRuntimeSlotStore
+    slotStore: EngineRuntimeSlotStore,
+    hookRuntime: DefaultEngineHookRuntime
 ) : VirtualizationEngine by DefaultVirtualizationEngineCore(
     hostPackageName = context.packageName,
     instanceManager = instanceManager,
     virtualInstallService = virtualInstallService,
     activityLauncher = activityLauncher,
     slotStore = slotStore,
-    runtimeRegistry = EngineRuntimeRegistry.global,
+    runtimeRegistry = EngineRuntimeRegistry.global.attachStateStore(
+        FileBackedEngineRuntimeStateStore(File(context.filesDir, ENGINE_RUNTIME_STATE_FILE))
+    ),
     profilePolicy = CompatibilityProfilePolicy(),
+    hookRuntime = hookRuntime,
     evidenceSessionFactory = { UUID.randomUUID().toString() }
-)
+) {
+    companion object {
+        internal const val ENGINE_RUNTIME_STATE_FILE = "engine_runtime_state.properties"
+    }
+}
 
 internal class DefaultVirtualizationEngineCore(
     private val hostPackageName: String,
@@ -48,7 +57,10 @@ internal class DefaultVirtualizationEngineCore(
     private val slotStore: EngineRuntimeSlotStore = InMemoryEngineRuntimeSlotStore(),
     private val runtimeRegistry: EngineRuntimeRegistry = EngineRuntimeRegistry(),
     private val profilePolicy: CompatibilityProfilePolicy = CompatibilityProfilePolicy(),
-    private val evidenceSessionFactory: () -> String = { UUID.randomUUID().toString() }
+    private val hookRuntime: EngineHookRuntime = EngineHookRuntime.NO_OP,
+    private val evidenceSessionFactory: () -> String = { UUID.randomUUID().toString() },
+    private val runtimeEpochFactory: () -> Long = { System.currentTimeMillis().coerceAtLeast(1L) },
+    private val systemServer: VirtualSystemServer = DefaultVirtualSystemServer(runtimeRegistry)
 ) : VirtualizationEngine {
 
     override fun installOrRefreshPackage(originPackageName: String): EngineResult {
@@ -145,7 +157,11 @@ internal class DefaultVirtualizationEngineCore(
                 message = error.message ?: "runtime slot assignment failed"
             )
         }
-        runtimeRegistry.register(runtime)
+        systemServer.runtimeService.register(runtime)
+        systemServer.runtimeService.registerOperationEvidence(
+            instance.instanceId,
+            hookRuntime.profileEvidence(decision)
+        )
         activityLauncher.launch(
             EngineLaunchSpec(
                 instanceId = instance.instanceId,
@@ -163,12 +179,12 @@ internal class DefaultVirtualizationEngineCore(
             originPackageName = instance.originPackageName,
             message = "launch dispatched through engine",
             runtime = runtime,
-            evidence = runtimeRegistry.evidence(instance.instanceId)
+            evidence = systemServer.runtimeService.evidence(instance.instanceId)
         )
     }
 
     override fun stopInstance(instanceId: String): EngineResult {
-        val stopped = runtimeRegistry.stop(instanceId)
+        val stopped = systemServer.runtimeService.stop(instanceId)
         return if (stopped) {
             EngineResult.pass(operation = OP_STOP, instanceId = instanceId, message = "runtime stopped")
         } else {
@@ -177,10 +193,10 @@ internal class DefaultVirtualizationEngineCore(
     }
 
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? =
-        runtimeRegistry.get(instanceId)
+        systemServer.runtimeService.get(instanceId)
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport =
-        runtimeRegistry.evidence(instanceId)
+        systemServer.runtimeService.evidence(instanceId)
 
     private fun buildRuntime(
         instance: VirtualInstanceRecord,
@@ -196,6 +212,7 @@ internal class DefaultVirtualizationEngineCore(
             processCandidates = processSlotCandidatesForProxySlots(proxyCandidates),
             proxyCandidates = proxyCandidates
         )
+        val evidenceSessionId = evidenceSessionFactory()
         return VirtualInstanceRuntime(
             instanceId = instance.instanceId,
             hostPackageName = hostPackageName,
@@ -206,7 +223,11 @@ internal class DefaultVirtualizationEngineCore(
             profile = profile,
             processSlot = slots.processSlot,
             proxySlot = slots.proxySlot,
-            evidenceSessionId = evidenceSessionFactory()
+            evidenceSessionId = evidenceSessionId,
+            runtimeEpoch = runtimeEpochFactory(),
+            engineSessionId = "engine-$evidenceSessionId",
+            processName = slots.processSlot,
+            state = VirtualRuntimeState.CREATED
         )
     }
 

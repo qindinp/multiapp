@@ -1,9 +1,11 @@
 package com.multiapp.app.container
 
 import android.content.Context
+import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.HostedRuntimeBindOutcome
+import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
-import com.multiapp.core.loader.VirtualProcessRuntime
 import com.multiapp.core.loader.toSummary
 import io.mockk.every
 import io.mockk.mockk
@@ -28,16 +30,10 @@ class HostedActivityRuntimeBinderTest {
 
     @Test
     fun `ensureBound returns cached runtime without bootstrapping`() {
-        val runtime = VirtualProcessRuntime()
         val reusable = hostedResult("inst-001")
-        runtime.bindApplication("inst-001") { reusable }
-        var bootstrapCalls = 0
+        val runtime = FakeHostedRuntimeEngine(reusableResults = mutableMapOf("inst-001" to reusable))
         val binder = HostedActivityRuntimeBinder(
-            runtime = runtime,
-            bootstrapRunner = { _, _ ->
-                bootstrapCalls += 1
-                hostedResult("inst-001")
-            }
+            runtimeEngineFactory = { runtime }
         )
 
         val result = binder.ensureBound(hostContext(), "inst-001")
@@ -47,21 +43,15 @@ class HostedActivityRuntimeBinderTest {
         assertEquals("CACHED", bound.status)
         assertEquals("runtimeAlreadyReusable", bound.detail)
         assertSame(reusable, bound.result)
-        assertEquals(0, bootstrapCalls)
+        assertEquals(0, runtime.bindCalls)
     }
 
     @Test
     fun `ensureBound bootstraps runtime through process binder`() {
-        val runtime = VirtualProcessRuntime()
         val bootstrapped = hostedResult("inst-001")
-        var bootstrapCalls = 0
+        val runtime = FakeHostedRuntimeEngine(bindResult = bootstrapped)
         val binder = HostedActivityRuntimeBinder(
-            runtime = runtime,
-            bootstrapRunner = { _, instanceId ->
-                bootstrapCalls += 1
-                assertEquals("inst-001", instanceId)
-                bootstrapped
-            }
+            runtimeEngineFactory = { runtime }
         )
 
         val result = binder.ensureBound(hostContext(), "inst-001")
@@ -71,15 +61,14 @@ class HostedActivityRuntimeBinderTest {
         assertEquals("BOUND", bound.status)
         assertEquals("runtimeBoundForActivityProxy", bound.detail)
         assertSame(bootstrapped, bound.result)
-        assertSame(bootstrapped, runtime.get("inst-001")?.result)
-        assertEquals(1, bootstrapCalls)
+        assertEquals(listOf("inst-001" to null), runtime.bindRequests)
     }
 
     @Test
     fun `ensureBound reports bootstrap failure`() {
+        val runtime = FakeHostedRuntimeEngine(bindError = IllegalStateException("boom"))
         val binder = HostedActivityRuntimeBinder(
-            runtime = VirtualProcessRuntime(),
-            bootstrapRunner = { _, _ -> error("boom") }
+            runtimeEngineFactory = { runtime }
         )
 
         val result = binder.ensureBound(hostContext(), "inst-001")
@@ -99,21 +88,57 @@ class HostedActivityRuntimeBinderTest {
         every { applicationContext } returns this
     }
 
-    private fun hostedResult(instanceId: String): HostedBootstrapResult = HostedBootstrapResult(
-        instanceId = instanceId,
-        installId = "com.example.app",
-        originPackageName = "com.example.app",
-        virtualPackageName = "com.multiapp.instance.example",
-        originApkPath = "/tmp/base.apk",
-        dataRoot = "/tmp/$instanceId",
-        guestClassLoader = ClassLoader.getSystemClassLoader(),
-        guestApplication = null,
-        installRecord = null,
-        packageSnapshot = null,
-        launcherActivityClassName = "com.example.app.MainActivity",
-        stageResults = emptyList(),
-        summary = emptyList<BootstrapResult>().toSummary(),
-        success = true,
-        diagnostics = null
-    )
+    private fun hostedResult(instanceId: String): EngineHostedBootstrapResult =
+        EngineHostedBootstrapResult.fromLoader(
+            HostedBootstrapResult(
+                instanceId = instanceId,
+                installId = "com.example.app",
+                originPackageName = "com.example.app",
+                virtualPackageName = "com.multiapp.instance.example",
+                originApkPath = "/tmp/base.apk",
+                dataRoot = "/tmp/$instanceId",
+                guestClassLoader = ClassLoader.getSystemClassLoader(),
+                guestApplication = null,
+                installRecord = null,
+                packageSnapshot = null,
+                launcherActivityClassName = "com.example.app.MainActivity",
+                stageResults = emptyList(),
+                summary = emptyList<BootstrapResult>().toSummary(),
+                success = true,
+                diagnostics = null
+            )
+        )
+
+    private class FakeHostedRuntimeEngine(
+        private val reusableResults: MutableMap<String, EngineHostedBootstrapResult> = mutableMapOf(),
+        private val bindResult: EngineHostedBootstrapResult? = null,
+        private val bindError: Throwable? = null
+    ) : HostedRuntimeEngine {
+        val bindRequests = mutableListOf<Pair<String, String?>>()
+        val bindCalls: Int
+            get() = bindRequests.size
+
+        override fun reusableResult(instanceId: String): EngineHostedBootstrapResult? = reusableResults[instanceId]
+
+        override fun runBootstrap(
+            instanceId: String,
+            providerHookEnabled: Boolean,
+            processSlot: String?
+        ): EngineHostedBootstrapResult = bindResult ?: error("No bind result configured")
+
+        override fun bindApplication(
+            instanceId: String,
+            providerHookEnabled: Boolean,
+            processSlot: String?
+        ): HostedRuntimeBindOutcome {
+            bindRequests += instanceId to processSlot
+            bindError?.let { throw it }
+            val result = bindResult ?: error("No bind result configured")
+            reusableResults[instanceId] = result
+            return HostedRuntimeBindOutcome(
+                result = result,
+                ranBootstrapOnThisThread = true
+            )
+        }
+    }
 }

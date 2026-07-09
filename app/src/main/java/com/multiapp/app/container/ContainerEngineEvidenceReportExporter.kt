@@ -35,6 +35,10 @@ internal object ContainerEngineEvidenceReportExporter {
         report.entries.forEach { (key, value) ->
             put(keySegment(key, "entry"), EvidenceSanitizer.sanitizeEvidenceEntry(key, value))
         }
+        put("subsystemVerdicts.count", report.subsystemVerdicts.size)
+        report.subsystemVerdicts.toSortedMap(compareBy { it.name }).forEach { (subsystem, verdict) ->
+            put("subsystemVerdicts.${keySegment(subsystem.name.lowercase(), "subsystem")}", verdict.name)
+        }
         put("${OPERATION_PREFIX}.count", report.operationEvidence.values.sumOf { operations ->
             operations.values.sumOf { evidence -> evidence.size }
         })

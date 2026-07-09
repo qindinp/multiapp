@@ -1,8 +1,8 @@
 package com.multiapp.app.container
 
 import android.content.Context
+import com.multiapp.core.engine.EngineHostedBootstrapResult
 import com.multiapp.core.engine.HostedRuntimeEngine
-import com.multiapp.core.loader.HostedBootstrapResult
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
 import dagger.hilt.android.EntryPointAccessors
@@ -27,5 +27,5 @@ internal fun runHostedRuntimeBootstrap(
     instanceId: String,
     providerHookEnabled: Boolean = true,
     processSlot: String? = null
-): HostedBootstrapResult =
+): EngineHostedBootstrapResult =
     hostedRuntimeEngineFrom(hostContext).runBootstrap(instanceId, providerHookEnabled, processSlot)

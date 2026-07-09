@@ -1,15 +1,15 @@
 package com.multiapp.app.container
 
 import android.net.Uri
-import com.multiapp.core.loader.VirtualProviderManager
+import com.multiapp.core.model.engine.ProviderRouteContract
 
 internal object ProviderProxyUri {
 
     private val proxyParameterNames = setOf(
-        VirtualProviderManager.PROXY_INSTANCE_ID,
-        VirtualProviderManager.PROXY_GUEST_AUTHORITY,
-        VirtualProviderManager.PROXY_PROCESS_SLOT,
-        VirtualProviderManager.PROXY_ROUTE_TOKEN
+        ProviderRouteContract.PROXY_INSTANCE_ID,
+        ProviderRouteContract.PROXY_GUEST_AUTHORITY,
+        ProviderRouteContract.PROXY_PROCESS_SLOT,
+        ProviderRouteContract.PROXY_ROUTE_TOKEN
     )
 
     fun toGuestUri(uri: Uri, guestAuthority: String): Uri =

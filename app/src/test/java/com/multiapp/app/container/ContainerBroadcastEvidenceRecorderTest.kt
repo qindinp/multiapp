@@ -1,8 +1,8 @@
 package com.multiapp.app.container
 
 import android.content.Context
-import com.multiapp.core.loader.VirtualBroadcastRecord
-import com.multiapp.core.loader.VirtualBroadcastResultCode
+import com.multiapp.core.engine.EngineBroadcastRecord
+import com.multiapp.core.engine.EngineBroadcastResultCode
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -19,11 +19,11 @@ class ContainerBroadcastEvidenceRecorderTest {
         val recorder = ContainerBroadcastEvidenceRecorder(context)
 
         recorder.record(
-            VirtualBroadcastRecord(
+            EngineBroadcastRecord(
                 instanceId = "inst-001",
                 receiverClassName = "com.test.minimal.BootReceiver",
                 action = "com.test.ACTION_BOOT",
-                result = VirtualBroadcastResultCode.Delivered
+                result = EngineBroadcastResultCode.Delivered
             )
         )
 
@@ -43,11 +43,11 @@ class ContainerBroadcastEvidenceRecorderTest {
         val recorder = ContainerBroadcastEvidenceRecorder(context)
 
         recorder.record(
-            VirtualBroadcastRecord(
+            EngineBroadcastRecord(
                 instanceId = null,
                 receiverClassName = null,
                 action = "com.test.ACTION_IMPLICIT",
-                result = VirtualBroadcastResultCode.UnsupportedImplicit
+                result = EngineBroadcastResultCode.UnsupportedImplicit
             )
         )
 

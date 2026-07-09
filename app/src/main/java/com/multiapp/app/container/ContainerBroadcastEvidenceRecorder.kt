@@ -2,16 +2,16 @@ package com.multiapp.app.container
 
 import android.content.Context
 import android.util.Log
-import com.multiapp.core.loader.VirtualBroadcastRecord
-import com.multiapp.core.loader.VirtualBroadcastRecorder
+import com.multiapp.core.engine.EngineBroadcastRecord
+import com.multiapp.core.engine.EngineBroadcastRecorder
 
 /** File-backed recorder for guest BroadcastReceiver dispatch inside hosted containers. */
 class ContainerBroadcastEvidenceRecorder(
     context: Context
-) : VirtualBroadcastRecorder {
+) : EngineBroadcastRecorder {
     private val appContext = context.applicationContext
 
-    override fun record(record: VirtualBroadcastRecord) {
+    override fun record(record: EngineBroadcastRecord) {
         val instanceId = record.instanceId ?: return
         runCatching {
             ContainerRuntimeEvidenceWriter.write(

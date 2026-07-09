@@ -1,10 +1,16 @@
 package com.multiapp.core.loader
 
+import com.multiapp.core.model.virtual.ProxySlotContract
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 class ProxyActivitySlotsTest {
+
+    @Test
+    fun `slot assignment file delegates to proxy slot contract`() {
+        assertEquals(ProxySlotContract.SLOT_ASSIGNMENT_FILE, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
+    }
 
     @Test
     fun `slot catalog exposes eight proxy slots per launch mode`() {

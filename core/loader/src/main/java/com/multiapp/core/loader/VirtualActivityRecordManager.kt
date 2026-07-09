@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityResult
@@ -25,6 +26,9 @@ class VirtualActivityRecordManager {
 
     @Synchronized
     fun register(record: VirtualActivityRecord): VirtualActivityRecord {
+        conflictingProxyOwner(record)?.let { owner ->
+            return owner
+        }
         records[record.token] = record
         recordsByProxy[record.proxyActivityClassName] = record.token
         recordsByActivityId[record.activityId] = record.token
@@ -37,12 +41,28 @@ class VirtualActivityRecordManager {
         intentFlags: Int = record.intentFlags,
         dataIntent: VirtualIntentSnapshot? = null
     ): VirtualActivityStack.LaunchResult {
+        conflictingProxyOwner(record)?.let { owner ->
+            return existingOwnerLaunchResult(owner)
+        }
         val result = activityStack.launch(record, intentFlags, dataIntent)
         result.clearedActivities.forEach { cleared -> markFinished(cleared) }
         register(result.activity)
         lastLaunchResult = result
         return result
     }
+
+    @Synchronized
+    fun conflictingProxyOwner(record: VirtualActivityRecord): VirtualActivityRecord? = records.values
+        .asSequence()
+        .filter { it.proxyActivityClassName == record.proxyActivityClassName }
+        .filter { it.isActive() }
+        .firstOrNull { owner ->
+            if (owner.token == record.token) {
+                !owner.matchesRecordOwner(record)
+            } else {
+                !owner.matchesProxySlotOwner(record)
+            }
+        }
 
     @Synchronized
     fun lastLaunchResult(): VirtualActivityStack.LaunchResult? = lastLaunchResult
@@ -195,11 +215,45 @@ class VirtualActivityRecordManager {
         lastLaunchResult = null
     }
 
+    private fun existingOwnerLaunchResult(owner: VirtualActivityRecord): VirtualActivityStack.LaunchResult {
+        val task = activityStack.listTasks().firstOrNull { task ->
+            task.activities.any { it.token == owner.token }
+        } ?: VirtualTaskRecord(
+            taskId = owner.taskId.takeIf { it > 0 } ?: 1,
+            affinity = owner.taskAffinity ?: "${owner.originPackageName}:${owner.instanceId}",
+            activities = listOf(owner)
+        )
+        return VirtualActivityStack.LaunchResult(
+            activity = owner,
+            task = task,
+            reused = true
+        )
+    }
+
+    private fun VirtualActivityRecord.isActive(): Boolean =
+        state != VirtualActivityState.FINISHED && state != VirtualActivityState.DESTROYED
+
+    private fun VirtualActivityRecord.matchesRecordOwner(other: VirtualActivityRecord): Boolean =
+        instanceId == other.instanceId &&
+            originPackageName == other.originPackageName &&
+            guestActivityClassName == other.guestActivityClassName &&
+            proxyActivityClassName == other.proxyActivityClassName
+
+    private fun VirtualActivityRecord.matchesProxySlotOwner(other: VirtualActivityRecord): Boolean =
+        instanceId == other.instanceId &&
+            ProxyActivityRegistry.normalizeLaunchMode(launchMode) == ProxyActivityRegistry.normalizeLaunchMode(other.launchMode) &&
+            effectiveTaskAffinity() == other.effectiveTaskAffinity()
+
+    private fun VirtualActivityRecord.effectiveTaskAffinity(): String =
+        taskAffinity ?: "${originPackageName}:${instanceId}"
+
     private fun updateRecord(record: VirtualActivityRecord): VirtualActivityRecord {
         records[record.token] = record
         recordsByActivityId[record.activityId] = record.token
-        if (record.state != VirtualActivityState.FINISHED) {
+        if (record.isActive()) {
             recordsByProxy[record.proxyActivityClassName] = record.token
+        } else if (recordsByProxy[record.proxyActivityClassName] == record.token) {
+            remapActiveProxyOwner(record.proxyActivityClassName, record.token)
         }
         return record
     }
@@ -209,7 +263,7 @@ class VirtualActivityRecordManager {
         records[finished.token] = finished
         recordsByActivityId[finished.activityId] = finished.token
         if (recordsByProxy[finished.proxyActivityClassName] == finished.token) {
-            recordsByProxy.remove(finished.proxyActivityClassName)
+            remapActiveProxyOwner(finished.proxyActivityClassName, finished.token)
         }
         return finished
     }
@@ -218,12 +272,26 @@ class VirtualActivityRecordManager {
         val removed = records.remove(token) ?: return null
         VirtualActivityIntentStore.clear(token)
         if (recordsByProxy[removed.proxyActivityClassName] == token) {
-            recordsByProxy.remove(removed.proxyActivityClassName)
+            remapActiveProxyOwner(removed.proxyActivityClassName, token)
         }
         if (recordsByActivityId[removed.activityId] == token) {
             recordsByActivityId.remove(removed.activityId)
         }
         return removed
+    }
+
+    private fun remapActiveProxyOwner(proxyActivityClassName: String, excludedToken: String) {
+        val replacement = records.values
+            .asSequence()
+            .filter { it.token != excludedToken }
+            .filter { it.proxyActivityClassName == proxyActivityClassName }
+            .filter { it.isActive() }
+            .lastOrNull()
+        if (replacement == null) {
+            recordsByProxy.remove(proxyActivityClassName)
+        } else {
+            recordsByProxy[proxyActivityClassName] = replacement.token
+        }
     }
 
     companion object {

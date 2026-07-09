@@ -20,19 +20,25 @@ object ActivityThreadLaunchRecordPatcher {
     private const val TAG = "ActivityLaunchPatcher"
     private const val EVIDENCE_DIR = "hosted_launch_evidence"
 
-    fun patchMessage(message: Message): ActivityThreadLaunchRecordPatchResult =
-        patchMessageObject(message.obj)
+    fun patchMessage(
+        message: Message,
+        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global
+    ): ActivityThreadLaunchRecordPatchResult =
+        patchMessageObject(message.obj, processRuntime)
 
-    internal fun patchMessageObject(messageObject: Any?): ActivityThreadLaunchRecordPatchResult {
+    internal fun patchMessageObject(
+        messageObject: Any?,
+        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global
+    ): ActivityThreadLaunchRecordPatchResult {
         if (messageObject == null) {
             return ActivityThreadLaunchRecordPatchResult(skippedReason = "MESSAGE_OBJECT_MISSING")
         }
 
-        val direct = patchLaunchRecord(messageObject)
+        val direct = patchLaunchRecord(messageObject, processRuntime)
         if (direct.observedProxyLaunch) return direct
 
         val callbackResults = activityCallbacks(messageObject).map { callback ->
-            patchLaunchRecord(callback)
+            patchLaunchRecord(callback, processRuntime)
         }.filter { it.observedProxyLaunch }
 
         if (callbackResults.isEmpty()) {
@@ -56,7 +62,10 @@ object ActivityThreadLaunchRecordPatcher {
         ).also { writeEvidence(it) }
     }
 
-    internal fun patchLaunchRecord(record: Any): ActivityThreadLaunchRecordPatchResult {
+    internal fun patchLaunchRecord(
+        record: Any,
+        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global
+    ): ActivityThreadLaunchRecordPatchResult {
         val proxyIntent = readFirstField(record, listOf("intent", "mIntent")) as? Intent
             ?: return ActivityThreadLaunchRecordPatchResult(
                 targetClassName = record.javaClass.name,
@@ -81,13 +90,14 @@ object ActivityThreadLaunchRecordPatcher {
                 reason = "PACKAGE_SNAPSHOT_SOURCE_DIR_MISSING"
             )
         }
-        val classLoader = VirtualProcessRuntime.global.get(spec.instanceId)?.result?.guestClassLoader
+        val runtimeResult = processRuntime.get(spec.instanceId)?.result
+        val classLoader = runtimeResult?.guestClassLoader
             ?: return skippedPrelaunchPatch(
                 record = record,
                 spec = spec,
                 reason = "GUEST_CLASS_LOADER_MISSING"
             )
-        val state = buildRuntimeState(spec, proxyIntent, snapshot, classLoader)
+        val state = buildRuntimeState(spec, proxyIntent, snapshot, classLoader, runtimeResult)
         if (state.loadedApk == null) {
             return skippedPrelaunchPatch(
                 record = record,
@@ -126,10 +136,11 @@ object ActivityThreadLaunchRecordPatcher {
         spec: LaunchSpec,
         proxyIntent: Intent,
         snapshot: VirtualPackageSnapshot,
-        classLoader: ClassLoader
+        classLoader: ClassLoader,
+        runtimeResult: HostedBootstrapResult?
     ): LaunchRuntimeState {
         val hostApplication = runCatching { ActivityThreadCompat.currentApplication() }.getOrNull()
-        val processSlot = VirtualProcessRuntime.global.get(spec.instanceId)?.result?.processSlot
+        val processSlot = runtimeResult?.processSlot
         val config = VirtualContextConfig(
             instanceId = spec.instanceId,
             originPackageName = spec.originPackageName,

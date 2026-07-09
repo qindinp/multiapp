@@ -1,19 +1,19 @@
 package com.multiapp.app.container
 
 import android.content.Context
-import com.multiapp.core.loader.HostedBootstrapResult
-import com.multiapp.core.loader.VirtualProcessRuntime
+import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.HostedRuntimeEngine
 
 class HostedActivityRuntimeBinder(
-    private val runtime: VirtualProcessRuntime = VirtualProcessRuntime.global,
-    private val bootstrapRunner: (Context, String) -> HostedBootstrapResult = ::runHostedRuntimeBootstrap
+    private val runtimeEngineFactory: (Context) -> HostedRuntimeEngine = ::hostedRuntimeEngineFrom
 ) {
     fun ensureBound(hostContext: Context, instanceId: String?): HostedActivityRuntimeBindResult {
         val requestedInstanceId = instanceId
             ?.takeIf { it.isNotBlank() }
             ?: return HostedActivityRuntimeBindResult.NotRequested("missingActivityProxyInstanceId")
 
-        runtime.reusableResult(requestedInstanceId)?.let { result ->
+        val runtimeEngine = runtimeEngineFactory(hostContext)
+        runtimeEngine.reusableResult(requestedInstanceId)?.let { result ->
             return HostedActivityRuntimeBindResult.Bound(
                 instanceId = requestedInstanceId,
                 result = result,
@@ -23,10 +23,7 @@ class HostedActivityRuntimeBinder(
         }
 
         return runCatching {
-            val applicationContext = hostContext.applicationContext ?: hostContext
-            val result = runtime.bindApplication(requestedInstanceId) {
-                bootstrapRunner(applicationContext, requestedInstanceId)
-            }
+            val result = runtimeEngine.bindApplication(instanceId = requestedInstanceId).result
             HostedActivityRuntimeBindResult.Bound(
                 instanceId = requestedInstanceId,
                 result = result,
@@ -50,7 +47,7 @@ sealed class HostedActivityRuntimeBindResult {
 
     data class Bound(
         val instanceId: String,
-        val result: HostedBootstrapResult,
+        val result: EngineHostedBootstrapResult,
         override val status: String,
         override val detail: String
     ) : HostedActivityRuntimeBindResult()

@@ -43,6 +43,7 @@ open class VirtualContextWrapper(
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val servicePackageRegistry: VirtualPackageRegistry = VirtualPackageRegistry.global,
     private val serviceRuntime: VirtualServiceRuntime = VirtualServiceRuntime.global,
+    private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
     private val broadcastManager: VirtualBroadcastManager = VirtualBroadcastManager(),
     private val dynamicReceiverRegistry: VirtualDynamicReceiverRegistry = VirtualDynamicReceiverRegistry.global,
     private val serviceProxyIntentFactory: (VirtualServiceManager, VirtualServiceStartRequest) -> Intent = { manager, request ->
@@ -167,6 +168,7 @@ open class VirtualContextWrapper(
             proxyActivityRegistry = proxyActivityRegistry,
             servicePackageRegistry = servicePackageRegistry,
             serviceRuntime = serviceRuntime,
+            processRuntime = processRuntime,
             broadcastManager = broadcastManager,
             serviceProxyIntentFactory = serviceProxyIntentFactory
         )

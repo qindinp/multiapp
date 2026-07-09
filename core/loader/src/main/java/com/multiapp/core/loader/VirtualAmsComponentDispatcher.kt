@@ -200,6 +200,7 @@ class DefaultVirtualAmsComponentDispatcher(
         return VirtualServiceDispatcher(
             hostContext = hostContext,
             packageRegistry = servicePackageRegistry,
+            activityRecordManager = activityRecordManager,
             serviceRuntime = serviceRuntime
         ).dispatchStop(request)
     }

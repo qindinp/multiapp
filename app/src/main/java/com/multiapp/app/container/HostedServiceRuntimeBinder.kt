@@ -2,21 +2,17 @@ package com.multiapp.app.container
 
 import android.content.Context
 import android.content.Intent
-import com.multiapp.core.loader.HostedBootstrapResult
-import com.multiapp.core.loader.VirtualProcessRuntime
-import com.multiapp.core.loader.VirtualServiceManager
-import com.multiapp.core.loader.VirtualServiceStartRequest
+import com.multiapp.core.engine.DefaultEngineServiceRouter
+import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.EngineServiceRouter
+import com.multiapp.core.engine.EngineServiceStartRoute
+import com.multiapp.core.engine.HostedRuntimeEngine
 
 class HostedServiceRuntimeBinder(
-    private val runtime: VirtualProcessRuntime = VirtualProcessRuntime.global,
-    private val serviceManagerFactory: (String) -> VirtualServiceManager = { hostPackageName ->
-        VirtualServiceManager(hostPackageName)
-    },
-    private val requestDecoder: (String, Intent) -> VirtualServiceStartRequest? = { hostPackageName, intent ->
-        serviceManagerFactory(hostPackageName).requestFromProxyIntent(intent)
-    },
-    private val bootstrapRunner: (Context, String, String?) -> HostedBootstrapResult = { context, instanceId, processSlot ->
-        runHostedRuntimeBootstrap(context, instanceId, processSlot = processSlot)
+    private val runtimeEngineFactory: (Context) -> HostedRuntimeEngine = ::hostedRuntimeEngineFrom,
+    private val serviceRouter: EngineServiceRouter = DefaultEngineServiceRouter(),
+    private val requestDecoder: (String, Intent) -> EngineServiceStartRoute? = { hostPackageName, intent ->
+        serviceRouter.routeFromProxyIntent(hostPackageName, intent)
     }
 ) {
     fun ensureBound(hostContext: Context, proxyIntent: Intent?): HostedServiceRuntimeBindResult {
@@ -27,20 +23,21 @@ class HostedServiceRuntimeBinder(
         return ensureBound(hostContext, request)
     }
 
-    fun ensureBound(hostContext: Context, request: VirtualServiceStartRequest): HostedServiceRuntimeBindResult {
-        runtime.reusableResult(request.instanceId)?.let { result ->
-            if (!request.processSlot.isNullOrBlank() && result.processSlot != request.processSlot) {
+    fun ensureBound(hostContext: Context, route: EngineServiceStartRoute): HostedServiceRuntimeBindResult {
+        val runtimeEngine = runtimeEngineFactory(hostContext)
+        runtimeEngine.reusableResult(route.instanceId)?.let { result ->
+            if (!route.processSlot.isNullOrBlank() && result.processSlot != route.processSlot) {
                 return HostedServiceRuntimeBindResult.Failed(
-                    instanceId = request.instanceId,
-                    processSlot = request.processSlot,
+                    instanceId = route.instanceId,
+                    processSlot = route.processSlot,
                     errorClassName = IllegalStateException::class.java.name,
-                    errorMessage = "cached runtime processSlot mismatch: expected=${request.processSlot} actual=${result.processSlot}",
+                    errorMessage = "cached runtime processSlot mismatch: expected=${route.processSlot} actual=${result.processSlot}",
                     detail = "runtimeProcessSlotMismatch"
                 )
             }
             return HostedServiceRuntimeBindResult.Bound(
-                instanceId = request.instanceId,
-                processSlot = request.processSlot,
+                instanceId = route.instanceId,
+                processSlot = route.processSlot,
                 result = result,
                 status = "CACHED",
                 detail = "runtimeAlreadyReusable"
@@ -48,21 +45,21 @@ class HostedServiceRuntimeBinder(
         }
 
         return runCatching {
-            val applicationContext = hostContext.applicationContext ?: hostContext
-            val result = runtime.bindApplication(request.instanceId) {
-                bootstrapRunner(applicationContext, request.instanceId, request.processSlot)
-            }
+            val result = runtimeEngine.bindApplication(
+                instanceId = route.instanceId,
+                processSlot = route.processSlot
+            ).result
             HostedServiceRuntimeBindResult.Bound(
-                instanceId = request.instanceId,
-                processSlot = request.processSlot,
+                instanceId = route.instanceId,
+                processSlot = route.processSlot,
                 result = result,
                 status = "BOUND",
                 detail = "runtimeBoundForServiceProxy"
             )
         }.getOrElse { error ->
             HostedServiceRuntimeBindResult.Failed(
-                instanceId = request.instanceId,
-                processSlot = request.processSlot,
+                instanceId = route.instanceId,
+                processSlot = route.processSlot,
                 errorClassName = error.javaClass.name,
                 errorMessage = error.message,
                 detail = "runtimeBindFailed"
@@ -78,7 +75,7 @@ sealed class HostedServiceRuntimeBindResult {
     data class Bound(
         val instanceId: String,
         val processSlot: String?,
-        val result: HostedBootstrapResult,
+        val result: EngineHostedBootstrapResult,
         override val status: String,
         override val detail: String
     ) : HostedServiceRuntimeBindResult()

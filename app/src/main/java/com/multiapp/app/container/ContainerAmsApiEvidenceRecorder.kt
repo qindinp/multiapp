@@ -2,16 +2,16 @@ package com.multiapp.app.container
 
 import android.content.Context
 import android.util.Log
-import com.multiapp.core.loader.VirtualAmsApiEvidenceRecord
-import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorder
+import com.multiapp.core.engine.EngineAmsApiEvidenceRecord
+import com.multiapp.core.engine.EngineAmsApiEvidenceRecorder
 
 /** File-backed recorder for PR-8 AMS API interception evidence inside hosted containers. */
 class ContainerAmsApiEvidenceRecorder(
     context: Context
-) : VirtualAmsApiEvidenceRecorder {
+) : EngineAmsApiEvidenceRecorder {
     private val appContext = context.applicationContext
 
-    override fun record(record: VirtualAmsApiEvidenceRecord) {
+    override fun record(record: EngineAmsApiEvidenceRecord) {
         runCatching {
             ContainerRuntimeEvidenceWriter.write(
                 context = appContext,
@@ -24,7 +24,7 @@ class ContainerAmsApiEvidenceRecorder(
         }
     }
 
-    private fun sharedFields(record: VirtualAmsApiEvidenceRecord): Map<String, Any?> = linkedMapOf(
+    private fun sharedFields(record: EngineAmsApiEvidenceRecord): Map<String, Any?> = linkedMapOf(
         "status" to record.status,
         "stage" to "AMS_API_OVERLOAD",
         "instanceId" to record.instanceId,

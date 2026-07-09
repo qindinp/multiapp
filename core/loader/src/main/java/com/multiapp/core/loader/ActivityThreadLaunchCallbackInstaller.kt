@@ -14,7 +14,9 @@ object ActivityThreadLaunchCallbackInstaller {
     @Volatile
     private var originalCallback: Handler.Callback? = null
 
-    fun install(): Result<ActivityThreadLaunchCallbackInstallResult> = runCatching {
+    fun install(
+        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global
+    ): Result<ActivityThreadLaunchCallbackInstallResult> = runCatching {
         val handler = ActivityThreadCompat.mainHandler()
         val current = ActivityThreadCompat.getHandlerCallback(handler)
         if (current is LaunchCallback) {
@@ -25,7 +27,7 @@ object ActivityThreadLaunchCallbackInstaller {
             )
         }
 
-        val callback = LaunchCallback(current)
+        val callback = LaunchCallback(current, processRuntime)
         originalCallback = current
         installedCallback = callback
         ActivityThreadCompat.setHandlerCallback(handler, callback)
@@ -53,13 +55,14 @@ object ActivityThreadLaunchCallbackInstaller {
             .getOrDefault(false)
 
     private class LaunchCallback(
-        private val delegate: Handler.Callback?
+        private val delegate: Handler.Callback?,
+        private val processRuntime: VirtualProcessRuntime
     ) : Handler.Callback {
         val delegateClassName: String?
             get() = delegate?.javaClass?.name
 
         override fun handleMessage(msg: Message): Boolean {
-            runCatching { ActivityThreadLaunchRecordPatcher.patchMessage(msg) }
+            runCatching { ActivityThreadLaunchRecordPatcher.patchMessage(msg, processRuntime) }
                 .onFailure { error -> Log.w(TAG, "Unable to patch ActivityThread launch record", error) }
             return delegate?.handleMessage(msg) ?: false
         }

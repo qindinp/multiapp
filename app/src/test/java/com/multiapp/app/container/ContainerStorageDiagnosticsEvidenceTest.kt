@@ -1,8 +1,8 @@
 package com.multiapp.app.container
 
-import com.multiapp.core.loader.VirtualStorageDiagnosticKind
-import com.multiapp.core.loader.VirtualStorageDiagnosticStatus
-import com.multiapp.core.loader.VirtualStoragePathDiagnostic
+import com.multiapp.core.engine.EngineStorageDiagnosticKind
+import com.multiapp.core.engine.EngineStorageDiagnosticStatus
+import com.multiapp.core.engine.EngineStoragePathDiagnostic
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -17,9 +17,9 @@ class ContainerStorageDiagnosticsEvidenceTest {
             parentFile?.mkdirs()
             writeText("instanceId=inst-001")
         }
-        val diagnostic = VirtualStoragePathDiagnostic(
-            kind = VirtualStorageDiagnosticKind.JAVA_ABSOLUTE_PATH,
-            status = VirtualStorageDiagnosticStatus.REDIRECTED,
+        val diagnostic = EngineStoragePathDiagnostic(
+            kind = EngineStorageDiagnosticKind.JAVA_ABSOLUTE_PATH,
+            status = EngineStorageDiagnosticStatus.REDIRECTED,
             instanceId = "inst-001",
             originPackageName = "com.example.app",
             virtualPackageName = "com.multiapp.instance.001",
@@ -52,9 +52,9 @@ class ContainerStorageDiagnosticsEvidenceTest {
 
     @Test
     fun `native unsupported fields make the unsupported hook gap explicit`() {
-        val diagnostic = VirtualStoragePathDiagnostic(
-            kind = VirtualStorageDiagnosticKind.NATIVE_IO,
-            status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+        val diagnostic = EngineStoragePathDiagnostic(
+            kind = EngineStorageDiagnosticKind.NATIVE_IO,
+            status = EngineStorageDiagnosticStatus.UNSUPPORTED,
             instanceId = "inst-001",
             originPackageName = "com.example.app",
             virtualPackageName = "com.multiapp.instance.001",
@@ -96,9 +96,9 @@ class ContainerStorageDiagnosticsEvidenceTest {
 
     @Test
     fun `native redirected fields make verified path redirect explicit`() {
-        val diagnostic = VirtualStoragePathDiagnostic(
-            kind = VirtualStorageDiagnosticKind.NATIVE_IO,
-            status = VirtualStorageDiagnosticStatus.REDIRECTED,
+        val diagnostic = EngineStoragePathDiagnostic(
+            kind = EngineStorageDiagnosticKind.NATIVE_IO,
+            status = EngineStorageDiagnosticStatus.REDIRECTED,
             instanceId = "inst-001",
             originPackageName = "com.example.app",
             virtualPackageName = "com.multiapp.instance.001",
@@ -137,9 +137,9 @@ class ContainerStorageDiagnosticsEvidenceTest {
 
     @Test
     fun `native unchanged fields fail closed when probe misses redirected path`() {
-        val diagnostic = VirtualStoragePathDiagnostic(
-            kind = VirtualStorageDiagnosticKind.NATIVE_IO,
-            status = VirtualStorageDiagnosticStatus.UNCHANGED,
+        val diagnostic = EngineStoragePathDiagnostic(
+            kind = EngineStorageDiagnosticKind.NATIVE_IO,
+            status = EngineStorageDiagnosticStatus.UNCHANGED,
             instanceId = "inst-001",
             originPackageName = "com.example.app",
             virtualPackageName = "com.multiapp.instance.001",

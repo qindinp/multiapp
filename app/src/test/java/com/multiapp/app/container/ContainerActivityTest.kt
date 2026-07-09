@@ -2,6 +2,8 @@ package com.multiapp.app.container
 
 import com.multiapp.core.loader.BootstrapEvidence
 import com.multiapp.core.loader.BootstrapResult
+import com.multiapp.core.engine.EngineBootstrapStageResult
+import com.multiapp.core.engine.EngineHostedBootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.loader.toSummary
@@ -204,7 +206,9 @@ class ContainerActivityTest {
             durationMs = 17L
         )
 
-        val fields = ContainerActivity.packageManagerProxyEvidenceFields(result)
+        val fields = ContainerActivity.packageManagerProxyEvidenceFields(
+            EngineBootstrapStageResult.fromLoader(result)
+        )
 
         assertEquals("PACKAGE_MANAGER_PROXY", fields["stage"])
         assertEquals("SUCCESS", fields["status"])
@@ -378,21 +382,23 @@ class ContainerActivityTest {
         stageResults: List<BootstrapResult> = emptyList(),
         packageSnapshot: VirtualPackageSnapshot? = null,
         launcherActivityClassName: String? = null
-    ) = HostedBootstrapResult(
-        instanceId = "inst-001",
-        installId = "com.example.app",
-        originPackageName = "com.example.app",
-        virtualPackageName = "com.multiapp.instance.abc123",
-        originApkPath = "/tmp/base.apk",
-        dataRoot = "/tmp/inst-001",
-        guestClassLoader = guestClassLoader,
-        guestApplication = null,
-        installRecord = null,
-        packageSnapshot = packageSnapshot,
-        launcherActivityClassName = launcherActivityClassName,
-        stageResults = stageResults,
-        summary = stageResults.toSummary(),
-        success = success,
-        diagnostics = null
+    ) = EngineHostedBootstrapResult.fromLoader(
+        HostedBootstrapResult(
+            instanceId = "inst-001",
+            installId = "com.example.app",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.abc123",
+            originApkPath = "/tmp/base.apk",
+            dataRoot = "/tmp/inst-001",
+            guestClassLoader = guestClassLoader,
+            guestApplication = null,
+            installRecord = null,
+            packageSnapshot = packageSnapshot,
+            launcherActivityClassName = launcherActivityClassName,
+            stageResults = stageResults,
+            summary = stageResults.toSummary(),
+            success = success,
+            diagnostics = null
+        )
     )
 }

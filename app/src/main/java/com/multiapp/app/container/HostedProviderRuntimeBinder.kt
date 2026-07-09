@@ -2,27 +2,25 @@ package com.multiapp.app.container
 
 import android.content.Context
 import android.net.Uri
-import com.multiapp.core.loader.HostedBootstrapResult
-import com.multiapp.core.loader.VirtualProcessRuntime
-import com.multiapp.core.loader.VirtualProviderManager
+import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.HostedRuntimeEngine
+import com.multiapp.core.model.engine.ProviderRouteContract
 
 class HostedProviderRuntimeBinder(
-    private val runtime: VirtualProcessRuntime = VirtualProcessRuntime.global,
-    private val bootstrapRunner: (Context, String, String?) -> HostedBootstrapResult = { context, instanceId, processSlot ->
-        runHostedRuntimeBootstrap(context, instanceId, processSlot = processSlot)
-    }
+    private val runtimeEngineFactory: (Context) -> HostedRuntimeEngine = ::hostedRuntimeEngineFrom
 ) {
     fun ensureBound(hostContext: Context, proxyUri: Uri): HostedProviderRuntimeBindResult {
-        val instanceId = proxyUri.getQueryParameter(VirtualProviderManager.PROXY_INSTANCE_ID)
+        val instanceId = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_INSTANCE_ID)
             ?.takeIf { it.isNotBlank() }
             ?: return HostedProviderRuntimeBindResult.NotRequested("missingProviderProxyInstanceId")
-        val guestAuthority = proxyUri.getQueryParameter(VirtualProviderManager.PROXY_GUEST_AUTHORITY)
+        val guestAuthority = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_GUEST_AUTHORITY)
             ?.takeIf { it.isNotBlank() }
             ?: return HostedProviderRuntimeBindResult.NotRequested("missingProviderProxyGuestAuthority")
-        val processSlot = proxyUri.getQueryParameter(VirtualProviderManager.PROXY_PROCESS_SLOT)
+        val processSlot = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_PROCESS_SLOT)
             ?.takeIf { it.isNotBlank() }
 
-        runtime.reusableResult(instanceId)?.let { result ->
+        val runtimeEngine = runtimeEngineFactory(hostContext)
+        runtimeEngine.reusableResult(instanceId)?.let { result ->
             if (!processSlot.isNullOrBlank() && result.processSlot != processSlot) {
                 return HostedProviderRuntimeBindResult.Failed(
                     instanceId = instanceId,
@@ -44,10 +42,10 @@ class HostedProviderRuntimeBinder(
         }
 
         return runCatching {
-            val applicationContext = hostContext.applicationContext ?: hostContext
-            val result = runtime.bindApplication(instanceId) {
-                bootstrapRunner(applicationContext, instanceId, processSlot)
-            }
+            val result = runtimeEngine.bindApplication(
+                instanceId = instanceId,
+                processSlot = processSlot
+            ).result
             HostedProviderRuntimeBindResult.Bound(
                 instanceId = instanceId,
                 guestAuthority = guestAuthority,
@@ -77,7 +75,7 @@ sealed class HostedProviderRuntimeBindResult {
         val instanceId: String,
         val guestAuthority: String,
         val processSlot: String?,
-        val result: HostedBootstrapResult,
+        val result: EngineHostedBootstrapResult,
         override val status: String,
         override val detail: String
     ) : HostedProviderRuntimeBindResult()
