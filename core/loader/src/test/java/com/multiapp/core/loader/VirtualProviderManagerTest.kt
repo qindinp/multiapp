@@ -37,10 +37,12 @@ class VirtualProviderManagerTest {
         assertEquals("com.test.minimal.ProbeProvider", resolution.providerClassName)
         assertEquals("com.test.minimal.ProbeProvider", resolution.providerInfo.name)
         assertEquals("com.test.minimal.probe", resolution.providerInfo.authority)
-        assertEquals("com.test.minimal.permission.PROBE", resolution.providerInfo.readPermission)
-        assertEquals("com.test.minimal.permission.PROBE", resolution.providerInfo.writePermission)
+        assertEquals("com.test.minimal.permission.READ_PROBE", resolution.providerInfo.readPermission)
+        assertEquals("com.test.minimal.permission.WRITE_PROBE", resolution.providerInfo.writePermission)
         assertEquals(true, resolution.providerInfo.grantUriPermissions)
         assertEquals("INTERNAL_ONLY", resolution.policy.status)
+        assertEquals("com.test.minimal.permission.READ_PROBE", resolution.policy.readPermission)
+        assertEquals("com.test.minimal.permission.WRITE_PROBE", resolution.policy.writePermission)
         assertEquals("INSTANCE", resolution.policy.routingScope)
         assertEquals(false, resolution.policy.processWideProviderHook)
         assertEquals("VirtualContentResolver", resolution.policy.authorityRewriteEntry)
@@ -126,6 +128,8 @@ class VirtualProviderManagerTest {
         assertEquals("com.test.minimal.ProbeProvider", resolved.providerClassName)
         assertEquals("INTERNAL_ONLY", resolved.policy?.status)
         assertEquals("com.test.minimal.permission.PROBE", resolved.policy?.permission)
+        assertEquals("com.test.minimal.permission.READ_PROBE", resolved.policy?.readPermission)
+        assertEquals("com.test.minimal.permission.WRITE_PROBE", resolved.policy?.writePermission)
         assertEquals(true, resolved.policy?.grantUriPermissions)
         assertEquals(true, resolved.success)
         assertNull(resolved.reason)
@@ -175,6 +179,8 @@ class VirtualProviderManagerTest {
                 exported = false,
                 authorities = listOf("com.test.minimal.probe"),
                 permission = "com.test.minimal.permission.PROBE",
+                readPermission = "com.test.minimal.permission.READ_PROBE",
+                writePermission = "com.test.minimal.permission.WRITE_PROBE",
                 grantUriPermissions = true
             )
         )

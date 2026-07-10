@@ -97,7 +97,6 @@ internal fun PackageInfo.toVirtualApp(
     return VirtualApp(
         packageName = packageName,
         appName = appInfo.safeLabel(packageManager, packageName),
-        icon = appInfo.safeIcon(packageManager, packageName),
         versionName = versionName ?: "",
         versionCode = safeVersionCode(),
         apkPath = appInfo.sourceDir,
@@ -122,10 +121,6 @@ private fun ApplicationInfo.safeLabel(packageManager: PackageManager, packageNam
         ?: nonLocalizedLabel?.toString()?.takeIf { it.isNotBlank() }
         ?: packageName.substringAfterLast(".")
 }
-
-private fun ApplicationInfo.safeIcon(packageManager: PackageManager, packageName: String) =
-    runCatching { packageManager.getApplicationIcon(packageName) }
-        .getOrElse { runCatching { loadIcon(packageManager) }.getOrNull() }
 
 private fun PackageInfo.safeVersionCode(): Long {
     return runCatching { longVersionCode }

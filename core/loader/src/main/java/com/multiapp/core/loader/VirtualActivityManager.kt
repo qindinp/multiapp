@@ -37,6 +37,8 @@ class VirtualActivityManager(
         const val EXTRA_HOST_PACKAGE_NAME = "multiapp.hostPackageName"
         const val EXTRA_GUEST_ACTIVITY_LAUNCH_MODE = "multiapp.guestActivityLaunchMode"
         const val EXTRA_GUEST_TASK_AFFINITY = "multiapp.guestTaskAffinity"
+        const val EXTRA_RESULT_TO_TOKEN = "multiapp.resultToToken"
+        const val EXTRA_RESULT_REQUEST_CODE = "multiapp.resultRequestCode"
     }
 
     fun launchGuestLauncher(
@@ -87,7 +89,10 @@ class VirtualActivityManager(
             taskAffinity = taskAffinity
         )
         return activityRecordManager.registerLaunch(
-            record,
+            record.copy(
+                resultToToken = request.resultToToken,
+                resultRequestCode = request.resultRequestCode
+            ),
             request.sourceIntent.safeFlags(),
             request.sourceIntent.toVirtualIntentSnapshot()
         ).activity
@@ -111,6 +116,10 @@ class VirtualActivityManager(
             }
             if (!spec.taskAffinity.isNullOrBlank()) {
                 putExtra(EXTRA_GUEST_TASK_AFFINITY, spec.taskAffinity)
+            }
+            if (!record.resultToToken.isNullOrBlank() && record.resultRequestCode >= 0) {
+                putExtra(EXTRA_RESULT_TO_TOKEN, record.resultToToken)
+                putExtra(EXTRA_RESULT_REQUEST_CODE, record.resultRequestCode)
             }
             if (sourceIntent != null) {
                 VirtualActivityIntentStore.remember(spec.token, sourceIntent)

@@ -155,6 +155,54 @@ object ProviderRouteTokenRegistry {
         }
     }
 
+    /**
+     * Validates the target-bound portion of a route and returns the caller identity
+     * stored in the unguessable token. The caller must never be inferred from URI
+     * parameters because cross-instance routes have different caller and target IDs.
+     */
+    fun validateTarget(
+        token: String?,
+        targetInstanceId: String,
+        authority: String,
+        operation: String,
+        expectedProcessSlot: String? = null,
+        nowMillis: Long = System.currentTimeMillis()
+    ): ProviderRouteTokenValidationResult {
+        if (token.isNullOrBlank()) {
+            return ProviderRouteTokenValidationResult(ProviderRouteTokenValidationStatus.MISSING_TOKEN)
+        }
+        val normalizedOperation = normalizeOperation(operation)
+        synchronized(lock) {
+            val route = routes[token]
+                ?: return ProviderRouteTokenValidationResult(ProviderRouteTokenValidationStatus.TOKEN_NOT_FOUND)
+            if (nowMillis >= route.expiresAtMillis) {
+                routes.remove(token)
+                return ProviderRouteTokenValidationResult(ProviderRouteTokenValidationStatus.EXPIRED)
+            }
+            pruneExpiredLocked(nowMillis)
+            return when {
+                route.targetInstanceId != targetInstanceId -> ProviderRouteTokenValidationResult(
+                    ProviderRouteTokenValidationStatus.TARGET_INSTANCE_MISMATCH,
+                    route
+                )
+                route.authority != authority -> ProviderRouteTokenValidationResult(
+                    ProviderRouteTokenValidationStatus.AUTHORITY_MISMATCH,
+                    route
+                )
+                route.operation != normalizedOperation -> ProviderRouteTokenValidationResult(
+                    ProviderRouteTokenValidationStatus.OPERATION_MISMATCH,
+                    route
+                )
+                !expectedProcessSlot.isNullOrBlank() && route.processSlot != expectedProcessSlot ->
+                    ProviderRouteTokenValidationResult(
+                        ProviderRouteTokenValidationStatus.PROCESS_SLOT_MISMATCH,
+                        route
+                    )
+                else -> ProviderRouteTokenValidationResult(ProviderRouteTokenValidationStatus.VALID, route)
+            }
+        }
+    }
+
     fun rememberProcessSlot(instanceId: String, processSlot: String?) {
         if (instanceId.isBlank() || processSlot.isNullOrBlank()) return
         synchronized(lock) {
@@ -270,6 +318,11 @@ class ContentProviderHook : HookPoint {
             PROXY_GUEST_AUTHORITY,
             PROXY_PROCESS_SLOT,
             PROXY_ROUTE_TOKEN
+        )
+
+        private val stableContentServiceOperations = setOf(
+            "notifyChange",
+            "registerContentObserver"
         )
 
         fun apply(config: IdentityConfig) {
@@ -1049,7 +1102,11 @@ class ContentProviderHook : HookPoint {
         ): Uri {
             val authority = uri.authority ?: return uri
             val newAuthority = authorityMap[authority] ?: return uri
-            val routeToken = issueRouteToken(instanceId, authority, operation).token
+            val routeToken = if (!routeTokenRequiredForOperation(operation)) {
+                null
+            } else {
+                issueRouteToken(instanceId, authority, operation).token
+            }
 
             return uri.buildUpon()
                 .encodedAuthority(newAuthority)
@@ -1063,6 +1120,9 @@ class ContentProviderHook : HookPoint {
                 )
                 .build()
         }
+
+        internal fun routeTokenRequiredForOperation(operation: String): Boolean =
+            operation.substringBefore(':') !in stableContentServiceOperations
 
         internal fun rewriteEncodedQueryForProviderHook(
             encodedQuery: String?,

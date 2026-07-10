@@ -36,7 +36,7 @@ class ManifestVirtualPackageResolverTest {
     }
 
     @Test
-    fun `resolver preserves service and receiver intent filters`(@TempDir tempDir: File) {
+    fun `resolver preserves component filters and Provider permissions`(@TempDir tempDir: File) {
         val apk = File(tempDir, "guest.apk").apply { writeText("stub") }
         val context = mockk<Context>(relaxed = true)
         every { context.applicationContext } returns context
@@ -65,7 +65,16 @@ class ManifestVirtualPackageResolverTest {
                     )
                 )
             ),
-            providers = emptyList(),
+            providers = listOf(
+                ManifestParser.ProviderInfo(
+                    name = ".DataProvider",
+                    authorities = "com.example.data",
+                    exported = true,
+                    permission = "com.example.ACCESS_DATA",
+                    readPermission = "com.example.READ_DATA",
+                    writePermission = "com.example.WRITE_DATA"
+                )
+            ),
             permissions = emptyList()
         )
         val resolver = ManifestVirtualPackageResolver(context = context, parser = parser)
@@ -80,5 +89,10 @@ class ManifestVirtualPackageResolverTest {
         val receiverFilter = resolved.receivers.single().resolvedIntentFilters.single()
         assertEquals("com.example.app.BootReceiver", resolved.receivers.single().name)
         assertEquals(listOf("com.example.BOOT"), receiverFilter.actions)
+        val provider = resolved.providers.single()
+        assertEquals("com.example.app.DataProvider", provider.name)
+        assertEquals("com.example.ACCESS_DATA", provider.permission)
+        assertEquals("com.example.READ_DATA", provider.readPermission)
+        assertEquals("com.example.WRITE_DATA", provider.writePermission)
     }
 }

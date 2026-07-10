@@ -62,6 +62,8 @@ object VirtualProviderOperationCapability {
         "delete",
         "call",
         "bulkInsert",
+        "applyBatch",
+        "refresh",
         "openFile",
         "openAssetFile",
         "openTypedAssetFile"

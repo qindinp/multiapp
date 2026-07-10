@@ -33,6 +33,24 @@ class EvidenceSanitizerTest {
     }
 
     @Test
+    fun `sanitize evidence value redacts activity token keys without hiding token status text`() {
+        val rawToken = "raw-activity-token-super-secret"
+
+        assertEquals("<redacted>", EvidenceSanitizer.sanitizeEvidenceValue("token", rawToken))
+        assertEquals("<redacted>", EvidenceSanitizer.sanitizeEvidenceValue("sourceToken", rawToken))
+        assertEquals("<redacted>", EvidenceSanitizer.sanitizeEvidenceValue("multiapp.virtualActivityToken", rawToken))
+        assertEquals("<redacted>", EvidenceSanitizer.sanitizeEvidenceValue("detail", "token=$rawToken"))
+        assertEquals("<redacted>", EvidenceSanitizer.sanitizeEvidenceValue("detail", "activityToken%3D$rawToken"))
+        assertEquals("EXPIRED", EvidenceSanitizer.sanitizeEvidenceValue("routeTokenStatus", "EXPIRED"))
+        assertEquals("MISSING_TOKEN", EvidenceSanitizer.sanitizeEvidenceValue("tokenValidationStatus", "MISSING_TOKEN"))
+        assertEquals("<redacted>", EvidenceSanitizer.redactTokenForEvidence(rawToken))
+        assertEquals(
+            "INVALID_PROXY_URI:invalid route token:EXPIRED",
+            EvidenceSanitizer.sanitizeEvidenceValue("detail", "INVALID_PROXY_URI:invalid route token:EXPIRED")
+        )
+    }
+
+    @Test
     fun `sanitize evidence label drops sensitive suffix`() {
         assertEquals("query", EvidenceSanitizer.sanitizeEvidenceLabel("query:password=secret", "unknown"))
         assertEquals("unknown", EvidenceSanitizer.sanitizeEvidenceLabel("  ", "unknown"))

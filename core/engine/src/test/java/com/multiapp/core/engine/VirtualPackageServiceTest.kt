@@ -111,6 +111,16 @@ class VirtualPackageServiceTest {
             instanceId = runtime.instanceId,
             authority = "com.test.app.provider"
         )
+        val dataMatches = restoredPackageService.resolveIntent(
+            instanceId = runtime.instanceId,
+            type = VirtualPackageComponentType.ACTIVITY,
+            action = "android.intent.action.VIEW",
+            categories = setOf("android.intent.category.DEFAULT"),
+            dataScheme = "https",
+            dataMimeType = "image/png",
+            dataAuthority = "example.com",
+            dataPath = "/deeplink"
+        )
         val launchMatches = restoredPackageService.resolveIntent(
             instanceId = runtime.instanceId,
             type = VirtualPackageComponentType.ACTIVITY,
@@ -140,6 +150,12 @@ class VirtualPackageServiceTest {
         assertEquals("com.test.app.AliasActivity", aliasTarget?.name)
         assertEquals("com.test.app.DataProvider", provider?.name)
         assertEquals(true, provider?.grantUriPermissions)
+        assertEquals("com.test.app.READ_DATA", provider?.readPermission)
+        assertEquals("com.test.app.WRITE_DATA", provider?.writePermission)
+        assertEquals(
+            listOf("com.test.app.HighPriorityDeepLinkActivity", "com.test.app.DeepLinkActivity"),
+            dataMatches.map { it.name }
+        )
         assertEquals(listOf("com.test.app.MainActivity"), launchMatches.map { it.name })
         assertEquals(listOf("com.test.app.SyncService"), serviceMatches.map { it.name })
         assertEquals(listOf("com.test.app.BootReceiver"), receiverMatches.map { it.name })
@@ -205,6 +221,36 @@ class VirtualPackageServiceTest {
                             categories = listOf("android.intent.category.DEFAULT")
                         )
                     )
+                ),
+                ResolvedComponent(
+                    name = "com.test.app.DeepLinkActivity",
+                    exported = true,
+                    resolvedIntentFilters = listOf(
+                        ResolvedIntentFilter(
+                            actions = listOf("android.intent.action.VIEW"),
+                            categories = listOf("android.intent.category.DEFAULT"),
+                            dataSchemes = listOf("https"),
+                            dataMimeTypes = listOf("image/*"),
+                            dataAuthorities = listOf("example.com"),
+                            dataPaths = listOf("/deeplink"),
+                            priority = 10
+                        )
+                    )
+                ),
+                ResolvedComponent(
+                    name = "com.test.app.HighPriorityDeepLinkActivity",
+                    exported = true,
+                    resolvedIntentFilters = listOf(
+                        ResolvedIntentFilter(
+                            actions = listOf("android.intent.action.VIEW"),
+                            categories = listOf("android.intent.category.DEFAULT"),
+                            dataSchemes = listOf("https"),
+                            dataMimeTypes = listOf("image/png"),
+                            dataAuthorities = listOf("example.com"),
+                            dataPaths = listOf("/deeplink"),
+                            priority = 20
+                        )
+                    )
                 )
             ),
             services = listOf(
@@ -235,6 +281,8 @@ class VirtualPackageServiceTest {
                     name = "com.test.app.DataProvider",
                     exported = true,
                     authorities = listOf("com.test.app.provider"),
+                    readPermission = "com.test.app.READ_DATA",
+                    writePermission = "com.test.app.WRITE_DATA",
                     grantUriPermissions = true
                 )
             ),

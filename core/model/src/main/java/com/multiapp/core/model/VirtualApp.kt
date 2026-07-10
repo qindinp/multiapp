@@ -1,7 +1,5 @@
 package com.multiapp.core.model
 
-import android.graphics.drawable.Drawable
-
 /**
  * Represents a virtual app installed inside MultiApp.
  * One VirtualApp = one guest app instance running in the sandbox.
@@ -21,8 +19,6 @@ data class VirtualApp(
     val versionName: String = "",
     /** Version code from manifest */
     val versionCode: Long = 0,
-    /** App icon loaded from APK (transient, not serialized) */
-    @Transient val icon: Drawable? = null,
     /** Path to the copied APK in virtual storage */
     val apkPath: String,
     /** Unique instance ID: "{packageName}_{timestamp}" */
@@ -98,7 +94,7 @@ data class VirtualApp(
 
     // === Application metadata ===
 
-    /** Fully qualified Application class name (null = android.app.Application) */
+    /** Fully qualified Application class name (null = platform default Application) */
     val applicationClassName: String? = null,
     /** Permissions requested by this app */
     val requestedPermissions: List<String> = emptyList(),

@@ -104,7 +104,6 @@ class ApkParser @Inject constructor(
             versionCode = packageInfo.longVersionCode,
             minSdk = appInfo?.minSdkVersion ?: 1,
             targetSdk = appInfo?.targetSdkVersion ?: 35,
-            icon = appInfo?.loadIcon(pm),
             apkPath = apkPath,
             apkSizeBytes = file.length(),
             permissions = permissions,
@@ -273,7 +272,6 @@ class ApkParser @Inject constructor(
                 versionCode = versionCode,
                 minSdk = minSdk,
                 targetSdk = targetSdk,
-                icon = null, // Icon requires resource resolution
                 apkPath = apkPath,
                 apkSizeBytes = file.length(),
                 permissions = permissions,

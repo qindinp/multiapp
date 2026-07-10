@@ -29,7 +29,8 @@ class VirtualProviderManager(
             guestAuthority = authority,
             proxyAuthority = proxyAuthority(snapshot, authority),
             providerClassName = provider.name,
-            providerInfo = providerInfo(snapshot, provider, authority)
+            providerInfo = providerInfo(snapshot, provider, authority),
+            policy = VirtualProviderPolicy.fromComponent(provider)
         )
     }
 
@@ -105,9 +106,9 @@ class VirtualProviderManager(
         this.name = provider.name
         this.authority = authority
         this.exported = provider.exported
-        this.readPermission = provider.permission
-        this.writePermission = provider.permission
-        this.grantUriPermissions = provider.grantUriPermissions
+        this.readPermission = provider.readPermission ?: provider.permission
+        this.writePermission = provider.writePermission ?: provider.permission
+        this.grantUriPermissions = provider.grantUriPermissions || provider.uriPermissionPatterns.isNotEmpty()
         this.applicationInfo = VirtualPackageInfoFactory.applicationInfo(snapshot)
     }
 }

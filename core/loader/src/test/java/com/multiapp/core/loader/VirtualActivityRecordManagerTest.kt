@@ -4,6 +4,7 @@ import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityStack
 import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
+import com.multiapp.core.model.virtual.VirtualTaskRecord
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -34,6 +35,25 @@ class VirtualActivityRecordManagerTest {
         assertNull(manager.resolve("token-1"))
         assertNull(manager.resolveByProxy("ProxyActivity0"))
         assertNull(manager.resolveByActivityId("activity-1"))
+    }
+
+    @Test
+    fun `state snapshot restores records and tasks after partial mutation`() {
+        val manager = VirtualActivityRecordManager()
+        val first = manager.registerLaunch(
+            record(token = "token-1", activityId = "activity-1", proxyActivityClassName = "ProxyActivity0")
+        ).activity
+        val snapshot = manager.snapshotState()
+        manager.registerLaunch(
+            record(token = "token-2", activityId = "activity-2", proxyActivityClassName = "ProxyActivity1")
+        )
+
+        manager.restoreState(snapshot)
+
+        assertEquals(listOf(first.token), manager.list().map { it.token })
+        assertEquals(listOf(first.token), manager.listTasks().single().activities.map { it.token })
+        assertNull(manager.resolve("token-2"))
+        assertEquals(first.token, manager.lastLaunchResult()?.activity?.token)
     }
 
     @Test
@@ -245,6 +265,41 @@ class VirtualActivityRecordManagerTest {
     }
 
     @Test
+    fun `resume fallback only consumes result when framework dispatch was not invoked`() {
+        val manager = VirtualActivityRecordManager()
+        manager.registerLaunch(record(token = "token-1", activityId = "activity-1", proxyActivityClassName = "ProxyActivity0"))
+        val dataIntent = VirtualIntentSnapshot(action = "result.ACTION", extras = mapOf("ok" to "true"))
+        manager.setResult(
+            token = "token-1",
+            resultCode = 100,
+            dataIntent = dataIntent,
+            requestCode = 42
+        )
+
+        val consumed = manager.consumeResultForResumeFallback("token-1")
+
+        assertEquals(100, consumed?.resultCode)
+        assertEquals(42, consumed?.requestCode)
+        assertEquals(dataIntent, consumed?.dataIntent)
+        assertNull(manager.resolve("token-1")?.result)
+
+        manager.setResult(
+            token = "token-1",
+            resultCode = 200,
+            requestCode = 43
+        )
+        manager.markResultDispatchState(
+            token = "token-1",
+            frameworkDispatchAttempted = true,
+            frameworkDispatchInvoked = true
+        )
+
+        assertNull(manager.consumeResultForResumeFallback("token-1"))
+        assertEquals(200, manager.resolve("token-1")?.result?.resultCode)
+        assertEquals(true, manager.resolve("token-1")?.result?.frameworkDispatchInvoked)
+    }
+
+    @Test
     fun `consumePendingNewIntent consumes oldest event and updates record`() {
         val manager = VirtualActivityRecordManager()
         val first = manager.registerLaunch(
@@ -318,6 +373,25 @@ class VirtualActivityRecordManagerTest {
         assertEquals(VirtualActivityState.FINISHED, manager.resolve(launched.token)?.state)
         assertNull(manager.resolve(launched.token)?.result)
         assertNull(manager.consumeResult(launched.token))
+    }
+
+    @Test
+    fun `updateState keeps active task records and finish removes them from stack`() {
+        val manager = VirtualActivityRecordManager()
+        val launched = manager.registerLaunch(
+            record(token = "token-1", activityId = "activity-1", proxyActivityClassName = "ProxyActivity0")
+        ).activity
+
+        val stopped = manager.updateState(launched.token, VirtualActivityState.STOPPED)
+
+        assertEquals(VirtualActivityState.STOPPED, stopped?.state)
+        assertEquals(VirtualActivityState.STOPPED, manager.listTasks().single().activities.single().state)
+
+        val finished = manager.updateStateByActivityId(launched.activityId, VirtualActivityState.FINISHED)
+
+        assertEquals(VirtualActivityState.FINISHED, finished?.state)
+        assertEquals(VirtualActivityState.FINISHED, manager.resolve(launched.token)?.state)
+        assertEquals(emptyList(), manager.listTasks().single().activities)
     }
 
     @Test
@@ -407,6 +481,65 @@ class VirtualActivityRecordManagerTest {
     }
 
     @Test
+    fun `restoreTasks rebuilds stack and lookup indexes`() {
+        val original = VirtualActivityRecordManager()
+        val root = original.registerLaunch(
+            record(
+                token = "token-root",
+                activityId = "activity-root",
+                activity = "MainActivity",
+                proxyActivityClassName = "ProxyActivity0"
+            ),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK
+        ).activity
+        val detail = original.registerLaunch(
+            record(
+                token = "token-detail",
+                activityId = "activity-detail",
+                activity = "DetailActivity",
+                proxyActivityClassName = "ProxyActivity1"
+            )
+        ).activity
+
+        val restored = VirtualActivityRecordManager()
+        val restoredCount = restored.restoreTasks(original.exportTasks())
+
+        assertEquals(2, restoredCount)
+        assertEquals(listOf(root.token, detail.token), restored.listTasks().single().activities.map { it.token })
+        assertEquals(root.token, restored.resolve(root.token)?.token)
+        assertEquals(detail.token, restored.resolveByProxy("ProxyActivity1")?.token)
+        assertEquals(detail.token, restored.resolveByActivityId("activity-detail")?.token)
+        assertNull(restored.lastLaunchResult())
+    }
+
+    @Test
+    fun `restoreTasks filters finished destroyed and duplicate records`() {
+        val active = record(token = "token-active", activityId = "activity-active", proxyActivityClassName = "ProxyActivity0")
+        val finished = record(token = "token-finished", activityId = "activity-finished", proxyActivityClassName = "ProxyActivity1")
+            .copy(state = VirtualActivityState.FINISHED)
+        val destroyed = record(token = "token-destroyed", activityId = "activity-destroyed", proxyActivityClassName = "ProxyActivity2")
+            .copy(state = VirtualActivityState.DESTROYED)
+        val duplicate = record(token = active.token, activityId = "activity-duplicate", proxyActivityClassName = "ProxyActivity3")
+        val task = VirtualTaskRecord(
+            taskId = 7,
+            affinity = "com.test.minimal:inst-001",
+            activities = listOf(active, finished, destroyed, duplicate),
+            createdAtMs = 2000L
+        )
+        val manager = VirtualActivityRecordManager()
+
+        val restoredCount = manager.restoreTasks(listOf(task))
+
+        assertEquals(1, restoredCount)
+        assertEquals(listOf(active.token), manager.listTasks().single().activities.map { it.token })
+        assertEquals(7, manager.resolve(active.token)?.taskId)
+        assertEquals("com.test.minimal:inst-001", manager.resolve(active.token)?.taskAffinity)
+        assertNull(manager.resolve(finished.token))
+        assertNull(manager.resolve(destroyed.token))
+        assertNull(manager.resolveByProxy("ProxyActivity3"))
+    }
+
+    @Test
     fun `clearAll clears records launch evidence and stack`() {
         val manager = VirtualActivityRecordManager()
         manager.registerLaunch(record(token = "token-1", proxyActivityClassName = "ProxyActivity0"))
@@ -418,6 +551,62 @@ class VirtualActivityRecordManagerTest {
         assertEquals(emptyList(), manager.listTasks())
     }
 
+    @Test
+    fun `finish result operation records child result on source activity`() {
+        val manager = VirtualActivityRecordManager()
+        manager.registerLaunch(record(token = "token-parent", proxyActivityClassName = "ProxyActivity0"))
+        manager.registerLaunch(
+            record(
+                token = "token-child",
+                activity = "ChildActivity",
+                proxyActivityClassName = "ProxyActivity1",
+                resultToToken = "token-parent",
+                resultRequestCode = 42
+            )
+        )
+        val operations = ManagerBackedVirtualActivityOperations(manager)
+        val dataIntent = VirtualIntentSnapshot(action = "test.RESULT")
+
+        val result = operations.recordActivityResultForFinish(
+            instanceId = "inst-001",
+            token = "token-child",
+            resultCode = 200,
+            dataIntent = dataIntent
+        )
+
+        assertTrue(result.recorded)
+        assertEquals("", result.reason)
+        assertEquals("token-parent", result.sourceToken)
+        assertEquals(42, result.requestCode)
+        assertEquals(200, manager.resolve("token-parent")?.result?.resultCode)
+        assertEquals(42, manager.resolve("token-parent")?.result?.requestCode)
+        assertEquals(dataIntent, manager.resolve("token-parent")?.result?.dataIntent)
+    }
+
+    @Test
+    fun `finish result operation fails closed when source token belongs to another instance`() {
+        val manager = VirtualActivityRecordManager()
+        manager.registerLaunch(record(token = "token-parent", instanceId = "inst-other", proxyActivityClassName = "ProxyActivity0"))
+        manager.registerLaunch(
+            record(
+                token = "token-child",
+                proxyActivityClassName = "ProxyActivity1",
+                resultToToken = "token-parent",
+                resultRequestCode = 42
+            )
+        )
+
+        val result = ManagerBackedVirtualActivityOperations(manager).recordActivityResultForFinish(
+            instanceId = "inst-001",
+            token = "token-child",
+            resultCode = 200
+        )
+
+        assertEquals(false, result.recorded)
+        assertEquals("RESULT_TARGET_INSTANCE_MISMATCH", result.reason)
+        assertNull(manager.resolve("token-parent")?.result)
+    }
+
     private fun record(
         token: String,
         activityId: String = token,
@@ -425,7 +614,9 @@ class VirtualActivityRecordManagerTest {
         activity: String = "MainActivity",
         launchMode: String? = null,
         taskAffinity: String? = null,
-        proxyActivityClassName: String
+        proxyActivityClassName: String,
+        resultToToken: String? = null,
+        resultRequestCode: Int = -1
     ) = VirtualActivityRecord(
         token = token,
         activityId = activityId,
@@ -435,6 +626,8 @@ class VirtualActivityRecordManagerTest {
         proxyActivityClassName = proxyActivityClassName,
         launchMode = launchMode,
         taskAffinity = taskAffinity,
+        resultToToken = resultToToken,
+        resultRequestCode = resultRequestCode,
         createdAtMs = 1000L
     )
 }

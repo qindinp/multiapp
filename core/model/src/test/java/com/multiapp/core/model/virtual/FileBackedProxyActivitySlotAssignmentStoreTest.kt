@@ -4,7 +4,9 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class FileBackedProxyActivitySlotAssignmentStoreTest {
 
@@ -66,6 +68,26 @@ class FileBackedProxyActivitySlotAssignmentStoreTest {
 
         assertEquals(firstKey, secondStore.ownerOf(proxyClassName))
         assertNull(secondStore.find(secondKey))
+    }
+
+    @Test
+    fun `compareAndSet restores or removes only expected assignment`(@TempDir tempDir: File) {
+        val store = FileBackedProxyActivitySlotAssignmentStore(File(tempDir, "proxy_activity_slots.properties"))
+        val key = ProxyActivitySlotKey(
+            instanceId = "inst-001",
+            launchMode = null,
+            taskKey = "com.test:inst-001"
+        )
+        val firstProxy = "com.multiapp.app.container.ProxyActivity0"
+        val secondProxy = "com.multiapp.app.container.ProxyActivity1"
+        store.save(key, firstProxy)
+
+        assertFalse(store.compareAndSet(key, secondProxy, null))
+        assertEquals(firstProxy, store.find(key))
+        assertTrue(store.compareAndSet(key, firstProxy, secondProxy))
+        assertEquals(secondProxy, store.find(key))
+        assertTrue(store.compareAndSet(key, secondProxy, null))
+        assertNull(store.find(key))
     }
 
     @Test

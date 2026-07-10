@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.os.Message
 import android.util.Log
+import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
@@ -163,7 +164,7 @@ object ActivityThreadLaunchRecordPatcher {
             ?: android.content.pm.ApplicationInfo().apply {
                 packageName = config.virtualPackageName
                 sourceDir = config.sourceDir
-                publicSourceDir = config.sourceDir
+                publicSourceDir = config.publicSourceDir
                 if (config.splitSourceDirs.isNotEmpty()) {
                     splitSourceDirs = config.splitSourceDirs.toTypedArray()
                 }
@@ -349,7 +350,7 @@ object ActivityThreadLaunchRecordPatcher {
                     "stage=ACTIVITY_THREAD_LAUNCH_RECORD",
                     "targetClassName=${result.targetClassName.orEmpty()}",
                     "instanceId=$instanceId",
-                    "token=${result.token.orEmpty()}",
+                    "token=${EvidenceSanitizer.redactTokenForEvidence(result.token)}",
                     "guestActivityClassName=${result.guestActivityClassName.orEmpty()}",
                     "preLaunchPatchVerdict=$verdict",
                     "patchedFields=${result.patchedFields.joinToString(",")}",

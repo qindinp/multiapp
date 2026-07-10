@@ -1,9 +1,14 @@
 package com.multiapp.core.loader
 
+import android.app.Application
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkObject
+import io.mockk.unmockkObject
+import org.junit.jupiter.api.io.TempDir
+import java.io.File
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -18,6 +23,7 @@ class ActivityThreadLaunchRecordPatcherTest {
         VirtualActivityIntentStore.resetIntentCopierForTest()
         VirtualPackageRegistry.global.clear()
         VirtualProcessRuntime.global.clearAll()
+        unmockkObject(ActivityThreadCompat)
     }
 
     @Test
@@ -113,6 +119,43 @@ class ActivityThreadLaunchRecordPatcherTest {
         )
 
         assertEquals("PASS", ActivityThreadLaunchRecordPatcher.launchRecordVerdict(result))
+    }
+
+    @Test
+    fun `launch record evidence redacts activity token`(@TempDir filesDir: File) {
+        val rawToken = "raw-activity-token-super-secret"
+        val hostApplication = mockk<Application>(relaxed = true) {
+            every { this@mockk.filesDir } returns filesDir
+        }
+        mockkObject(ActivityThreadCompat)
+        every { ActivityThreadCompat.currentApplication() } returns hostApplication
+        val result = ActivityThreadLaunchRecordPatchResult(
+            targetClassName = "android.app.ActivityThread\$ActivityClientRecord",
+            observedProxyLaunch = true,
+            patchedFields = listOf("intent", "activityInfo"),
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            token = rawToken,
+            loadedApkSource = "GUEST_SANDBOX"
+        )
+
+        invokePrivateWriteEvidence(result)
+
+        val text = File(
+            filesDir,
+            "hosted_launch_evidence/${HostedActivityEvidenceFiles.launchRecord("inst-001")}"
+        ).readText()
+        assertTrue(text.contains("token=<redacted>"))
+        assertTrue(!text.contains(rawToken), "launch record evidence leaked raw token in $text")
+    }
+
+    private fun invokePrivateWriteEvidence(result: ActivityThreadLaunchRecordPatchResult) {
+        val method = ActivityThreadLaunchRecordPatcher::class.java.getDeclaredMethod(
+            "writeEvidence",
+            ActivityThreadLaunchRecordPatchResult::class.java
+        )
+        method.isAccessible = true
+        method.invoke(ActivityThreadLaunchRecordPatcher, result)
     }
 
     private fun proxyIntent(token: String): Intent =

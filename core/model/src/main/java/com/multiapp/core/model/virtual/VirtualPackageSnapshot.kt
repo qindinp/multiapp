@@ -29,13 +29,16 @@ data class VirtualPackageSnapshot(
     val taskAffinity: String? = null,
     val themeId: Int = 0,
     val metaData: Map<String, String> = emptyMap(),
+    val typedMetaData: Map<String, VirtualMetaDataValue> = emptyMap(),
     val launcherActivityName: String? = null,
     val activities: List<ResolvedComponent> = emptyList(),
     val services: List<ResolvedComponent> = emptyList(),
     val receivers: List<ResolvedComponent> = emptyList(),
     val providers: List<ResolvedComponent> = emptyList(),
     val permissions: List<String> = emptyList(),
-    val originCertSha256: String? = null
+    val originCertSha256: String? = null,
+    val signerSha256Digests: List<String> = emptyList(),
+    val hasMultipleSigners: Boolean = false
 ) {
     /** Code paths for class loading: base APK first, then split APKs. */
     val codeSourceDirs: List<String>
@@ -56,6 +59,9 @@ data class VirtualPackageSnapshot(
             "splitPublicSourceDirs must not contain blank entries"
         }
         require(splitNames.none { it.isBlank() }) { "splitNames must not contain blank entries" }
+        require(signerSha256Digests.none { it.isBlank() }) {
+            "signerSha256Digests must not contain blank entries"
+        }
         require(splitPublicSourceDirs.isEmpty() || splitPublicSourceDirs.size == splitSourceDirs.size) {
             "splitPublicSourceDirs size must match splitSourceDirs size"
         }

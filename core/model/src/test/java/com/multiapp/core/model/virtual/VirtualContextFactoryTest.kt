@@ -159,14 +159,34 @@ class VirtualContextFactoryTest {
     @Test
     fun `VirtualContextFactory interface exists and can be implemented`() {
         val factory = object : VirtualContextFactory {
-            override fun createGuestContext(
-                hostContext: android.content.Context,
-                config: VirtualContextConfig
-            ): android.content.Context {
-                return hostContext
+            override fun createGuestContext(config: VirtualContextConfig): VirtualContextSpec {
+                return VirtualContextSpec.from(config)
             }
         }
 
         assertNotNull(factory)
+    }
+
+    @Test
+    fun `VirtualContextSpec maps config without Android framework objects`() {
+        val config = VirtualContextConfig(
+            instanceId = "test-instance-004",
+            originPackageName = "com.example.origin",
+            virtualPackageName = "com.multiapp.instance.example",
+            dataDir = "/data/user/0/com.multiapp.app/files/instances/test-instance-004/data",
+            sourceDir = "/runtime/base.apk",
+            nativeLibraryDir = "/runtime/lib/arm64-v8a",
+            classLoader = ClassLoader.getSystemClassLoader(),
+            processSlot = ":v2"
+        )
+
+        val spec = VirtualContextSpec.from(config)
+
+        assertEquals(config.virtualPackageName, spec.packageName)
+        assertEquals(config.originPackageName, spec.originPackageName)
+        assertEquals("${config.dataDir}/files", spec.filesDir)
+        assertEquals("${config.dataDir}/cache", spec.cacheDir)
+        assertEquals(config.nativeLibraryDir, spec.nativeLibraryDir)
+        assertEquals(":v2", spec.processSlot)
     }
 }

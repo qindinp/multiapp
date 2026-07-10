@@ -68,7 +68,8 @@ data class EngineStoragePathDiagnostic(
     val nativeProbeResultCode: Int? = null,
     val nativeProbeErrno: Int? = null,
     val nativeProbeCandidateExists: Boolean? = null,
-    val nativeProbeResolvedPath: String? = null
+    val nativeProbeResolvedPath: String? = null,
+    val nativeRuntimeEvidence: EngineNativeRuntimeEvidence = EngineNativeRuntimeEvidence.unknown()
 ) {
     companion object {
         fun fromLoader(diagnostic: VirtualStoragePathDiagnostic): EngineStoragePathDiagnostic =
@@ -93,6 +94,40 @@ data class EngineStoragePathDiagnostic(
                 nativeProbeCandidateExists = diagnostic.nativeProbeCandidateExists,
                 nativeProbeResolvedPath = diagnostic.nativeProbeResolvedPath
             )
+    }
+}
+
+data class EngineNativeRuntimeEvidence(
+    val namespaceVerdict: String,
+    val namespaceVerdictReason: String,
+    val findLibraryVerdict: String,
+    val findLibraryVerdictReason: String,
+    val nativeLoadVerdict: String,
+    val nativeLoadVerdictReason: String,
+    val nativeLibraryDir: String? = null,
+    val nativeLibrarySearchPath: String? = null,
+    val nativeLibraryCount: Int? = null,
+    val findLibraryName: String? = null,
+    val findLibraryResolvedPath: String? = null
+) {
+    companion object {
+        fun unknown(): EngineNativeRuntimeEvidence = EngineNativeRuntimeEvidence(
+            namespaceVerdict = "UNKNOWN",
+            namespaceVerdictReason = "NAMESPACE_COLLECTOR_NOT_IMPLEMENTED",
+            findLibraryVerdict = "UNKNOWN",
+            findLibraryVerdictReason = "FIND_LIBRARY_COLLECTOR_NOT_IMPLEMENTED",
+            nativeLoadVerdict = "UNKNOWN",
+            nativeLoadVerdictReason = "NATIVE_LOAD_COLLECTOR_NOT_IMPLEMENTED"
+        )
+
+        fun identityIncomplete(): EngineNativeRuntimeEvidence = EngineNativeRuntimeEvidence(
+            namespaceVerdict = "UNKNOWN",
+            namespaceVerdictReason = "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+            findLibraryVerdict = "UNKNOWN",
+            findLibraryVerdictReason = "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
+            nativeLoadVerdict = "UNKNOWN",
+            nativeLoadVerdictReason = "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE"
+        )
     }
 }
 
@@ -211,7 +246,7 @@ object EngineStorageDiagnosticsFacade {
         virtualPackageName: String,
         dataRoot: String
     ): EngineStorageEvidenceEntry {
-        val fields = linkedMapOf(
+        val fields = linkedMapOf<String, Any?>(
             "stage" to STAGE,
             "instanceId" to result.instanceId,
             "originPackageName" to originPackageName,
@@ -220,17 +255,13 @@ object EngineStorageDiagnosticsFacade {
             "storageDiagnosticStatus" to EngineStorageDiagnosticStatus.UNSUPPORTED.name,
             "nativeIoRedirectVerdict" to "UNSUPPORTED",
             "nativeIoRedirectVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
-            "namespaceVerdict" to "UNKNOWN",
-            "namespaceVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
-            "findLibraryVerdict" to "UNKNOWN",
-            "findLibraryVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
-            "nativeLoadVerdict" to "UNKNOWN",
-            "nativeLoadVerdictReason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
             "procMapsSpoofEnabled" to false,
             "procStatusSpoofEnabled" to false,
             "reason" to "BOOTSTRAP_STORAGE_IDENTITY_INCOMPLETE",
             "caller" to CALLER
-        )
+        ).apply {
+            putAll(EngineNativeRuntimeEvidence.identityIncomplete().toFields())
+        }
         return EngineStorageEvidenceEntry(
             instanceId = result.instanceId,
             component = "storage-bootstrap",
@@ -252,6 +283,7 @@ object EngineStorageDiagnosticsFacade {
             .associate { it.key to it.value }
         val redirectVerdict = bootstrapEvidence["nativePrivatePathRedirectVerdict"]
         val unsupportedReason = nativeIoUnsupportedReason(result)
+        val runtimeEvidence = nativeRuntimeEvidence(result, bootstrapEvidence)
         val baseDiagnostics = VirtualStoragePathDiagnostics.nativeIoUnsupportedDiagnostics(
             instanceId = instanceId,
             originPackageName = originPackageName,
@@ -259,7 +291,11 @@ object EngineStorageDiagnosticsFacade {
             dataRoot = dataRoot,
             caller = caller,
             reason = unsupportedReason
-        ).map(EngineStoragePathDiagnostic::fromLoader)
+        ).map { diagnostic ->
+            EngineStoragePathDiagnostic.fromLoader(diagnostic).copy(
+                nativeRuntimeEvidence = runtimeEvidence
+            )
+        }
         if (redirectVerdict != "PARTIAL") return baseDiagnostics
 
         val bridge = NativeHookBridge.getInstance()
@@ -323,22 +359,213 @@ object EngineStorageDiagnosticsFacade {
             EngineStorageDiagnosticStatus.UNSUPPORTED -> diagnostic.reason.orEmpty()
             EngineStorageDiagnosticStatus.UNCHANGED -> diagnostic.reason ?: "NATIVE_IO_PATH_NOT_REDIRECTED"
         }
-        return linkedMapOf(
+        return linkedMapOf<String, Any?>(
             "nativeIoRedirectVerdict" to nativeIoRedirectVerdict,
             "nativeIoRedirectVerdictReason" to nativeIoRedirectReason,
             "nativeRedirectScope" to "GUEST_PRIVATE_PATHS_ONLY",
             "nativeIoRedirectEnabled" to (diagnostic.status == EngineStorageDiagnosticStatus.REDIRECTED),
             "nativeIoCandidateWithinDataRoot" to (diagnostic.candidateWithinDataRoot ?: false),
-            "namespaceVerdict" to "UNKNOWN",
-            "namespaceVerdictReason" to "NAMESPACE_COLLECTOR_NOT_IMPLEMENTED",
-            "findLibraryVerdict" to "UNKNOWN",
-            "findLibraryVerdictReason" to "FIND_LIBRARY_COLLECTOR_NOT_IMPLEMENTED",
-            "nativeLoadVerdict" to "UNKNOWN",
-            "nativeLoadVerdictReason" to "NATIVE_LOAD_COLLECTOR_NOT_IMPLEMENTED",
             "procMapsSpoofEnabled" to false,
             "procStatusSpoofEnabled" to false
+        ).apply {
+            putAll(diagnostic.nativeRuntimeEvidence.toFields())
+        }
+    }
+
+    private fun EngineNativeRuntimeEvidence.toFields(): Map<String, Any?> = buildMap {
+        put("namespaceVerdict", namespaceVerdict)
+        put("namespaceVerdictReason", namespaceVerdictReason)
+        put("findLibraryVerdict", findLibraryVerdict)
+        put("findLibraryVerdictReason", findLibraryVerdictReason)
+        put("nativeLoadVerdict", nativeLoadVerdict)
+        put("nativeLoadVerdictReason", nativeLoadVerdictReason)
+        nativeLibraryDir?.let { put("nativeLibraryDir", it) }
+        nativeLibrarySearchPath?.let { put("nativeLibrarySearchPath", it) }
+        nativeLibraryCount?.let { put("nativeLibraryCount", it) }
+        findLibraryName?.let { put("findLibraryName", it) }
+        findLibraryResolvedPath?.let { put("findLibraryResolvedPath", it) }
+    }
+
+    private fun nativeRuntimeEvidence(
+        result: HostedBootstrapResult,
+        bootstrapEvidence: Map<String, String>
+    ): EngineNativeRuntimeEvidence {
+        val nativeLibraryDir = bootstrapEvidence["nativeLibraryDir"].orEmpty()
+        val nativeLibrarySearchPath = bootstrapEvidence["nativeLibrarySearchPath"].orEmpty()
+        val libraries = nativeLibraryCandidates(bootstrapEvidence, nativeLibraryDir)
+        val nativeLibraryCount = bootstrapEvidence["nativeLibraryCount"]?.toIntOrNull() ?: libraries.size
+        if (nativeLibraryCount == 0 || libraries.isEmpty()) {
+            return EngineNativeRuntimeEvidence(
+                namespaceVerdict = "UNSUPPORTED",
+                namespaceVerdictReason = "NO_GUEST_NATIVE_LIBRARIES",
+                findLibraryVerdict = "UNSUPPORTED",
+                findLibraryVerdictReason = "NO_GUEST_NATIVE_LIBRARIES",
+                nativeLoadVerdict = "UNSUPPORTED",
+                nativeLoadVerdictReason = "NO_GUEST_NATIVE_LIBRARIES",
+                nativeLibraryDir = nativeLibraryDir.ifBlank { null },
+                nativeLibrarySearchPath = nativeLibrarySearchPath.ifBlank { null },
+                nativeLibraryCount = nativeLibraryCount
+            )
+        }
+
+        val classLoader = result.guestClassLoader
+        if (classLoader == null) {
+            return EngineNativeRuntimeEvidence(
+                namespaceVerdict = "FAIL",
+                namespaceVerdictReason = "GUEST_CLASSLOADER_MISSING",
+                findLibraryVerdict = "FAIL",
+                findLibraryVerdictReason = "GUEST_CLASSLOADER_MISSING",
+                nativeLoadVerdict = "FAIL",
+                nativeLoadVerdictReason = "GUEST_CLASSLOADER_MISSING",
+                nativeLibraryDir = nativeLibraryDir.ifBlank { null },
+                nativeLibrarySearchPath = nativeLibrarySearchPath.ifBlank { null },
+                nativeLibraryCount = nativeLibraryCount
+            )
+        }
+
+        val findLibrary = resolveFirstNativeLibrary(classLoader, libraries, nativeLibraryDir, result.dataRoot)
+        val namespaceVerdict = when {
+            nativeLibrarySearchPath.isBlank() -> "FAIL"
+            findLibrary.verdict == "PASS" || findLibrary.verdict == "PARTIAL" -> "PARTIAL"
+            else -> "FAIL"
+        }
+        val namespaceReason = when {
+            nativeLibrarySearchPath.isBlank() -> "NATIVE_LIBRARY_SEARCH_PATH_MISSING"
+            findLibrary.verdict == "PASS" ->
+                "CLASSLOADER_FIND_LIBRARY_PASS_LINKER_NAMESPACE_DEVICE_LOAD_NOT_PROBED"
+            findLibrary.verdict == "PARTIAL" ->
+                "CLASSLOADER_FIND_LIBRARY_PARTIAL_LINKER_NAMESPACE_DEVICE_LOAD_NOT_PROBED"
+            else -> "CLASSLOADER_FIND_LIBRARY_FAILED"
+        }
+        val nativeLoadVerdict = when (findLibrary.verdict) {
+            "PASS", "PARTIAL" -> "PARTIAL"
+            else -> "FAIL"
+        }
+        val nativeLoadReason = when (findLibrary.verdict) {
+            "PASS", "PARTIAL" -> "NATIVE_LOAD_NOT_EXECUTED_BY_STORAGE_DIAGNOSTIC"
+            else -> "FIND_LIBRARY_UNRESOLVED"
+        }
+        return EngineNativeRuntimeEvidence(
+            namespaceVerdict = namespaceVerdict,
+            namespaceVerdictReason = namespaceReason,
+            findLibraryVerdict = findLibrary.verdict,
+            findLibraryVerdictReason = findLibrary.reason,
+            nativeLoadVerdict = nativeLoadVerdict,
+            nativeLoadVerdictReason = nativeLoadReason,
+            nativeLibraryDir = nativeLibraryDir.ifBlank { null },
+            nativeLibrarySearchPath = nativeLibrarySearchPath.ifBlank { null },
+            nativeLibraryCount = nativeLibraryCount,
+            findLibraryName = findLibrary.libraryName,
+            findLibraryResolvedPath = findLibrary.resolvedPath
         )
     }
+
+    private fun nativeLibraryCandidates(
+        bootstrapEvidence: Map<String, String>,
+        nativeLibraryDir: String
+    ): List<String> {
+        val fromEvidence = bootstrapEvidence["nativeLibraries"]
+            .orEmpty()
+            .split(',')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+        val fromDirectory = nativeLibraryDir
+            .takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?.listFiles { file -> file.isFile && file.name.endsWith(".so") }
+            ?.map { it.name }
+            .orEmpty()
+        return (fromEvidence + fromDirectory).distinct().sorted()
+    }
+
+    private data class FindLibraryEvidence(
+        val libraryName: String?,
+        val resolvedPath: String?,
+        val verdict: String,
+        val reason: String
+    )
+
+    private fun resolveFirstNativeLibrary(
+        classLoader: ClassLoader,
+        libraries: List<String>,
+        nativeLibraryDir: String,
+        dataRoot: String?
+    ): FindLibraryEvidence {
+        val libraryName = libraries.firstOrNull()?.toLoadLibraryName()
+            ?: return FindLibraryEvidence(
+                libraryName = null,
+                resolvedPath = null,
+                verdict = "UNSUPPORTED",
+                reason = "NO_GUEST_NATIVE_LIBRARIES"
+            )
+        val resolved = invokeFindLibrary(classLoader, libraryName)
+        val resolvedPath = resolved.getOrNull().orEmpty()
+        if (resolved.isFailure) {
+            val error = resolved.exceptionOrNull()
+            return FindLibraryEvidence(
+                libraryName = libraryName,
+                resolvedPath = null,
+                verdict = "FAIL",
+                reason = "FIND_LIBRARY_EXCEPTION:${error?.javaClass?.simpleName.orEmpty()}"
+            )
+        }
+        if (resolvedPath.isBlank()) {
+            return FindLibraryEvidence(
+                libraryName = libraryName,
+                resolvedPath = null,
+                verdict = "FAIL",
+                reason = "FIND_LIBRARY_RETURNED_EMPTY"
+            )
+        }
+        val verdict = if (isResolvedLibraryPathVerified(resolvedPath, nativeLibraryDir, dataRoot)) {
+            "PASS"
+        } else {
+            "PARTIAL"
+        }
+        return FindLibraryEvidence(
+            libraryName = libraryName,
+            resolvedPath = resolvedPath,
+            verdict = verdict,
+            reason = if (verdict == "PASS") "" else "FIND_LIBRARY_RETURNED_UNVERIFIED_PATH"
+        )
+    }
+
+    private fun String.toLoadLibraryName(): String =
+        removePrefix("lib").removeSuffix(".so")
+
+    private fun invokeFindLibrary(classLoader: ClassLoader, libraryName: String): Result<String?> =
+        runCatching {
+            var current: Class<*>? = classLoader.javaClass
+            while (current != null) {
+                val method = runCatching { current.getDeclaredMethod("findLibrary", String::class.java) }.getOrNull()
+                if (method != null) {
+                    method.isAccessible = true
+                    return@runCatching method.invoke(classLoader, libraryName) as? String
+                }
+                current = current.superclass
+            }
+            null
+        }
+
+    private fun isResolvedLibraryPathVerified(
+        resolvedPath: String,
+        nativeLibraryDir: String,
+        dataRoot: String?
+    ): Boolean {
+        if (resolvedPath.contains("!/lib/") && resolvedPath.endsWith(".so")) return true
+        val resolvedFile = File(resolvedPath)
+        if (resolvedFile.isFile) return true
+        return listOf(nativeLibraryDir, dataRoot.orEmpty())
+            .filter { it.isNotBlank() }
+            .any { root -> isCanonicalContained(resolvedFile, File(root)) }
+    }
+
+    private fun isCanonicalContained(candidate: File, root: File): Boolean =
+        runCatching {
+            val rootPath = root.canonicalFile.path.trimEnd(File.separatorChar)
+            val candidatePath = candidate.canonicalFile.path
+            candidatePath == rootPath || candidatePath.startsWith(rootPath + File.separator)
+        }.getOrDefault(false)
 
     private fun nativeIoUnsupportedReason(result: HostedBootstrapResult): String {
         val evidence = result.stageResults

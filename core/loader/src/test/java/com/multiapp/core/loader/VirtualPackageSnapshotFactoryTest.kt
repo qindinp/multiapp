@@ -1,15 +1,25 @@
 package com.multiapp.core.loader
 
 import android.content.pm.ActivityInfo
+import android.content.pm.Signature
+import android.content.pm.SigningInfo
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.installer.InstallRecord
+import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.VirtualProviderPathPattern
+import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
+import com.multiapp.core.model.virtual.VirtualProviderPathPermission
 import com.multiapp.core.model.virtual.ResolvedPackage
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertNotNull
+import kotlin.test.assertSame
+import io.mockk.mockk
 import kotlin.test.assertTrue
 
 class VirtualPackageSnapshotFactoryTest {
@@ -55,7 +65,18 @@ class VirtualPackageSnapshotFactoryTest {
                         exported = false,
                         authorities = listOf("com.test.minimal.probe"),
                         permission = "com.test.permission.PROBE",
-                        grantUriPermissions = true,
+                        readPermission = "com.test.permission.READ_PROBE",
+                        writePermission = "com.test.permission.WRITE_PROBE",
+                        grantUriPermissions = false,
+                        pathPermissions = listOf(
+                            VirtualProviderPathPermission(
+                                VirtualProviderPathPattern("/private", VirtualProviderPathPatternType.PREFIX),
+                                readPermission = "com.test.permission.READ_PRIVATE"
+                            )
+                        ),
+                        uriPermissionPatterns = listOf(
+                            VirtualProviderPathPattern("/shared", VirtualProviderPathPatternType.PREFIX)
+                        ),
                         metaData = mapOf("provider.mode" to "probe")
                     )
                 ),
@@ -79,7 +100,11 @@ class VirtualPackageSnapshotFactoryTest {
         assertEquals("orientation|screenSize|keyboardHidden", snapshot.activities.single().configChanges)
         assertEquals("com.test.permission.START", snapshot.activities.single().permission)
         assertEquals("com.test.permission.PROBE", snapshot.providers.single().permission)
-        assertEquals(true, snapshot.providers.single().grantUriPermissions)
+        assertEquals("com.test.permission.READ_PROBE", snapshot.providers.single().readPermission)
+        assertEquals("com.test.permission.WRITE_PROBE", snapshot.providers.single().writePermission)
+        assertEquals(false, snapshot.providers.single().grantUriPermissions)
+        assertEquals("/private", snapshot.providers.single().pathPermissions.single().pattern.path)
+        assertEquals("/shared", snapshot.providers.single().uriPermissionPatterns.single().path)
         assertEquals("main", snapshot.activities.single().metaData["activity.mode"])
         assertTrue(snapshot.matchesPackageName("com.test.minimal"))
         assertTrue(snapshot.matchesPackageName("com.multiapp.instance.abc"))
@@ -114,9 +139,11 @@ class VirtualPackageSnapshotFactoryTest {
         assertEquals(":sync", serviceInfo.processName)
         assertEquals("com.test.permission.SYNC", serviceInfo.permission)
         assertEquals("com.test.minimal.probe", providerInfo.authority)
-        assertEquals("com.test.permission.PROBE", providerInfo.readPermission)
-        assertEquals("com.test.permission.PROBE", providerInfo.writePermission)
+        assertEquals("com.test.permission.READ_PROBE", providerInfo.readPermission)
+        assertEquals("com.test.permission.WRITE_PROBE", providerInfo.writePermission)
         assertEquals(true, providerInfo.grantUriPermissions)
+        assertEquals(1, providerInfo.pathPermissions.size)
+        assertEquals(1, providerInfo.uriPermissionPatterns.size)
     }
 
     @Test
@@ -146,6 +173,66 @@ class VirtualPackageSnapshotFactoryTest {
         val activityInfo = VirtualPackageInfoFactory.activityInfo(snapshot, snapshot.activities.single())
 
         assertEquals(0x7f010010, activityInfo.theme)
+    }
+
+    @Test
+    fun `typed meta-data maps to Android platform value types`() {
+        assertEquals(true, VirtualMetaDataValue.boolean(true).toPlatformMetaDataValue())
+        assertEquals(5, VirtualMetaDataValue.int(5).toPlatformMetaDataValue())
+        assertEquals(8L, VirtualMetaDataValue.long(8L).toPlatformMetaDataValue())
+        assertEquals(0.25f, VirtualMetaDataValue.float(0.25f).toPlatformMetaDataValue())
+        assertEquals(0x7f010001, VirtualMetaDataValue.resource("@0x7f010001").toPlatformMetaDataValue())
+        assertEquals("@xml/provider_paths", VirtualMetaDataValue.resource("@xml/provider_paths").toPlatformMetaDataValue())
+    }
+
+    @Test
+    fun `package info preserves snapshot signing identity`() {
+        val snapshot = VirtualPackageSnapshotFactory.create(
+            instance = instanceRecord(),
+            installRecord = installRecord().copy(
+                signerSha256Digests = listOf("signer-sha")
+            ),
+            resolvedPackage = null,
+            nativeLibraryDir = null
+        )
+        val signature = mockk<Signature>()
+        val signingInfo = mockk<SigningInfo>()
+        val packageInfo = VirtualPackageInfoFactory.packageInfo(
+            snapshot,
+            VirtualPackageSigningInfo(
+                legacySignatures = arrayOf(signature),
+                signingInfo = signingInfo,
+                signerSha256Digests = listOf("signer-sha")
+            )
+        )
+
+        @Suppress("DEPRECATION")
+        assertSame(signature, assertNotNull(packageInfo.signatures).single())
+        assertSame(signingInfo, packageInfo.signingInfo)
+    }
+
+    @Test
+    fun `factory falls back to persisted components when manifest resolution is unavailable`() {
+        val snapshot = VirtualPackageSnapshotFactory.create(
+            instance = instanceRecord(),
+            installRecord = installRecord().copy(
+                activities = listOf(
+                    ComponentInfo(
+                        name = "com.test.minimal.MainActivity",
+                        exported = true,
+                        metaData = mapOf("mode" to VirtualMetaDataValue.string("persisted"))
+                    )
+                )
+            ),
+            resolvedPackage = null,
+            nativeLibraryDir = null
+        )
+
+        assertEquals("com.test.minimal.MainActivity", snapshot.activities.single().name)
+        assertEquals(
+            "persisted",
+            snapshot.activities.single().typedMetaData.getValue("mode").encodedValue
+        )
     }
 
     @Test

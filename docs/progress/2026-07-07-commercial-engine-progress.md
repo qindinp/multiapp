@@ -1439,3 +1439,1998 @@ Remaining gate for this slice:
   expose `VirtualProcessRuntime.global` as compatibility defaults. A later
   engine installer facade should remove or hide those defaults behind a loader
   owned narrow interface.
+
+## Execution Update - 2026-07-09 Core Model Android Boundary Slice
+
+This batch starts shrinking the `:core:model` Android framework surface without
+touching the active proxy/token dirty work. The goal is to move toward a pure
+contract/model module while avoiding a broad UI/repository migration in the
+same patch.
+
+Implemented:
+
+- Removed `android.graphics.drawable.Drawable` from `ApkInfo`.
+- Removed APK icon loading from `ApkParser` when constructing `ApkInfo`; icon
+  materialization should remain in Android/UI/repository layers instead of the
+  model DTO.
+
+Verification:
+
+```powershell
+rg -n "^import android\.|android\." core/model/src/main/java -S
+.\gradlew.bat :core:model:testDebugUnitTest :core:apk:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `ApkInfo` no longer imports or exposes `android.graphics.drawable.Drawable`.
+- `:core:model:testDebugUnitTest :core:apk:compileDebugKotlin` passed in 32s.
+- Known warnings remain: AGP `8.7.3` compileSdk 36 compatibility warning and
+  an existing deprecated `Bundle.get(String)` warning in `ApkParser`.
+
+Remaining gate for this slice:
+
+- `VirtualApp.icon`, `ProcessSlot`, `VirtualContextFactory`, and
+  `VirtualActivityController` still expose Android framework types in
+  `:core:model`. Those need separate migration into Android-facing adapter
+  modules or narrow pure contracts.
+
+## Execution Update - 2026-07-10 Core Model Pure Contract Follow-up
+
+This batch continues the `:core:model` Android boundary cleanup after the
+previous APK DTO slice. It keeps the active app/container proxy-token and
+loader dirty work untouched and focuses on model contracts that were called out
+by the BLOCK review.
+
+Implemented:
+
+- Removed `VirtualApp.icon` and the `android.graphics.drawable.Drawable`
+  dependency from `:core:model`.
+- Moved app-list icon materialization to the Android UI/repository edge:
+  `InstalledAppRepository` no longer loads icons into model DTOs, while the
+  launcher UI resolves installed-package or archive APK icons when rendering.
+- Replaced Android-facing `VirtualContextFactory` signatures with a pure
+  `VirtualContextSpec` generated from `VirtualContextConfig`.
+- Replaced `VirtualActivityController.launchGuestActivity(...)` Android
+  `Activity` input with a pure `GuestActivityLaunchRequest` /
+  `planGuestActivityLaunch(...)` contract.
+- Removed the Android `Activity`, `Context`, `ContextWrapper`, `Bundle`,
+  `ApplicationInfo`, and `Log` dependencies from
+  `DefaultVirtualActivityController`; the class now only validates/describes
+  launch plans and leaves real Activity creation to engine/loader adapters.
+- Replaced Android framework types in `GmsServiceRouter` with pure DTOs:
+  `VirtualServiceIntentSpec`, `VirtualBinderHandle`,
+  `VirtualPackageIdentity`, and `VirtualAccountRecord`.
+- Added `CoreModelAndroidBoundaryTest` so `:core:model` main sources cannot
+  reintroduce Android framework imports or typed references without failing the
+  local gate.
+
+Verification:
+
+```powershell
+rg -n "^import android\.|android\." core/model/src/main/java -S
+rg -n "^import android\.|android\.app\.|android\.content\.Context|android\.content\.Intent|android\.os\.IBinder|android\.content\.pm\.|android\.accounts\." core/model/src/test/java -S
+.\gradlew.bat :core:model:testDebugUnitTest :core:instance:testDebugUnitTest :feature:launcher:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:model:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `:core:model:testDebugUnitTest`, `:core:instance:testDebugUnitTest`, and
+  `:feature:launcher:compileDebugKotlin` passed.
+- `:app:compileDebugKotlin` passed.
+- `:core:model:testDebugUnitTest` passed again after adding the source
+  boundary regression test.
+- `core/model/src/main/java` no longer has Android framework imports or typed
+  Android framework references. Remaining broad `android.*` hits are manifest
+  action string constants.
+
+Remaining gate for this slice:
+
+- `:core:model` is still an Android Gradle library and still depends on
+  Android build tooling, even though the main source Android framework surface
+  has been narrowed. A later build-structure slice should convert it toward a
+  pure JVM/Kotlin contract module after downstream Android modules no longer
+  require Android-library packaging.
+
+## Execution Update - 2026-07-10 VirtualSystemServer Runtime-Bound Subservices
+
+This batch follows the VirtualApp/BlackBox server-side split without touching
+the active app/container or loader dirty files. The goal is to make engine
+subservices answer runtime state explicitly instead of staying as empty marker
+interfaces.
+
+Implemented:
+
+- Added `VirtualRuntimeBoundSubsystemService` and
+  `VirtualSubsystemRuntimeBinding`.
+- `VirtualActivityService`, `VirtualProviderService`, `VirtualServiceService`,
+  `VirtualBroadcastService`, `VirtualStorageService`, and
+  `VirtualNativeService` now expose `queryRuntimeBinding(instanceId)`.
+- `DefaultVirtualSystemServer` now wires registry-backed subsystem services
+  instead of static empty singleton services.
+- Runtime-bound subsystem responses include `processSlot`, `proxySlot`,
+  `runtimeEpoch`, process identity, runtime state, supported operations, and
+  unsupported operations.
+- Component services fail closed with `FAIL/runtime_not_found` when no runtime
+  exists, and return `PARTIAL` for known runtimes to avoid overstating
+  incomplete Activity/Provider/Service/Broadcast/Storage/Native semantics.
+- `VirtualEvidenceService` now exposes `exportReport(instanceId)` through the
+  engine runtime service.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `:core:model` + `:core:engine` unit tests passed after adding
+  `VirtualSystemServerTest` coverage for subsystem bindings, fail-closed
+  missing runtime behavior, and evidence export.
+- `:app:compileDebugKotlin` passed, proving the public engine changes did not
+  break current app compile.
+
+Remaining gate for this slice:
+
+- These are engine service contracts and state queries only. They do not yet
+  implement full VAMS/VProvider/VService/VBroadcast semantics, do not replace
+  loader/app dispatch paths, and are not device proof.
+
+## Execution Update - 2026-07-10 VPMS Snapshot Query Semantics
+
+This batch continues the engine-owned VPMS facade. It keeps the implementation
+snapshot-backed and does not claim full Android `PackageManager` parity yet.
+
+Implemented:
+
+- Extended resolved intent filters with MIME types, authorities, exact paths,
+  and priority.
+- Extended resolved provider/component metadata with read/write permissions.
+- `VirtualPackageService.resolveIntent(...)` now evaluates action, categories,
+  scheme, MIME exact/wildcard match, authority, path, and returns higher
+  priority filters first with stable class-name tie breaking.
+- `EngineRuntimeStateStore` persists/restores the new filter and provider
+  permission fields while keeping older state files compatible.
+- Added focused VPMS tests for persisted metadata, MIME wildcard matching,
+  authority/path matching, and priority ordering.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:model:testDebugUnitTest :core:engine:testDebugUnitTest --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `:core:model:testDebugUnitTest :core:engine:testDebugUnitTest` passed before
+  this documentation update.
+- `:app:compileDebugKotlin` passed before this documentation update.
+
+Remaining gate for this slice:
+
+- Parser coverage is still incomplete. The engine can now store/query these
+  fields when present, but APK/manifest parsing still needs to populate all
+  Android-equivalent `IntentFilter`, signature, `SigningInfo`, and typed
+  metadata fields before VPMS can be treated as commercial complete.
+
+## Execution Update - 2026-07-10 Native Runtime Evidence Narrowing
+
+This batch reduces the PR-10 native/storage evidence blind spot. It does not
+enable hook profiles or claim QQ/WeChat/QQ Reader native compatibility.
+
+Implemented:
+
+- Added `EngineNativeRuntimeEvidence` behind
+  `EngineStorageDiagnosticsFacade`.
+- Native storage diagnostics now derive `namespaceVerdict`,
+  `findLibraryVerdict`, and `nativeLoadVerdict` from hosted bootstrap evidence:
+  native library count/list, native library dir, classloader native search path,
+  and `guestClassLoader.findLibrary(...)`.
+- Apps with no guest native libraries now report explicit `UNSUPPORTED /
+  NO_GUEST_NATIVE_LIBRARIES` instead of `UNKNOWN`.
+- If `findLibrary(...)` resolves a guest `.so`, evidence reports
+  `findLibraryVerdict=PASS`, `namespaceVerdict=PARTIAL`, and
+  `nativeLoadVerdict=PARTIAL` because storage diagnostics still do not execute
+  a real `Runtime.nativeLoad` probe.
+- Android instrumentation storage evidence now asserts these native runtime
+  verdict fields are no longer `UNKNOWN` for a complete hosted bootstrap.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineStorageDiagnosticsEvidenceTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `EngineStorageDiagnosticsEvidenceTest` passed.
+
+Remaining gate for this slice:
+
+- `nativeLoadVerdict=PARTIAL` is intentional until a controlled device/native
+  load probe exists. `namespaceVerdict=PARTIAL` is also not proof of linker
+  namespace execution; it only proves the classloader search path and
+  `findLibrary` layer are coherent enough to move past an `UNKNOWN` result.
+
+## Execution Update - 2026-07-10 Activity Proxy Recovery Evidence
+
+This batch follows the VirtualApp/BlackBox/DroidPlugin pattern that Activity
+state must be owned by a central virtual activity layer, while real Android
+components remain stub/proxy carriers. It tightens the process-death/recents
+recovery path without touching the broader `ActivityThread` patcher.
+
+Implemented:
+
+- `EngineProxyActivityRecords.observeProxyIntent(...)` now returns task
+  identity evidence for the observed/recovered record: `taskId`,
+  `taskAffinity`, `launchMode`, and `intentFlags`.
+- Proxy Activity recovery now preserves launch flags from the original guest
+  intent when available, and falls back to current proxy intent flags after
+  process death. This prevents recents restore from silently dropping
+  `FLAG_ACTIVITY_NEW_TASK` when the in-memory `VirtualActivityIntentStore` is
+  gone.
+- `ProxyActivityEvidence` now exports the task and launch-mode fields into
+  `files/hosted_launch_evidence/*activity-proxy.properties`.
+- `VirtualSystemServer.activityService` now advertises
+  `proxy-process-death-recovery-evidence` as supported while keeping
+  `recents-device-proof` unsupported until device evidence exists.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityRuntimeTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:testDebugUnitTest --tests "com.multiapp.app.container.ProxyActivityEvidenceTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused engine Activity runtime, system-server, and app proxy evidence tests
+  passed.
+
+Remaining gate for this slice:
+
+- This is still JVM/local evidence. Same-origin dual-instance recents and
+  process-death recovery must still be validated on device with
+  `dumpsys activity recents`, `exit-info`, and hosted launch evidence before
+  it can be marked `PASS`.
+
+## Execution Update - 2026-07-10 Activity Task State Persistence Foundation
+
+This batch starts moving Activity task truth from process-only memory toward an
+engine-owned recoverable state model. It follows the same VirtualApp/BlackBox
+shape as the previous proxy evidence slice: the Android Activity remains a
+stub/proxy carrier, while the virtual task/back-stack record is owned by the
+container runtime.
+
+Implemented:
+
+- `VirtualActivityStack` can restore a task snapshot and rebuild `nextTaskId`
+  / `nextEventId` while filtering `FINISHED`, `DESTROYED`, and duplicate
+  records.
+- `VirtualActivityRecordManager` now exposes `exportTasks()` and
+  `restoreTasks(...)`, rebuilding token, proxy-class, and activity-id lookup
+  indexes from the restored stack.
+- Added `EngineActivityTaskStateSnapshot` plus in-memory and file-backed
+  `EngineActivityTaskStateStore` implementations in `:core:engine`.
+- Added `EngineActivityTaskRecords` as the engine facade for
+  snapshot/persist/restore so later app/container wiring does not need to call
+  loader globals directly.
+- `ContainerRuntimePaths` now owns
+  `engine_activity_task_state.properties`.
+- `ContainerActivity` restores persisted task state before proxy launch/prune
+  and persists the task snapshot after slot prune and after successful proxy
+  launch.
+- `ProxyActivityBase` restores persisted task state only when the current
+  in-memory manager is empty, avoiding a hot-path race where stale disk state
+  could overwrite a just-registered proxy record. It persists the snapshot
+  after observing/recovering the proxy intent.
+- Activity lifecycle now feeds the engine task facade: `onResume`, `onPause`,
+  and `onStop` update the virtual record state and persist the snapshot;
+  `onDestroy` removes the record from the task snapshot only when
+  `isFinishing=true`, otherwise it keeps the task recoverable as `STOPPED`.
+- `VirtualActivityService.queryTaskState(instanceId)` now exposes the
+  persisted virtual task snapshot through `VirtualSystemServer`, including
+  `taskCount`, `activityCount`, top task/activity identity, top Activity state,
+  and filtered task records for the requested instance only.
+- `VirtualEvidenceService.exportReport(instanceId)` now adds
+  `operationEvidence.activity.task-state` so exported engine reports can show
+  task-state query verdicts and counts without marking full recents semantics
+  as complete.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualActivityRecordManagerTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.EngineActivityRuntimeTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" :app:testDebugUnitTest --tests "com.multiapp.app.container.ContainerRuntimePathsTest" --tests "com.multiapp.app.container.ProxyActivityEvidenceTest" :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualActivityRecordManagerTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" :app:testDebugUnitTest --tests "com.multiapp.app.container.ContainerRuntimePathsTest" --tests "com.multiapp.app.container.ProxyActivityEvidenceTest" :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.DefaultVirtualizationEngineTest" :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused loader Activity record manager and engine task-state tests passed.
+- App path test/compile gate passed after wiring the file-backed task-state
+  store into `ContainerActivity` and `ProxyActivityBase`.
+- Lifecycle state update tests and app compile gate passed after adding
+  `resume/pause/stop/destroy` task-state persistence.
+- `VirtualSystemServerTest`, `EngineActivityTaskStateStoreTest`,
+  `DefaultVirtualizationEngineTest`, and `:app:compileDebugKotlin` passed after
+  exposing task snapshots through `VirtualActivityService` and engine-report
+  operation evidence.
+
+Remaining gate for this slice:
+
+- This is now wired into the app/container path, but is not device proof.
+  Device evidence still must prove same-origin multi-instance recents,
+  process-death recovery, and no black screen before `recents-device-proof`
+  can move out of `UNSUPPORTED`.
+
+## Execution Update - 2026-07-10 Activity Control-Plane Operations
+
+This batch continues the Activity task-state work by moving local record
+operations behind the engine-facing `VirtualActivityService` facade. The goal
+is to stop treating finish/result/onNewIntent as loose loader-only helpers and
+make them explicit engine control-plane operations with instance ownership
+checks.
+
+Implemented:
+
+- `VirtualActivityService` now exposes persisted-record operations:
+  `markActivityState(...)`, `finishActivity(...)`,
+  `setActivityResult(...)`, `consumeActivityResult(...)`, and
+  `consumePendingNewIntent(...)`.
+- `RegistryBackedVirtualActivityService` restores the persisted task snapshot
+  into a temporary `VirtualActivityRecordManager`, verifies the runtime exists,
+  verifies the token belongs to the requested `instanceId`, mutates the record,
+  then writes the task snapshot back through `EngineActivityTaskStateStore`.
+- Cross-instance token use fails closed with
+  `activity_record_instance_mismatch:<token>` and does not mutate the other
+  instance's persisted state.
+- `DefaultVirtualizationEngine.exportEvidence(instanceId)` now routes through
+  `VirtualEvidenceService.exportReport(...)` first, so exported engine reports
+  include `operationEvidence.activity.task-state` instead of returning only the
+  raw runtime-registry report.
+- Added `EngineActivityTaskController` and `EngineActivityTaskControllers` as
+  the app/container-facing Activity task facade. The controller attaches the
+  file-backed engine runtime state, uses `VirtualActivityService` for
+  lifecycle mutations, and keeps task snapshot restore/persist inside
+  `:core:engine`.
+- `ContainerActivity` and `ProxyActivityBase` now use the controller instead of
+  directly constructing `EngineActivityTaskRecords` or
+  `FileBackedEngineActivityTaskStateStore`.
+- `RegistryBackedVirtualActivityService` now uses the shared hosted
+  `VirtualActivityRecordManager` and only restores persisted task state when
+  the requested token is missing, avoiding unconditional replacement of hot
+  process Activity records.
+- Added loader-level `VirtualActivityOperations` so `VirtualInstrumentation`
+  can consume pending `onNewIntent` records and finish Activity records through
+  an injected operation facade instead of hard-coding direct manager calls.
+- `EngineRuntimeInstallers.installInstrumentation()` now injects
+  `EngineVirtualActivityOperationsFactory.hotPath()`. The engine operation path
+  delegates to `VirtualActivityService` first and falls back to the local
+  manager when no runtime record is available, preserving existing direct
+  instrumentation install tests while moving the normal app path toward engine
+  ownership.
+- Activity binding supported operations now include precise local capabilities:
+  `finish-record`, `result-record`, `on-new-intent-record`, and
+  `back-stack-state`.
+- The unsupported set keeps delivery/device claims separate:
+  `result-delivery`, `finish-result-delivery`, and `recents-device-proof`
+  remain unsupported until app/container and device evidence prove them.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.DefaultVirtualizationEngineTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualInstrumentationStartActivityEvidenceTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `VirtualSystemServerTest` and `EngineActivityTaskStateStoreTest`
+  passed.
+- Focused `DefaultVirtualizationEngineTest`, `VirtualSystemServerTest`, and
+  `EngineActivityTaskStateStoreTest` passed after the export-evidence bridge.
+- Focused `EngineActivityTaskStateStoreTest`, `VirtualSystemServerTest`, and
+  `:app:compileDebugKotlin` passed after the app/container controller wiring.
+- Focused `VirtualInstrumentationStartActivityEvidenceTest`,
+  `EngineActivityTaskStateStoreTest`, `VirtualSystemServerTest`, and
+  `:app:compileDebugKotlin` passed after instrumentation operation injection.
+
+Remaining gate for this slice:
+
+- These are engine/JVM control-plane operations only. The app/container
+  delivery path still must route real Android `setResult`, finish/result
+  propagation, and `onNewIntent` delivery through the engine facade before
+  claiming Android Activity parity. The lifecycle task-state path is now routed
+  through the engine controller, and `VirtualInstrumentation` uses an injected
+  operation facade for pending new-intent consumption and finish marking.
+  Activity result delivery and lower-level launch/remap records still keep
+  direct loader dependencies.
+- Device evidence is still required before same-origin multi-instance recents,
+  process-death restore, and black-screen avoidance can move to `PASS`.
+
+## Execution Update - 2026-07-10 Activity Result Route Foundation
+
+This batch continues the Activity control-plane slice by recording
+`startActivityForResult` route metadata in the virtual Activity record instead
+of only writing an `UNSUPPORTED` evidence string.
+
+Implemented:
+
+- `VirtualActivityRecord` now carries `resultToToken` and `resultRequestCode`.
+- `VirtualActivityLaunchRequest` can carry the source Activity result route.
+- `VirtualInstrumentation.remapStartActivityIntent(...)` records the source
+  hosted Activity token and `requestCode` when `requestCode >= 0`.
+- Remap evidence now reports `activityResultVerdict=PARTIAL` with
+  `HOST_PROXY_RESULT_ROUTE_RECORDED_DELIVERY_PENDING` when the result route is
+  recorded, rather than claiming full delivery.
+- `VirtualActivityManager.allocateGuestActivity(...)` persists the route into
+  the launch record, and proxy launch intents carry the route for device-path
+  recovery.
+- `VirtualActivityStack` refreshes route metadata when `singleTop`,
+  `singleTask`, or `CLEAR_TOP` reuse an existing Activity record, avoiding
+  stale parent result routes.
+- `EngineActivityTaskStateStore` persists and restores result route metadata.
+- Loader-level `VirtualActivityOperations` now exposes
+  `setActivityResult(...)` and `consumeActivityResult(...)`, and
+  `EngineVirtualActivityOperations` delegates those calls through
+  `VirtualActivityService` first.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualInstrumentationStartActivityEvidenceTest" --tests "com.multiapp.core.loader.VirtualActivityManagerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused loader remap/Activity manager tests passed.
+- Focused engine task-state/system-server tests and `:app:compileDebugKotlin`
+  passed.
+
+Remaining gate for this slice:
+
+- This is still not full Android Activity result delivery. The next Activity
+  slice must capture guest `setResult(...)` on finish, write it to the source
+  token through the engine facade, and prove `onActivityResult` delivery with
+  Android/device evidence before `result-delivery` or `finish-result-delivery`
+  can move out of `UNSUPPORTED`.
+
+## Execution Update - 2026-07-10 Activity Finish Result Record Foundation
+
+This batch follows the VirtualApp-style finish path more closely: the proxy
+runtime reads the finishing Activity's result code/data and records that result
+against the source Activity token through the injected operation facade. It
+does not yet claim framework callback delivery.
+
+Implemented:
+
+- Added `VirtualActivityOperations.recordActivityResultForFinish(...)`.
+- `ManagerBackedVirtualActivityOperations` resolves the finishing child
+  record, verifies `resultToToken/resultRequestCode`, verifies the target token
+  belongs to the same instance, and writes the virtual result to the source
+  record.
+- `EngineVirtualActivityOperations` first attempts the same write through
+  `VirtualActivityService.setActivityResult(...)` and falls back to the local
+  manager when persisted task-state does not yet contain the hot record.
+- `VirtualInstrumentation.markActivityFinishedIfNeeded(...)` now reads
+  `Activity.mResultCode` and `Activity.mResultData` before finishing the child
+  record, then calls the operation facade to record the result.
+- Added `ACTIVITY_FINISH_RESULT` evidence entries with source token redaction,
+  request code, result code, record verdict, and data URI redaction.
+
+Open-source precedent checked:
+
+- VirtualApp `VActivityManager.startActivity(...)` passes `resultTo`,
+  `resultWho`, and `requestCode` into its virtual Activity manager.
+- VirtualApp `VActivityManager.finishActivity(...)` reads `mResultCode` and
+  `mResultData` before ending the Activity.
+- VirtualApp still has a separate `sendActivityResult(...)` path, which maps to
+  MultiApp's remaining `onActivityResult` delivery gap.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualInstrumentationStartActivityEvidenceTest" --tests "com.multiapp.core.loader.VirtualActivityManagerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualActivityRecordManagerTest" --tests "com.multiapp.core.loader.VirtualInstrumentationStartActivityEvidenceTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityRuntimeTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused loader instrumentation/Activity manager tests passed.
+- Focused loader record-manager tests, engine Activity runtime/system-server
+  tests, and `:app:compileDebugKotlin` passed.
+
+Remaining gate for this slice:
+
+- This is still not full Android result callback delivery. The next Activity
+  slice must consume the source record and prove `onActivityResult` delivery.
+- `result-delivery` and `finish-result-delivery` stay `UNSUPPORTED` until that
+  callback bridge has device evidence.
+
+## Execution Update - 2026-07-10 ActivityThread Result Dispatch Bridge
+
+This batch closes the next code-level step in the VirtualApp-style Activity
+result chain: recorded virtual results can now be scheduled back to the source
+Activity through Android's `ActivityThread.sendActivityResult(...)` hidden
+bridge, with a conservative source-`onResume` fallback when the framework
+bridge was not invoked. This is still intentionally recorded as `PARTIAL` until
+device evidence proves the framework callback reaches guest
+`onActivityResult(...)`.
+
+Implemented:
+
+- Added `ActivityThreadCompat.sendActivityResult(...)`, a fail-closed
+  reflection bridge for the AOSP
+  `ActivityThread.sendActivityResult(IBinder, String, int, int, Intent)` path.
+- `VirtualInstrumentation` now keeps a process-local map from virtual Activity
+  token to framework `Activity.mToken` on `onCreate` / `onResume`, and removes
+  it on destroy.
+- When a child Activity finishes, `VirtualInstrumentation` records the virtual
+  result first, then attempts the `ActivityThread` dispatch to the source
+  Activity token if the source framework token is available.
+- `ACTIVITY_FINISH_RESULT` evidence now includes
+  `activityThreadSendActivityResultVerdict`,
+  `activityThreadSendActivityResultAttempted`,
+  `activityThreadSendActivityResultInvoked`, method, reason, and error class.
+- Added focused JVM tests for the `ActivityThreadCompat` bridge and the
+  skip-evidence path when the source framework token is not available.
+- `VirtualActivityResult` now preserves `requestCode`, optional `resultWho`,
+  and framework-dispatch attempted/invoked state, so resume fallback does not
+  lose the information needed to call `onActivityResult(...)`.
+- `EngineActivityTaskStateStore` persists the new result metadata while keeping
+  older state files compatible.
+- `VirtualInstrumentation.callActivityOnResume(...)` now consumes a pending
+  result only when `frameworkDispatchInvoked=false`, then calls the same
+  base-instrumentation result callback bridge and writes
+  `ACTIVITY_RESULT_RESUME_FALLBACK` evidence. If the `ActivityThread` bridge
+  was invoked, fallback leaves the result pending for the framework callback
+  path instead of risking duplicate delivery.
+
+Open-source / platform alignment:
+
+- AOSP `ActivityThread` exposes the hidden `sendActivityResult(...)` scheduling
+  path used for Activity result callback delivery.
+- VirtualApp uses the same concept in `VActivityManager.sendActivityResult(...)`
+  and its AMS start-activity proxy records `resultTo/resultWho/requestCode`.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ActivityThreadCompatTest" --tests "com.multiapp.core.loader.VirtualInstrumentationStartActivityEvidenceTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ActivityThreadCompatTest" --tests "com.multiapp.core.loader.VirtualInstrumentationStartActivityEvidenceTest" --tests "com.multiapp.core.loader.VirtualActivityRecordManagerTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.EngineActivityRuntimeTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused loader bridge and instrumentation evidence tests passed.
+- Focused loader Activity record-manager tests, engine task-state/runtime/
+  system-server tests, and `:app:compileDebugKotlin` passed.
+
+Remaining gate for this slice:
+
+- `result-delivery` and `finish-result-delivery` must remain unsupported in the
+  engine capability matrix until device evidence shows either
+  `activityThreadSendActivityResultVerdict=PARTIAL` followed by
+  `ACTIVITY_RESULT_DELIVERY`, or `ACTIVITY_RESULT_RESUME_FALLBACK`, and also
+  confirms the source guest Activity callback was actually invoked.
+- The current virtual-token-to-framework-token map is process-local. Process
+  death and cross-process Activity result routes still need a durable/IPC route
+  before this can be treated as commercial-grade Activity result semantics.
+
+## Execution Update - 2026-07-10 App Container Engine Boundary
+
+This batch advances the P0-A architecture boundary: production `:app` container
+code no longer directly imports or declares implementation dependencies on the
+loader/hook/identity runtime primitives for Provider route-token validation,
+AMS/Broadcast evidence recorder installation, and hosted bootstrap result
+summaries. These paths now go through `:core:engine` DTOs/facades.
+
+Implemented:
+
+- Added `EngineProviderRouteTokenGate` in `:core:engine`.
+  `StubContentProvider` now validates route tokens and canonicalizes proxy URIs
+  through the engine facade instead of importing `ProviderRouteTokenRegistry`
+  from `:core:identity`.
+- Removed the app-local `ProviderRouteTokenGate`.
+- Strengthened `EngineBoundaryTest` to fail on new production app imports or
+  fully-qualified usage of `core.loader`, `core.hook`, `core.xposed`, or
+  `core.identity` runtime APIs.
+- Removed `:core:loader`, `:core:hook`, and `:core:identity` from `app`
+  `implementation` dependencies. Unit/android tests keep explicit test-scoped
+  dependencies where they still construct legacy fixtures.
+- Converted engine-exposed hosted bootstrap summary and native diagnostics into
+  engine DTOs (`EngineBootstrapSummary`, `EngineNativeDiagnosticsSummary`) so
+  app production compile no longer needs loader/hook DTOs just to consume
+  `EngineHostedBootstrapResult`.
+- Made `EngineAmsApiEvidenceRecorder` and `EngineBroadcastRecorder` pure engine
+  interfaces. `EngineRuntimeInstallers` adapts them to loader recorder
+  interfaces internally.
+- Hid loader-backed `VirtualActivityRecordManager` constructor parameters from
+  the app-facing constructors of `EngineActivityProxyLauncher`,
+  `EngineProxyActivityRecords`, and `EngineActivityTaskRecords`.
+
+Verification:
+
+```powershell
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --tests "com.multiapp.app.container.StubContentProviderRouteTokenTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineHostedBootstrapResultTest" --tests "com.multiapp.core.engine.EngineActivityRuntimeTest" --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.ActivityThreadCompatTest" --tests "com.multiapp.core.loader.VirtualInstrumentationStartActivityEvidenceTest" --tests "com.multiapp.core.loader.VirtualActivityRecordManagerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `:app:compileDebugKotlin` passed without app production implementation
+  dependencies on `:core:loader`, `:core:hook`, or `:core:identity`.
+- Focused app boundary/provider-token tests passed.
+- Focused engine hosted-bootstrap/activity-runtime/task-state/system-server
+  tests and focused loader Activity result tests passed.
+
+Remaining gate for this slice:
+
+- This does not close the commercial engine BLOCK. Tests still use some legacy
+  loader fixtures, and device evidence is still required for LoadedApk,
+  Provider preinstall, Activity result delivery, recents, Service/Broadcast,
+  and native behavior.
+- `:app` still has real Android stub/proxy components by design; those
+  components should continue calling engine facades only.
+
+## Execution Update - 2026-07-10 Broadcast Engine Route Foundation
+
+This batch starts moving Broadcast from loader-only process-local dispatch
+toward the engine-owned `VirtualSystemServer` route model used by
+VirtualApp/BlackBox-style runtimes. It does not instantiate guest receivers or
+claim ordered/sticky/result semantics.
+
+Implemented:
+
+- Extended `VirtualBroadcastService` with engine-facing broadcast route and
+  dispatch evidence APIs:
+  - `planBroadcast(instanceId, VirtualBroadcastDispatchPlanRequest)`
+  - `recordBroadcastDispatch(instanceId, VirtualBroadcastOperationResult)`
+- Added pure engine DTOs for broadcast route planning and dispatch evidence,
+  keeping loader `VirtualBroadcastResult` types out of app/feature contracts.
+- `RegistryBackedVirtualBroadcastService` now resolves explicit receivers and
+  implicit manifest receivers from `VirtualPackageSnapshot` through
+  `VirtualPackageService`, preserving action/category/data matching and
+  manifest priority ordering.
+- Broadcast route plans include `processSlot`, optional component process
+  name, target receivers, verdict, supported operations, unsupported
+  operations, and engine operation evidence.
+- Ordered, sticky, result-receiver, and abort semantics return explicit
+  `UNSUPPORTED` instead of being hidden behind a best-effort dispatch path.
+- Missing runtime and missing explicit receiver fail closed.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `VirtualSystemServerTest` passed, including missing-runtime
+  fail-closed behavior, explicit receiver route planning, implicit receiver
+  priority ordering, unsupported ordered/sticky/result/abort semantics, and
+  dispatch evidence recording.
+
+Remaining gate for this slice:
+
+- This is route planning and evidence only. Real `BroadcastReceiver.onReceive`,
+  PendingResult lifecycle, ordered broadcast chain, sticky cache,
+  permission checks, result callbacks, abort/result extras, cross-process
+  receiver routing, and device evidence remain open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Provider Authorization and Baseline Resolver
+
+Provider execution now has a caller-aware authorization gate and an API 29+
+baseline resolver path that does not require LSPlant for normal data-plane
+operations.
+
+Implemented:
+
+- Route-token validation now obtains `callerInstanceId` from the unguessable
+  token while validating target instance, authority, operation, expiry, and
+  process slot. It no longer infers the caller from URI parameters.
+- `StubContentProvider` captures the original Provider Binder UID/PID before
+  nested engine calls. Provider plan IPC carries caller/target instance,
+  original UID/PID, host UID, caller slot, access mode, and token-verification
+  state; the engine endpoint independently records its own Binder UID/PID.
+- Engine authorization rejects missing/unverified tokens, target/caller
+  mismatch, external UID, known PID mismatch, caller-slot mismatch, and
+  cross-instance access to non-exported providers.
+- Query/read, mutation/write, and file-mode (`r` versus `w/rw`) permission
+  requirements are evaluated separately. Same-instance access follows Android
+  self-access behavior. Cross-instance permission/AppOps access remains
+  fail-closed `UNSUPPORTED` until virtual permission and AppOps stores exist.
+- Provider read/write permissions now remain visible in engine dispatch
+  evidence instead of collapsing into one permission string.
+- `VirtualContextWrapper.getContentResolver()` now uses an engine-installed
+  factory. On API 29+, `ContentResolver.wrap(ContentProvider)` routes guest
+  CRUD, call, canonicalization, and file operations through
+  `EngineRoutingContentProvider -> EngineProviderDispatcher`.
+- Non-guest authorities such as Settings, MediaStore, and Contacts are
+  delegated to the host resolver, so the guest resolver does not swallow
+  system providers.
+- Added an engine-installed `IContentService` proxy for
+  `registerContentObserver`, `notifyChange`, and unregister. Observer routes
+  are stable across operations and intentionally omit expiring provider route
+  tokens; all unrelated content-service methods pass through unchanged.
+- The legacy LSPlant compatibility hook now uses the same stable observer URI,
+  preventing register and notify from diverging because each operation issued
+  a different token.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:identity:compileDebugKotlin :core:engine:compileDebugKotlin :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.EngineProviderIpcServiceTest" :core:identity:testDebugUnitTest --tests "com.multiapp.core.identity.ContentProviderHookUriRewriteTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualContentServiceProxyTest" --tests "com.multiapp.core.loader.VirtualContextWrapperTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineVirtualContentResolverTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Identity, loader, engine, app compilation, caller authorization, stable
+  observer routing, guest/system resolver split, and app boundary tests passed.
+
+Remaining gate:
+
+- API 28 still uses the existing fallback because `ContentResolver.wrap` was
+  added in API 29.
+- The hidden `ContentResolver.sContentService` proxy requires API 30-36 device
+  evidence across AOSP and HyperOS; local reflection/unit tests are not device
+  proof.
+- At this point URI grant/revoke, cross-package authority ownership,
+  `applyBatch`, `refresh`, and path policy were still open; later 2026-07-10
+  updates below supersede those items. Persistable grants and custom Provider
+  processes remain open.
+- Observer behavior is `PARTIAL` until device evidence proves exact URI,
+  descendant, self-change, flags, user, and process-death behavior.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Base/Public Resources and Provider Permission Fidelity
+
+The package snapshot now keeps code and public resource paths distinct through
+Activity identity, Context, Resources, and launch-record patching. Provider
+permission facts are no longer collapsed into one synthetic string.
+
+What changed:
+
+- `publicSourceDir` and split public resource paths remain independent from
+  code paths across `ApplicationInfo`, Resources, Activity identity, and
+  launch-record patching.
+- Provider `permission`, `readPermission`, and `writePermission` survive XML
+  and PackageManager parsing, binary manifest generation, install-record JSON,
+  snapshot creation, VPMS `ProviderInfo`, engine route targets, and policy
+  evidence.
+- When live manifest resolution is unavailable, snapshot creation falls back
+  to persisted install-record components instead of returning empty component
+  lists.
+- Focused model, manifest, loader, engine, and app boundary tests passed.
+
+### Still BLOCK
+
+- Provider permission/AppOps enforcement, caller virtual UID ownership, URI
+  grants, observers, and `notifyChange` remain incomplete.
+- `isolatedSplits` remains explicit `UNSUPPORTED`; resource path fidelity does
+  not implement isolated split dependency graphs.
+- Device evidence is still required for split Resources and Provider access.
+
+## Execution Update - 2026-07-10 Typed PMS Metadata and Signing Identity
+
+Snapshot-backed PMS identity now owns typed manifest metadata and signer
+digests instead of reducing metadata to strings and relying only on late
+`LoaderFactory` signature patches.
+
+What changed:
+
+- A pure-model `VirtualMetaDataValue` preserves String, Boolean, Int, Long,
+  Float, Double, and resource values.
+- Application and component metadata survive Manifest parsing, PackageManager
+  type enrichment, install-record JSON, package snapshots, and file-backed
+  engine runtime restoration.
+- VPMS converts typed values to corresponding Android `Bundle` value types;
+  legacy string metadata remains a backward-compatible fallback.
+- Install metadata records signer SHA-256 identity and multiple-signer state.
+  Existing signer identity is retained if a later metadata refresh cannot read
+  certificates.
+- VPMS reparses the immutable snapshot APK for `signatures` and `signingInfo`,
+  and rejects the result when its signer digest set does not match snapshot
+  identity.
+- Focused install-store, manifest, snapshot, signer-resolver, runtime-state,
+  engine, app compile, and boundary tests passed.
+
+This follows the AOSP package-manager shape: framework `PackageInfo` objects
+are reconstructed at the Android boundary from engine-owned package truth.
+
+### Still BLOCK
+
+- VPMS does not yet own `checkSignatures`, `hasSigningCertificate`, shared UID,
+  key-rotation capability checks, or installer signing identity.
+- Signing scheme version and full lineage capabilities are recovered from the
+  APK, not persisted as an engine-native signing model.
+- Device gates must prove `GET_SIGNATURES`, `GET_SIGNING_CERTIFICATES`, typed
+  Bundle values, and process-death restoration on API 28-36.
+- This is not evidence that QQ, WeChat, QQ Reader, or protected apps are
+  compatible.
+
+## Execution Update - 2026-07-10 Service Engine Route Foundation
+
+This batch applies the same engine-first route model to Service dispatch. It
+keeps loader `VirtualServiceManager` / `VirtualServiceRuntime` as execution
+primitives, but adds an engine-owned plan/result/evidence surface so app and
+feature layers have a central `VirtualSystemServer` contract to consume.
+
+Implemented:
+
+- Extended `VirtualServiceService` with:
+  - `planService(instanceId, VirtualServiceDispatchPlanRequest)`
+  - `recordServiceDispatch(instanceId, VirtualServiceOperationResult)`
+- Added pure engine DTOs for Service operation planning and dispatch evidence,
+  without exposing loader `VirtualServiceDispatchResult` types.
+- `RegistryBackedVirtualServiceService` now resolves explicit and implicit
+  Service routes from `VirtualPackageSnapshot` through `VirtualPackageService`.
+- Explicit Service names are normalized the same way as Android component
+  names (`.SyncService`, `SyncService`, and fully-qualified names).
+- Implicit Service routes use VPMS intent-filter matching and choose the
+  highest-priority target, matching the single-target Service resolution shape.
+- Service route plans include `processSlot`, optional service process name,
+  operation, foreground flag, target service, verdict, supported operations,
+  unsupported operations, and engine operation evidence.
+- `BIND` / `UNBIND`, foreground service type mapping, and sticky restart
+  semantics return explicit `UNSUPPORTED`.
+- Missing runtime and missing Service target fail closed.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `VirtualSystemServerTest` passed, including Service missing-runtime
+  fail-closed behavior, explicit start route planning, implicit priority
+  resolution, explicit stop route planning, unsupported bind/foreground-type/
+  sticky semantics, and dispatch evidence recording.
+
+Remaining gate for this slice:
+
+- This is route planning and evidence only. It does not yet prove real Android
+  `startService`/`stopService`/`bindService` lifecycle parity, foreground
+  notification/type mapping, sticky restart behavior, cross-process Service
+  delivery, or device behavior.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Service Dispatcher Consumes Engine Plan
+
+This batch wires the Service route foundation into the container dispatcher
+path. `StubService` still calls the app-facing engine dispatcher, but the
+dispatcher now uses `VirtualServiceService` as the gate before falling through
+to loader execution primitives.
+
+Implemented:
+
+- `DefaultEngineServiceDispatcher` now calls
+  `VirtualServiceService.planService(...)` before invoking loader
+  `VirtualServiceDispatcher`.
+- Engine plan verdicts now gate Service dispatch:
+  - `PASS` / `PARTIAL`: proceed to loader execution.
+  - `FAIL` with `runtime_not_found`: return `RuntimeNotBound` without loader
+    dispatch.
+  - Other `FAIL` or `UNSUPPORTED`: return an engine `Unsupported` dispatch
+    result without loader dispatch.
+- Loader execution results are converted back into
+  `VirtualServiceOperationResult` and recorded through
+  `VirtualServiceService.recordServiceDispatch(...)`.
+- Added focused tests proving:
+  - `DefaultEngineServiceDispatcher` records both `service/plan` and
+    `service/dispatch` engine evidence.
+  - Loader dispatch is not invoked when the engine plan fails.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `EngineContainerDispatchersTest` passed.
+
+Remaining gate for this slice:
+
+- This still uses loader primitives for actual guest Service execution. Real
+  `bindService`, foreground notification/type mapping, sticky restart,
+  started+bound destruction policy, cross-process Service routing, and device
+  evidence remain open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Provider Engine Route Foundation
+
+This batch starts moving Provider routing from app/loader-local dispatch into
+the engine-owned `VirtualSystemServer` control plane. It is route planning and
+evidence gating, not full Android Provider parity.
+
+Implemented:
+
+- `VirtualProviderService` now exposes:
+  - `planProvider(instanceId, VirtualProviderDispatchPlanRequest)`
+  - `recordProviderDispatch(instanceId, VirtualProviderOperationResult)`
+- Added pure engine DTOs for Provider route targets, route plans, and dispatch
+  operation evidence without exposing loader `VirtualProviderDispatchResult`
+  types as engine service contracts.
+- `RegistryBackedVirtualProviderService` resolves Provider authorities from
+  `VirtualPackageSnapshot` through `VirtualPackageService`.
+- Provider route plans carry `processSlot`, provider process name, authority,
+  permission/readPermission/writePermission, grant-URI flag, route-token
+  presence, supported operations, unsupported operations, and verdict.
+- Missing runtime, process-slot mismatch, unknown operation, and missing
+  Provider target fail closed or return explicit `UNSUPPORTED`.
+
+## Execution Update - 2026-07-10 Provider Dispatcher Engine Gate
+
+This batch wires the Provider route foundation into the container dispatcher
+path. `StubContentProvider` still calls the app-facing engine dispatcher, but
+the dispatcher now asks `VirtualProviderService` for a plan before falling
+through to loader execution primitives.
+
+Implemented:
+
+- `EngineProviderDispatchRequest` now carries `operationName`, so engine
+  evidence can distinguish `query`, `insert`, `openFile`, `notifyChange`, and
+  other Provider operations.
+- `DefaultEngineProviderDispatcher` now calls
+  `VirtualProviderService.planProvider(...)` before invoking loader
+  `VirtualProviderDispatcher`.
+- Engine plan verdicts gate Provider dispatch:
+  - `PASS` / `PARTIAL`: proceed to loader execution.
+  - `FAIL` / `UNSUPPORTED`: fail closed without loader dispatch.
+- Loader execution results are converted into
+  `VirtualProviderOperationResult` and recorded through
+  `VirtualProviderService.recordProviderDispatch(...)`.
+- `StubContentProvider` passes the operation name into the engine dispatcher.
+- Added focused tests proving:
+  - Provider dispatcher records both `provider/plan` and `provider/dispatch`
+    evidence.
+  - Loader dispatch is not invoked when the engine plan fails.
+  - Provider service covers missing runtime, authority route planning,
+    process-slot mismatch, unknown operation, and dispatch evidence recording.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `VirtualSystemServerTest` and `EngineContainerDispatchersTest`
+  passed.
+- `:app:compileDebugKotlin` and `EngineBoundaryTest` passed.
+- Existing AGP 8.7.3 / `compileSdk=36` compatibility warning remains.
+
+Remaining gate for this slice:
+
+- This still uses loader primitives for actual guest Provider creation and
+  method execution after engine gating.
+- URI grants, `ContentObserver`, `notifyChange`, custom Provider process
+  delivery, permission enforcement, real return-value behavior, split Provider
+  loading, and device evidence remain open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Broadcast Dispatcher Engine Gate
+
+This batch wires the Broadcast route foundation into the actual hosted
+Context dispatch path. `VirtualContextWrapper.sendBroadcast(...)` still lives
+in `:core:loader`, but its default AMS dispatcher can now be replaced by an
+engine-installed dispatcher factory without making loader depend on engine.
+
+Implemented:
+
+- Added `VirtualAmsComponentDispatchers` in `:core:loader` as a small
+  installable dispatcher factory extension point.
+- `VirtualContextWrapper` now builds the existing
+  `DefaultVirtualAmsComponentDispatcher` as a fallback, then lets an installed
+  factory wrap it.
+- Added `DefaultEngineAmsComponentDispatcher` in `:core:engine`.
+  - Activity and Service operations delegate to the fallback dispatcher for
+    this slice.
+  - Broadcast dispatch first calls `VirtualBroadcastService.planBroadcast(...)`.
+  - `PASS` / `PARTIAL`: proceed to fallback loader dispatch.
+  - `FAIL` / `UNSUPPORTED`: fail closed and do not call the fallback loader
+    dispatch.
+  - Loader Broadcast results are converted into
+    `VirtualBroadcastOperationResult` and recorded through
+    `VirtualBroadcastService.recordBroadcastDispatch(...)`.
+- `EngineRuntimeInstallers.installAmsComponentDispatcher()` installs the
+  engine-aware dispatcher factory during app startup.
+- Added focused tests proving:
+  - Broadcast dispatcher records both `broadcast/plan` and
+    `broadcast/dispatch` engine evidence.
+  - Fallback loader dispatch is not invoked when the engine plan fails.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused engine tests passed.
+- `:app:compileDebugKotlin` and `EngineBoundaryTest` passed.
+- Existing AGP 8.7.3 / `compileSdk=36` compatibility warning remains.
+
+Remaining gate for this slice:
+
+- This is still not complete `VBroadcast` parity. Ordered/sticky broadcasts,
+  result receiver chains, permissions, abort/result extras, cross-process
+  receiver process routing, Android `PendingResult` behavior, and device
+  evidence remain open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Service AMS Dispatcher Engine Gate
+
+This batch extends the engine-installed AMS dispatcher wrapper from Broadcast
+to the guest Context Service path. It moves `startService`,
+`startForegroundService`, and `bindService` decisions closer to the engine
+service plan instead of letting the loader path make the first decision.
+
+Implemented:
+
+- `DefaultEngineAmsComponentDispatcher.resolveStartServiceIntent(...)` now
+  builds a `VirtualServiceDispatchPlanRequest` from the source `Intent` and
+  calls `VirtualServiceService.planService(...)` before using the loader
+  fallback remapper.
+- `START` / `START_FOREGROUND` plans gate service remapping:
+  - `PASS` / `PARTIAL`: proceed to the fallback remapper that creates the host
+    proxy Service intent.
+  - `FAIL` / `UNSUPPORTED`: return `StartServiceMappingResult.Blocked`, record
+    engine service dispatch evidence, and do not call the fallback remapper.
+- `DefaultEngineAmsComponentDispatcher.dispatchBindService(...)` now calls
+  `VirtualServiceService.planService(...)` with operation `BIND` before loader
+  bind execution.
+- Because `BIND` is still explicitly unsupported by the current engine service
+  model, `bindService` now fails closed through the engine wrapper instead of
+  silently invoking loader bind primitives.
+- Added focused tests proving:
+  - `startService` route planning happens before fallback remap.
+  - `bindService` does not call loader fallback when the engine plan returns
+    `UNSUPPORTED`.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused engine tests passed.
+
+Remaining gate for this slice:
+
+- `stopService` and `unbindService` are not fully engine-gated in this slice.
+- Real started+bound Service lifecycle parity, foreground notification/type
+  mapping, sticky restart, cross-process Service delivery, and device evidence
+  remain open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Service Stop/Unbind AMS Dispatcher Follow-up
+
+This follow-up closes the remaining obvious bypass in the engine-installed
+AMS dispatcher wrapper: guest Context `stopService(...)` and
+`unbindService(...)` now ask the engine service plan before loader fallback
+execution.
+
+Implemented:
+
+- `DefaultEngineAmsComponentDispatcher.dispatchStopService(...)` now builds a
+  `VirtualServiceDispatchPlanRequest(operation = STOP)` and calls
+  `VirtualServiceService.planService(...)` before invoking loader stop
+  dispatch.
+- `STOP` plans gate loader dispatch:
+  - `PASS` / `PARTIAL`: proceed to loader stop execution.
+  - `FAIL` / `UNSUPPORTED`: fail closed, record engine service dispatch
+    evidence, and do not call loader fallback.
+- Loader stop results are converted into `VirtualServiceOperationResult` and
+  recorded through `VirtualServiceService.recordServiceDispatch(...)`.
+- `DefaultEngineAmsComponentDispatcher.dispatchUnbindService(...)` now calls
+  `VirtualServiceService.planService(...)` with operation `UNBIND`.
+- Because `UNBIND` is still part of the current unsupported bind-service
+  semantics, the engine wrapper fails closed and records `UNSUPPORTED`
+  dispatch evidence instead of silently invoking loader unbind primitives.
+- `VirtualServiceOperationResult` now records `stopped` and `unbound` fields so
+  Service dispatch evidence can distinguish start/bind from stop/unbind.
+- Added focused tests proving:
+  - `stopService` is planned through engine before loader fallback.
+  - loader stop fallback is not called when the engine plan fails.
+  - `unbindService` fails closed as `UNSUPPORTED` before loader fallback.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `EngineContainerDispatchersTest` passed.
+- `:app:compileDebugKotlin`, `EngineBoundaryTest`, focused
+  `EngineContainerDispatchersTest`, and focused `VirtualSystemServerTest`
+  passed.
+- Existing AGP 8.7.3 / `compileSdk=36` compatibility warning remains.
+
+Remaining gate for this slice:
+
+- `bindService` / `unbindService` remain deliberately `UNSUPPORTED` in the
+  engine service model until a real bound-service lifecycle and connection
+  state model is implemented.
+- Loader primitives still execute actual guest Service lifecycle after engine
+  gating.
+- Foreground notification/type mapping, sticky restart, started+bound
+  destruction policy, cross-process Service delivery, and device evidence
+  remain open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Activity AMS Dispatcher Engine Gate
+
+This slice wires guest Context `startActivity(...)` and
+`startActivities(...)` through the engine-installed AMS dispatcher wrapper
+before loader proxy-record allocation. It is a route-planning and evidence
+gate, not a full VAMS/ATM implementation.
+
+Implemented:
+
+- Added `VirtualActivityService.planActivity(...)` and
+  `recordActivityDispatch(...)`.
+- Activity route planning is backed by `VirtualPackageSnapshot` through
+  `VirtualPackageService`, so explicit and implicit Activity targets are
+  checked by the central engine snapshot before loader fallback.
+- Activity plans record target Activity, action, target package, launch flags,
+  process slot, supported operations, unsupported operations, and verdict.
+- `DefaultEngineAmsComponentDispatcher.resolveStartActivityIntent(...)` now
+  calls `VirtualActivityService.planActivity(...)` before invoking loader
+  fallback remap.
+- `DefaultEngineAmsComponentDispatcher.resolveStartActivityIntents(...)` now
+  plans the batch first and fails closed before loader fallback if any member
+  cannot be planned.
+- Loader remap/block results are converted into
+  `VirtualActivityDispatchResult` and recorded as `activity/dispatch`
+  evidence.
+- Added focused tests proving:
+  - `startActivity` is planned through engine before loader fallback remap.
+  - loader fallback is not called when the engine Activity plan fails.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused `EngineContainerDispatchersTest` and focused
+  `VirtualSystemServerTest` passed.
+- `:app:compileDebugKotlin`, `EngineBoundaryTest`, focused
+  `EngineContainerDispatchersTest`, and focused `VirtualSystemServerTest`
+  passed.
+- Existing AGP 8.7.3 / `compileSdk=36` compatibility warning remains.
+
+Remaining gate for this slice:
+
+- Loader primitives still allocate proxy records and create proxy intents
+  after engine gating.
+- Full `launchMode`, `taskAffinity`, `onNewIntent`, result delivery, finish,
+  recents/task behavior, process-death recovery, and device evidence remain
+  open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Activity Launch Task-State Sync
+
+This follow-up removes a launch-time state split between loader proxy-record
+allocation and the engine task-state store. After a successful Activity remap,
+the engine now snapshots the shared hot Activity records immediately instead
+of waiting for a later lifecycle callback or manual persistence step.
+
+Implemented:
+
+- Added `VirtualActivityService.syncActivityTaskState(instanceId, reason)`.
+- The registry-backed implementation validates the active runtime, reads the
+  shared `VirtualActivityRecordManager`, requires at least one record owned by
+  the requested instance, and persists the complete task snapshot through
+  `EngineActivityTaskStateStore`.
+- `DefaultEngineAmsComponentDispatcher` calls task-state sync after successful
+  `startActivity(...)` and `startActivities(...)` remaps.
+- Failed or blocked Activity plans do not write an empty task snapshot.
+- Added tests proving hot loader records become visible through engine
+  `queryTaskState(...)` and successful remap invokes the sync path.
+
+Verification:
+
+```powershell
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `:app:compileDebugKotlin`, `EngineBoundaryTest`, focused
+  `EngineContainerDispatchersTest`, and focused `VirtualSystemServerTest`
+  passed.
+
+Remaining gate for this slice:
+
+- Loader still allocates the proxy slot and creates the initial hot Activity
+  record; this follow-up synchronizes that result into engine-owned durable
+  state but does not yet make engine ActivityStack the allocator.
+- Same-origin multi-instance recents, process-death task restoration, and full
+  Android task/result behavior still require device evidence.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Multi-Instance Activity Task Merge
+
+This slice hardens the Activity task-state store for same-origin instances in
+different virtual process slots. A process-local task snapshot can no longer
+replace the complete persisted snapshot and silently remove sibling-instance
+tasks.
+
+Implemented:
+
+- Added `EngineActivityTaskStateStore.mergeInstance(...)`.
+- Instance merge removes and replaces only records owned by the requested
+  instance while preserving sibling-instance activities and tasks.
+- Tasks sharing the same task id and affinity are merged without mixing
+  unrelated instance records.
+- `FileBackedEngineActivityTaskStateStore` now serializes save/load/merge/clear
+  with a shared in-process monitor and an OS file lock for virtual-process
+  coordination.
+- Activity launch sync, lifecycle mutations, result consumption, pending
+  `onNewIntent` consumption, and `EngineActivityTaskController.persist(...)`
+  now use instance-level merge instead of whole-file replacement.
+- Added regression tests with independent file-store objects proving an update
+  for instance A preserves instance B and replaces only A's previous record.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused Activity store/server/dispatcher tests passed.
+- `:app:compileDebugKotlin` and `EngineBoundaryTest` passed.
+
+Remaining gate for this slice:
+
+- File locking and instance merge protect the persisted model, but Android
+  recents separation still depends on real proxy components, task affinity,
+  document/task flags, and device behavior.
+- Multi-process kill/restart concurrency still needs device stress evidence.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 File-Backed Activity Hot Path Wiring
+
+The app startup hot path now uses the same file-backed engine runtime and
+Activity task stores as `DefaultVirtualizationEngine`. This fixes an internal
+configuration split where Activity route dispatch used an in-memory task store
+while engine launch/evidence used the durable file store.
+
+Implemented:
+
+- `EngineRuntimeInstallers.installAmsComponentDispatcher(context)` creates one
+  file-backed `VirtualSystemServer` and injects its Activity, Service, and
+  Broadcast services into the dispatcher wrapper.
+- `EngineRuntimeInstallers.installInstrumentation(context)` now creates
+  Activity operations with the same `filesDir`-backed runtime/task stores.
+- `MultiAppApplication` passes the application context to both installers.
+- Dispatcher launch sync, Instrumentation lifecycle/result updates, engine
+  runtime queries, and evidence export now target the same persisted files.
+
+Verification:
+
+```powershell
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityTaskStateStoreTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Combined app compile/boundary and focused engine tests passed.
+
+Remaining gate for this slice:
+
+- This unifies the current process-local adapters around one durable store; it
+  is not yet an engine-server Binder IPC boundary.
+- Device evidence must prove all `:vN` processes observe and merge the same
+  task state without stale runtime restoration.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Engine-Owned Activity Launch Allocation
+
+The Activity launch hot path now lets the engine coordinator allocate the
+proxy slot and initial virtual Activity record after central route planning.
+The loader remains the framework primitive provider, but it no longer owns the
+launch decision when the engine dispatcher is installed.
+
+Implemented:
+
+- Added `EngineActivityLaunchCoordinator` to consume a
+  `VirtualActivityDispatchPlan`, validate instance/process-slot ownership,
+  allocate the proxy component, register the launch record, and create the
+  proxy Intent.
+- `DefaultEngineAmsComponentDispatcher` now uses the coordinator for single and
+  batch Activity remaps; the loader dispatcher is retained only as an adapter
+  fallback when no engine coordinator is installed.
+- The coordinator uses the process-slot-specific proxy pool and the persisted
+  proxy-slot assignment store.
+- Instance or process-slot mismatch fails closed before a record is allocated.
+- Activity dispatch evidence distinguishes engine-owned remaps from legacy
+  loader fallback remaps.
+- Added focused tests for engine allocation and process-slot mismatch.
+
+Verification:
+
+```powershell
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityRuntimeTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- App compile/boundary and focused Activity dispatcher/runtime/server tests
+  passed.
+
+Remaining gate for this slice:
+
+- Batch Activity mapping now rolls back earlier records and slot assignments if
+  a later member fails. Rollback after Android framework dispatch itself throws
+  is still open.
+- Android recents/task identity, process-death restoration, and simultaneous
+  same-origin instances still require device evidence.
+- This is still a file-backed in-process coordinator, not a dedicated Binder
+  virtual system server.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Activity Mapping Transaction Rollback
+
+Engine-owned Activity mapping now has rollback semantics for both a single
+allocation failure and a partially allocated `startActivities(...)` batch.
+
+Implemented:
+
+- Added `VirtualActivityRecordManager` state snapshots covering tasks, records,
+  last launch result, and original guest Intent cache.
+- Added compare-and-set restoration for persisted proxy-slot assignments.
+- `EngineActivityLaunchCoordinator.remap(...)` restores manager and slot state
+  when record or proxy Intent creation fails.
+- `remapBatch(...)` restores the complete pre-batch state and returns a blocked
+  result for every member when any member fails.
+- Added regression tests for record/task/slot rollback and conditional slot
+  restoration.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:model:testDebugUnitTest --tests "com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStoreTest" :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualActivityRecordManagerTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityRuntimeTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Focused model, loader, and engine transaction tests passed.
+
+Remaining gate:
+
+- This covers mapping-time failure. A failure from the real Android
+  `Context.startActivities(...)` call still needs an engine abort callback.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Cross-Process Runtime State Hardening
+
+The file-backed runtime registry now behaves as a shared recoverable state
+source instead of a per-process cache that never observes sibling updates.
+
+Implemented:
+
+- Runtime state reads/writes/removals use a shared process monitor and OS file
+  lock.
+- Writes use same-directory temporary files, fsync, and atomic replace where
+  supported.
+- `putIfNewer(...)` rejects lower `runtimeEpoch` writes.
+- `removeIfEpoch(...)` prevents a stale stop request from deleting a newer
+  launch session.
+- `EngineRuntimeRegistry.get(...)` reconciles its cache with durable state on
+  every query and observes sibling-process updates and removals.
+- Runtime evidence refresh preserves operation evidence only within the same
+  engine/evidence session.
+- Added concurrent multi-store, stale-writer, cross-registry refresh, and
+  cross-registry stop tests.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineRuntimeStateStoreTest" --tests "com.multiapp.core.engine.EngineRuntimeRegistryTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Runtime state/registry/server tests, app compile, and `EngineBoundaryTest`
+  passed.
+
+Remaining gate:
+
+- File-backed coordination is an interim recovery layer, not a VirtualApp-style
+  Binder-owned virtual system server.
+- Operation evidence and ordered mutation ownership are still process-local.
+- Device process-death and simultaneous `:vN` stress evidence remain required.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 BinderProvider Engine Authority Foundation
+
+MultiApp now has a real main-process Binder publication path modeled after the
+VirtualApp BinderProvider/service-manager bootstrap pattern. Durable files
+remain the cold-start recovery layer, while online virtual processes can query
+one main-process runtime authority.
+
+Implemented:
+
+- Added `IEngineRuntimeService.aidl` in `:core:engine`.
+- Added a same-UID Binder endpoint for runtime query, evidence query, operation
+  evidence submission, and epoch-conditional stop.
+- Added `EngineBinderProvider` in the host main process with a fixed private
+  authority; it is non-exported and has no virtual-process assignment.
+- `MultiAppApplication` acquires the Binder through `ContentResolver.call(...)`
+  in every process and installs the IPC evidence sink when available.
+- Activity, Provider, and Service runtime binders validate authoritative
+  runtime existence, epoch, live state, and expected process slot before guest
+  bootstrap. A connected authority fails closed; an unavailable authority may
+  use the durable recovery fallback.
+- Added pure authority-verdict tests and a structured Manifest security test.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:compileDebugKotlin :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineRuntimeAuthorityValidatorTest" --tests "com.multiapp.core.engine.EngineRuntimeRegistryTest" :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --tests "com.multiapp.app.container.HostedActivityRuntimeBinderTest" --tests "com.multiapp.app.container.HostedProviderRuntimeBinderTest" --tests "com.multiapp.app.container.HostedServiceRuntimeBinderTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:testDebugUnitTest --tests "com.multiapp.app.EngineBinderProviderManifestTest" --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- AIDL/core/app compilation, authority/registry tests, hosted component binder
+  tests, app boundary, and Manifest security tests passed.
+
+Remaining gate:
+
+- Package snapshot and Activity/Provider/Service/Broadcast mutation ownership
+  are not yet fully remote; local engine adapters still execute those
+  primitives after authoritative runtime validation.
+- Binder death/reconnect and device evidence for every `:vN` process remain
+  open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Binder-Owned Activity Route Planning
+
+Activity route planning and dispatch evidence now use the main-process Binder
+authority. This is the first engine subsystem following the target split:
+server owns policy and package resolution, virtual client owns framework
+execution and guest lifecycle primitives.
+
+Implemented:
+
+- Extended `IEngineRuntimeService` with Activity plan and dispatch-evidence
+  operations.
+- Added Bundle codecs for Activity plan requests, targets, plans, and dispatch
+  results.
+- `EngineRuntimeBinderEndpoint` delegates route planning to the main-process
+  `VirtualActivityService`, which resolves components from the authoritative
+  runtime package snapshot.
+- Added `IpcBackedVirtualActivityService`: remote planning/evidence is used when
+  Binder is connected; durable local planning is allowed only when Binder is
+  unavailable; malformed connected responses fail closed.
+- `EngineRuntimeInstallers` injects the IPC-backed Activity service into the
+  AMS dispatcher while lifecycle/task primitives stay in the owning virtual
+  process.
+- Added tests proving remote ownership, fail-closed connected behavior,
+  durable fallback, and remote evidence ownership.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:compileDebugKotlin :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityIpcServiceTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --tests "com.multiapp.core.engine.EngineRuntimeAuthorityValidatorTest" :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- AIDL/core/app compilation and focused IPC/dispatcher/boundary tests passed.
+
+Remaining gate:
+
+- Activity lifecycle/result/task mutation is not fully Binder-owned yet.
+- Provider, Service, and Broadcast route planning still need the same remote
+  authority migration.
+- Binder reconnect and device multi-process evidence remain open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Binder-Owned Component Route Planning
+
+Provider, Service, and Broadcast now follow the same server-policy/client-
+execution split as Activity. All four component families resolve targets and
+aggregate dispatch evidence in the main-process engine authority.
+
+Implemented:
+
+- Extended `IEngineRuntimeService` with Provider, Service, and Broadcast
+  plan/result operations.
+- Added Bundle codecs for each request, target, plan, and operation result.
+- Added IPC-backed `VirtualProviderService`, `VirtualServiceService`, and
+  `VirtualBroadcastService` adapters.
+- Wired StubContentProvider, StubService, and Context AMS dispatch to those
+  adapters.
+- Connected invalid responses fail closed; durable local planning is used only
+  when Binder is unavailable.
+- Binder clients now link a death recipient and reacquire the endpoint through
+  BinderProvider after server death.
+- BinderProvider and app installers obtain one file-backed
+  `EngineSystemServerHandle`, so all subsystem endpoints share the same
+  registry and server instance.
+- Added tests for remote ownership, evidence ownership, fail-closed behavior,
+  and durable fallback.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:compileDebugKotlin :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityIpcServiceTest" --tests "com.multiapp.core.engine.EngineProviderIpcServiceTest" --tests "com.multiapp.core.engine.EngineComponentIpcServicesTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" :app:testDebugUnitTest --tests "com.multiapp.app.EngineBinderProviderManifestTest" --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- AIDL/core/app compilation and focused component IPC, dispatcher, app
+  boundary, and Manifest tests passed.
+
+Remaining gate:
+
+- Component framework execution correctly remains in the target virtual
+  process, but durable lifecycle mutation and ordered semantics need further
+  server reconciliation.
+- Activity task/lifecycle/result mutation is still hybrid.
+- Binder death recovery needs device process-kill evidence.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Binder-Owned Component Route Planning
+
+Provider, Service, and Broadcast route planning now follow the same
+server-policy/client-execution split as Activity. All four component families
+resolve targets and aggregate dispatch evidence in the main-process engine
+authority.
+
+Implemented:
+
+- Extended `IEngineRuntimeService` with Provider, Service, and Broadcast
+  plan/result operations.
+- Added complete Bundle codecs for their request, target, plan, and operation
+  result models.
+- Added IPC-backed `VirtualProviderService`, `VirtualServiceService`, and
+  `VirtualBroadcastService` adapters.
+- Connected IPC owns planning/evidence and fails closed on invalid responses;
+  durable local planning is used only when the Binder authority is unavailable.
+- Wired Provider dispatch, StubService dispatch, and Context AMS
+  Service/Broadcast dispatch to the IPC-backed services.
+- Added adapter tests for remote ownership, invalid-response blocking, evidence
+  ownership, and durable fallback.
+
+Binder lifecycle hardening:
+
+- Clients link a death recipient to the engine Binder.
+- Dead proxies are cleared and reacquired through BinderProvider on the next
+  operation.
+- Provider restart can therefore recover without restarting every virtual
+  process.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:compileDebugKotlin :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityIpcServiceTest" --tests "com.multiapp.core.engine.EngineProviderIpcServiceTest" --tests "com.multiapp.core.engine.EngineComponentIpcServicesTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" :app:testDebugUnitTest --tests "com.multiapp.app.EngineBinderProviderManifestTest" --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- AIDL/core/app compilation and focused component IPC, dispatcher, boundary,
+  and Manifest tests passed.
+
+Remaining gate:
+
+- Provider/Service/Broadcast execution and lifecycle primitives still run in
+  the target virtual process, which is intentional, but their durable runtime
+  records and ordered mutation semantics need further server reconciliation.
+- Activity task/lifecycle/result mutation is still hybrid.
+- Binder death recovery requires real device process-kill evidence.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Binder-Owned Activity Lifecycle Mutation
+
+Activity lifecycle and result mutations now use the main-process engine
+authority instead of independently changing each virtual process's local
+record manager.
+
+Implemented:
+
+- Extended `IEngineRuntimeService` with typed Activity mutation and consume
+  operations.
+- Main-process `VirtualActivityService` now owns `mark-state`, `finish`,
+  atomic `record-finish-result`, `set-result`, `mark-result-dispatch`, result
+  consumption, resume-fallback consumption, and pending `onNewIntent`
+  consumption.
+- Added complete Bundle codecs for operation results, Activity records,
+  result payloads, pending new intents, and intent snapshots.
+- Wired both Instrumentation hot-path operations and `ProxyActivityBase`
+  lifecycle control through `IpcBackedVirtualActivityService`.
+- Connected invalid mutation responses fail closed. Binder-unavailable clients
+  may use the locked file-backed service.
+- A connected authoritative empty consume result no longer falls through to a
+  stale local record manager.
+- `queryTaskState` now returns a main-process Binder snapshot with strict task
+  and Activity count validation; connected malformed snapshots fail closed.
+- `syncActivityTaskState` now sends the current virtual-process task snapshot
+  to the main-process authority for instance filtering and durable merge;
+  direct file-backed sync is used only when Binder is unavailable.
+- `EngineActivityTaskController.persist()` now delegates to that service, so
+  `ContainerActivity` and `ProxyActivityBase` no longer bypass the online
+  authority with direct task-file writes.
+- Removed the second manager-level fallback from
+  `EngineVirtualActivityOperations`; the IPC adapter is now the only fallback
+  policy owner.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:compileDebugKotlin :app:compileDebugKotlin --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineActivityIpcServiceTest" --tests "com.multiapp.core.engine.EngineActivityRuntimeTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --tests "com.multiapp.app.EngineBinderProviderManifestTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- AIDL/core/app compilation and focused lifecycle ownership, durable fallback,
+  task persistence, BinderProvider Manifest, and app boundary tests passed.
+
+Remaining gate:
+
+- Task snapshot admission and reads are Binder-owned; the server still uses the
+  locked file store as its durable recovery backend.
+- Finish-result route lookup and target-result persistence now execute as one
+  server transaction; focused server tests cover the source/target route.
+- Process-kill/reconnect ordering still requires device evidence.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Durable Service Runtime State
+
+Binder-owned Service dispatch now updates a recoverable engine ServiceRecord
+instead of producing evidence only.
+
+Implemented:
+
+- Added `EngineServiceRuntimeStateStore` with in-memory and locked,
+  atomic-replace file-backed implementations.
+- Added pure engine `EngineServiceRuntimeRecord` states: `STARTED`,
+  `FOREGROUND`, and `STOPPED`.
+- Every ServiceRecord is bound to `runtimeEpoch`; a recreated instance cannot
+  observe stale records from its previous virtual process generation.
+- Successful START/START_FOREGROUND dispatch persists process slot, active
+  start/bind counts, cache state, and `onStartCommand()` result.
+- Successful STOP transitions the same instance/service record to `STOPPED`
+  and clears active start count.
+- BIND/UNBIND remain excluded from the commercial state table while their
+  framework semantics are explicitly `UNSUPPORTED`.
+- Added Binder-owned `queryServiceRuntimeState`; malformed connected responses
+  fail closed and unavailable Binder may use the durable fallback.
+- Engine evidence now exports an aggregate `service/runtime-state` record.
+- The main-process `EngineSystemServerHandle` uses
+  `engine_service_runtime_state.properties` for process-death recovery.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineServiceRuntimeStateStoreTest" --tests "com.multiapp.core.engine.EngineComponentIpcServicesTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Service store recovery/isolation, Binder query ownership, fail-closed state,
+  and START-to-STOP lifecycle transition tests passed.
+
+Remaining gate:
+
+- This records lifecycle truth after loader execution; guest Service callbacks
+  still run in the target virtual process by design.
+- Binding, foreground notification/type mapping, sticky restart, and
+  cross-process callback delivery remain incomplete.
+- Device process-kill/restart evidence is still required.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Durable Provider Runtime State
+
+Provider dispatch now updates a recoverable main-process ProviderRecord rather
+than producing route/evidence data only.
+
+Implemented:
+
+- Added `EngineProviderRuntimeStateStore` with in-memory and locked,
+  atomic-replace file-backed implementations.
+- READY records are keyed by `instanceId + guestAuthority` and contain provider
+  class, process slot, `runtimeEpoch`, cache state, last operation, and
+  operation count.
+- Repeated access updates one record; a recreated runtime cannot observe stale
+  records from its previous epoch.
+- Added Binder-owned `queryProviderRuntimeState`; malformed connected responses
+  fail closed and unavailable Binder may use durable fallback.
+- Provider runtime state is aggregated into engine evidence.
+- The main-process server persists records in
+  `engine_provider_runtime_state.properties`.
+- `notifyChange`, observer registration, and URI grant/revoke operations now
+  return `UNSUPPORTED` with no loader dispatch until a real system-service
+  proxy exists. They are no longer ambiguous `PARTIAL` routes.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineProviderRuntimeStateStoreTest" --tests "com.multiapp.core.engine.EngineProviderIpcServiceTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Provider store recovery/isolation, epoch filtering, Binder query ownership,
+  repeated operation accounting, and control-plane fail-closed tests passed.
+
+Remaining gate:
+
+- Real URI grant and ContentObserver semantics require an engine-owned
+  `IContentService`/AMS grant proxy; this batch deliberately does not fake it.
+- Custom provider processes and device process-death recovery remain open.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Durable Broadcast State and Semantic Gate
+
+Broadcast dispatch now preserves framework call semantics through the loader
+boundary and records recoverable engine-owned delivery state.
+
+Implemented:
+
+- Added `VirtualBroadcastDispatchOptions` and propagated ordered, sticky,
+  result-receiver, abort, receiver permission, receiver app-op, AsUser, and
+  platform-options metadata from every relevant `VirtualContextWrapper`
+  overload.
+- `removeStickyBroadcast*` is treated as sticky semantics instead of being
+  silently downgraded to a normal broadcast.
+- Added `EngineBroadcastRuntimeStateStore` with in-memory and locked,
+  atomic-replace file-backed implementations.
+- Delivery records are keyed by instance, receiver, and action, and carry
+  process slot, `runtimeEpoch`, latest verdict/state, and delivered/blocked/
+  failed counters.
+- Counter mutation executes under one store lock, preventing cross-process
+  read-modify-write loss.
+- Added Binder-owned `queryBroadcastRuntimeState`; malformed connected
+  responses fail closed and unavailable Binder may use the durable fallback.
+- Engine evidence now exports `broadcast/runtime-state`.
+- Ordered, sticky, result-receiver, abort, permission/app-op, AsUser, and
+  platform-options semantics return `UNSUPPORTED` before loader dispatch.
+  Normal explicit/implicit manifest delivery remains `PARTIAL` pending device
+  proof.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualContextWrapperTest" --tests "com.multiapp.core.loader.VirtualAmsComponentDispatcherTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineBroadcastRuntimeStateStoreTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineComponentIpcServicesTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+.\gradlew.bat :app:compileDebugKotlin :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --tests "com.multiapp.app.EngineBinderProviderManifestTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Loader semantic propagation, durable state recovery/isolation, Binder query
+  ownership, engine fail-closed routing, app compilation, Manifest, and app
+  boundary tests passed.
+
+Remaining gate:
+
+- Ordered result propagation/abort, sticky storage/removal, virtual-user
+  mapping, receiver permission/AppOps enforcement, and cross-process receiver
+  callbacks still require real virtual Broadcast system-service support.
+- Device process-death and delivery-order evidence is still required.
+- The commercial engine BLOCK remains in force.
+
+## Execution Update - 2026-07-10 Provider URI Grants and Virtual AppOps Checks
+
+Provider URI permission state and the stable AppOps check path now have
+engine-owned, instance-scoped state instead of relying only on host package
+rewrites.
+
+Implemented:
+
+- Added locked, atomic-replace file stores for Provider URI grants and virtual
+  AppOps modes:
+  - `engine_provider_uri_grants.properties`
+  - `engine_app_ops.properties`
+- URI grants bind owner instance, target instance, authority, encoded path,
+  read/write mode, prefix flag, and persistable eligibility.
+- Provider dispatch verifies the durable grant record. A guest-provided
+  `uriGrantPresent=true` without that record fails closed.
+- Added Binder-owned grant/revoke/check AIDL operations. Connected malformed
+  responses fail closed; only unavailable Binder can use the file-backed
+  recovery service.
+- `VirtualContextWrapper` now routes `grantUriPermission`, both revoke
+  overloads, check/calling-check, and enforce overloads through an engine
+  extension point for guest authorities. Non-guest authorities still delegate
+  to Android.
+- Added an `APP_OPS` engine subsystem and persistent per-instance op modes.
+  `checkOperation`, `checkOperationRaw`, and `checkAudioOperation` can return an
+  explicit virtual integer mode before the host call. Without an explicit
+  virtual record, the proxy preserves the existing guest-to-host rewrite and
+  delegates to Android.
+- Guest `set*`/`reset*` AppOps mutations, including no-package
+  `resetAllModes`, are rejected before reaching the host service.
+- The implementation follows current AOSP behavior where check calls return an
+  integer mode, while modern note/start calls return richer results:
+  - https://android.googlesource.com/platform/frameworks/base/+/HEAD/core/java/com/android/internal/app/IAppOpsService.aidl
+  - https://android.googlesource.com/platform/frameworks/base/+/master/core/java/android/app/AppOpsManager.java
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:loader:testDebugUnitTest --tests "com.multiapp.core.loader.VirtualContextWrapperTest" :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.EngineProviderUriGrantStoreTest" --tests "com.multiapp.core.engine.EngineVirtualUriPermissionDispatcherTest" --tests "com.multiapp.core.engine.EngineAppOpsStateStoreTest" --tests "com.multiapp.core.engine.EngineAppOpsServiceTest" --tests "com.multiapp.core.engine.EngineVirtualAppOpsDispatcherTest" --tests "com.multiapp.core.engine.VirtualSystemServerTest" :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Store recovery, instance/path/mode isolation, forged-grant rejection,
+  Context routing, Binder authority behavior, AppOps mode interception,
+  no-package mutation blocking, and app engine-boundary tests passed.
+
+Remaining gate:
+
+- Persistable URI take/release, external non-virtual recipients, custom
+  Provider processes, and device proof remain open.
+- AppOps note/start/finish, attribution chains, foreground translation,
+  watchers, and complete `PackageOps` query objects remain `UNSUPPORTED`; no
+  fake `SyncNotedAppOp` is returned.
+- Provider path-policy parsing and matching are implemented in the later
+  Provider batch/path update below. Virtual runtime permission ownership is
+  still incomplete.
+- The commercial engine decision remains `BLOCK`.
+
+## Execution Update - 2026-07-10 Global Provider Authority Routing
+
+Provider data-plane routing can now resolve authorities owned by another
+virtual package or clone instance instead of checking only the caller's
+package snapshot.
+
+Implemented:
+
+- `VirtualProviderService` owns global authority resolution across durable
+  virtual runtimes.
+- The caller's own Provider wins for self access. A single external virtual
+  owner is selected directly; duplicate clone owners require a matching
+  instance-scoped URI grant to disambiguate the target.
+- Authority resolution crosses the engine Binder with typed request/result
+  codecs. A connected malformed response fails closed as a virtual route.
+- API 29+ wrapped resolvers delegate non-virtual/system authorities to Android,
+  but an unresolved virtual authority never falls through to the host
+  `ContentResolver`.
+- The verified target instance is carried into the route token and the target
+  runtime performs the existing authority, process-slot, permission, AppOps,
+  and URI-grant checks before Provider dispatch.
+- Fixed a data-plane defect where a globally resolved external authority was
+  incorrectly revalidated against the caller's package snapshot.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:engine:testDebugUnitTest --tests "com.multiapp.core.engine.VirtualSystemServerTest" --tests "com.multiapp.core.engine.EngineProviderIpcServiceTest" --tests "com.multiapp.core.engine.EngineVirtualContentResolverTest" --tests "com.multiapp.core.engine.EngineContainerDispatchersTest" :app:testDebugUnitTest --tests "com.multiapp.app.EngineBoundaryTest" --no-daemon --console=plain --max-workers=1 --build-cache "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Global owner selection, duplicate-owner URI-grant disambiguation, external
+  virtual Provider dispatch, host delegation for system authorities, virtual
+  fail-closed behavior, and app engine-boundary tests passed.
+
+Remaining gate:
+
+- Persistable URI grants, custom Provider processes, authority-index
+  invalidation after install refresh, and device process-death evidence remain
+  open. `applyBatch`, `refresh`, and path policy are covered by the next update.
+- No device artifact in this batch proves QQ, WeChat, QQ Reader, or GKD
+  compatibility.
+- The commercial engine decision remains `BLOCK`.
+
+## Execution Update - 2026-07-10 Provider Batch and Path Policy
+
+The baseline wrapped resolver now preserves Provider batch semantics and the
+engine models path-scoped permissions instead of applying one authority-wide
+policy to every URI.
+
+Implemented:
+
+- Added `APPLY_BATCH` and `REFRESH` as explicit Provider operations.
+- `applyBatch` performs a two-phase route: every operation must use the declared
+  authority, resolve to the same virtual owner, pass read/write planning, and
+  return the same guest Provider object before one guest `applyBatch()` call is
+  made. Validation failure occurs before guest mutation.
+- Non-virtual batches and `refresh()` preserve host `ContentResolver`
+  delegation; unresolved virtual routes fail closed.
+- Added pure-model literal/prefix/simple-glob/advanced-glob/suffix Provider path
+  patterns and path read/write permissions.
+- Manifest parsing, install JSON, runtime-state persistence, snapshot rebuild,
+  and guest `ProviderInfo.pathPermissions/uriPermissionPatterns` now preserve
+  those policies.
+- Engine authorization applies matching path permissions before Provider-level
+  permissions. A Provider with global URI grants disabled can grant only a URI
+  matching its declared grant patterns.
+- PackageManager fallback requests `GET_URI_PERMISSION_PATTERNS` and handles its
+  ambiguity conservatively: when patterns are present it does not infer an
+  authority-wide grant.
+- The behavior follows Android's documented path policy and AOSP Provider
+  transport enforcement:
+  - https://developer.android.com/guide/topics/manifest/path-permission-element
+  - https://developer.android.com/guide/topics/manifest/grant-uri-permission-element
+  - https://android.googlesource.com/platform/frameworks/base/+/master/core/java/android/content/ContentProvider.java
+
+Verification:
+
+- Focused model, Manifest, loader, engine, and app boundary tests passed.
+- Engine coverage includes batch owner consistency, path permission override,
+  grant-pattern containment, global authority routing, runtime-state recovery,
+  and system `refresh()` delegation.
+- `:app:compileDebugKotlin` and `EngineBoundaryTest` passed.
+
+Remaining gate:
+
+- A full virtual permission service is still required to grant manifest
+  permissions to cross-instance callers; protected paths remain
+  `UNSUPPORTED`, not falsely allowed.
+- Persistable take/release, external non-virtual recipients, advanced/simple
+  glob device parity on API 28-36, custom Provider processes, and device
+  process-death evidence remain open.
+- The commercial engine decision remains `BLOCK`.
+
+## Execution Update - 2026-07-10 Full Local Gate
+
+The current commercial-engine dirty tree passed the complete local test and
+debug-package gate after the Provider authority, AppOps, batch, and path-policy
+work was integrated.
+
+Command:
+
+```powershell
+.\gradlew.bat :core:common:testDebugUnitTest :core:model:testDebugUnitTest :core:instance:testDebugUnitTest :core:manifest:testDebugUnitTest :core:identity:testDebugUnitTest :core:loader:testDebugUnitTest :core:hook:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 --build-cache "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `BUILD SUCCESSFUL` in 9m14s; 514 Gradle tasks completed or reused.
+- 1,816 unit tests were reported across common/model/instance/manifest/
+  identity/loader/hook/engine/app: 0 failures, 0 errors, 12 skipped.
+- `app/build/outputs/apk/debug/app-debug.apk` was rebuilt, size 99,315,837
+  bytes, SHA-256
+  `E7BEDDC21C8281C7221B26A0E77EE4A280FCB4263247F249ACD4884E7BC7F4D4`.
+- `git diff --check` passed; only existing LF/CRLF conversion warnings remain.
+- AGP 8.7.3 still warns that it was tested only through compileSdk 35 while
+  this project uses compileSdk 36.
+
+This is a local gate only. Device process-death, recents, component lifecycle,
+native namespace/IO, and compatibility-matrix evidence are still required, so
+the commercial engine decision remains `BLOCK`.

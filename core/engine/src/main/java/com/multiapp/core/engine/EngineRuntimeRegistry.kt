@@ -17,29 +17,62 @@ class EngineRuntimeRegistry(
 
     @Synchronized
     fun register(runtime: VirtualInstanceRuntime): VirtualInstanceRuntime {
-        runtimes[runtime.instanceId] = runtime
-        stateStore.put(EngineRuntimeStateRecord.from(runtime))
-        reports[runtime.instanceId] = reportFor(runtime, source = "memory")
-        return runtime
+        val requestedRecord = EngineRuntimeStateRecord.from(runtime)
+        val authoritativeRecord = stateStore.putIfNewer(requestedRecord)
+        val authoritativeRuntime = if (authoritativeRecord == requestedRecord) {
+            runtime
+        } else {
+            authoritativeRecord.toRuntime()
+        }
+        cacheRuntime(
+            runtime = authoritativeRuntime,
+            source = if (authoritativeRecord == requestedRecord) "memory" else "durable-newer"
+        )
+        return authoritativeRuntime
     }
 
-    fun get(instanceId: String): VirtualInstanceRuntime? =
-        runtimes[instanceId] ?: restore(instanceId)
+    @Synchronized
+    fun get(instanceId: String): VirtualInstanceRuntime? {
+        val durableRuntime = stateStore.get(instanceId)?.toRuntime()
+        if (durableRuntime == null) {
+            runtimes.remove(instanceId)
+            reports.remove(instanceId)
+            return null
+        }
+        val cachedRuntime = runtimes[instanceId]
+        if (cachedRuntime == durableRuntime) return cachedRuntime
+        cacheRuntime(
+            runtime = durableRuntime,
+            source = if (cachedRuntime == null) "durable" else "durable-refresh"
+        )
+        return durableRuntime
+    }
+
+    @Synchronized
+    fun list(): List<VirtualInstanceRuntime> = stateStore.list()
+        .map { it.toRuntime() }
+        .sortedBy { it.instanceId }
+        .onEach { runtime -> cacheRuntime(runtime, source = "durable-list") }
 
     @Synchronized
     fun attachStateStore(store: EngineRuntimeStateStore): EngineRuntimeRegistry {
         stateStore = store
-        stateStore.list().forEach { record ->
+        val durableRecords = stateStore.list()
+        val durableInstanceIds = durableRecords.mapTo(linkedSetOf()) { it.instanceId }
+        runtimes.keys.filterNot { it in durableInstanceIds }.forEach { instanceId ->
+            runtimes.remove(instanceId)
+            reports.remove(instanceId)
+        }
+        durableRecords.forEach { record ->
             val runtime = record.toRuntime()
-            runtimes.putIfAbsent(runtime.instanceId, runtime)
-            reports.putIfAbsent(runtime.instanceId, reportFor(runtime, source = "durable"))
+            cacheRuntime(runtime, source = "durable")
         }
         return this
     }
 
     @Synchronized
     fun runtimeState(instanceId: String): EngineRuntimeStateRecord? =
-        runtimes[instanceId]?.let(EngineRuntimeStateRecord::from) ?: stateStore.get(instanceId)
+        get(instanceId)?.let(EngineRuntimeStateRecord::from)
 
     private fun reportFor(runtime: VirtualInstanceRuntime, source: String): EngineEvidenceReport {
         return EngineEvidenceReport(
@@ -82,15 +115,32 @@ class EngineRuntimeRegistry(
 
     @Synchronized
     fun stop(instanceId: String): Boolean {
-        reports.remove(instanceId)
-        val removedRuntime = runtimes.remove(instanceId) != null
-        val removedState = stateStore.remove(instanceId)
-        return removedRuntime || removedState
+        val runtime = get(instanceId) ?: return false
+        return stopIfEpoch(instanceId, runtime.runtimeEpoch)
+    }
+
+    @Synchronized
+    fun stopIfEpoch(instanceId: String, runtimeEpoch: Long): Boolean {
+        val durableRuntime = stateStore.get(instanceId)?.toRuntime() ?: run {
+            runtimes.remove(instanceId)
+            reports.remove(instanceId)
+            return false
+        }
+        if (durableRuntime.runtimeEpoch != runtimeEpoch) {
+            cacheRuntime(durableRuntime, source = "durable-refresh")
+            return false
+        }
+        val removed = stateStore.removeIfEpoch(instanceId, runtimeEpoch)
+        if (removed) {
+            reports.remove(instanceId)
+            runtimes.remove(instanceId)
+        } else {
+            get(instanceId)
+        }
+        return removed
     }
 
     fun evidence(instanceId: String): EngineEvidenceReport {
-        val report = reports[instanceId]
-        if (report != null) return report
         val runtime = get(instanceId)
         if (runtime != null) return reports[instanceId] ?: reportFor(runtime, source = "durable")
         return EngineEvidenceReport(
@@ -109,12 +159,19 @@ class EngineRuntimeRegistry(
         stateStore.clear()
     }
 
-    @Synchronized
-    private fun restore(instanceId: String): VirtualInstanceRuntime? {
-        val runtime = stateStore.get(instanceId)?.toRuntime() ?: return null
-        runtimes[runtime.instanceId] = runtime
-        reports.putIfAbsent(runtime.instanceId, reportFor(runtime, source = "durable"))
-        return runtime
+    private fun cacheRuntime(runtime: VirtualInstanceRuntime, source: String) {
+        val previousRuntime = runtimes.put(runtime.instanceId, runtime)
+        val previousReport = reports[runtime.instanceId]
+        val baseReport = reportFor(runtime, source)
+        val preserveOperations = previousRuntime?.engineSessionId == runtime.engineSessionId &&
+            previousRuntime.evidenceSessionId == runtime.evidenceSessionId
+        reports[runtime.instanceId] = if (preserveOperations && previousReport != null) {
+            previousReport.flattenedOperationEvidence().fold(baseReport) { current, evidence ->
+                current.withOperationEvidence(evidence)
+            }
+        } else {
+            baseReport
+        }
     }
 
     private fun EngineOperationEvidence.sanitizedForReport(): EngineOperationEvidence {

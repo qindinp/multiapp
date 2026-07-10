@@ -24,7 +24,7 @@ class HostedActivityIdentityTest {
             taskAffinity = "com.test.minimal"
             theme = 0x7f010001
         }
-        val config = config()
+        val config = config(publicSourceDir = "/public/apks/minimal.apk")
 
         val runtimeInfo = HostedActivityIdentity.applicationInfoForRuntime(config, source)
 
@@ -32,7 +32,7 @@ class HostedActivityIdentityTest {
         assertEquals("com.test.minimal.MinimalApp", runtimeInfo.className)
         assertEquals("com.test.minimal.MinimalApp", runtimeInfo.name)
         assertEquals("/data/apks/minimal.apk", runtimeInfo.sourceDir)
-        assertEquals("/data/apks/minimal.apk", runtimeInfo.publicSourceDir)
+        assertEquals("/public/apks/minimal.apk", runtimeInfo.publicSourceDir)
         assertEquals("/data/user/0/com.multiapp.app/files/instance_data/inst-001", runtimeInfo.dataDir)
         assertEquals("/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib", runtimeInfo.nativeLibraryDir)
         assertEquals("com.test.minimal", runtimeInfo.processName)
@@ -197,7 +197,8 @@ class HostedActivityIdentityTest {
 
     private fun config(
         snapshot: VirtualPackageSnapshot? = null,
-        nativeLibraryDir: String? = "/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib"
+        nativeLibraryDir: String? = "/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib",
+        publicSourceDir: String = snapshot?.publicSourceDir ?: "/data/apks/minimal.apk"
     ) = VirtualContextConfig(
         instanceId = "inst-001",
         originPackageName = "com.test.minimal",
@@ -207,7 +208,8 @@ class HostedActivityIdentityTest {
         nativeLibraryDir = nativeLibraryDir,
         classLoader = ClassLoader.getSystemClassLoader(),
         applicationLabel = "MinimalTest",
-        packageSnapshot = snapshot
+        packageSnapshot = snapshot,
+        publicSourceDir = publicSourceDir
     )
 
     private fun snapshot(

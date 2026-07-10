@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.content.Intent
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
@@ -8,6 +9,13 @@ import com.multiapp.core.model.virtual.VirtualActivityStack
 import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualTaskRecord
+
+data class VirtualActivityRecordManagerSnapshot(
+    val tasks: List<VirtualTaskRecord>,
+    val records: List<VirtualActivityRecord>,
+    val lastLaunchResult: VirtualActivityStack.LaunchResult?,
+    val intents: Map<String, Intent>
+)
 
 /**
  * Process-local Activity launch record store for hosted container proxy slots.
@@ -71,6 +79,54 @@ class VirtualActivityRecordManager {
     fun listTasks(): List<VirtualTaskRecord> = activityStack.listTasks()
 
     @Synchronized
+    fun exportTasks(): List<VirtualTaskRecord> = activityStack.listTasks()
+
+    @Synchronized
+    fun snapshotState(): VirtualActivityRecordManagerSnapshot = VirtualActivityRecordManagerSnapshot(
+        tasks = activityStack.listTasks(),
+        records = records.values.toList(),
+        lastLaunchResult = lastLaunchResult,
+        intents = VirtualActivityIntentStore.snapshot()
+    )
+
+    @Synchronized
+    fun restoreState(snapshot: VirtualActivityRecordManagerSnapshot) {
+        records.clear()
+        recordsByProxy.clear()
+        recordsByActivityId.clear()
+        activityStack.restore(snapshot.tasks)
+        snapshot.records.forEach { record ->
+            records[record.token] = record
+            recordsByActivityId[record.activityId] = record.token
+            if (record.isActive()) {
+                recordsByProxy[record.proxyActivityClassName] = record.token
+            }
+        }
+        lastLaunchResult = snapshot.lastLaunchResult
+        VirtualActivityIntentStore.restore(snapshot.intents)
+    }
+
+    @Synchronized
+    fun restoreTasks(tasks: List<VirtualTaskRecord>): Int {
+        records.clear()
+        recordsByProxy.clear()
+        recordsByActivityId.clear()
+        VirtualActivityIntentStore.clearAll()
+        lastLaunchResult = null
+        val restored = activityStack.restore(tasks)
+        activityStack.listTasks()
+            .flatMap { it.activities }
+            .forEach { record ->
+                records[record.token] = record
+                recordsByActivityId[record.activityId] = record.token
+                if (record.isActive()) {
+                    recordsByProxy[record.proxyActivityClassName] = record.token
+                }
+            }
+        return restored
+    }
+
+    @Synchronized
     fun resolve(token: String?): VirtualActivityRecord? {
         if (token.isNullOrBlank()) return null
         return records[token]
@@ -108,11 +164,30 @@ class VirtualActivityRecordManager {
     fun setResult(
         token: String?,
         resultCode: Int,
-        dataIntent: VirtualIntentSnapshot? = null
+        dataIntent: VirtualIntentSnapshot? = null,
+        requestCode: Int = -1,
+        resultWho: String? = null,
+        frameworkDispatchAttempted: Boolean = false,
+        frameworkDispatchInvoked: Boolean = false
     ): VirtualActivityRecord? {
         if (token.isNullOrBlank()) return null
-        val updated = activityStack.setResultByToken(token, resultCode, dataIntent)
-            ?: records[token]?.copy(result = VirtualActivityResult(resultCode = resultCode, dataIntent = dataIntent))
+        val result = VirtualActivityResult(
+            resultCode = resultCode,
+            dataIntent = dataIntent,
+            requestCode = requestCode,
+            resultWho = resultWho,
+            frameworkDispatchAttempted = frameworkDispatchAttempted,
+            frameworkDispatchInvoked = frameworkDispatchInvoked
+        )
+        val updated = activityStack.setResultByToken(
+            token = token,
+            resultCode = resultCode,
+            dataIntent = dataIntent,
+            requestCode = requestCode,
+            resultWho = resultWho,
+            frameworkDispatchAttempted = frameworkDispatchAttempted,
+            frameworkDispatchInvoked = frameworkDispatchInvoked
+        ) ?: records[token]?.copy(result = result)
         return updated?.let { updateRecord(it) }
     }
 
@@ -120,12 +195,81 @@ class VirtualActivityRecordManager {
     fun setResultByActivityId(
         activityId: String?,
         resultCode: Int,
-        dataIntent: VirtualIntentSnapshot? = null
+        dataIntent: VirtualIntentSnapshot? = null,
+        requestCode: Int = -1,
+        resultWho: String? = null,
+        frameworkDispatchAttempted: Boolean = false,
+        frameworkDispatchInvoked: Boolean = false
     ): VirtualActivityRecord? {
         if (activityId.isNullOrBlank()) return null
         val token = recordsByActivityId[activityId]
-        val updated = activityStack.setResultByActivityId(activityId, resultCode, dataIntent)
-            ?: token?.let { records[it]?.copy(result = VirtualActivityResult(resultCode = resultCode, dataIntent = dataIntent)) }
+        val result = VirtualActivityResult(
+            resultCode = resultCode,
+            dataIntent = dataIntent,
+            requestCode = requestCode,
+            resultWho = resultWho,
+            frameworkDispatchAttempted = frameworkDispatchAttempted,
+            frameworkDispatchInvoked = frameworkDispatchInvoked
+        )
+        val updated = activityStack.setResultByActivityId(
+            activityId = activityId,
+            resultCode = resultCode,
+            dataIntent = dataIntent,
+            requestCode = requestCode,
+            resultWho = resultWho,
+            frameworkDispatchAttempted = frameworkDispatchAttempted,
+            frameworkDispatchInvoked = frameworkDispatchInvoked
+        ) ?: token?.let { records[it]?.copy(result = result) }
+        return updated?.let { updateRecord(it) }
+    }
+
+    @Synchronized
+    fun markResultDispatchState(
+        token: String?,
+        frameworkDispatchAttempted: Boolean,
+        frameworkDispatchInvoked: Boolean
+    ): VirtualActivityRecord? {
+        if (token.isNullOrBlank()) return null
+        val updated = activityStack.updateResultDispatchStateByToken(
+            token = token,
+            frameworkDispatchAttempted = frameworkDispatchAttempted,
+            frameworkDispatchInvoked = frameworkDispatchInvoked
+        ) ?: records[token]?.takeIf { it.result != null }?.let { record ->
+            record.copy(
+                result = record.result?.copy(
+                    frameworkDispatchAttempted = frameworkDispatchAttempted,
+                    frameworkDispatchInvoked = frameworkDispatchInvoked
+                )
+            )
+        }
+        return updated?.let { updateRecord(it) }
+    }
+
+    @Synchronized
+    fun updateState(
+        token: String?,
+        state: VirtualActivityState
+    ): VirtualActivityRecord? {
+        if (token.isNullOrBlank()) return null
+        if (state == VirtualActivityState.FINISHED || state == VirtualActivityState.DESTROYED) {
+            return finish(token)
+        }
+        val updated = activityStack.updateStateByToken(token, state) ?: records[token]?.copy(state = state)
+        return updated?.let { updateRecord(it) }
+    }
+
+    @Synchronized
+    fun updateStateByActivityId(
+        activityId: String?,
+        state: VirtualActivityState
+    ): VirtualActivityRecord? {
+        if (activityId.isNullOrBlank()) return null
+        val token = recordsByActivityId[activityId]
+        if (state == VirtualActivityState.FINISHED || state == VirtualActivityState.DESTROYED) {
+            return finishByActivityId(activityId)
+        }
+        val updated = activityStack.updateStateByActivityId(activityId, state)
+            ?: token?.let { records[it]?.copy(state = state) }
         return updated?.let { updateRecord(it) }
     }
 
@@ -153,6 +297,16 @@ class VirtualActivityRecordManager {
         val result = activityStack.consumeResultByToken(token) ?: record.result ?: return null
         updateRecord(record.copy(result = null))
         return result
+    }
+
+    @Synchronized
+    fun consumeResultForResumeFallback(token: String?): VirtualActivityResult? {
+        if (token.isNullOrBlank()) return null
+        val record = records[token] ?: return null
+        val result = activityStack.findByToken(token)?.result ?: record.result ?: return null
+        if (result.requestCode < 0) return null
+        if (result.frameworkDispatchInvoked) return null
+        return consumeResult(token)
     }
 
     @Synchronized

@@ -3,6 +3,10 @@ package com.multiapp.core.model.installer
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
+import com.multiapp.core.model.virtual.VirtualProviderPathPattern
+import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
+import com.multiapp.core.model.virtual.VirtualProviderPathPermission
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
@@ -27,6 +31,71 @@ class InstallRecordStoreTest {
         assertEquals(record.packageName, loaded.packageName)
         assertEquals(record.originApkSha256, loaded.originApkSha256)
         assertEquals(record.versionCode, loaded.versionCode)
+    }
+
+    @Test
+    fun `save and load preserves distinct Provider permissions`() {
+        val store = JsonInstallRecordStore(tempDir)
+        val record = createRecord(packageName = "com.example.provider").copy(
+            providers = listOf(
+                ComponentInfo(
+                    name = "com.example.provider.DataProvider",
+                    permission = "com.example.provider.ACCESS",
+                    readPermission = "com.example.provider.READ",
+                    writePermission = "com.example.provider.WRITE",
+                    grantUriPermissions = false,
+                    pathPermissions = listOf(
+                        VirtualProviderPathPermission(
+                            VirtualProviderPathPattern(
+                                "/private",
+                                VirtualProviderPathPatternType.PREFIX
+                            ),
+                            readPermission = "com.example.provider.READ_PRIVATE"
+                        )
+                    ),
+                    uriPermissionPatterns = listOf(
+                        VirtualProviderPathPattern("/shared", VirtualProviderPathPatternType.PREFIX)
+                    )
+                )
+            )
+        )
+
+        assertTrue(store.save(record).isSuccess)
+
+        val provider = assertNotNull(store.load(record.packageName)).providers.single()
+        assertEquals("com.example.provider.ACCESS", provider.permission)
+        assertEquals("com.example.provider.READ", provider.readPermission)
+        assertEquals("com.example.provider.WRITE", provider.writePermission)
+        assertEquals(false, provider.grantUriPermissions)
+        assertEquals(record.providers.single().pathPermissions, provider.pathPermissions)
+        assertEquals(record.providers.single().uriPermissionPatterns, provider.uriPermissionPatterns)
+    }
+
+    @Test
+    fun `save and load preserves typed meta-data and signer identity`() {
+        val store = JsonInstallRecordStore(tempDir)
+        val record = createRecord(packageName = "com.example.identity").copy(
+            applicationMetaData = mapOf(
+                "enabled" to VirtualMetaDataValue.boolean(true),
+                "retries" to VirtualMetaDataValue.int(4)
+            ),
+            signerSha256Digests = listOf("old-signer", "current-signer"),
+            hasMultipleSigners = false,
+            activities = listOf(
+                ComponentInfo(
+                    name = "com.example.identity.MainActivity",
+                    metaData = mapOf("mode" to VirtualMetaDataValue.string("main"))
+                )
+            )
+        )
+
+        assertTrue(store.save(record).isSuccess)
+        val loaded = assertNotNull(store.load(record.packageName))
+
+        assertEquals(record.applicationMetaData, loaded.applicationMetaData)
+        assertEquals(record.signerSha256Digests, loaded.signerSha256Digests)
+        assertEquals(record.hasMultipleSigners, loaded.hasMultipleSigners)
+        assertEquals(record.activities.single().metaData, loaded.activities.single().metaData)
     }
 
     @Test
@@ -144,6 +213,8 @@ class InstallRecordStoreTest {
         assertEquals(emptyList(), loaded.services)
         assertEquals(emptyList(), loaded.receivers)
         assertEquals(emptyList(), loaded.providers)
+        assertEquals(emptyMap(), loaded.applicationMetaData)
+        assertEquals(emptyList(), loaded.signerSha256Digests)
     }
 
     @Test

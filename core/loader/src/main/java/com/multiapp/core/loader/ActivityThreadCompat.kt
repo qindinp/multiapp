@@ -2,8 +2,10 @@ package com.multiapp.core.loader
 
 import android.app.Application
 import android.app.Instrumentation
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.os.Handler
+import android.os.IBinder
 import java.lang.ref.WeakReference
 
 object ActivityThreadCompat {
@@ -95,6 +97,51 @@ object ActivityThreadCompat {
             ?: throw IllegalStateException("ActivityThread.getPackageInfoNoCheck returned null")
     }
 
+    fun sendActivityResult(
+        activityToken: IBinder?,
+        resultWho: String?,
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?,
+        activityThread: Any? = null
+    ): ActivityThreadActivityResultDispatchResult {
+        if (activityToken == null) {
+            return ActivityThreadActivityResultDispatchResult.skipped("ACTIVITY_THREAD_TOKEN_MISSING")
+        }
+        if (requestCode < 0) {
+            return ActivityThreadActivityResultDispatchResult.skipped("REQUEST_CODE_NOT_FOR_RESULT")
+        }
+        val thread = runCatching { activityThread ?: currentActivityThread() }
+            .getOrElse { error ->
+                return ActivityThreadActivityResultDispatchResult.failed(
+                    reason = "ACTIVITY_THREAD_LOOKUP_FAILED",
+                    error = error
+                )
+            }
+        val method = findMethodInHierarchy(thread.javaClass, "sendActivityResult") { candidate ->
+            val types = candidate.parameterTypes
+            types.size == 5 &&
+                IBinder::class.java.isAssignableFrom(types[0]) &&
+                String::class.java.isAssignableFrom(types[1]) &&
+                types[2] == Integer.TYPE &&
+                types[3] == Integer.TYPE &&
+                Intent::class.java.isAssignableFrom(types[4])
+        } ?: return ActivityThreadActivityResultDispatchResult.failed("SEND_ACTIVITY_RESULT_METHOD_MISSING")
+        return runCatching {
+            method.isAccessible = true
+            method.invoke(thread, activityToken, resultWho, requestCode, resultCode, data)
+            ActivityThreadActivityResultDispatchResult.partial(
+                methodName = "${method.declaringClass.name}.${method.name}",
+                reason = "CALL_SCHEDULED_DELIVERY_PENDING_DEVICE_PROOF"
+            )
+        }.getOrElse { error ->
+            ActivityThreadActivityResultDispatchResult.failed(
+                reason = "SEND_ACTIVITY_RESULT_INVOKE_FAILED",
+                error = error
+            )
+        }
+    }
+
     private fun defaultCompatibilityInfo(type: Class<*>): Any? {
         return runCatching {
             val field = type.getDeclaredField("DEFAULT_COMPATIBILITY_INFO")
@@ -125,5 +172,42 @@ object ActivityThreadCompat {
             current = current.superclass
         }
         return null
+    }
+}
+
+data class ActivityThreadActivityResultDispatchResult(
+    val verdict: String,
+    val attempted: Boolean,
+    val invoked: Boolean,
+    val methodName: String? = null,
+    val reason: String,
+    val errorClassName: String? = null
+) {
+    companion object {
+        fun skipped(reason: String): ActivityThreadActivityResultDispatchResult =
+            ActivityThreadActivityResultDispatchResult(
+                verdict = "SKIPPED",
+                attempted = false,
+                invoked = false,
+                reason = reason
+            )
+
+        fun partial(methodName: String, reason: String): ActivityThreadActivityResultDispatchResult =
+            ActivityThreadActivityResultDispatchResult(
+                verdict = "PARTIAL",
+                attempted = true,
+                invoked = true,
+                methodName = methodName,
+                reason = reason
+            )
+
+        fun failed(reason: String, error: Throwable? = null): ActivityThreadActivityResultDispatchResult =
+            ActivityThreadActivityResultDispatchResult(
+                verdict = "FAIL",
+                attempted = true,
+                invoked = false,
+                reason = reason,
+                errorClassName = error?.javaClass?.name
+            )
     }
 }

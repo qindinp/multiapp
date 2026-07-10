@@ -13,6 +13,21 @@ data class GuestActivityLaunchResult(
 )
 
 /**
+ * Pure model request for planning a guest Activity launch.
+ *
+ * Android-facing modules turn this plan into real ActivityThread /
+ * Instrumentation operations. Keeping this DTO Android-free is important
+ * because :core:model is the shared contract layer.
+ */
+data class GuestActivityLaunchRequest(
+    val activityClassName: String,
+    val classLoader: ClassLoader,
+    val config: VirtualContextConfig,
+    val launchFlags: Int = 0,
+    val taskAffinity: String? = null
+)
+
+/**
  * Controls guest Activity lifecycle within the container.
  *
  * This skeleton records launch intent and resolves the launcher activity
@@ -32,19 +47,11 @@ interface VirtualActivityController {
     /**
      * Launch (or record the intent to launch) a guest activity.
      *
-     * Skeleton implementation: may attempt `Class.forName(activityClassName).newInstance()`
-     * or simply record the launch for later interception.
+     * Model-layer implementation should only validate or describe the launch.
+     * Real Android Activity objects are created by the engine/loader adapter.
      *
-     * @param hostActivity the host Activity used as a base for starting the guest
-     * @param activityClassName fully qualified class name of the guest Activity
-     * @param classLoader ClassLoader that can load the guest Activity class
-     * @param config guest context configuration
+     * @param request Android-free launch request
      * @return launch result with success flag and optional error message
      */
-    fun launchGuestActivity(
-        hostActivity: android.app.Activity,
-        activityClassName: String,
-        classLoader: ClassLoader,
-        config: VirtualContextConfig
-    ): GuestActivityLaunchResult
+    fun planGuestActivityLaunch(request: GuestActivityLaunchRequest): GuestActivityLaunchResult
 }

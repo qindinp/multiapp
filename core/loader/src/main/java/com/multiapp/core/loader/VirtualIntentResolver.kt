@@ -12,7 +12,9 @@ data class VirtualActivityLaunchRequest(
     val sourceIntent: Intent,
     val reason: String,
     val launchMode: String? = null,
-    val taskAffinity: String? = null
+    val taskAffinity: String? = null,
+    val resultToToken: String? = null,
+    val resultRequestCode: Int = -1
 )
 
 /** Resolves guest Activity intents against a virtual package snapshot. */

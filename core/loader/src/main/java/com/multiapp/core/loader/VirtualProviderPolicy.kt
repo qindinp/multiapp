@@ -6,6 +6,8 @@ import com.multiapp.core.model.virtual.ResolvedComponent
 data class VirtualProviderPolicy(
     val exported: Boolean,
     val permission: String?,
+    val readPermission: String?,
+    val writePermission: String?,
     val grantUriPermissions: Boolean,
     val status: String,
     val reason: String,
@@ -16,6 +18,8 @@ data class VirtualProviderPolicy(
     fun toEvidenceFields(): Map<String, Any?> = linkedMapOf(
         "providerExported" to exported,
         "providerPermission" to permission.orEmpty(),
+        "providerReadPermission" to readPermission.orEmpty(),
+        "providerWritePermission" to writePermission.orEmpty(),
         "providerGrantUriPermissions" to grantUriPermissions,
         "providerPolicyStatus" to status,
         "providerPolicyReason" to reason,
@@ -29,10 +33,14 @@ data class VirtualProviderPolicy(
         const val AUTHORITY_REWRITE_ENTRY = "VirtualContentResolver"
 
         fun fromProviderInfo(providerInfo: ProviderInfo): VirtualProviderPolicy {
-            val permission = providerInfo.providerPermission()
+            val readPermission = providerInfo.readPermission?.takeIf { it.isNotBlank() }
+            val writePermission = providerInfo.writePermission?.takeIf { it.isNotBlank() }
+            val permission = readPermission.takeIf { it != null && it == writePermission }
             return fromValues(
                 exported = providerInfo.exported,
                 permission = permission,
+                readPermission = readPermission,
+                writePermission = writePermission,
                 grantUriPermissions = providerInfo.grantUriPermissions
             )
         }
@@ -40,18 +48,25 @@ data class VirtualProviderPolicy(
         fun fromComponent(component: ResolvedComponent): VirtualProviderPolicy = fromValues(
             exported = component.exported,
             permission = component.permission,
-            grantUriPermissions = component.grantUriPermissions
+            readPermission = component.readPermission ?: component.permission,
+            writePermission = component.writePermission ?: component.permission,
+            grantUriPermissions = component.grantUriPermissions || component.uriPermissionPatterns.isNotEmpty()
         )
 
         private fun fromValues(
             exported: Boolean,
             permission: String?,
+            readPermission: String?,
+            writePermission: String?,
             grantUriPermissions: Boolean
         ): VirtualProviderPolicy {
             val normalizedPermission = permission?.takeIf { it.isNotBlank() }
+            val normalizedReadPermission = readPermission?.takeIf { it.isNotBlank() }
+            val normalizedWritePermission = writePermission?.takeIf { it.isNotBlank() }
             val status = when {
                 !exported -> "INTERNAL_ONLY"
-                normalizedPermission != null -> "EXPORTED_PERMISSION_GATED"
+                normalizedPermission != null || normalizedReadPermission != null || normalizedWritePermission != null ->
+                    "EXPORTED_PERMISSION_GATED"
                 else -> "EXPORTED_UNGUARDED"
             }
             val reason = buildString {
@@ -59,30 +74,24 @@ data class VirtualProviderPolicy(
                 append(exported)
                 append(";permission=")
                 append(normalizedPermission ?: "")
+                append(";readPermission=")
+                append(normalizedReadPermission ?: "")
+                append(";writePermission=")
+                append(normalizedWritePermission ?: "")
                 append(";grantUriPermissions=")
                 append(grantUriPermissions)
             }
             return VirtualProviderPolicy(
                 exported = exported,
                 permission = normalizedPermission,
+                readPermission = normalizedReadPermission,
+                writePermission = normalizedWritePermission,
                 grantUriPermissions = grantUriPermissions,
                 status = status,
                 reason = reason
             )
         }
 
-        private fun ProviderInfo.providerPermission(): String? {
-            val readPermission = readPermission?.takeIf { it.isNotBlank() }
-            val writePermission = writePermission?.takeIf { it.isNotBlank() }
-            return when {
-                readPermission == null && writePermission == null -> null
-                readPermission == writePermission -> readPermission
-                else -> listOfNotNull(
-                    readPermission?.let { "read=$it" },
-                    writePermission?.let { "write=$it" }
-                ).joinToString(";")
-            }
-        }
     }
 }
 
@@ -118,7 +127,11 @@ data class VirtualProviderPolicySummary(
         fun fromProviders(providers: List<ResolvedComponent>): VirtualProviderPolicySummary {
             val policies = providers.map { VirtualProviderPolicy.fromComponent(it) }
             return VirtualProviderPolicySummary(
-                providerPermissionCount = policies.count { !it.permission.isNullOrBlank() },
+                providerPermissionCount = policies.count {
+                    !it.permission.isNullOrBlank() ||
+                        !it.readPermission.isNullOrBlank() ||
+                        !it.writePermission.isNullOrBlank()
+                },
                 providerGrantUriPermissionCount = policies.count { it.grantUriPermissions },
                 providerExportedCount = policies.count { it.exported },
                 providerUnguardedExportedCount = policies.count { it.status == "EXPORTED_UNGUARDED" },

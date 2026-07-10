@@ -2,7 +2,6 @@ package com.multiapp.core.engine
 
 import com.multiapp.core.loader.VirtualAmsApiEvidenceComponent
 import com.multiapp.core.loader.VirtualAmsApiEvidenceRecord
-import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorder
 
 enum class EngineAmsApiEvidenceComponent(val componentName: String) {
     START_ACTIVITY_OVERLOAD("ams-start-activity-overload"),
@@ -42,12 +41,8 @@ data class EngineAmsApiEvidenceRecord(
     val fields: Map<String, Any?> = emptyMap()
 )
 
-fun interface EngineAmsApiEvidenceRecorder : VirtualAmsApiEvidenceRecorder {
+fun interface EngineAmsApiEvidenceRecorder {
     fun record(record: EngineAmsApiEvidenceRecord)
-
-    override fun record(record: VirtualAmsApiEvidenceRecord) {
-        record(record.toEngineRecord())
-    }
 }
 
 fun VirtualAmsApiEvidenceRecord.toEngineRecord(): EngineAmsApiEvidenceRecord =

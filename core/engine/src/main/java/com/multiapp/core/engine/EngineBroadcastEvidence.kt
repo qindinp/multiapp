@@ -1,7 +1,6 @@
 package com.multiapp.core.engine
 
 import com.multiapp.core.loader.VirtualBroadcastRecord
-import com.multiapp.core.loader.VirtualBroadcastRecorder
 import com.multiapp.core.loader.VirtualBroadcastResultCode
 
 data class EngineBroadcastRecord(
@@ -34,12 +33,8 @@ enum class EngineBroadcastResultCode {
     }
 }
 
-fun interface EngineBroadcastRecorder : VirtualBroadcastRecorder {
+fun interface EngineBroadcastRecorder {
     fun record(record: EngineBroadcastRecord)
-
-    override fun record(record: VirtualBroadcastRecord) {
-        record(record.toEngineRecord())
-    }
 }
 
 fun VirtualBroadcastRecord.toEngineRecord(): EngineBroadcastRecord =

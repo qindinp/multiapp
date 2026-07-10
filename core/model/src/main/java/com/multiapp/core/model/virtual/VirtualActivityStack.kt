@@ -25,6 +25,8 @@ class VirtualActivityStack {
                 val reused = found.task.activities[found.index].copy(
                     intentFlags = intentFlags,
                     state = VirtualActivityState.RESUMED,
+                    resultToToken = requested.resultToToken,
+                    resultRequestCode = requested.resultRequestCode,
                     pendingNewIntents = found.task.activities[found.index].pendingNewIntents + pendingNewIntent
                 )
                 found.task.activities[found.index] = reused
@@ -46,6 +48,8 @@ class VirtualActivityStack {
             val reused = top.copy(
                 intentFlags = intentFlags,
                 state = VirtualActivityState.RESUMED,
+                resultToToken = requested.resultToToken,
+                resultRequestCode = requested.resultRequestCode,
                 pendingNewIntents = top.pendingNewIntents + pendingNewIntent
             )
             targetTask.activities[targetTask.activities.lastIndex] = reused
@@ -66,6 +70,8 @@ class VirtualActivityStack {
                 val reused = targetTask.activities[index].copy(
                     intentFlags = intentFlags,
                     state = VirtualActivityState.RESUMED,
+                    resultToToken = requested.resultToToken,
+                    resultRequestCode = requested.resultRequestCode,
                     pendingNewIntents = targetTask.activities[index].pendingNewIntents + pendingNewIntent
                 )
                 targetTask.activities[index] = reused
@@ -92,6 +98,55 @@ class VirtualActivityStack {
 
     @Synchronized
     fun listTasks(): List<VirtualTaskRecord> = tasks.values.map { it.toRecord() }
+
+    @Synchronized
+    fun restore(restoredTasks: List<VirtualTaskRecord>): Int {
+        tasks.clear()
+        val seenTokens = mutableSetOf<String>()
+        val seenActivityIds = mutableSetOf<String>()
+        var maxTaskId = 0
+        var maxEventId = 0L
+        restoredTasks.forEach { task ->
+            val activities = task.activities
+                .asSequence()
+                .filter { it.isRestorableActivity() }
+                .filter { seenTokens.add(it.token) }
+                .filter { seenActivityIds.add(it.activityId) }
+                .map { activity ->
+                    val restoredActivity = activity.copy(
+                        taskId = task.taskId,
+                        taskAffinity = activity.taskAffinity ?: task.affinity
+                    )
+                    restoredActivity.pendingNewIntents.forEach { pending ->
+                        if (pending.eventId > maxEventId) {
+                            maxEventId = pending.eventId
+                        }
+                    }
+                    restoredActivity
+                }
+                .toMutableList()
+            if (activities.isNotEmpty()) {
+                tasks[task.taskId] = MutableTaskRecord(
+                    taskId = task.taskId,
+                    affinity = task.affinity,
+                    createdAtMs = task.createdAtMs,
+                    activities = activities
+                )
+                if (task.taskId > maxTaskId) {
+                    maxTaskId = task.taskId
+                }
+            }
+        }
+        nextTaskId = maxTaskId + 1
+        if (nextTaskId < 1) {
+            nextTaskId = 1
+        }
+        nextEventId = maxEventId + 1
+        if (nextEventId < 1L) {
+            nextEventId = 1L
+        }
+        return tasks.values.sumOf { it.activities.size }
+    }
 
     @Synchronized
     fun topTask(): VirtualTaskRecord? = tasks.values.lastOrNull()?.toRecord()
@@ -121,18 +176,74 @@ class VirtualActivityStack {
     fun setResultByToken(
         token: String,
         resultCode: Int,
-        dataIntent: VirtualIntentSnapshot? = null
+        dataIntent: VirtualIntentSnapshot? = null,
+        requestCode: Int = -1,
+        resultWho: String? = null,
+        frameworkDispatchAttempted: Boolean = false,
+        frameworkDispatchInvoked: Boolean = false
     ): VirtualActivityRecord? = updateFirst({ it.token == token }) { record ->
-        record.copy(result = VirtualActivityResult(resultCode = resultCode, dataIntent = dataIntent))
+        record.copy(
+            result = VirtualActivityResult(
+                resultCode = resultCode,
+                dataIntent = dataIntent,
+                requestCode = requestCode,
+                resultWho = resultWho,
+                frameworkDispatchAttempted = frameworkDispatchAttempted,
+                frameworkDispatchInvoked = frameworkDispatchInvoked
+            )
+        )
     }
 
     @Synchronized
     fun setResultByActivityId(
         activityId: String,
         resultCode: Int,
-        dataIntent: VirtualIntentSnapshot? = null
+        dataIntent: VirtualIntentSnapshot? = null,
+        requestCode: Int = -1,
+        resultWho: String? = null,
+        frameworkDispatchAttempted: Boolean = false,
+        frameworkDispatchInvoked: Boolean = false
     ): VirtualActivityRecord? = updateFirst({ it.activityId == activityId }) { record ->
-        record.copy(result = VirtualActivityResult(resultCode = resultCode, dataIntent = dataIntent))
+        record.copy(
+            result = VirtualActivityResult(
+                resultCode = resultCode,
+                dataIntent = dataIntent,
+                requestCode = requestCode,
+                resultWho = resultWho,
+                frameworkDispatchAttempted = frameworkDispatchAttempted,
+                frameworkDispatchInvoked = frameworkDispatchInvoked
+            )
+        )
+    }
+
+    @Synchronized
+    fun updateResultDispatchStateByToken(
+        token: String,
+        frameworkDispatchAttempted: Boolean,
+        frameworkDispatchInvoked: Boolean
+    ): VirtualActivityRecord? = updateFirst({ it.token == token && it.result != null }) { record ->
+        record.copy(
+            result = record.result?.copy(
+                frameworkDispatchAttempted = frameworkDispatchAttempted,
+                frameworkDispatchInvoked = frameworkDispatchInvoked
+            )
+        )
+    }
+
+    @Synchronized
+    fun updateStateByToken(
+        token: String,
+        state: VirtualActivityState
+    ): VirtualActivityRecord? = updateFirst({ it.token == token }) { record ->
+        record.copy(state = state)
+    }
+
+    @Synchronized
+    fun updateStateByActivityId(
+        activityId: String,
+        state: VirtualActivityState
+    ): VirtualActivityRecord? = updateFirst({ it.activityId == activityId }) { record ->
+        record.copy(state = state)
     }
 
     @Synchronized
@@ -294,6 +405,16 @@ class VirtualActivityStack {
         instanceId == other.instanceId &&
             originPackageName == other.originPackageName &&
             guestActivityClassName == other.guestActivityClassName
+
+    private fun VirtualActivityRecord.isRestorableActivity(): Boolean =
+        state != VirtualActivityState.FINISHED &&
+            state != VirtualActivityState.DESTROYED &&
+            token.isNotBlank() &&
+            activityId.isNotBlank() &&
+            instanceId.isNotBlank() &&
+            originPackageName.isNotBlank() &&
+            guestActivityClassName.isNotBlank() &&
+            proxyActivityClassName.isNotBlank()
 
     private fun VirtualActivityRecord.instanceScopedAffinity(): String =
         "$originPackageName:$instanceId"

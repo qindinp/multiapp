@@ -17,9 +17,19 @@ class MultiAppApplication : Application() {
             Timber.plant(Timber.DebugTree())
         }
 
-        EngineRuntimeInstallers.installInstrumentation()
+        if (!EngineRuntimeInstallers.installSystemServerClient(this)) {
+            Timber.w("Engine system-server Binder unavailable; durable state fallback active")
+        }
+
+        EngineRuntimeInstallers.installInstrumentation(this)
             .onFailure { Timber.e(it, "VirtualInstrumentation install failed") }
 
+        EngineRuntimeInstallers.installAmsComponentDispatcher(this)
+        EngineRuntimeInstallers.installContentResolver().also { result ->
+            if (!result.installed) {
+                Timber.w("Engine ContentService proxy unavailable: ${result.status}:${result.reason}")
+            }
+        }
         EngineRuntimeInstallers.installBroadcastRecorder(ContainerBroadcastEvidenceRecorder(this))
         EngineRuntimeInstallers.installAmsApiEvidenceRecorder(ContainerAmsApiEvidenceRecorder(this))
 

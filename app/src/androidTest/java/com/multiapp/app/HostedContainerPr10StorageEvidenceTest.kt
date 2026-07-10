@@ -223,9 +223,9 @@ class HostedContainerPr10StorageEvidenceTest {
             assertEquals("GUEST_PRIVATE_PATHS_ONLY", fields["nativeRedirectScope"])
             assertEquals("false", fields["procMapsSpoofEnabled"])
             assertEquals("false", fields["procStatusSpoofEnabled"])
-            assertEquals("UNKNOWN", fields["namespaceVerdict"])
-            assertEquals("UNKNOWN", fields["findLibraryVerdict"])
-            assertEquals("UNKNOWN", fields["nativeLoadVerdict"])
+            assertNotEquals("UNKNOWN", fields["namespaceVerdict"])
+            assertNotEquals("UNKNOWN", fields["findLibraryVerdict"])
+            assertNotEquals("UNKNOWN", fields["nativeLoadVerdict"])
 
             val candidatePath = File(checkNotNull(fields["candidateRedirectedPath"])).canonicalPath
             assertTrue("$component candidate outside dataRoot: $candidatePath", candidatePath.startsWith(dataRootPath))

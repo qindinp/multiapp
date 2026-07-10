@@ -190,10 +190,10 @@ class EngineBoundaryTest {
         val sourceExtensions = setOf("java", "kt")
 
         val directRuntimeImportRegex =
-            Regex("""import\s+(com\.multiapp\.core\.(?:loader|hook|xposed)\.[A-Za-z0-9_.*]+)(?:\s+as\s+[A-Za-z0-9_]+)?;?""")
+            Regex("""import\s+(com\.multiapp\.core\.(?:loader|hook|xposed|identity)\.[A-Za-z0-9_.*]+)(?:\s+as\s+[A-Za-z0-9_]+)?;?""")
 
         val directRuntimeFqcnRegex =
-            Regex("""\b(com\.multiapp\.core\.(?:loader|hook|xposed)\.[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*)\b""")
+            Regex("""\b(com\.multiapp\.core\.(?:loader|hook|xposed|identity)\.[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*)\b""")
 
         val allowedLegacyRuntimeReferenceCounts = emptyMap<RuntimeReferenceKey, Int>()
     }

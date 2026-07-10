@@ -69,21 +69,45 @@ data class VirtualContextConfig(
  */
 interface VirtualContextFactory {
     /**
-     * Create a guest Context that wraps [hostContext] and overrides identity
-     * fields according to [config].
+     * Create an Android-free description of a guest Context identity.
      *
-     * The returned Context should report:
-     * - `getPackageName()` -> [VirtualContextConfig.virtualPackageName]
-     * - `getApplicationInfo()` -> guest's ApplicationInfo with spoofed paths
-     * - `getClassLoader()` -> [VirtualContextConfig.classLoader]
-     * - `getFilesDir()` / `getCacheDir()` -> under [VirtualContextConfig.dataDir]
-     *
-     * @param hostContext the real Android Context to wrap
      * @param config guest instance configuration
-     * @return a Context with overridden identity
+     * @return guest identity and storage paths that Android-facing adapters can wrap
      */
-    fun createGuestContext(
-        hostContext: android.content.Context,
-        config: VirtualContextConfig
-    ): android.content.Context
+    fun createGuestContext(config: VirtualContextConfig): VirtualContextSpec
+}
+
+data class VirtualContextSpec(
+    val packageName: String,
+    val originPackageName: String,
+    val virtualPackageName: String,
+    val dataDir: String,
+    val filesDir: String,
+    val cacheDir: String,
+    val sourceDir: String,
+    val publicSourceDir: String,
+    val splitSourceDirs: List<String>,
+    val splitPublicSourceDirs: List<String>,
+    val splitNames: List<String>,
+    val nativeLibraryDir: String?,
+    val processSlot: String?
+) {
+    companion object {
+        fun from(config: VirtualContextConfig): VirtualContextSpec =
+            VirtualContextSpec(
+                packageName = config.virtualPackageName,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                dataDir = config.dataDir,
+                filesDir = "${config.dataDir}/files",
+                cacheDir = "${config.dataDir}/cache",
+                sourceDir = config.sourceDir,
+                publicSourceDir = config.publicSourceDir,
+                splitSourceDirs = config.splitSourceDirs,
+                splitPublicSourceDirs = config.splitPublicSourceDirs,
+                splitNames = config.splitNames,
+                nativeLibraryDir = config.nativeLibraryDir,
+                processSlot = config.processSlot
+            )
+    }
 }

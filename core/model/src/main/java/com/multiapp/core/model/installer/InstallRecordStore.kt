@@ -113,12 +113,26 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
             splitPublicSourceDirs = splitPublicSourceDirs.orEmpty(),
             splitNames = splitNames.orEmpty(),
             splitApkSha256s = splitApkSha256s.orEmpty(),
+            signerSha256Digests = signerSha256Digests.orEmpty(),
+            applicationMetaData = applicationMetaData.orEmpty(),
             nativeLibraries = nativeLibraries.orEmpty(),
             abiList = abiList.orEmpty(),
             permissions = permissions.orEmpty(),
-            activities = activities.orEmpty(),
-            services = services.orEmpty(),
-            receivers = receivers.orEmpty(),
-            providers = providers.orEmpty()
+            providers = providers.orEmpty().map { component ->
+                component.copy(
+                    metaData = component.metaData.orEmpty(),
+                    pathPermissions = component.pathPermissions.orEmpty(),
+                    uriPermissionPatterns = component.uriPermissionPatterns.orEmpty()
+                )
+            },
+            activities = activities.orEmpty().map { component ->
+                component.copy(metaData = component.metaData.orEmpty())
+            },
+            services = services.orEmpty().map { component ->
+                component.copy(metaData = component.metaData.orEmpty())
+            },
+            receivers = receivers.orEmpty().map { component ->
+                component.copy(metaData = component.metaData.orEmpty())
+            }
         )
 }

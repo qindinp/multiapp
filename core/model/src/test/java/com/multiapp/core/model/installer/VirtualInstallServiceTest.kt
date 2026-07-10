@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.security.MessageDigest
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
@@ -327,10 +328,18 @@ class VirtualInstallServiceTest {
             metadataResolver = InstallMetadataResolver { _, _ ->
                 InstallMetadata(
                     permissions = listOf("android.permission.INTERNET"),
-                    activities = listOf(ComponentInfo("com.example.MainActivity", exported = true)),
+                    activities = listOf(
+                        ComponentInfo(
+                            "com.example.MainActivity",
+                            exported = true,
+                            metaData = mapOf("mode" to VirtualMetaDataValue.string("main"))
+                        )
+                    ),
                     services = listOf(ComponentInfo("com.example.SyncService")),
                     receivers = listOf(ComponentInfo("com.example.BootReceiver")),
-                    providers = listOf(ComponentInfo("com.example.ProbeProvider"))
+                    providers = listOf(ComponentInfo("com.example.ProbeProvider")),
+                    applicationMetaData = mapOf("enabled" to VirtualMetaDataValue.boolean(true)),
+                    signerSha256Digests = listOf("signer-sha")
                 )
             }
         )
@@ -349,10 +358,12 @@ class VirtualInstallServiceTest {
         assertTrue(result.isSuccess)
         val record = installStore.load("com.example.app")!!
         assertEquals(listOf("android.permission.INTERNET"), record.permissions)
-        assertEquals(listOf(ComponentInfo("com.example.MainActivity", exported = true)), record.activities)
+        assertEquals("main", record.activities.single().metaData.getValue("mode").encodedValue)
         assertEquals(listOf(ComponentInfo("com.example.SyncService")), record.services)
         assertEquals(listOf(ComponentInfo("com.example.BootReceiver")), record.receivers)
         assertEquals(listOf(ComponentInfo("com.example.ProbeProvider")), record.providers)
+        assertEquals(true, record.applicationMetaData.getValue("enabled").encodedValue.toBoolean())
+        assertEquals(listOf("signer-sha"), record.signerSha256Digests)
     }
 
     @Test
@@ -376,6 +387,15 @@ class VirtualInstallServiceTest {
             ).isSuccess
         )
         assertEquals(emptyList(), installStore.load("com.example.app")!!.activities)
+        val installed = installStore.load("com.example.app")!!
+        assertTrue(
+            installStore.save(
+                installed.copy(
+                    originCertSha256 = "current-signer",
+                    signerSha256Digests = listOf("old-signer", "current-signer")
+                )
+            ).isSuccess
+        )
 
         val refreshingService = ProductionVirtualInstallService(
             installRecordStore = installStore,
@@ -401,6 +421,10 @@ class VirtualInstallServiceTest {
         assertEquals(
             listOf(ComponentInfo("com.example.MainActivity", exported = true)),
             installStore.load("com.example.app")!!.activities
+        )
+        assertEquals(
+            listOf("old-signer", "current-signer"),
+            installStore.load("com.example.app")!!.signerSha256Digests
         )
     }
 

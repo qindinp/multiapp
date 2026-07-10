@@ -21,7 +21,7 @@ class VirtualPackageManagerGlobalInstaller(
         runtimeUid: Int
     ): VirtualPackageManagerGlobalInstallResult {
         val readResult = bridge.readCurrentPackageManager()
-        VirtualPackageManagerServiceRegistry.register(snapshot)
+        VirtualPackageManagerServiceRegistry.register(snapshot, hostContext?.packageManager)
         val original = readResult.packageManager
         if (original == null) {
             return baseResult(

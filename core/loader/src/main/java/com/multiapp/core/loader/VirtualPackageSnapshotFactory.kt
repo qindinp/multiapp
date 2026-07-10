@@ -1,9 +1,12 @@
 package com.multiapp.core.loader
 
 import com.multiapp.core.model.instance.VirtualInstanceRecord
+import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.virtual.ResolvedPackage
+import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import com.multiapp.core.model.virtual.toLegacyMetaDataMap
 
 internal object VirtualPackageSnapshotFactory {
 
@@ -39,15 +42,45 @@ internal object VirtualPackageSnapshotFactory {
             processName = resolvedPackage?.processName,
             taskAffinity = resolvedPackage?.taskAffinity,
             themeId = resolvedPackage?.themeId ?: 0,
-            metaData = resolvedPackage?.metaData ?: emptyMap(),
+            metaData = resolvedPackage?.metaData?.takeIf { it.isNotEmpty() }
+                ?: installRecord.applicationMetaData.toLegacyMetaDataMap(),
+            typedMetaData = resolvedPackage?.typedMetaData?.takeIf { it.isNotEmpty() }
+                ?: installRecord.applicationMetaData,
             launcherActivityName = resolvedPackage?.launcherActivityName
                 ?: resolvedPackage?.activities?.resolveLauncherIntentActivityName(),
-            activities = resolvedPackage?.activities ?: emptyList(),
-            services = resolvedPackage?.services ?: emptyList(),
-            receivers = resolvedPackage?.receivers ?: emptyList(),
-            providers = resolvedPackage?.providers ?: emptyList(),
+            activities = resolvedPackage?.activities?.takeIf { it.isNotEmpty() }
+                ?: installRecord.activities.toResolvedComponents(),
+            services = resolvedPackage?.services?.takeIf { it.isNotEmpty() }
+                ?: installRecord.services.toResolvedComponents(),
+            receivers = resolvedPackage?.receivers?.takeIf { it.isNotEmpty() }
+                ?: installRecord.receivers.toResolvedComponents(),
+            providers = resolvedPackage?.providers?.takeIf { it.isNotEmpty() }
+                ?: installRecord.providers.toResolvedComponents(),
             permissions = resolvedPackage?.permissions ?: installRecord.permissions,
-            originCertSha256 = installRecord.originCertSha256
+            originCertSha256 = installRecord.originCertSha256,
+            signerSha256Digests = installRecord.signerSha256Digests,
+            hasMultipleSigners = installRecord.hasMultipleSigners
         )
     }
+
+    private fun List<ComponentInfo>.toResolvedComponents(): List<ResolvedComponent> =
+        map { component ->
+            ResolvedComponent(
+                name = component.name,
+                exported = component.exported,
+                launchMode = component.launchMode,
+                processName = component.processName,
+                taskAffinity = component.taskAffinity,
+                themeId = component.themeId,
+                permission = component.permission,
+                readPermission = component.readPermission,
+                writePermission = component.writePermission,
+                grantUriPermissions = component.grantUriPermissions,
+                pathPermissions = component.pathPermissions,
+                uriPermissionPatterns = component.uriPermissionPatterns,
+                metaData = component.metaData.toLegacyMetaDataMap(),
+                typedMetaData = component.metaData,
+                targetActivityName = component.targetActivityName
+            )
+        }
 }

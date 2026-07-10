@@ -30,6 +30,7 @@ class ProviderRoutingStage(
             passThroughHookAllowed = providerHookInstallEnabled
         )
         ProviderRouteTokenRegistry.rememberProcessSlot(packageSnapshot.instanceId, input.processSlot)
+        VirtualContentServiceRoutes.install(providerRoutingPlan)
         val providerHookInstallResult = if (providerHookInstallEnabled) {
             providerHookInstaller.install(providerRoutingPlan)
         } else {

@@ -2,15 +2,29 @@ package com.multiapp.app.container
 
 import android.content.Context
 import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.EngineRuntimeAuthorityValidator
+import com.multiapp.core.engine.EngineRuntimeIpcClients
+import com.multiapp.core.engine.EngineRuntimeIpcSnapshot
 import com.multiapp.core.engine.HostedRuntimeEngine
 
 class HostedActivityRuntimeBinder(
-    private val runtimeEngineFactory: (Context) -> HostedRuntimeEngine = ::hostedRuntimeEngineFrom
+    private val runtimeEngineFactory: (Context) -> HostedRuntimeEngine = ::hostedRuntimeEngineFrom,
+    private val authorityQuery: (String) -> EngineRuntimeIpcSnapshot? = EngineRuntimeIpcClients::queryRuntime
 ) {
     fun ensureBound(hostContext: Context, instanceId: String?): HostedActivityRuntimeBindResult {
         val requestedInstanceId = instanceId
             ?.takeIf { it.isNotBlank() }
             ?: return HostedActivityRuntimeBindResult.NotRequested("missingActivityProxyInstanceId")
+
+        val authority = EngineRuntimeAuthorityValidator.validate(authorityQuery(requestedInstanceId))
+        if (!authority.allowed) {
+            return HostedActivityRuntimeBindResult.Failed(
+                instanceId = requestedInstanceId,
+                errorClassName = SecurityException::class.java.name,
+                errorMessage = authority.reason,
+                detail = "engineRuntimeAuthorityRejected"
+            )
+        }
 
         val runtimeEngine = runtimeEngineFactory(hostContext)
         runtimeEngine.reusableResult(requestedInstanceId)?.let { result ->

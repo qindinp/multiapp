@@ -28,9 +28,19 @@ class DefaultEngineOperationEvidenceSink(
 }
 
 object EngineOperationEvidenceSinks {
-    val global: EngineOperationEvidenceSink by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+    private val defaultSink: EngineOperationEvidenceSink by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         DefaultEngineOperationEvidenceSink(
             DefaultVirtualSystemServer(EngineRuntimeRegistry.global).runtimeService
         )
+    }
+
+    @Volatile
+    private var installedSink: EngineOperationEvidenceSink? = null
+
+    val global: EngineOperationEvidenceSink
+        get() = installedSink ?: defaultSink
+
+    fun install(sink: EngineOperationEvidenceSink?) {
+        installedSink = sink
     }
 }

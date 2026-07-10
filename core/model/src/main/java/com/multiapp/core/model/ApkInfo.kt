@@ -1,7 +1,5 @@
 package com.multiapp.core.model
 
-import android.graphics.drawable.Drawable
-
 /**
  * Information parsed from an APK file.
  * This is a snapshot — NOT stored persistently.
@@ -13,7 +11,6 @@ data class ApkInfo(
     val versionCode: Long,
     val minSdk: Int,
     val targetSdk: Int,
-    @Transient val icon: Drawable? = null,
     val apkPath: String,
     val apkSizeBytes: Long,
     /** Requested permissions from manifest */

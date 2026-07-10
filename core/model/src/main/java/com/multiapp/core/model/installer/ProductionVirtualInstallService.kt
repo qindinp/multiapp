@@ -38,6 +38,7 @@ class ProductionVirtualInstallService(
             val appMetadata = app.toInstallMetadata()
             val resolvedMetadata = resolveInstallMetadata(app.packageName, app.apkPath)
             val importMetadata = appMetadata.withResolvedFallback(resolvedMetadata)
+                .withExistingSignerFallback(existing)
             val appApkSha256 = computeSha256OrNull(app.apkPath)
             val appSplitSha256s = computeSha256sOrNull(importMetadata.splitApkPaths)
             if (existing != null && !existing.needsAppRefresh(app, importMetadata, appApkSha256, appSplitSha256s)) {
@@ -62,6 +63,9 @@ class ProductionVirtualInstallService(
                 services = importMetadata.services,
                 receivers = importMetadata.receivers,
                 providers = importMetadata.providers,
+                applicationMetaData = importMetadata.applicationMetaData,
+                signerSha256Digests = importMetadata.signerSha256Digests,
+                hasMultipleSigners = importMetadata.hasMultipleSigners,
                 nativeLibraries = importMetadata.nativeLibraries,
                 abiList = importMetadata.abiList,
                 splitApkPaths = importMetadata.splitApkPaths,
@@ -98,6 +102,7 @@ class ProductionVirtualInstallService(
             requireSafeInstallPackageName(packageName)
             val existing = installRecordStore.load(packageName)
             val resolvedMetadata = resolveInstallMetadata(packageName, originApkPath)
+                .withExistingSignerFallback(existing)
 
             // Idempotent for complete records. Older v2 records may have been created
             // before component import existed; refresh those so hosted launch can find
@@ -124,6 +129,9 @@ class ProductionVirtualInstallService(
                 services = resolvedMetadata.services,
                 receivers = resolvedMetadata.receivers,
                 providers = resolvedMetadata.providers,
+                applicationMetaData = resolvedMetadata.applicationMetaData,
+                signerSha256Digests = resolvedMetadata.signerSha256Digests,
+                hasMultipleSigners = resolvedMetadata.hasMultipleSigners,
                 nativeLibraries = resolvedMetadata.nativeLibraries,
                 abiList = resolvedMetadata.abiList,
                 splitApkPaths = resolvedMetadata.splitApkPaths,
@@ -151,6 +159,9 @@ class ProductionVirtualInstallService(
             services = services.map { ComponentInfo(it) },
             receivers = receivers.map { ComponentInfo(it) },
             providers = providers.map { ComponentInfo(it) },
+            applicationMetaData = emptyMap(),
+            signerSha256Digests = emptyList(),
+            hasMultipleSigners = false,
             nativeLibraries = emptyList(),
             abiList = nativeAbis,
             splitApkPaths = splitApkPaths,
@@ -167,12 +178,23 @@ class ProductionVirtualInstallService(
             services = resolved.services.ifEmpty { services },
             receivers = resolved.receivers.ifEmpty { receivers },
             providers = resolved.providers.ifEmpty { providers },
+            applicationMetaData = resolved.applicationMetaData.ifEmpty { applicationMetaData },
+            signerSha256Digests = resolved.signerSha256Digests.ifEmpty { signerSha256Digests },
+            hasMultipleSigners = resolved.hasMultipleSigners || hasMultipleSigners,
             nativeLibraries = resolved.nativeLibraries.ifEmpty { nativeLibraries },
             abiList = resolved.abiList.ifEmpty { abiList },
             splitApkPaths = resolved.splitApkPaths.ifEmpty { splitApkPaths },
             splitPublicSourceDirs = resolved.splitPublicSourceDirs.ifEmpty { splitPublicSourceDirs },
             splitNames = resolved.splitNames.ifEmpty { splitNames },
             isolatedSplits = resolved.isolatedSplits || isolatedSplits
+        )
+    }
+
+    private fun InstallMetadata.withExistingSignerFallback(existing: InstallRecord?): InstallMetadata {
+        if (signerSha256Digests.isNotEmpty() || existing == null) return this
+        return copy(
+            signerSha256Digests = existing.signerSha256Digests,
+            hasMultipleSigners = existing.hasMultipleSigners
         )
     }
 
@@ -183,6 +205,9 @@ class ProductionVirtualInstallService(
             services.isEmpty() && metadata.services.isNotEmpty() ||
             receivers.isEmpty() && metadata.receivers.isNotEmpty() ||
             providers.isEmpty() && metadata.providers.isNotEmpty() ||
+            applicationMetaData.isEmpty() && metadata.applicationMetaData.isNotEmpty() ||
+            signerSha256Digests.isEmpty() && metadata.signerSha256Digests.isNotEmpty() ||
+            hasMultipleSigners != metadata.hasMultipleSigners ||
             permissions.isEmpty() && metadata.permissions.isNotEmpty() ||
             nativeLibraries.isEmpty() && metadata.nativeLibraries.isNotEmpty() ||
             abiList.isEmpty() && metadata.abiList.isNotEmpty() ||
@@ -218,6 +243,9 @@ class ProductionVirtualInstallService(
             services == metadata.services &&
             receivers == metadata.receivers &&
             providers == metadata.providers &&
+            applicationMetaData == metadata.applicationMetaData &&
+            signerSha256Digests == metadata.signerSha256Digests &&
+            hasMultipleSigners == metadata.hasMultipleSigners &&
             splitApkPaths == metadata.splitApkPaths &&
             splitPublicSourceDirs == metadata.splitPublicSourceDirs &&
             splitNames == metadata.splitNames &&

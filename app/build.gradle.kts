@@ -88,10 +88,7 @@ dependencies {
     implementation(project(":core:engine"))
     implementation(project(":core:designsystem"))
     implementation(project(":core:apk"))
-    implementation(project(":core:hook"))
     implementation(project(":core:manifest"))
-    implementation(project(":core:identity"))
-    implementation(project(":core:loader"))
     implementation(project(":core:stub"))
     implementation(project(":core:instance"))
     implementation(project(":core:installer"))
@@ -134,6 +131,9 @@ dependencies {
     testImplementation(libs.coroutines.test)
     testImplementation(libs.mockk)
     testImplementation(libs.turbine)
+    testImplementation(project(":core:hook"))
+    testImplementation(project(":core:identity"))
+    testImplementation(project(":core:loader"))
 
     // Android Instrumentation Testing
     androidTestImplementation(platform(libs.compose.bom))
@@ -147,4 +147,6 @@ dependencies {
     kspAndroidTest(libs.hilt.compiler)
     androidTestImplementation(libs.mockk.android)
     androidTestImplementation(libs.coroutines.test)
+    androidTestImplementation(project(":core:identity"))
+    androidTestImplementation(project(":core:loader"))
 }

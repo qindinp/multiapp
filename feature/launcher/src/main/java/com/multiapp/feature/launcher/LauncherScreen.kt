@@ -33,6 +33,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.hilt.navigation.compose.hiltViewModel
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
 import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
@@ -706,6 +709,10 @@ private fun AppPickerItem(
     onClick: () -> Unit
 ) {
     val canCreate = app.mainActivity != null
+    val context = LocalContext.current
+    val appIcon = remember(app.packageName, app.apkPath) {
+        loadVirtualAppIcon(context.applicationContext, app)
+    }
     ElevatedCard(
         onClick = { if (canCreate) onClick() },
         shape = RoundedCornerShape(14.dp),
@@ -731,7 +738,7 @@ private fun AppPickerItem(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                app.icon?.let { drawable ->
+                appIcon?.let { drawable ->
                     val bitmap = remember(drawable) { drawable.toBitmap(112, 112) }
                     Image(
                         bitmap = bitmap.asImageBitmap(),
@@ -793,12 +800,8 @@ private fun CreateInstanceDialog(
 ) {
     var displayName by remember(app.packageName, defaultName) { mutableStateOf(defaultName) }
     val context = LocalContext.current
-    val appIcon = remember(app.packageName) {
-        try {
-            app.icon ?: context.packageManager.getApplicationIcon(app.packageName)
-        } catch (_: Exception) {
-            null
-        }
+    val appIcon = remember(app.packageName, app.apkPath) {
+        loadVirtualAppIcon(context.applicationContext, app)
     }
 
     AlertDialog(
@@ -956,6 +959,25 @@ private fun VirtualApp.supportLabel(): String {
         isSystemApp -> "谨慎"
         else -> "可创建"
     }
+}
+
+private fun loadVirtualAppIcon(context: Context, app: VirtualApp): Drawable? {
+    val packageManager = context.packageManager
+    return runCatching { packageManager.getApplicationIcon(app.packageName) }
+        .getOrElse {
+            loadArchiveIcon(packageManager, app.apkPath)
+        }
+}
+
+private fun loadArchiveIcon(packageManager: PackageManager, apkPath: String): Drawable? {
+    if (apkPath.isBlank()) return null
+    return runCatching {
+        val info = packageManager.getPackageArchiveInfo(apkPath, 0) ?: return null
+        val appInfo = info.applicationInfo ?: return null
+        appInfo.sourceDir = apkPath
+        appInfo.publicSourceDir = apkPath
+        appInfo.loadIcon(packageManager)
+    }.getOrNull()
 }
 
 private fun LauncherUiState.formattedError(): String {

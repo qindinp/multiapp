@@ -97,15 +97,10 @@ class VirtualActivityControllerTest {
                 return resolvedPackage.launcherActivityName
             }
 
-            override fun launchGuestActivity(
-                hostActivity: android.app.Activity,
-                activityClassName: String,
-                classLoader: ClassLoader,
-                config: VirtualContextConfig
-            ): GuestActivityLaunchResult {
+            override fun planGuestActivityLaunch(request: GuestActivityLaunchRequest): GuestActivityLaunchResult {
                 return GuestActivityLaunchResult(
                     success = true,
-                    activityClassName = activityClassName
+                    activityClassName = request.activityClassName
                 )
             }
         }
@@ -120,12 +115,7 @@ class VirtualActivityControllerTest {
                 return resolvedPackage.launcherActivityName
             }
 
-            override fun launchGuestActivity(
-                hostActivity: android.app.Activity,
-                activityClassName: String,
-                classLoader: ClassLoader,
-                config: VirtualContextConfig
-            ): GuestActivityLaunchResult {
+            override fun planGuestActivityLaunch(request: GuestActivityLaunchRequest): GuestActivityLaunchResult {
                 return GuestActivityLaunchResult(success = false, activityClassName = null)
             }
         }
@@ -149,13 +139,8 @@ class VirtualActivityControllerTest {
                 return resolvedPackage.launcherActivityName
             }
 
-            override fun launchGuestActivity(
-                hostActivity: android.app.Activity,
-                activityClassName: String,
-                classLoader: ClassLoader,
-                config: VirtualContextConfig
-            ): GuestActivityLaunchResult {
-                return GuestActivityLaunchResult(success = true, activityClassName = activityClassName)
+            override fun planGuestActivityLaunch(request: GuestActivityLaunchRequest): GuestActivityLaunchResult {
+                return GuestActivityLaunchResult(success = true, activityClassName = request.activityClassName)
             }
         }
 
@@ -169,5 +154,32 @@ class VirtualActivityControllerTest {
         )
 
         assertEquals("com.example.MainActivity", controller.resolveLauncherActivity(pkg))
+    }
+
+    @Test
+    fun `GuestActivityLaunchRequest carries pure model launch data`() {
+        val config = VirtualContextConfig(
+            instanceId = "instance-1",
+            originPackageName = "com.example",
+            virtualPackageName = "com.multiapp.instance.example",
+            dataDir = "/data/user/0/com.multiapp.app/files/instances/instance-1",
+            sourceDir = "/data/app/com.example/base.apk",
+            nativeLibraryDir = null,
+            classLoader = ClassLoader.getSystemClassLoader(),
+            processSlot = ":v0"
+        )
+
+        val request = GuestActivityLaunchRequest(
+            activityClassName = "com.example.MainActivity",
+            classLoader = config.classLoader,
+            config = config,
+            launchFlags = 0x10000000,
+            taskAffinity = "com.example"
+        )
+
+        assertEquals("com.example.MainActivity", request.activityClassName)
+        assertEquals(":v0", request.config.processSlot)
+        assertEquals(0x10000000, request.launchFlags)
+        assertEquals("com.example", request.taskAffinity)
     }
 }

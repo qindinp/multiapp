@@ -3,6 +3,11 @@ package com.multiapp.core.manifest
 import net.dongliu.apk.parser.ApkFile
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.os.PatternMatcher
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
+import com.multiapp.core.model.virtual.VirtualProviderPathPattern
+import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
+import com.multiapp.core.model.virtual.VirtualProviderPathPermission
 import org.w3c.dom.Element
 import org.w3c.dom.NodeList
 import java.io.File
@@ -66,7 +71,8 @@ class ManifestParser @Inject constructor(
         val clearTaskOnLaunch: Boolean = false,
         val finishOnTaskLaunch: Boolean = false,
         val enabled: Boolean = true,
-        val targetActivityName: String? = null
+        val targetActivityName: String? = null,
+        val metaData: List<MetaDataInfo> = emptyList()
     )
 
     data class ProviderInfo(
@@ -74,14 +80,19 @@ class ManifestParser @Inject constructor(
         val authorities: String,
         val exported: Boolean = false,
         val grantUriPermissions: Boolean = false,
-        val permission: String? = null
+        val permission: String? = null,
+        val readPermission: String? = null,
+        val writePermission: String? = null,
+        val pathPermissions: List<VirtualProviderPathPermission> = emptyList(),
+        val uriPermissionPatterns: List<VirtualProviderPathPattern> = emptyList()
     )
 
     data class MetaDataInfo(
         val name: String,
         val resource: String? = null,
         val value: String? = null,
-        val resourceId: Int = 0
+        val resourceId: Int = 0,
+        val typedValue: VirtualMetaDataValue? = null
     )
 
     data class IntentFilterInfo(
@@ -228,6 +239,7 @@ class ManifestParser @Inject constructor(
             android.content.pm.PackageManager.GET_SERVICES or
             android.content.pm.PackageManager.GET_RECEIVERS or
             android.content.pm.PackageManager.GET_PROVIDERS or
+            android.content.pm.PackageManager.GET_URI_PERMISSION_PATTERNS or
             android.content.pm.PackageManager.GET_PERMISSIONS or
             android.content.pm.PackageManager.GET_META_DATA or
             android.content.pm.PackageManager.GET_RESOLVED_FILTER
@@ -279,7 +291,8 @@ class ManifestParser @Inject constructor(
                 clearTaskOnLaunch = (act.flags and 0x0004) != 0,
                 finishOnTaskLaunch = (act.flags and 0x0002) != 0,
                 enabled = act.enabled,
-                targetActivityName = act.targetActivity?.takeIf { it.isNotEmpty() }
+                targetActivityName = act.targetActivity?.takeIf { it.isNotEmpty() },
+                metaData = act.metaData.toMetaDataList()
             )
         }
 
@@ -290,7 +303,8 @@ class ManifestParser @Inject constructor(
                 process = svc.processName?.takeIf { it.isNotEmpty() },
                 intentFilters = emptyList(),
                 permission = svc.permission?.takeIf { it.isNotEmpty() },
-                enabled = svc.enabled
+                enabled = svc.enabled,
+                metaData = svc.metaData.toMetaDataList()
             )
         }
 
@@ -301,7 +315,8 @@ class ManifestParser @Inject constructor(
                 process = rcv.processName?.takeIf { it.isNotEmpty() },
                 intentFilters = emptyList(),
                 permission = rcv.permission?.takeIf { it.isNotEmpty() },
-                enabled = rcv.enabled
+                enabled = rcv.enabled,
+                metaData = rcv.metaData.toMetaDataList()
             )
         }
 
@@ -311,12 +326,24 @@ class ManifestParser @Inject constructor(
             if (metaData.isNotEmpty()) {
                 providerMetaDataMap[prv.name ?: ""] = metaData
             }
+            val uriPermissionPatterns = prv.uriPermissionPatterns.orEmpty()
+                .mapNotNull { it.toVirtualProviderPathPattern() }
             ProviderInfo(
                 name = prv.name ?: "",
                 authorities = prv.authority ?: "",
                 exported = prv.exported,
-                grantUriPermissions = prv.grantUriPermissions || prv.name?.contains("FileProvider") == true,
-                permission = providerPermission(prv)
+                grantUriPermissions = prv.grantUriPermissions && uriPermissionPatterns.isEmpty(),
+                permission = providerCommonPermission(prv),
+                readPermission = prv.readPermission?.takeIf { it.isNotBlank() },
+                writePermission = prv.writePermission?.takeIf { it.isNotBlank() },
+                pathPermissions = prv.pathPermissions.orEmpty().mapNotNull { permission ->
+                    val pattern = permission.toVirtualProviderPathPattern() ?: return@mapNotNull null
+                    val readPermission = permission.readPermission?.takeIf { it.isNotBlank() }
+                    val writePermission = permission.writePermission?.takeIf { it.isNotBlank() }
+                    if (readPermission == null && writePermission == null) return@mapNotNull null
+                    VirtualProviderPathPermission(pattern, readPermission, writePermission)
+                },
+                uriPermissionPatterns = uriPermissionPatterns
             )
         }
 
@@ -357,7 +384,9 @@ class ManifestParser @Inject constructor(
         apkFile: File,
         manifest: ParsedManifest
     ): ParsedManifest {
-        val flags = PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA
+        val flags = PackageManager.GET_ACTIVITIES or
+            PackageManager.GET_PROVIDERS or
+            PackageManager.GET_META_DATA
         val info = runCatching {
             context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, flags)
         }.getOrNull() ?: return manifest
@@ -370,6 +399,18 @@ class ManifestParser @Inject constructor(
     ): ParsedManifest {
         val applicationThemeId = packageInfo.applicationInfo?.theme ?: 0
         val applicationMetaData = packageInfo.applicationInfo?.metaData.toMetaDataList()
+        val manifestProviderNameByNormalizedName = manifest.providers.associate { provider ->
+            normalizeComponentName(manifest.packageName, provider.name) to provider.name
+        }
+        val providerMetaData = (packageInfo.providers ?: emptyArray())
+            .mapNotNull { providerInfo ->
+                providerInfo.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    val normalizedName = normalizeComponentName(manifest.packageName, name)
+                    val manifestName = manifestProviderNameByNormalizedName[normalizedName] ?: normalizedName
+                    manifestName to providerInfo.metaData.toMetaDataList()
+                }
+            }
+            .toMap()
         val targetActivityByName = (packageInfo.activities ?: emptyArray())
             .mapNotNull { activityInfo ->
                 val name = activityInfo.name?.takeIf { it.isNotBlank() }
@@ -388,9 +429,33 @@ class ManifestParser @Inject constructor(
                 ).map { name -> normalizeComponentName(manifest.packageName, name) to activityInfo.theme }
             }
             .toMap()
+        val activityMetaDataByName = (packageInfo.activities ?: emptyArray())
+            .mapNotNull { info ->
+                info.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    normalizeComponentName(manifest.packageName, name) to info.metaData.toMetaDataList()
+                }
+            }
+            .toMap()
+        val serviceMetaDataByName = (packageInfo.services ?: emptyArray())
+            .mapNotNull { info ->
+                info.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    normalizeComponentName(manifest.packageName, name) to info.metaData.toMetaDataList()
+                }
+            }
+            .toMap()
+        val receiverMetaDataByName = (packageInfo.receivers ?: emptyArray())
+            .mapNotNull { info ->
+                info.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    normalizeComponentName(manifest.packageName, name) to info.metaData.toMetaDataList()
+                }
+            }
+            .toMap()
         return manifest.copy(
             applicationThemeId = applicationThemeId,
-            applicationMetaData = manifest.applicationMetaData.ifEmpty { applicationMetaData },
+            applicationMetaData = manifest.applicationMetaData.mergeTypedValues(applicationMetaData),
+            providerMetaData = manifest.providerMetaData.mapValues { (name, values) ->
+                values.mergeTypedValues(providerMetaData[name].orEmpty())
+            } + providerMetaData.filterKeys { it !in manifest.providerMetaData },
             activities = manifest.activities.map { component ->
                 val componentName = normalizeComponentName(manifest.packageName, component.name)
                 val targetName = component.targetActivityName
@@ -400,8 +465,27 @@ class ManifestParser @Inject constructor(
                     ?: component.themeId
                 component.copy(
                     themeId = resolvedTheme,
+                    metaData = component.metaData.mergeTypedValues(
+                        activityMetaDataByName[componentName].orEmpty()
+                    ),
                     targetActivityName = component.targetActivityName
                         ?: targetActivityByName[componentName]
+                )
+            },
+            services = manifest.services.map { component ->
+                val componentName = normalizeComponentName(manifest.packageName, component.name)
+                component.copy(
+                    metaData = component.metaData.mergeTypedValues(
+                        serviceMetaDataByName[componentName].orEmpty()
+                    )
+                )
+            },
+            receivers = manifest.receivers.map { component ->
+                val componentName = normalizeComponentName(manifest.packageName, component.name)
+                component.copy(
+                    metaData = component.metaData.mergeTypedValues(
+                        receiverMetaDataByName[componentName].orEmpty()
+                    )
                 )
             }
         )
@@ -416,17 +500,10 @@ class ManifestParser @Inject constructor(
     /**
      * 从 ActivityInfo 数组中查找带 MAIN+LAUNCHER intent-filter 的 activity
      */
-    private fun providerPermission(provider: android.content.pm.ProviderInfo): String? {
+    private fun providerCommonPermission(provider: android.content.pm.ProviderInfo): String? {
         val readPermission = provider.readPermission?.takeIf { it.isNotEmpty() }
         val writePermission = provider.writePermission?.takeIf { it.isNotEmpty() }
-        return when {
-            readPermission == null && writePermission == null -> null
-            readPermission == writePermission -> readPermission
-            else -> listOfNotNull(
-                readPermission?.let { "read=$it" },
-                writePermission?.let { "write=$it" }
-            ).joinToString(";")
-        }
+        return readPermission.takeIf { it != null && it == writePermission }
     }
 
     private fun findLauncherFromFilters(activities: Array<android.content.pm.ActivityInfo>): String? {
@@ -633,7 +710,8 @@ class ManifestParser @Inject constructor(
                         enabled = el.getAttributeNS(ANDROID_NS, "enabled").let {
                             if (it.isEmpty()) true else it == "true"
                         },
-                        targetActivityName = targetActivityName
+                        targetActivityName = targetActivityName,
+                        metaData = extractMetaData(el)
                     )
                 )
             }
@@ -648,13 +726,18 @@ class ManifestParser @Inject constructor(
         forEachChild(applicationEl, "provider") { el ->
             val name = el.getAttributeNS(ANDROID_NS, "name")
             if (name.isNotEmpty()) {
+                val permission = el.getAttributeNS(ANDROID_NS, "permission").takeIf { it.isNotEmpty() }
                 providers.add(
                     ProviderInfo(
                         name = name,
                         authorities = el.getAttributeNS(ANDROID_NS, "authorities"),
                         exported = el.getAttributeNS(ANDROID_NS, "exported") == "true",
                         grantUriPermissions = el.getAttributeNS(ANDROID_NS, "grantUriPermissions") == "true",
-                        permission = el.getAttributeNS(ANDROID_NS, "permission").takeIf { it.isNotEmpty() }
+                        permission = permission,
+                        readPermission = el.getAttributeNS(ANDROID_NS, "readPermission").takeIf { it.isNotEmpty() },
+                        writePermission = el.getAttributeNS(ANDROID_NS, "writePermission").takeIf { it.isNotEmpty() },
+                        pathPermissions = extractProviderPathPermissions(el),
+                        uriPermissionPatterns = extractProviderGrantPatterns(el)
                     )
                 )
                 val metaData = extractMetaData(el)
@@ -664,6 +747,60 @@ class ManifestParser @Inject constructor(
             }
         }
         return providers to metaDataMap
+    }
+
+    private fun extractProviderPathPermissions(provider: Element): List<VirtualProviderPathPermission> {
+        val result = mutableListOf<VirtualProviderPathPermission>()
+        forEachChild(provider, "path-permission") { element ->
+            val pattern = element.extractProviderPathPattern() ?: return@forEachChild
+            val commonPermission = element.getAttributeNS(ANDROID_NS, "permission").takeIf { it.isNotEmpty() }
+            val readPermission = element.getAttributeNS(ANDROID_NS, "readPermission")
+                .takeIf { it.isNotEmpty() } ?: commonPermission
+            val writePermission = element.getAttributeNS(ANDROID_NS, "writePermission")
+                .takeIf { it.isNotEmpty() } ?: commonPermission
+            if (readPermission != null || writePermission != null) {
+                result += VirtualProviderPathPermission(pattern, readPermission, writePermission)
+            }
+        }
+        return result
+    }
+
+    private fun extractProviderGrantPatterns(provider: Element): List<VirtualProviderPathPattern> {
+        val result = mutableListOf<VirtualProviderPathPattern>()
+        forEachChild(provider, "grant-uri-permission") { element ->
+            element.extractProviderPathPattern()?.let(result::add)
+        }
+        return result
+    }
+
+    private fun Element.extractProviderPathPattern(): VirtualProviderPathPattern? = listOfNotNull(
+        getAttributeNS(ANDROID_NS, "path").takeIf { it.isNotEmpty() }?.let {
+            VirtualProviderPathPattern(it, VirtualProviderPathPatternType.LITERAL)
+        },
+        getAttributeNS(ANDROID_NS, "pathPrefix").takeIf { it.isNotEmpty() }?.let {
+            VirtualProviderPathPattern(it, VirtualProviderPathPatternType.PREFIX)
+        },
+        getAttributeNS(ANDROID_NS, "pathPattern").takeIf { it.isNotEmpty() }?.let {
+            VirtualProviderPathPattern(it, VirtualProviderPathPatternType.SIMPLE_GLOB)
+        },
+        getAttributeNS(ANDROID_NS, "pathAdvancedPattern").takeIf { it.isNotEmpty() }?.let {
+            VirtualProviderPathPattern(it, VirtualProviderPathPatternType.ADVANCED_GLOB)
+        },
+        getAttributeNS(ANDROID_NS, "pathSuffix").takeIf { it.isNotEmpty() }?.let {
+            VirtualProviderPathPattern(it, VirtualProviderPathPatternType.SUFFIX)
+        }
+    ).lastOrNull()
+
+    private fun PatternMatcher.toVirtualProviderPathPattern(): VirtualProviderPathPattern? {
+        val patternType = when (type) {
+            PatternMatcher.PATTERN_LITERAL -> VirtualProviderPathPatternType.LITERAL
+            PatternMatcher.PATTERN_PREFIX -> VirtualProviderPathPatternType.PREFIX
+            PatternMatcher.PATTERN_SIMPLE_GLOB -> VirtualProviderPathPatternType.SIMPLE_GLOB
+            PatternMatcher.PATTERN_ADVANCED_GLOB -> VirtualProviderPathPatternType.ADVANCED_GLOB
+            PatternMatcher.PATTERN_SUFFIX -> VirtualProviderPathPatternType.SUFFIX
+            else -> return null
+        }
+        return path?.takeIf { it.isNotEmpty() }?.let { VirtualProviderPathPattern(it, patternType) }
     }
 
     private fun extractMetaData(el: Element?): List<MetaDataInfo> {
@@ -689,13 +826,59 @@ class ManifestParser @Inject constructor(
             when (value) {
                 is Int -> MetaDataInfo(
                     name = key,
-                    resource = "@0x${Integer.toHexString(value)}",
-                    resourceId = value
+                    value = value.toString(),
+                    resourceId = value,
+                    typedValue = VirtualMetaDataValue.int(value)
                 )
-                is String -> MetaDataInfo(name = key, value = value)
-                else -> MetaDataInfo(name = key, value = value?.toString())
+                is Boolean -> MetaDataInfo(
+                    name = key,
+                    value = value.toString(),
+                    typedValue = VirtualMetaDataValue.boolean(value)
+                )
+                is Long -> MetaDataInfo(
+                    name = key,
+                    value = value.toString(),
+                    typedValue = VirtualMetaDataValue.long(value)
+                )
+                is Float -> MetaDataInfo(
+                    name = key,
+                    value = value.toString(),
+                    typedValue = VirtualMetaDataValue.float(value)
+                )
+                is Double -> MetaDataInfo(
+                    name = key,
+                    value = value.toString(),
+                    typedValue = VirtualMetaDataValue.double(value)
+                )
+                is String -> MetaDataInfo(
+                    name = key,
+                    value = value,
+                    typedValue = VirtualMetaDataValue.string(value)
+                )
+                else -> MetaDataInfo(
+                    name = key,
+                    value = value?.toString(),
+                    typedValue = VirtualMetaDataValue.fromAny(value)
+                )
             }
         }
+    }
+
+    private fun List<MetaDataInfo>.mergeTypedValues(runtimeValues: List<MetaDataInfo>): List<MetaDataInfo> {
+        if (runtimeValues.isEmpty()) return this
+        val runtimeByName = runtimeValues.associateBy { it.name }
+        val declaredNames = mapTo(hashSetOf()) { value -> value.name }
+        return map { value ->
+            val runtimeValue = runtimeByName[value.name]
+            if (runtimeValue?.typedValue != null) {
+                value.copy(
+                    resourceId = runtimeValue.resourceId,
+                    typedValue = runtimeValue.typedValue
+                )
+            } else {
+                value
+            }
+        } + runtimeValues.filter { it.name !in declaredNames }
     }
 
     private fun extractIntentFilters(componentEl: Element): List<IntentFilterInfo> {

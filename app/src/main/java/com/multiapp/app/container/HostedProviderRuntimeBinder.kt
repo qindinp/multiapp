@@ -3,11 +3,15 @@ package com.multiapp.app.container
 import android.content.Context
 import android.net.Uri
 import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.EngineRuntimeAuthorityValidator
+import com.multiapp.core.engine.EngineRuntimeIpcClients
+import com.multiapp.core.engine.EngineRuntimeIpcSnapshot
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.model.engine.ProviderRouteContract
 
 class HostedProviderRuntimeBinder(
-    private val runtimeEngineFactory: (Context) -> HostedRuntimeEngine = ::hostedRuntimeEngineFrom
+    private val runtimeEngineFactory: (Context) -> HostedRuntimeEngine = ::hostedRuntimeEngineFrom,
+    private val authorityQuery: (String) -> EngineRuntimeIpcSnapshot? = EngineRuntimeIpcClients::queryRuntime
 ) {
     fun ensureBound(hostContext: Context, proxyUri: Uri): HostedProviderRuntimeBindResult {
         val instanceId = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_INSTANCE_ID)
@@ -18,6 +22,21 @@ class HostedProviderRuntimeBinder(
             ?: return HostedProviderRuntimeBindResult.NotRequested("missingProviderProxyGuestAuthority")
         val processSlot = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_PROCESS_SLOT)
             ?.takeIf { it.isNotBlank() }
+
+        val authority = EngineRuntimeAuthorityValidator.validate(
+            snapshot = authorityQuery(instanceId),
+            expectedProcessSlot = processSlot
+        )
+        if (!authority.allowed) {
+            return HostedProviderRuntimeBindResult.Failed(
+                instanceId = instanceId,
+                guestAuthority = guestAuthority,
+                processSlot = processSlot,
+                errorClassName = SecurityException::class.java.name,
+                errorMessage = authority.reason,
+                detail = "engineRuntimeAuthorityRejected"
+            )
+        }
 
         val runtimeEngine = runtimeEngineFactory(hostContext)
         runtimeEngine.reusableResult(instanceId)?.let { result ->

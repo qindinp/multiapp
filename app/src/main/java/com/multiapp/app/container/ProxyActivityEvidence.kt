@@ -1,5 +1,6 @@
 package com.multiapp.app.container
 
+import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityResult
 
@@ -16,6 +17,10 @@ data class ProxyActivityEvidence(
     val resultConsumed: Boolean = result != null,
     val lifecycleEvent: String = "onCreate",
     val taskDescriptionLabel: String = "",
+    val taskId: Int = 0,
+    val taskAffinity: String? = null,
+    val launchMode: String? = null,
+    val intentFlags: Int = 0,
     val substitutionVerdict: String = "UNSUBSTITUTED_PROXY",
     val fallbackAction: String = ""
 ) {
@@ -28,11 +33,15 @@ data class ProxyActivityEvidence(
         "stage" to "ACTIVITY_PROXY",
         "detail" to proxyActivityClassName,
         "lifecycleEvent" to lifecycleEvent,
-        "token" to token,
+        "token" to EvidenceSanitizer.redactTokenForEvidence(token),
         "originPackageName" to originPackageName,
         "guestActivityClassName" to guestActivityClassName,
         "proxyActivityClassName" to proxyActivityClassName,
         "taskDescriptionLabel" to taskDescriptionLabel,
+        "taskId" to taskId,
+        "taskAffinity" to taskAffinity.orEmpty(),
+        "launchMode" to launchMode.orEmpty(),
+        "intentFlags" to intentFlags,
         "substitutionVerdict" to substitutionVerdict,
         "fallbackAction" to fallbackAction,
         "activityRecordFound" to recordFound,

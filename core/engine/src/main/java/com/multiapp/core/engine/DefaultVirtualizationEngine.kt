@@ -17,6 +17,7 @@ import com.multiapp.core.model.installer.VirtualInstallService
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import com.multiapp.core.model.virtual.toLegacyMetaDataMap
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.util.UUID
@@ -38,14 +39,22 @@ class DefaultVirtualizationEngine @Inject constructor(
     activityLauncher = activityLauncher,
     slotStore = slotStore,
     runtimeRegistry = EngineRuntimeRegistry.global.attachStateStore(
-        FileBackedEngineRuntimeStateStore(File(context.filesDir, ENGINE_RUNTIME_STATE_FILE))
+        FileBackedEngineRuntimeStateStore(File(context.filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME))
     ),
     profilePolicy = CompatibilityProfilePolicy(),
     hookRuntime = hookRuntime,
-    evidenceSessionFactory = { UUID.randomUUID().toString() }
+    evidenceSessionFactory = { UUID.randomUUID().toString() },
+    systemServerFactory = { runtimeRegistry ->
+        DefaultVirtualSystemServer(
+            registry = runtimeRegistry,
+            activityTaskStateStore = FileBackedEngineActivityTaskStateStore(
+                File(context.filesDir, EngineActivityTaskStateFiles.DEFAULT_FILE_NAME)
+            )
+        )
+    }
 ) {
     companion object {
-        internal const val ENGINE_RUNTIME_STATE_FILE = "engine_runtime_state.properties"
+        internal const val ENGINE_RUNTIME_STATE_FILE = EngineRuntimeStateFiles.DEFAULT_FILE_NAME
     }
 }
 
@@ -60,8 +69,11 @@ internal class DefaultVirtualizationEngineCore(
     private val hookRuntime: EngineHookRuntime = EngineHookRuntime.NO_OP,
     private val evidenceSessionFactory: () -> String = { UUID.randomUUID().toString() },
     private val runtimeEpochFactory: () -> Long = { System.currentTimeMillis().coerceAtLeast(1L) },
-    private val systemServer: VirtualSystemServer = DefaultVirtualSystemServer(runtimeRegistry)
+    systemServerFactory: (EngineRuntimeRegistry) -> VirtualSystemServer = { registry ->
+        DefaultVirtualSystemServer(registry)
+    }
 ) : VirtualizationEngine {
+    private val systemServer: VirtualSystemServer = systemServerFactory(runtimeRegistry)
 
     override fun installOrRefreshPackage(originPackageName: String): EngineResult {
         if (originPackageName.isBlank()) {
@@ -196,7 +208,8 @@ internal class DefaultVirtualizationEngineCore(
         systemServer.runtimeService.get(instanceId)
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport =
-        systemServer.runtimeService.evidence(instanceId)
+        systemServer.evidenceService.exportReport(instanceId)
+            ?: systemServer.runtimeService.evidence(instanceId)
 
     private fun buildRuntime(
         instance: VirtualInstanceRecord,
@@ -253,13 +266,17 @@ internal class DefaultVirtualizationEngineCore(
             dataDir = instance.dataRoot,
             nativeLibraryDir = File(instance.dataRoot, "lib").absolutePath,
             applicationClassName = installRecord.applicationClassName,
+            metaData = installRecord.applicationMetaData.toLegacyMetaDataMap(),
+            typedMetaData = installRecord.applicationMetaData,
             launcherActivityName = installRecord.activities.firstOrNull()?.name,
             activities = installRecord.activities.toResolvedComponents(),
             services = installRecord.services.toResolvedComponents(),
             receivers = installRecord.receivers.toResolvedComponents(),
             providers = installRecord.providers.toResolvedComponents(),
             permissions = installRecord.permissions,
-            originCertSha256 = installRecord.originCertSha256
+            originCertSha256 = installRecord.originCertSha256,
+            signerSha256Digests = installRecord.signerSha256Digests,
+            hasMultipleSigners = installRecord.hasMultipleSigners
         )
     }
 
@@ -269,11 +286,15 @@ internal class DefaultVirtualizationEngineCore(
                 name = component.name,
                 exported = component.exported,
                 permission = component.permission,
+                readPermission = component.readPermission,
+                writePermission = component.writePermission,
                 grantUriPermissions = component.grantUriPermissions,
                 launchMode = component.launchMode,
                 processName = component.processName,
                 taskAffinity = component.taskAffinity,
                 themeId = component.themeId,
+                metaData = component.metaData.toLegacyMetaDataMap(),
+                typedMetaData = component.metaData,
                 targetActivityName = component.targetActivityName
             )
         }

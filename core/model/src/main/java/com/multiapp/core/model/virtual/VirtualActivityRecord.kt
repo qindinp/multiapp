@@ -14,6 +14,8 @@ data class VirtualActivityRecord(
     val state: VirtualActivityState = VirtualActivityState.CREATED,
     val taskAffinity: String? = null,
     val pendingNewIntents: List<VirtualActivityPendingNewIntent> = emptyList(),
+    val resultToToken: String? = null,
+    val resultRequestCode: Int = -1,
     val result: VirtualActivityResult? = null
 ) {
     init {
@@ -25,6 +27,11 @@ data class VirtualActivityRecord(
         require(proxyActivityClassName.isNotBlank()) { "proxyActivityClassName must not be blank" }
         require(taskId >= 0) { "taskId must not be negative" }
         require(taskAffinity == null || taskAffinity.isNotBlank()) { "taskAffinity must not be blank" }
+        require(resultToToken == null || resultToToken.isNotBlank()) { "resultToToken must not be blank" }
+        require(resultRequestCode >= -1) { "resultRequestCode must be -1 or greater" }
+        require((resultToToken == null) == (resultRequestCode < 0)) {
+            "result route must include both resultToToken and non-negative resultRequestCode"
+        }
     }
 }
 
@@ -53,8 +60,17 @@ data class VirtualActivityPendingNewIntent(
 data class VirtualActivityResult(
     val resultCode: Int,
     val dataIntent: VirtualIntentSnapshot? = null,
+    val requestCode: Int = -1,
+    val resultWho: String? = null,
+    val frameworkDispatchAttempted: Boolean = false,
+    val frameworkDispatchInvoked: Boolean = false,
     val updatedAtMs: Long = System.currentTimeMillis()
-)
+) {
+    init {
+        require(requestCode >= -1) { "requestCode must be -1 or greater" }
+        require(resultWho == null || resultWho.isNotBlank()) { "resultWho must not be blank" }
+    }
+}
 
 data class VirtualIntentSnapshot(
     val flags: Int = 0,

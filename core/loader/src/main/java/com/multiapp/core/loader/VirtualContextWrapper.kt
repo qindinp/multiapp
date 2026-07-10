@@ -1,6 +1,7 @@
 package com.multiapp.core.loader
 
 import android.content.Context
+import android.content.ContentResolver
 import android.content.ContextWrapper
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -21,6 +22,9 @@ import android.view.Display
 import android.view.LayoutInflater
 import android.database.DatabaseErrorHandler
 import android.database.sqlite.SQLiteDatabase
+import android.net.Uri
+import android.os.Binder
+import android.os.Process
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.File
@@ -117,6 +121,24 @@ open class VirtualContextWrapper(
 
     private val sharedPreferences = mutableMapOf<String, SharedPreferences>()
 
+    private val guestContentResolver: ContentResolver by lazy(LazyThreadSafetyMode.NONE) {
+        VirtualContentResolverFactories.createOrNull(
+            VirtualContentResolverFactoryRequest(
+                hostContext = base,
+                config = config
+            )
+        ) ?: base.contentResolver
+    }
+
+    private val uriPermissionDispatcher: VirtualUriPermissionDispatcher? by lazy(LazyThreadSafetyMode.NONE) {
+        VirtualUriPermissionDispatcherFactories.createOrNull(
+            VirtualUriPermissionDispatcherFactoryRequest(
+                hostContext = base,
+                config = config
+            )
+        )
+    }
+
     private var lastStartActivityMappingResult: StartActivityMappingResult? = null
 
     private var lastStartServiceMappingResult: StartServiceMappingResult? = null
@@ -132,6 +154,174 @@ open class VirtualContextWrapper(
     private var lastBroadcastReceiverRegistrationResult: BroadcastReceiverRegistrationResult? = null
 
     private var lastStorageEvidence: VirtualStorageEvidence? = null
+
+    override fun getContentResolver(): ContentResolver = guestContentResolver
+
+    override fun grantUriPermission(toPackage: String, uri: Uri, modeFlags: Int) {
+        val result = dispatchUriPermission(
+            operation = VirtualUriPermissionOperation.GRANT,
+            uri = uri,
+            modeFlags = modeFlags,
+            targetPackageName = toPackage,
+            pid = -1,
+            uid = -1
+        )
+        if (result == null || !result.handled) {
+            base.grantUriPermission(toPackage, uri, modeFlags)
+            return
+        }
+        if (!result.success) throw SecurityException(result.reason)
+    }
+
+    override fun revokeUriPermission(uri: Uri, modeFlags: Int) {
+        revokeVirtualUriPermission(targetPackageName = null, uri = uri, modeFlags = modeFlags)
+    }
+
+    override fun revokeUriPermission(targetPackage: String, uri: Uri, modeFlags: Int) {
+        revokeVirtualUriPermission(targetPackageName = targetPackage, uri = uri, modeFlags = modeFlags)
+    }
+
+    override fun checkUriPermission(uri: Uri, pid: Int, uid: Int, modeFlags: Int): Int {
+        val result = dispatchUriPermission(
+            operation = VirtualUriPermissionOperation.CHECK,
+            uri = uri,
+            modeFlags = modeFlags,
+            pid = pid,
+            uid = uid
+        )
+        return if (result == null || !result.handled) {
+            base.checkUriPermission(uri, pid, uid, modeFlags)
+        } else if (result.success && result.granted) {
+            PackageManager.PERMISSION_GRANTED
+        } else {
+            PackageManager.PERMISSION_DENIED
+        }
+    }
+
+    override fun checkUriPermission(
+        uri: Uri?,
+        readPermission: String?,
+        writePermission: String?,
+        pid: Int,
+        uid: Int,
+        modeFlags: Int
+    ): Int {
+        if (uri == null) {
+            return base.checkUriPermission(null, readPermission, writePermission, pid, uid, modeFlags)
+        }
+        val result = dispatchUriPermission(
+            operation = VirtualUriPermissionOperation.CHECK,
+            uri = uri,
+            modeFlags = modeFlags,
+            pid = pid,
+            uid = uid
+        )
+        return if (result == null || !result.handled) {
+            base.checkUriPermission(uri, readPermission, writePermission, pid, uid, modeFlags)
+        } else if (result.success && result.granted) {
+            PackageManager.PERMISSION_GRANTED
+        } else {
+            PackageManager.PERMISSION_DENIED
+        }
+    }
+
+    override fun checkCallingUriPermission(uri: Uri, modeFlags: Int): Int {
+        val callingPid = Binder.getCallingPid()
+        if (callingPid == Process.myPid()) return PackageManager.PERMISSION_DENIED
+        return checkUriPermission(uri, callingPid, Binder.getCallingUid(), modeFlags)
+    }
+
+    override fun checkCallingOrSelfUriPermission(uri: Uri, modeFlags: Int): Int {
+        val callingPid = Binder.getCallingPid()
+        return if (callingPid == Process.myPid()) {
+            checkUriPermission(uri, Process.myPid(), Process.myUid(), modeFlags)
+        } else {
+            checkUriPermission(uri, callingPid, Binder.getCallingUid(), modeFlags)
+        }
+    }
+
+    override fun enforceUriPermission(
+        uri: Uri,
+        pid: Int,
+        uid: Int,
+        modeFlags: Int,
+        message: String?
+    ) {
+        if (checkUriPermission(uri, pid, uid, modeFlags) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException(message ?: "Permission denial for $uri")
+        }
+    }
+
+    override fun enforceUriPermission(
+        uri: Uri?,
+        readPermission: String?,
+        writePermission: String?,
+        pid: Int,
+        uid: Int,
+        modeFlags: Int,
+        message: String?
+    ) {
+        if (uri == null) {
+            base.enforceUriPermission(null, readPermission, writePermission, pid, uid, modeFlags, message)
+            return
+        }
+        if (
+            checkUriPermission(uri, readPermission, writePermission, pid, uid, modeFlags) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            throw SecurityException(message ?: "Permission denial for $uri")
+        }
+    }
+
+    override fun enforceCallingUriPermission(uri: Uri, modeFlags: Int, message: String?) {
+        if (checkCallingUriPermission(uri, modeFlags) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException(message ?: "Permission denial for $uri")
+        }
+    }
+
+    override fun enforceCallingOrSelfUriPermission(uri: Uri, modeFlags: Int, message: String?) {
+        if (checkCallingOrSelfUriPermission(uri, modeFlags) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException(message ?: "Permission denial for $uri")
+        }
+    }
+
+    private fun revokeVirtualUriPermission(targetPackageName: String?, uri: Uri, modeFlags: Int) {
+        val result = dispatchUriPermission(
+            operation = VirtualUriPermissionOperation.REVOKE,
+            uri = uri,
+            modeFlags = modeFlags,
+            targetPackageName = targetPackageName,
+            pid = -1,
+            uid = -1
+        )
+        if (result == null || !result.handled) {
+            if (targetPackageName == null) {
+                base.revokeUriPermission(uri, modeFlags)
+            } else {
+                base.revokeUriPermission(targetPackageName, uri, modeFlags)
+            }
+            return
+        }
+        if (!result.success) throw SecurityException(result.reason)
+    }
+
+    private fun dispatchUriPermission(
+        operation: VirtualUriPermissionOperation,
+        uri: Uri,
+        modeFlags: Int,
+        targetPackageName: String? = null,
+        pid: Int,
+        uid: Int
+    ): VirtualUriPermissionResult? = uriPermissionDispatcher?.dispatch(
+        VirtualUriPermissionRequest(
+            operation = operation,
+            uri = uri,
+            modeFlags = modeFlags,
+            targetPackageName = targetPackageName,
+            pid = pid,
+            uid = uid
+        )
+    )
 
     private val virtualPackageManager: PackageManager? by lazy(LazyThreadSafetyMode.NONE) {
         config.packageSnapshot?.let { snapshot ->
@@ -158,7 +348,7 @@ open class VirtualContextWrapper(
     private var guestTheme: Resources.Theme? = null
 
     private val defaultAmsDispatcher: VirtualAmsComponentDispatcher by lazy(LazyThreadSafetyMode.NONE) {
-        DefaultVirtualAmsComponentDispatcher(
+        val fallback = DefaultVirtualAmsComponentDispatcher(
             hostContext = base,
             hostPackageName = base.packageName,
             packageSnapshot = config.packageSnapshot,
@@ -172,6 +362,13 @@ open class VirtualContextWrapper(
             broadcastManager = broadcastManager,
             serviceProxyIntentFactory = serviceProxyIntentFactory
         )
+        VirtualAmsComponentDispatchers.createOrNull(
+            VirtualAmsComponentDispatcherFactoryRequest(
+                hostContext = base,
+                config = config,
+                fallback = fallback
+            )
+        ) ?: fallback
     }
 
     override fun getPackageName(): String = config.originPackageName
@@ -454,27 +651,57 @@ open class VirtualContextWrapper(
     }
 
     override fun sendBroadcast(intent: Intent, receiverPermission: String?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(receiverPermission = receiverPermission)
+        )
     }
 
     override fun sendBroadcast(intent: Intent, receiverPermission: String?, options: Bundle?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                receiverPermission = receiverPermission,
+                platformOptionsPresent = options != null
+            )
+        )
     }
 
     override fun sendBroadcastAsUser(intent: Intent, user: UserHandle?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(intent, broadcastDispatchOptions(asUserRequested = true))
     }
 
     override fun sendBroadcastAsUser(intent: Intent, user: UserHandle?, receiverPermission: String?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                receiverPermission = receiverPermission,
+                asUserRequested = true
+            )
+        )
     }
 
     override fun sendOrderedBroadcast(intent: Intent, receiverPermission: String?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                receiverPermission = receiverPermission
+            )
+        )
     }
 
     override fun sendOrderedBroadcast(intent: Intent, receiverPermission: String?, options: Bundle?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                receiverPermission = receiverPermission,
+                platformOptionsPresent = options != null
+            )
+        )
     }
 
     override fun sendOrderedBroadcast(
@@ -486,7 +713,15 @@ open class VirtualContextWrapper(
         initialData: String?,
         initialExtras: Bundle?
     ) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                resultReceiver = resultReceiver,
+                receiverPermission = receiverPermission
+            )
+        )
     }
 
     override fun sendOrderedBroadcast(
@@ -499,7 +734,16 @@ open class VirtualContextWrapper(
         initialData: String?,
         initialExtras: Bundle?
     ) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                resultReceiver = resultReceiver,
+                receiverPermission = receiverPermission,
+                platformOptionsPresent = options != null
+            )
+        )
     }
 
     override fun sendOrderedBroadcast(
@@ -512,7 +756,16 @@ open class VirtualContextWrapper(
         initialData: String?,
         initialExtras: Bundle?
     ) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                resultReceiver = resultReceiver,
+                receiverPermission = receiverPermission,
+                receiverAppOp = receiverAppOp
+            )
+        )
     }
 
     override fun sendOrderedBroadcast(
@@ -526,7 +779,17 @@ open class VirtualContextWrapper(
         initialExtras: Bundle?,
         options: Bundle?
     ) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                resultReceiver = resultReceiver,
+                receiverPermission = receiverPermission,
+                receiverAppOp = receiverAppOp,
+                platformOptionsPresent = options != null
+            )
+        )
     }
 
     override fun sendOrderedBroadcastAsUser(
@@ -539,19 +802,37 @@ open class VirtualContextWrapper(
         initialData: String?,
         initialExtras: Bundle?
     ) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                resultReceiver = resultReceiver,
+                receiverPermission = receiverPermission,
+                asUserRequested = true
+            )
+        )
     }
 
     override fun sendStickyBroadcast(intent: Intent) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(intent, broadcastDispatchOptions(sticky = true))
     }
 
     override fun sendStickyBroadcast(intent: Intent, options: Bundle?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                sticky = true,
+                platformOptionsPresent = options != null
+            )
+        )
     }
 
     override fun sendStickyBroadcastAsUser(intent: Intent, user: UserHandle?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(sticky = true, asUserRequested = true)
+        )
     }
 
     override fun sendStickyOrderedBroadcast(
@@ -562,7 +843,15 @@ open class VirtualContextWrapper(
         initialData: String?,
         initialExtras: Bundle?
     ) {
-        val result = dispatchBroadcastIntent(intent)
+        val result = dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                sticky = true,
+                resultReceiver = resultReceiver
+            )
+        )
         recordStickyOrderedBroadcastEvidence("sendStickyOrderedBroadcast", result)
     }
 
@@ -575,27 +864,67 @@ open class VirtualContextWrapper(
         initialData: String?,
         initialExtras: Bundle?
     ) {
-        val result = dispatchBroadcastIntent(intent)
+        val result = dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(
+                intent = intent,
+                ordered = true,
+                sticky = true,
+                resultReceiver = resultReceiver,
+                asUserRequested = true
+            )
+        )
         recordStickyOrderedBroadcastEvidence("sendStickyOrderedBroadcastAsUser", result)
     }
 
     override fun removeStickyBroadcast(intent: Intent) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(intent, broadcastDispatchOptions(sticky = true))
     }
 
     override fun removeStickyBroadcastAsUser(intent: Intent, user: UserHandle?) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(sticky = true, asUserRequested = true)
+        )
     }
 
-    protected fun dispatchBroadcastIntent(intent: Intent): VirtualBroadcastResult {
+    protected fun dispatchBroadcastIntent(
+        intent: Intent,
+        options: VirtualBroadcastDispatchOptions = VirtualBroadcastDispatchOptions.DEFAULT
+    ): VirtualBroadcastResult {
         val result = componentDispatcher().dispatchBroadcast(
             intent = intent,
             virtualContext = this,
-            receiverClassLoader = guestClassLoader
+            receiverClassLoader = guestClassLoader,
+            options = options
         )
         lastBroadcastDispatchResult = result
         return result
     }
+
+    protected fun broadcastDispatchOptions(
+        intent: Intent? = null,
+        ordered: Boolean = false,
+        sticky: Boolean = false,
+        resultReceiver: BroadcastReceiver? = null,
+        receiverPermission: String? = null,
+        receiverPermissions: Set<String> = emptySet(),
+        receiverAppOp: String? = null,
+        asUserRequested: Boolean = false,
+        platformOptionsPresent: Boolean = false
+    ): VirtualBroadcastDispatchOptions = VirtualBroadcastDispatchOptions(
+        ordered = ordered,
+        sticky = sticky,
+        expectsResultReceiver = resultReceiver != null,
+        abortSupportedRequested = ordered && intent?.let {
+            it.flags and Intent.FLAG_RECEIVER_NO_ABORT == 0
+        } == true,
+        receiverPermissions = (receiverPermissions + listOfNotNull(receiverPermission))
+            .filterTo(linkedSetOf()) { it.isNotBlank() },
+        receiverAppOp = receiverAppOp?.takeIf { it.isNotBlank() },
+        asUserRequested = asUserRequested,
+        platformOptionsPresent = platformOptionsPresent
+    )
 
     override fun registerReceiver(receiver: BroadcastReceiver?, filter: IntentFilter?): Intent? {
         if (receiver == null || filter == null) {
@@ -1284,7 +1613,7 @@ open class VirtualContextWrapper(
         return createGuestApplicationInfo(baseInfo).apply {
             packageName = config.originPackageName
             sourceDir = config.sourceDir
-            publicSourceDir = config.sourceDir
+            publicSourceDir = config.publicSourceDir
             applySplitPaths(config)
             dataDir = config.dataDir
             nonLocalizedLabel = config.applicationLabel ?: config.originPackageName
@@ -1297,7 +1626,7 @@ open class VirtualContextWrapper(
         return ApplicationInfo(source).apply {
             packageName = config.originPackageName
             sourceDir = config.sourceDir
-            publicSourceDir = config.sourceDir
+            publicSourceDir = config.publicSourceDir
             applySplitPaths(config)
             dataDir = config.dataDir
             nativeLibraryDir = config.nativeLibraryDir

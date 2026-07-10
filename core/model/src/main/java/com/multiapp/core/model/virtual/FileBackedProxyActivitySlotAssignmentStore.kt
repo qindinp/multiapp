@@ -22,6 +22,36 @@ class FileBackedProxyActivitySlotAssignmentStore(
         }
     }
 
+    override fun compareAndSet(
+        key: ProxyActivitySlotKey,
+        expectedProxyActivityClassName: String?,
+        newProxyActivityClassName: String?
+    ): Boolean {
+        require(newProxyActivityClassName == null || newProxyActivityClassName.isNotBlank()) {
+            "newProxyActivityClassName must be null or non-blank"
+        }
+        return withFileLock {
+            val properties = load().toMutableMap()
+            val storageKey = key.toStorageKey()
+            if (properties[storageKey] != expectedProxyActivityClassName) {
+                return@withFileLock false
+            }
+            if (newProxyActivityClassName == null) {
+                properties.remove(storageKey)
+            } else {
+                val ownedByDifferentKey = properties.any { (storedKey, value) ->
+                    storedKey != storageKey && value == newProxyActivityClassName
+                }
+                if (ownedByDifferentKey) {
+                    return@withFileLock false
+                }
+                properties[storageKey] = newProxyActivityClassName
+            }
+            store(properties)
+            true
+        }
+    }
+
     override fun reserve(key: ProxyActivitySlotKey, candidateProxyActivityClassNames: List<String>): String? {
         val candidates = candidateProxyActivityClassNames.filter { it.isNotBlank() }
         if (candidates.isEmpty()) return null

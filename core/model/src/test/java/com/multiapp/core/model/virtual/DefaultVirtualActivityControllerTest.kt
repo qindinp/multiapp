@@ -164,4 +164,54 @@ class DefaultVirtualActivityControllerTest {
 
         assertEquals("com.example.app.DeclaredLauncher", controller.resolveLauncherActivity(pkg))
     }
+
+    @Test
+    fun `planGuestActivityLaunch returns success when class is loadable`() {
+        val config = VirtualContextConfig(
+            instanceId = "instance-1",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.example",
+            dataDir = "/data/user/0/com.multiapp.app/files/instances/instance-1/data",
+            sourceDir = "/data/app/com.example.app/base.apk",
+            nativeLibraryDir = null,
+            classLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        val result = controller.planGuestActivityLaunch(
+            GuestActivityLaunchRequest(
+                activityClassName = String::class.java.name,
+                classLoader = ClassLoader.getSystemClassLoader(),
+                config = config
+            )
+        )
+
+        assertEquals(true, result.success)
+        assertEquals(String::class.java.name, result.activityClassName)
+        assertNull(result.errorMessage)
+    }
+
+    @Test
+    fun `planGuestActivityLaunch returns failure when class is not loadable`() {
+        val config = VirtualContextConfig(
+            instanceId = "instance-1",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.example",
+            dataDir = "/data/user/0/com.multiapp.app/files/instances/instance-1/data",
+            sourceDir = "/data/app/com.example.app/base.apk",
+            nativeLibraryDir = null,
+            classLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        val result = controller.planGuestActivityLaunch(
+            GuestActivityLaunchRequest(
+                activityClassName = "com.example.DoesNotExist",
+                classLoader = ClassLoader.getSystemClassLoader(),
+                config = config
+            )
+        )
+
+        assertEquals(false, result.success)
+        assertEquals("com.example.DoesNotExist", result.activityClassName)
+        assertNotNull(result.errorMessage)
+    }
 }

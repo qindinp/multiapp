@@ -9,6 +9,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.io.TempDir
 
@@ -291,6 +292,57 @@ class EngineRuntimeRegistryTest {
         assertEquals(EngineResultStatus.FAIL, rebuiltRegistry.evidence(runtime.instanceId).status)
     }
 
+    @Test
+    fun `cached registry refreshes runtime written by another registry`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val writer = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val reader = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val created = runtime(runtimeEpoch = 10L)
+        val running = created.copy(
+            runtimeEpoch = 11L,
+            state = com.multiapp.core.model.engine.VirtualRuntimeState.RUNNING,
+            processId = 1234
+        )
+        writer.register(created)
+        assertEquals(created, reader.get(created.instanceId))
+
+        writer.register(running)
+
+        assertEquals(running, reader.get(created.instanceId))
+        assertEquals("durable-refresh", reader.evidence(created.instanceId).entries["runtimeStateSource"])
+    }
+
+    @Test
+    fun `stale registry cannot overwrite newer runtime epoch`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val newestRegistry = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val staleRegistry = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val newest = runtime(runtimeEpoch = 20L, processSlot = "com.multiapp.app:v2")
+        val stale = runtime(runtimeEpoch = 10L, processSlot = "com.multiapp.app:v1")
+        newestRegistry.register(newest)
+
+        val accepted = staleRegistry.register(stale)
+
+        assertEquals(newest, accepted)
+        assertEquals(newest, staleRegistry.get(newest.instanceId))
+        assertEquals("durable-newer", staleRegistry.evidence(newest.instanceId).entries["runtimeStateSource"])
+    }
+
+    @Test
+    fun `cached registry observes runtime stopped by another registry`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val owner = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val observer = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(file))
+        val runtime = runtime(runtimeEpoch = 30L)
+        owner.register(runtime)
+        assertEquals(runtime, observer.get(runtime.instanceId))
+
+        assertTrue(owner.stop(runtime.instanceId))
+
+        assertNull(observer.get(runtime.instanceId))
+        assertEquals(EngineResultStatus.FAIL, observer.evidence(runtime.instanceId).status)
+    }
+
     private fun operationEvidence(verdict: EngineResultStatus) = EngineOperationEvidence(
         component = "provider",
         operation = "route-token",
@@ -301,7 +353,8 @@ class EngineRuntimeRegistryTest {
     private fun runtime(
         instanceId: String = "instance-1",
         processSlot: String = "com.multiapp.app:v0",
-        proxySlot: String = "com.multiapp.app.ProxyActivity0"
+        proxySlot: String = "com.multiapp.app.ProxyActivity0",
+        runtimeEpoch: Long = 1L
     ) = VirtualInstanceRuntime(
         instanceId = instanceId,
         hostPackageName = "com.multiapp.app",
@@ -312,7 +365,8 @@ class EngineRuntimeRegistryTest {
         profile = EngineProfile.BASELINE,
         processSlot = processSlot,
         proxySlot = proxySlot,
-        evidenceSessionId = "evidence-1"
+        evidenceSessionId = "evidence-1",
+        runtimeEpoch = runtimeEpoch
     )
 
     private fun packageSnapshot(instanceId: String) = VirtualPackageSnapshot(

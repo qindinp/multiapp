@@ -14,6 +14,21 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
 import java.util.concurrent.Executor
 
+data class VirtualBroadcastDispatchOptions(
+    val ordered: Boolean = false,
+    val sticky: Boolean = false,
+    val expectsResultReceiver: Boolean = false,
+    val abortSupportedRequested: Boolean = false,
+    val receiverPermissions: Set<String> = emptySet(),
+    val receiverAppOp: String? = null,
+    val asUserRequested: Boolean = false,
+    val platformOptionsPresent: Boolean = false
+) {
+    companion object {
+        val DEFAULT = VirtualBroadcastDispatchOptions()
+    }
+}
+
 interface VirtualAmsComponentDispatcher {
     fun resolveStartActivityIntent(intent: Intent): VirtualContextWrapper.StartActivityMappingResult
 
@@ -43,6 +58,13 @@ interface VirtualAmsComponentDispatcher {
         virtualContext: Context,
         receiverClassLoader: ClassLoader
     ): VirtualBroadcastResult
+
+    fun dispatchBroadcast(
+        intent: Intent,
+        virtualContext: Context,
+        receiverClassLoader: ClassLoader,
+        options: VirtualBroadcastDispatchOptions
+    ): VirtualBroadcastResult = dispatchBroadcast(intent, virtualContext, receiverClassLoader)
 }
 
 class DefaultVirtualAmsComponentDispatcher(

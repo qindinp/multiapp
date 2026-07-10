@@ -7,6 +7,7 @@ import com.multiapp.core.loader.VirtualProviderDispatchResult
 import com.multiapp.core.loader.VirtualProviderEvidence
 import com.multiapp.core.loader.VirtualProviderPolicy
 import com.multiapp.core.loader.VirtualProviderResolution
+import com.multiapp.core.model.engine.EngineResultStatus
 
 data class EngineProviderResolution(
     val instanceId: String,
@@ -34,6 +35,8 @@ data class EngineProviderResolution(
 data class EngineProviderPolicy(
     val exported: Boolean,
     val permission: String?,
+    val readPermission: String? = null,
+    val writePermission: String? = null,
     val grantUriPermissions: Boolean,
     val status: String,
     val reason: String,
@@ -46,6 +49,8 @@ data class EngineProviderPolicy(
             EngineProviderPolicy(
                 exported = policy.exported,
                 permission = policy.permission,
+                readPermission = policy.readPermission,
+                writePermission = policy.writePermission,
                 grantUriPermissions = policy.grantUriPermissions,
                 status = policy.status,
                 reason = policy.reason,
@@ -68,9 +73,15 @@ enum class EngineProviderOperation {
     OPEN_ASSET_FILE,
     OPEN_TYPED_ASSET_FILE,
     BULK_INSERT,
+    APPLY_BATCH,
     NOTIFY_CHANGE,
+    REGISTER_CONTENT_OBSERVER,
+    UNREGISTER_CONTENT_OBSERVER,
+    GRANT_URI_PERMISSION,
+    REVOKE_URI_PERMISSION,
     CANONICALIZE,
     UNCANONICALIZE,
+    REFRESH,
     UNKNOWN;
 
     companion object {
@@ -86,9 +97,15 @@ enum class EngineProviderOperation {
                 "openAssetFile" -> OPEN_ASSET_FILE
                 "openTypedAssetFile" -> OPEN_TYPED_ASSET_FILE
                 "bulkInsert" -> BULK_INSERT
+                "applyBatch" -> APPLY_BATCH
                 "notifyChange" -> NOTIFY_CHANGE
+                "registerContentObserver" -> REGISTER_CONTENT_OBSERVER
+                "unregisterContentObserver" -> UNREGISTER_CONTENT_OBSERVER
+                "grantUriPermission" -> GRANT_URI_PERMISSION
+                "revokeUriPermission" -> REVOKE_URI_PERMISSION
                 "canonicalize" -> CANONICALIZE
                 "uncanonicalize" -> UNCANONICALIZE
+                "refresh" -> REFRESH
                 else -> UNKNOWN
             }
 
@@ -105,9 +122,11 @@ enum class EngineProviderOperation {
                 VirtualProviderEvidence.Operation.OPEN_ASSET_FILE -> OPEN_ASSET_FILE
                 VirtualProviderEvidence.Operation.OPEN_TYPED_ASSET_FILE -> OPEN_TYPED_ASSET_FILE
                 VirtualProviderEvidence.Operation.BULK_INSERT -> BULK_INSERT
+                VirtualProviderEvidence.Operation.APPLY_BATCH -> APPLY_BATCH
                 VirtualProviderEvidence.Operation.NOTIFY_CHANGE -> NOTIFY_CHANGE
                 VirtualProviderEvidence.Operation.CANONICALIZE -> CANONICALIZE
                 VirtualProviderEvidence.Operation.UNCANONICALIZE -> UNCANONICALIZE
+                VirtualProviderEvidence.Operation.REFRESH -> REFRESH
                 VirtualProviderEvidence.Operation.UNKNOWN -> UNKNOWN
             }
     }
@@ -349,6 +368,31 @@ fun EngineProviderDispatchResult?.toEngineBundle(): Bundle = Bundle().apply {
     }
 }
 
+fun EngineProviderDispatchResult.toVirtualProviderOperationResult(
+    operationName: String
+): VirtualProviderOperationResult? {
+    val operation = EngineProviderOperation.fromOperationName(operationName)
+    val evidence = EngineProviderEvidence.methodDispatch(this, operationName)
+    val instanceId = evidence.instanceId ?: instanceIdForEvidence() ?: return null
+    val reason = evidence.reason ?: statusName()
+    return VirtualProviderOperationResult(
+        instanceId = instanceId,
+        operation = operation,
+        guestAuthority = evidence.guestAuthority ?: guestAuthorityForEvidence(),
+        proxyAuthority = evidence.proxyAuthority,
+        providerClassName = evidence.providerClassName ?: providerClassNameForEvidence(),
+        verdict = if (this is EngineProviderDispatchResult.ProviderReady) {
+            EngineResultStatus.PASS
+        } else {
+            EngineResultStatus.FAIL
+        },
+        reason = reason,
+        ready = this is EngineProviderDispatchResult.ProviderReady,
+        cached = (this as? EngineProviderDispatchResult.ProviderReady)?.cached ?: false,
+        message = statusForLog()
+    )
+}
+
 fun EngineProviderDispatchResult?.toEngineEvidenceFields(
     operationName: String,
     uri: Uri,
@@ -375,6 +419,8 @@ fun EngineProviderDispatchResult?.toEngineEvidenceFields(
         "reason" to methodEvidence.reason.orEmpty(),
         "providerExported" to (methodEvidence.policy?.exported ?: false),
         "providerPermission" to methodEvidence.policy?.permission.orEmpty(),
+        "providerReadPermission" to methodEvidence.policy?.readPermission.orEmpty(),
+        "providerWritePermission" to methodEvidence.policy?.writePermission.orEmpty(),
         "providerGrantUriPermissions" to (methodEvidence.policy?.grantUriPermissions ?: false),
         "providerPolicyStatus" to methodEvidence.policy?.status.orEmpty(),
         "providerPolicyReason" to methodEvidence.policy?.reason.orEmpty(),
@@ -470,6 +516,8 @@ private fun Bundle.putEngineProviderEvidence(evidence: EngineProviderEvidence) {
     evidence.policy?.let { policy ->
         putBoolean("providerExported", policy.exported)
         putString("providerPermission", policy.permission.orEmpty())
+        putString("providerReadPermission", policy.readPermission.orEmpty())
+        putString("providerWritePermission", policy.writePermission.orEmpty())
         putBoolean("providerGrantUriPermissions", policy.grantUriPermissions)
         putString("providerPolicyStatus", policy.status)
         putString("providerPolicyReason", policy.reason)

@@ -1,5 +1,7 @@
 package com.multiapp.app.container
 
+import com.multiapp.core.engine.EngineProviderRouteToken
+import com.multiapp.core.engine.EngineProviderRouteTokenGate
 import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
@@ -29,13 +31,13 @@ class StubContentProviderRouteTokenTest {
             ttlMillis = 50L
         )
 
-        val canonicalQuery = ProviderRouteTokenGate.canonicalEncodedQueryForTest(
+        val canonicalQuery = EngineProviderRouteTokenGate.canonicalEncodedQueryForTest(
             encodedQuery = "bookId=123" +
                 "&multiapp_instanceId=forged" +
                 "&multiapp_guestAuthority=forged.authority" +
                 "&multiapp_routeToken=stale-token" +
                 "&flag",
-            route = route
+            route = route.toEngineRoute()
         )
 
         assertEquals(
@@ -59,9 +61,9 @@ class StubContentProviderRouteTokenTest {
             processSlot = "com.multiapp.app:v3"
         )
 
-        val canonicalQuery = ProviderRouteTokenGate.canonicalEncodedQueryForTest(
+        val canonicalQuery = EngineProviderRouteTokenGate.canonicalEncodedQueryForTest(
             encodedQuery = "bookId=123&multiapp_processSlot=com.multiapp.app%3Av7",
-            route = route
+            route = route.toEngineRoute()
         )
 
         assertEquals(
@@ -192,4 +194,15 @@ class StubContentProviderRouteTokenTest {
 
         assertEquals("VALID", status)
     }
+
+    private fun com.multiapp.core.identity.ProviderRouteToken.toEngineRoute(): EngineProviderRouteToken =
+        EngineProviderRouteToken(
+            token = token,
+            callerInstanceId = callerInstanceId,
+            targetInstanceId = targetInstanceId,
+            authority = authority,
+            operation = operation,
+            expiresAtMillis = expiresAtMillis,
+            processSlot = processSlot
+        )
 }

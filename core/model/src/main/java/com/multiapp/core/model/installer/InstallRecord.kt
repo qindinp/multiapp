@@ -1,18 +1,30 @@
 package com.multiapp.core.model.installer
 
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
+import com.multiapp.core.model.virtual.VirtualProviderPathPattern
+import com.multiapp.core.model.virtual.VirtualProviderPathPermission
+
 data class ComponentInfo(
     val name: String,
     val exported: Boolean = false,
     val permission: String? = null,
+    val readPermission: String? = null,
+    val writePermission: String? = null,
     val grantUriPermissions: Boolean = false,
+    val pathPermissions: List<VirtualProviderPathPermission> = emptyList(),
+    val uriPermissionPatterns: List<VirtualProviderPathPattern> = emptyList(),
     val launchMode: String? = null,
     val processName: String? = null,
     val taskAffinity: String? = null,
     val themeId: Int = 0,
+    val metaData: Map<String, VirtualMetaDataValue> = emptyMap(),
     val targetActivityName: String? = null
 ) {
     init {
         require(name.isNotBlank()) { "component name must not be blank" }
+        require(permission == null || permission.isNotBlank()) { "permission must not be blank" }
+        require(readPermission == null || readPermission.isNotBlank()) { "readPermission must not be blank" }
+        require(writePermission == null || writePermission.isNotBlank()) { "writePermission must not be blank" }
     }
 }
 
@@ -22,6 +34,9 @@ data class InstallMetadata(
     val services: List<ComponentInfo> = emptyList(),
     val receivers: List<ComponentInfo> = emptyList(),
     val providers: List<ComponentInfo> = emptyList(),
+    val applicationMetaData: Map<String, VirtualMetaDataValue> = emptyMap(),
+    val signerSha256Digests: List<String> = emptyList(),
+    val hasMultipleSigners: Boolean = false,
     val nativeLibraries: List<String> = emptyList(),
     val abiList: List<String> = emptyList(),
     val splitApkPaths: List<String> = emptyList(),
@@ -47,6 +62,8 @@ data class InstallRecord(
     val originApkPath: String,
     val originApkSha256: String,
     val originCertSha256: String,
+    val signerSha256Digests: List<String> = emptyList(),
+    val hasMultipleSigners: Boolean = false,
     val splitApkPaths: List<String> = emptyList(),
     val splitPublicSourceDirs: List<String> = emptyList(),
     val splitNames: List<String> = emptyList(),
@@ -60,6 +77,7 @@ data class InstallRecord(
     val abiList: List<String> = emptyList(),
     val applicationClassName: String? = null,
     val packageLabel: String? = null,
+    val applicationMetaData: Map<String, VirtualMetaDataValue> = emptyMap(),
     val permissions: List<String> = emptyList(),
     val activities: List<ComponentInfo> = emptyList(),
     val services: List<ComponentInfo> = emptyList(),
@@ -86,6 +104,9 @@ data class InstallRecord(
         }
         require(splitNames.none { it.isBlank() }) { "splitNames must not contain blank entries" }
         require(splitApkSha256s.none { it.isBlank() }) { "splitApkSha256s must not contain blank entries" }
+        require(signerSha256Digests.none { it.isBlank() }) {
+            "signerSha256Digests must not contain blank entries"
+        }
         require(splitPublicSourceDirs.isEmpty() || splitPublicSourceDirs.size == splitApkPaths.size) {
             "splitPublicSourceDirs size must match splitApkPaths size"
         }

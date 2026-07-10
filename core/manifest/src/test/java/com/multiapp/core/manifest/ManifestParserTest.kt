@@ -4,7 +4,11 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
+import android.os.Bundle
+import com.multiapp.core.model.virtual.VirtualMetaDataValueType
+import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
 import io.mockk.mockk
+import io.mockk.every
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Nested
@@ -37,6 +41,9 @@ class ManifestParserTest {
             <application android:name=".MyApplication" android:label="TestApp">
 
                 <meta-data android:name="channel" android:value="default"/>
+                <meta-data android:name="feature.enabled" android:value="true"/>
+                <meta-data android:name="retry.count" android:value="3"/>
+                <meta-data android:name="sample.rate" android:value="0.5"/>
 
                 <activity android:name=".MainActivity"
                     android:exported="true">
@@ -64,7 +71,14 @@ class ManifestParserTest {
                     android:authorities="com.example.testapp.provider"
                     android:exported="false"
                     android:permission="com.example.testapp.permission.PROVIDER"
-                    android:grantUriPermissions="true"/>
+                    android:readPermission="com.example.testapp.permission.READ_PROVIDER"
+                    android:writePermission="com.example.testapp.permission.WRITE_PROVIDER"
+                    android:grantUriPermissions="true">
+                    <path-permission
+                        android:pathPrefix="/private"
+                        android:readPermission="com.example.testapp.permission.READ_PRIVATE"/>
+                    <grant-uri-permission android:pathPattern="/shared/.*"/>
+                </provider>
 
                 <provider android:name=".FileProvider"
                     android:authorities="com.example.testapp.fileprovider"
@@ -214,6 +228,47 @@ class ManifestParserTest {
         fun `parse full manifest preserves application meta-data`() {
             val result = parser.parseFromXml(fullManifestXml())
             assertEquals("default", result.applicationMetaData.single { it.name == "channel" }.value)
+            val typed = result.applicationMetaData.toVirtualMetaDataMap()
+            assertEquals(VirtualMetaDataValueType.STRING, typed.getValue("channel").type)
+            assertEquals(VirtualMetaDataValueType.BOOLEAN, typed.getValue("feature.enabled").type)
+            assertEquals(VirtualMetaDataValueType.INT, typed.getValue("retry.count").type)
+            assertEquals(VirtualMetaDataValueType.FLOAT, typed.getValue("sample.rate").type)
+        }
+
+        @Test
+        fun `merge package info preserves runtime meta-data types`() {
+            val manifest = parser.parseFromXml(fullManifestXml())
+            val applicationMetaData = mockk<Bundle>()
+            every { applicationMetaData.keySet() } returns setOf("feature.enabled", "retry.count", "sample.rate")
+            every { applicationMetaData.get("feature.enabled") } returns true
+            every { applicationMetaData.get("retry.count") } returns 7
+            every { applicationMetaData.get("sample.rate") } returns 0.75f
+            val activityMetaData = mockk<Bundle>()
+            every { activityMetaData.keySet() } returns setOf("activity.mode")
+            every { activityMetaData.get("activity.mode") } returns 2
+            val merged = parser.applyPackageInfoThemeIds(
+                manifest = manifest,
+                packageInfo = PackageInfo().apply {
+                    applicationInfo = ApplicationInfo().apply {
+                        metaData = applicationMetaData
+                    }
+                    activities = arrayOf(
+                        ActivityInfo().apply {
+                            name = "com.example.testapp.MainActivity"
+                            metaData = activityMetaData
+                        }
+                    )
+                }
+            )
+
+            val appMetaData = merged.applicationMetaData.toVirtualMetaDataMap()
+            assertEquals("7", appMetaData.getValue("retry.count").encodedValue)
+            assertEquals(VirtualMetaDataValueType.FLOAT, appMetaData.getValue("sample.rate").type)
+            assertEquals(
+                VirtualMetaDataValueType.INT,
+                merged.activities.single { it.name == ".MainActivity" }
+                    .metaData.toVirtualMetaDataMap().getValue("activity.mode").type
+            )
         }
 
         @Test
@@ -307,7 +362,20 @@ class ManifestParserTest {
             val provider = result.providers.find { it.name == ".MyProvider" }
             assertNotNull(provider)
             assertEquals("com.example.testapp.permission.PROVIDER", provider!!.permission)
+            assertEquals("com.example.testapp.permission.READ_PROVIDER", provider.readPermission)
+            assertEquals("com.example.testapp.permission.WRITE_PROVIDER", provider.writePermission)
             assertTrue(provider.grantUriPermissions)
+            assertEquals("/private", provider.pathPermissions.single().pattern.path)
+            assertEquals(VirtualProviderPathPatternType.PREFIX, provider.pathPermissions.single().pattern.type)
+            assertEquals(
+                "com.example.testapp.permission.READ_PRIVATE",
+                provider.pathPermissions.single().readPermission
+            )
+            assertEquals("/shared/.*", provider.uriPermissionPatterns.single().path)
+            assertEquals(
+                VirtualProviderPathPatternType.SIMPLE_GLOB,
+                provider.uriPermissionPatterns.single().type
+            )
             assertFalse(provider.exported)
         }
     }

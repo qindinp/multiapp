@@ -25,11 +25,13 @@ class VirtualResourcesManagerTest {
         every { context.applicationInfo } returns hostInfo
 
         val manager = VirtualResourcesManager(context)
-        val appInfo = manager.createApplicationInfo(config())
+        val appInfo = manager.createApplicationInfo(
+            config(publicSourceDir = "/data/local/tmp/public-minimal.apk")
+        )
 
         assertEquals("com.test.minimal", appInfo.packageName)
         assertEquals("/data/local/tmp/minimal.apk", appInfo.sourceDir)
-        assertEquals("/data/local/tmp/minimal.apk", appInfo.publicSourceDir)
+        assertEquals("/data/local/tmp/public-minimal.apk", appInfo.publicSourceDir)
         assertEquals("/data/user/0/com.multiapp.app/files/instance_data/inst-001", appInfo.dataDir)
         assertEquals("/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib", appInfo.nativeLibraryDir)
         assertEquals("MinimalTest", appInfo.nonLocalizedLabel)
@@ -88,6 +90,7 @@ class VirtualResourcesManagerTest {
     }
 
     private fun config(
+        publicSourceDir: String = "/data/local/tmp/minimal.apk",
         splitSourceDirs: List<String> = emptyList(),
         splitPublicSourceDirs: List<String> = emptyList(),
         splitNames: List<String> = emptyList()
@@ -100,6 +103,7 @@ class VirtualResourcesManagerTest {
         nativeLibraryDir = "/data/user/0/com.multiapp.app/files/instance_data/inst-001/lib",
         classLoader = ClassLoader.getSystemClassLoader(),
         applicationLabel = "MinimalTest",
+        publicSourceDir = publicSourceDir,
         splitSourceDirs = splitSourceDirs,
         splitPublicSourceDirs = splitPublicSourceDirs,
         splitNames = splitNames

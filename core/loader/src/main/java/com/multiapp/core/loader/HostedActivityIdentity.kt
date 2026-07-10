@@ -14,7 +14,7 @@ internal object HostedActivityIdentity {
         className = source.className
         name = source.name
         sourceDir = config.sourceDir
-        publicSourceDir = config.sourceDir
+        publicSourceDir = config.publicSourceDir
         if (config.splitSourceDirs.isNotEmpty()) {
             splitSourceDirs = config.splitSourceDirs.toTypedArray()
         }

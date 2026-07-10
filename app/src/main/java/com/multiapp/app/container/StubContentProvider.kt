@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.content.res.AssetFileDescriptor
 import android.database.Cursor
 import android.net.Uri
+import android.os.Binder
 import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
@@ -13,13 +14,14 @@ import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.engine.DefaultEngineProviderDispatcher
 import com.multiapp.core.engine.EngineProviderDispatchRequest
 import com.multiapp.core.engine.EngineProviderDispatchResult
+import com.multiapp.core.engine.EngineProviderRouteTokenGate
+import com.multiapp.core.engine.EngineProviderRouteTokenGateResult
 import com.multiapp.core.engine.EngineProviderRouteSlots
 import com.multiapp.core.engine.guestAuthorityForEvidence
 import com.multiapp.core.engine.instanceIdForEvidence
 import com.multiapp.core.engine.statusForLog
 import com.multiapp.core.engine.toEngineBundle
 import com.multiapp.core.engine.toEngineEvidenceFields
-import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.model.engine.ProviderRouteContract
 import java.io.FileNotFoundException
 
@@ -181,7 +183,7 @@ open class StubContentProvider : ContentProvider() {
 
     @Throws(FileNotFoundException::class)
     override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
-        val result = dispatch(uri, "openFile")
+        val result = dispatch(uri, "openFile:$mode")
         writeProviderEvidence("openFile:$mode", uri, result)
         Log.w(TAG, "openFile dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -195,7 +197,7 @@ open class StubContentProvider : ContentProvider() {
 
     @Throws(FileNotFoundException::class)
     override fun openAssetFile(uri: Uri, mode: String): AssetFileDescriptor? {
-        val result = dispatch(uri, "openAssetFile")
+        val result = dispatch(uri, "openAssetFile:$mode")
         writeProviderEvidence("openAssetFile:$mode", uri, result)
         Log.w(TAG, "openAssetFile dispatch result=${result.statusForLog()} uri=${uri.redactForLog()}")
         return when (result) {
@@ -256,9 +258,11 @@ open class StubContentProvider : ContentProvider() {
     }
 
     private fun dispatch(uri: Uri, operationName: String): EngineProviderDispatchResult {
+        val providerCallingUid = Binder.getCallingUid()
+        val providerCallingPid = Binder.getCallingPid()
         val route = when (val routeResult = validateRouteToken(uri, operationName)) {
-            is ProviderRouteTokenGateResult.Valid -> routeResult
-            is ProviderRouteTokenGateResult.Invalid -> return routeResult.result
+            is EngineProviderRouteTokenGateResult.Valid -> routeResult
+            is EngineProviderRouteTokenGateResult.Invalid -> return routeResult.result
         }
         val hostPackageName = context?.packageName ?: return EngineProviderDispatchResult.InvalidProxyUri("missing host context")
         val hostContext = context ?: return EngineProviderDispatchResult.InvalidProxyUri("missing host context")
@@ -268,7 +272,16 @@ open class StubContentProvider : ContentProvider() {
             EngineProviderDispatchRequest(
                 hostPackageName = hostPackageName,
                 hostContext = hostContext,
-                proxyUri = route.canonicalProxyUri
+                proxyUri = route.canonicalProxyUri,
+                operationName = operationName,
+                verifiedRoute = route.route,
+                providerCallingUid = providerCallingUid,
+                providerCallingPid = providerCallingPid,
+                hostUid = hostContext.applicationInfo.uid,
+                callerProcessSlot = route.route.processSlot.takeIf {
+                    route.route.callerInstanceId == route.route.targetInstanceId
+                },
+                accessMode = operationName.substringAfter(':', "").takeIf { it.isNotBlank() }
             )
         )
     }
@@ -329,8 +342,8 @@ open class StubContentProvider : ContentProvider() {
     )?.reason
         ?: "VALID"
 
-    private fun validateRouteToken(uri: Uri, operationName: String): ProviderRouteTokenGateResult {
-        return ProviderRouteTokenGate.validate(uri, operationName)
+    private fun validateRouteToken(uri: Uri, operationName: String): EngineProviderRouteTokenGateResult {
+        return EngineProviderRouteTokenGate.validate(uri, operationName)
     }
 
     private fun validateRouteTokenFields(
@@ -341,26 +354,15 @@ open class StubContentProvider : ContentProvider() {
         expectedProcessSlot: String? = null,
         nowMillis: Long = System.currentTimeMillis()
     ): EngineProviderDispatchResult.InvalidProxyUri? {
-        if (instanceId.isNullOrBlank()) {
-            return EngineProviderDispatchResult.InvalidProxyUri("missing instanceId")
-        }
-        if (guestAuthority.isNullOrBlank()) {
-            return EngineProviderDispatchResult.InvalidProxyUri("missing guestAuthority")
-        }
-        val result = ProviderRouteTokenRegistry.validate(
+        val status = EngineProviderRouteTokenGate.routeTokenStatus(
             token = token,
-            callerInstanceId = instanceId,
-            targetInstanceId = instanceId,
-            authority = guestAuthority,
-            operation = operationName,
+            instanceId = instanceId,
+            guestAuthority = guestAuthority,
+            operationName = operationName,
             expectedProcessSlot = expectedProcessSlot,
             nowMillis = nowMillis
         )
-        return if (result.isValid) {
-            null
-        } else {
-            EngineProviderDispatchResult.InvalidProxyUri("invalid route token:${result.status.name}")
-        }
+        return if (status == "VALID") null else EngineProviderDispatchResult.InvalidProxyUri(status)
     }
 
     private fun Uri.toGuestUri(guestAuthority: String): Uri {

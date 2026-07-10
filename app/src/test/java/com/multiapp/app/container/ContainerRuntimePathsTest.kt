@@ -20,6 +20,10 @@ class ContainerRuntimePathsTest {
         assertEquals(File(filesDir, "artifacts"), ContainerRuntimePaths.artifactDir(filesDir))
         assertEquals(File(filesDir, "instance_data"), ContainerRuntimePaths.instanceDataRootBase(filesDir))
         assertEquals(File(filesDir, "hosted_launch_evidence"), ContainerRuntimePaths.hostedLaunchEvidenceDir(filesDir))
+        assertEquals(
+            File(filesDir, "engine_activity_task_state.properties"),
+            ContainerRuntimePaths.engineActivityTaskStateFile(filesDir)
+        )
 
         assertTrue(ContainerRuntimePaths.instanceStoreDir(filesDir).isDirectory)
         assertTrue(ContainerRuntimePaths.installStoreDir(filesDir).isDirectory)
@@ -154,6 +158,29 @@ class ContainerRuntimePathsTest {
         listOf("token=", "password=", "secret", "instanceId=", "fragment", "private@example.com", "user:pass").forEach { leaked ->
             assertFalse(text.contains(leaked), "evidence leaked $leaked in $text")
         }
+    }
+
+    @Test
+    @DisplayName("runtime evidence writer redacts activity token fields")
+    fun runtimeEvidenceWriterRedactsActivityTokenFields(@TempDir filesDir: File) {
+        val rawToken = "raw-activity-token-super-secret"
+        val file = ContainerRuntimeEvidenceWriter.write(
+            filesDir = filesDir,
+            instanceId = "inst-001",
+            component = "activity-proxy",
+            fields = linkedMapOf(
+                "status" to "PROXY_ACTIVITY_BASE_ONCREATE",
+                "token" to rawToken,
+                "sourceToken" to rawToken,
+                "detail" to "INVALID_PROXY_URI:invalid route token:EXPIRED"
+            )
+        )
+        val text = file.readText()
+
+        assertTrue(text.contains("token=<redacted>"))
+        assertTrue(text.contains("sourceToken=<redacted>"))
+        assertTrue(text.contains("detail=INVALID_PROXY_URI:invalid route token:EXPIRED"))
+        assertFalse(text.contains(rawToken), "evidence leaked raw token in $text")
     }
 
     @Test

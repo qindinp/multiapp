@@ -22,7 +22,11 @@ class ProxyActivityEvidenceTest {
                 dataIntent = VirtualIntentSnapshot(action = "com.test.ACTION")
             ),
             result = VirtualActivityResult(resultCode = 42),
-            taskDescriptionLabel = "com.test.minimal #inst-001"
+            taskDescriptionLabel = "com.test.minimal #inst-001",
+            taskId = 3,
+            taskAffinity = "com.test.minimal:inst-001",
+            launchMode = "singleTop",
+            intentFlags = 0x10000000.toInt()
         ).toLines()
 
         assertTrue("status=PROXY_ACTIVITY_BASE_ONCREATE" in lines)
@@ -34,6 +38,10 @@ class ProxyActivityEvidenceTest {
         assertTrue("resultObserved=true" in lines)
         assertTrue("resultCode=42" in lines)
         assertTrue("taskDescriptionLabel=com.test.minimal #inst-001" in lines)
+        assertTrue("taskId=3" in lines)
+        assertTrue("taskAffinity=com.test.minimal:inst-001" in lines)
+        assertTrue("launchMode=singleTop" in lines)
+        assertTrue("intentFlags=268435456" in lines)
         assertTrue("substitutionVerdict=UNSUBSTITUTED_PROXY" in lines)
         assertTrue("fallbackAction=" in lines)
         assertTrue("activityRecordRecovered=false" in lines)
@@ -130,6 +138,21 @@ class ProxyActivityEvidenceTest {
 
         assertTrue("activityRecordFound=false" in lines)
         assertTrue("activityRecordRecovered=true" in lines)
+    }
+
+    @Test
+    fun `evidence lines redact activity token`() {
+        val rawToken = "raw-activity-token-super-secret"
+        val lines = ProxyActivityEvidence(
+            proxyActivityClassName = "ProxyActivity0",
+            token = rawToken,
+            originPackageName = "com.test.minimal",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            recordFound = true
+        ).toLines()
+
+        assertTrue("token=<redacted>" in lines)
+        assertTrue(lines.none { it.contains(rawToken) }, "evidence leaked raw token in $lines")
     }
 
     @Test

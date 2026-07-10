@@ -564,6 +564,21 @@ object IntentRemapDiagnostics {
 
         override fun invoke(proxy: Any, method: java.lang.reflect.Method, args: Array<Any?>?): Any? {
             val currentAliases = synchronized(aliases) { aliases.toSet() }
+            val appOpsResult = (args ?: emptyArray()).toVirtualAppOpsDispatchRequest(
+                method.name,
+                currentAliases
+            )
+                ?.let(VirtualAppOpsDispatchers::dispatch)
+            if (appOpsResult?.blockSystemCall == true) {
+                throw SecurityException(appOpsResult.reason)
+            }
+            if (
+                appOpsResult?.handled == true &&
+                appOpsResult.mode != null &&
+                method.returnType.isIntReturnType()
+            ) {
+                return appOpsResult.mode
+            }
             val patchedArgs = args?.let {
                 remapAppOpsPackageArgs(method.name, it, currentAliases, hostPackageName, runtimeUidProvider())
             }
@@ -573,6 +588,43 @@ object IntentRemapDiagnostics {
                 throw e.targetException
             }
         }
+
+        private fun Array<Any?>.toVirtualAppOpsDispatchRequest(
+            methodName: String,
+            currentAliases: Set<String>
+        ): VirtualAppOpsDispatchRequest? {
+            val packageIndex = indices.firstOrNull { index ->
+                val value = this[index]
+                value is String && value in currentAliases && VirtualAppOpsRuntimeBindings.resolve(value) != null
+            }
+            val activeMutation = packageIndex == null && methodName.isAppOpsMutationMethod()
+            val activeBinding = if (activeMutation) VirtualAppOpsRuntimeBindings.active() else null
+            val packageName = packageIndex?.let { this[it] as String }
+                ?: activeBinding?.primaryPackageName
+                ?: return null
+            val instanceId = packageIndex?.let { VirtualAppOpsRuntimeBindings.resolve(packageName) }
+                ?: activeBinding?.instanceId
+                ?: return null
+            val uidIndex = packageIndex?.let { appOpsUidIndexBeforePackage(methodName, this, it) }
+            val uid = uidIndex?.let { this[it] as? Int } ?: -1
+            val opSearchEnd = packageIndex ?: size
+            val opCode = (0 until opSearchEnd)
+                .asSequence()
+                .mapNotNull { this[it] as? Int }
+                .firstOrNull()
+            return VirtualAppOpsDispatchRequest(
+                instanceId = instanceId,
+                methodName = methodName,
+                opCode = opCode,
+                uid = uid,
+                packageName = packageName
+            )
+        }
+
+        private fun Class<*>.isIntReturnType(): Boolean =
+            this == Int::class.javaPrimitiveType || this == Int::class.javaObjectType
+
+        private fun String.isAppOpsMutationMethod(): Boolean = startsWith("set") || startsWith("reset")
     }
 
     private class AppOpsServiceManagerBinderInvocationHandler(

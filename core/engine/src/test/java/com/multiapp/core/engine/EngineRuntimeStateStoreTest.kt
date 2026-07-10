@@ -6,10 +6,18 @@ import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
+import com.multiapp.core.model.virtual.VirtualProviderPathPattern
+import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
+import com.multiapp.core.model.virtual.VirtualProviderPathPermission
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import org.junit.jupiter.api.io.TempDir
 
 class EngineRuntimeStateStoreTest {
@@ -39,6 +47,9 @@ class EngineRuntimeStateStoreTest {
         assertEquals(runtime.packageSnapshot.nativeLibraryDir, restored?.packageSnapshot?.nativeLibraryDir)
         assertEquals(runtime.packageSnapshot.permissions, restored?.packageSnapshot?.permissions)
         assertEquals(runtime.packageSnapshot.metaData, restored?.packageSnapshot?.metaData)
+        assertEquals(runtime.packageSnapshot.typedMetaData, restored?.packageSnapshot?.typedMetaData)
+        assertEquals(runtime.packageSnapshot.signerSha256Digests, restored?.packageSnapshot?.signerSha256Digests)
+        assertEquals(runtime.packageSnapshot.hasMultipleSigners, restored?.packageSnapshot?.hasMultipleSigners)
         assertEquals(runtime.packageSnapshot.activities, restored?.packageSnapshot?.activities)
         assertEquals(runtime.packageSnapshot.services, restored?.packageSnapshot?.services)
         assertEquals(runtime.packageSnapshot.receivers, restored?.packageSnapshot?.receivers)
@@ -57,16 +68,67 @@ class EngineRuntimeStateStoreTest {
         assertNull(FileBackedEngineRuntimeStateStore(file).get(runtime.instanceId))
     }
 
-    private fun runtime() = VirtualInstanceRuntime(
-        instanceId = "instance-1",
+    @Test
+    fun `file backed runtime state rejects stale epoch writes and removals`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val store = FileBackedEngineRuntimeStateStore(file)
+        val newest = EngineRuntimeStateRecord.from(runtime(runtimeEpoch = 20L))
+        val stale = EngineRuntimeStateRecord.from(runtime(runtimeEpoch = 10L))
+
+        assertEquals(newest, store.putIfNewer(newest))
+        assertEquals(newest, store.putIfNewer(stale))
+        assertFalse(store.removeIfEpoch(newest.instanceId, stale.runtimeEpoch))
+        assertEquals(newest, store.get(newest.instanceId))
+        assertTrue(store.removeIfEpoch(newest.instanceId, newest.runtimeEpoch))
+        assertNull(store.get(newest.instanceId))
+    }
+
+    @Test
+    fun `independent runtime stores preserve concurrent instance writes`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val executor = Executors.newFixedThreadPool(4)
+        val start = CountDownLatch(1)
+        val futures = (1..16).map { index ->
+            executor.submit {
+                start.await()
+                FileBackedEngineRuntimeStateStore(file).put(
+                    EngineRuntimeStateRecord.from(
+                        runtime(
+                            instanceId = "instance-$index",
+                            runtimeEpoch = index.toLong(),
+                            processSlot = "com.multiapp.app:v$index",
+                            proxySlot = "com.multiapp.app.container.ProxyActivity$index"
+                        )
+                    )
+                )
+            }
+        }
+
+        start.countDown()
+        futures.forEach { it.get() }
+        executor.shutdown()
+
+        assertEquals(
+            (1..16).map { "instance-$it" }.sorted(),
+            FileBackedEngineRuntimeStateStore(file).list().map { it.instanceId }
+        )
+    }
+
+    private fun runtime(
+        instanceId: String = "instance-1",
+        runtimeEpoch: Long = 99L,
+        processSlot: String = "com.multiapp.app:v0",
+        proxySlot: String = "com.multiapp.app.container.ProxyActivity0"
+    ) = VirtualInstanceRuntime(
+        instanceId = instanceId,
         hostPackageName = "com.multiapp.app",
         originPackageName = "com.test.app",
-        virtualPackageName = "com.multiapp.virtual.instance-1",
-        dataRoot = "build/tmp/instance-1",
+        virtualPackageName = "com.multiapp.virtual.$instanceId",
+        dataRoot = "build/tmp/$instanceId",
         packageSnapshot = VirtualPackageSnapshot(
-            instanceId = "instance-1",
+            instanceId = instanceId,
             originPackageName = "com.test.app",
-            virtualPackageName = "com.multiapp.virtual.instance-1",
+            virtualPackageName = "com.multiapp.virtual.$instanceId",
             applicationLabel = "Test",
             versionCode = 7L,
             versionName = "7.0",
@@ -78,8 +140,8 @@ class EngineRuntimeStateStoreTest {
             splitPublicSourceDirs = listOf("build/tmp/public-split-feature.apk"),
             splitNames = listOf("feature"),
             isolatedSplits = true,
-            dataDir = "build/tmp/instance-1",
-            nativeLibraryDir = "build/tmp/instance-1/lib",
+            dataDir = "build/tmp/$instanceId",
+            nativeLibraryDir = "build/tmp/$instanceId/lib",
             applicationClassName = "com.test.app.App",
             processName = "com.test.app",
             taskAffinity = "com.test.app.task",
@@ -87,6 +149,10 @@ class EngineRuntimeStateStoreTest {
             metaData = mapOf(
                 "analytics.channel" to "internal",
                 "feature.reader" to "enabled"
+            ),
+            typedMetaData = mapOf(
+                "feature.enabled" to VirtualMetaDataValue.boolean(true),
+                "retry.count" to VirtualMetaDataValue.int(3)
             ),
             launcherActivityName = "com.test.app.MainActivity",
             activities = listOf(
@@ -108,6 +174,7 @@ class EngineRuntimeStateStoreTest {
                     screenOrientation = "portrait",
                     configChanges = "keyboardHidden|orientation",
                     metaData = mapOf("activity.meta" to "value"),
+                    typedMetaData = mapOf("activity.count" to VirtualMetaDataValue.int(2)),
                     targetActivityName = "com.test.app.AliasTargetActivity"
                 )
             ),
@@ -136,20 +203,31 @@ class EngineRuntimeStateStoreTest {
                     exported = true,
                     authorities = listOf("com.test.app.provider", "com.test.app.files"),
                     permission = "com.test.app.permission.PROVIDER",
-                    grantUriPermissions = true,
+                    grantUriPermissions = false,
+                    pathPermissions = listOf(
+                        VirtualProviderPathPermission(
+                            VirtualProviderPathPattern("/private", VirtualProviderPathPatternType.PREFIX),
+                            readPermission = "com.test.app.permission.READ_PRIVATE"
+                        )
+                    ),
+                    uriPermissionPatterns = listOf(
+                        VirtualProviderPathPattern("/shared", VirtualProviderPathPatternType.PREFIX)
+                    ),
                     processName = "com.test.app"
                 )
             ),
             permissions = listOf("android.permission.INTERNET"),
-            originCertSha256 = "cert-sha"
+            originCertSha256 = "cert-sha",
+            signerSha256Digests = listOf("old-cert-sha", "cert-sha"),
+            hasMultipleSigners = false
         ),
         profile = EngineProfile.BASELINE,
-        processSlot = "com.multiapp.app:v0",
-        proxySlot = "com.multiapp.app.container.ProxyActivity0",
+        processSlot = processSlot,
+        proxySlot = proxySlot,
         evidenceSessionId = "evidence-1",
-        runtimeEpoch = 99L,
+        runtimeEpoch = runtimeEpoch,
         engineSessionId = "engine-evidence-1",
-        processName = "com.multiapp.app:v0",
+        processName = processSlot,
         state = VirtualRuntimeState.CREATED
     )
 }

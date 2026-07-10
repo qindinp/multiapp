@@ -18,6 +18,12 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.MultiApp">
+        <provider
+            android:name=".container.EngineBinderProvider"
+            android:authorities="${applicationId}.multiapp.engine.server"
+            android:exported="false"
+            android:initOrder="1000" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

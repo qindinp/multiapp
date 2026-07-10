@@ -78,7 +78,9 @@ class ManifestGeneratorTest {
                     authorities = "com.test.provider",
                     exported = true,
                     grantUriPermissions = true,
-                    permission = "com.test.permission.PROVIDER"
+                    permission = "com.test.permission.PROVIDER",
+                    readPermission = "com.test.permission.READ_PROVIDER",
+                    writePermission = "com.test.permission.WRITE_PROVIDER"
                 )
             )
         )
@@ -89,6 +91,8 @@ class ManifestGeneratorTest {
 
         assertTrue(bytes.isNotEmpty(), "Should produce non-empty output")
         assertTrue(containsBytes(bytes, "com.test.permission.PROVIDER".toByteArray(Charsets.UTF_8)), "Should contain provider permission")
+        assertTrue(containsBytes(bytes, "com.test.permission.READ_PROVIDER".toByteArray(Charsets.UTF_8)))
+        assertTrue(containsBytes(bytes, "com.test.permission.WRITE_PROVIDER".toByteArray(Charsets.UTF_8)))
         assertTrue(containsBytes(bytes, "grantUriPermissions".toByteArray(Charsets.UTF_8)), "Should contain grantUriPermissions")
     }
 

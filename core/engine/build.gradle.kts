@@ -18,6 +18,7 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    buildFeatures { aidl = true }
     kotlinOptions { jvmTarget = "17" }
 }
 
@@ -27,6 +28,7 @@ dependencies {
     implementation(project(":core:instance"))
     implementation(project(":core:loader"))
     implementation(project(":core:hook"))
+    implementation(project(":core:identity"))
 
     implementation(libs.core.ktx)
     implementation(libs.hilt.android)

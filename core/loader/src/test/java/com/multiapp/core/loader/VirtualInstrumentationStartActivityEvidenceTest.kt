@@ -8,7 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
+import com.multiapp.core.model.virtual.VirtualActivityRecord
+import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualActivityStack
+import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
@@ -130,8 +134,12 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     }
 
     @Test
-    fun `remap evidence records overload and unsupported result routing`(@TempDir filesDir: File) {
+    fun `remap evidence records overload and partial result route`(@TempDir filesDir: File) {
         val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
+        val resultRouteClass = Class.forName("${VirtualInstrumentation::class.java.name}\$ActivityResultRoute")
+        val resultRouteConstructor = resultRouteClass.getDeclaredConstructor(String::class.java, Integer.TYPE)
+        resultRouteConstructor.isAccessible = true
+        val resultRoute = resultRouteConstructor.newInstance("source-token-001", 42)
 
         invokePrivate(
             instrumentation,
@@ -144,7 +152,8 @@ class VirtualInstrumentationStartActivityEvidenceTest {
                 String::class.java,
                 Integer.TYPE,
                 String::class.java,
-                String::class.java
+                String::class.java,
+                resultRouteClass
             ),
             filesDir,
             "inst-001",
@@ -153,7 +162,8 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             "execStartActivity:activity-options",
             42,
             "explicit",
-            "singleTop"
+            "singleTop",
+            resultRoute
         )
 
         val lines = remapEvidenceLines(filesDir)
@@ -163,8 +173,11 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         assertTrue("hostFallback=false" in lines)
         assertTrue("requestCode=42" in lines)
         assertTrue("resultRequested=true" in lines)
-        assertTrue("activityResultVerdict=UNSUPPORTED" in lines)
-        assertTrue("activityResultVerdictReason=HOST_PROXY_RESULT_ROUTING_NOT_IMPLEMENTED" in lines)
+        assertTrue("activityResultRouteRecorded=true" in lines)
+        assertTrue("activityResultToToken=<redacted>" in lines)
+        assertTrue("activityResultRecordRequestCode=42" in lines)
+        assertTrue("activityResultVerdict=PARTIAL" in lines)
+        assertTrue("activityResultVerdictReason=HOST_PROXY_RESULT_ROUTE_RECORDED_DELIVERY_PENDING" in lines)
         assertTrue("launchMode=singleTop" in lines)
     }
 
@@ -350,6 +363,154 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     }
 
     @Test
+    fun `new intent evidence consumes pending intent through injected activity operations`(@TempDir filesDir: File) {
+        val operations = RecordingVirtualActivityOperations(
+            pending = VirtualActivityPendingNewIntent(
+                eventId = 3L,
+                sourceToken = "source-token",
+                intentFlags = 17,
+                dataIntent = VirtualIntentSnapshot(
+                    action = "com.test.PENDING",
+                    dataUri = "content://guest/items/1?token=secret"
+                )
+            )
+        )
+        val instrumentation = VirtualInstrumentation(
+            base = mockk<Instrumentation>(relaxed = true),
+            activityOperations = operations
+        )
+        val hostApplication = mockk<Application>(relaxed = true) {
+            every { this@mockk.filesDir } returns filesDir
+        }
+        val activity = mockk<Activity>(relaxed = true) {
+            every { intent } returns hostedIdentityIntent()
+        }
+        val deliveredIntent = mockk<Intent>(relaxed = true) {
+            every { action } returns "com.test.DELIVERED"
+            every { dataString } returns "content://guest/delivered?token=secret"
+        }
+        mockkObject(ActivityThreadCompat)
+        every { ActivityThreadCompat.currentApplication() } returns hostApplication
+
+        invokePrivate(
+            instrumentation,
+            "writeNewIntentEvidence",
+            arrayOf(Activity::class.java, Intent::class.java),
+            activity,
+            deliveredIntent
+        )
+
+        val lines = File(
+            filesDir,
+            "hosted_launch_evidence/${HostedActivityEvidenceFiles.newIntent("inst-001")}"
+        ).readLines().map { it.trim() }
+        assertEquals(listOf("inst-001" to "token-001"), operations.pendingCalls)
+        assertTrue("status=GUEST_ACTIVITY_ON_NEW_INTENT" in lines)
+        assertTrue("pendingNewIntentConsumed=true" in lines)
+        assertTrue("pendingAction=com.test.PENDING" in lines)
+        assertTrue("pendingDataUri=content://guest/<redacted>" in lines)
+        assertTrue("intentAction=com.test.DELIVERED" in lines)
+        assertTrue("intentDataUri=content://guest/<redacted>" in lines)
+    }
+
+    @Test
+    fun `delivered activity result consumes virtual result through injected operations`(@TempDir filesDir: File) {
+        val operations = RecordingVirtualActivityOperations(
+            consumedResult = VirtualActivityResult(
+                resultCode = Activity.RESULT_OK,
+                dataIntent = VirtualIntentSnapshot(action = "com.test.RESULT", dataUri = "content://guest/<redacted>")
+            )
+        )
+        val baseInstrumentation = ResultCallbackInstrumentation()
+        val instrumentation = VirtualInstrumentation(
+            base = baseInstrumentation,
+            activityOperations = operations
+        )
+        val hostApplication = mockk<Application>(relaxed = true) {
+            every { this@mockk.filesDir } returns filesDir
+        }
+        val activity = mockk<Activity>(relaxed = true) {
+            every { intent } returns hostedIdentityIntent()
+        }
+        val resultData = mockk<Intent>(relaxed = true) {
+            every { action } returns "com.test.RESULT"
+            every { dataString } returns "content://guest/result?token=secret"
+        }
+        mockkObject(ActivityThreadCompat)
+        every { ActivityThreadCompat.currentApplication() } returns hostApplication
+
+        instrumentation.callActivityOnActivityResult(
+            activity,
+            "child",
+            42,
+            Activity.RESULT_OK,
+            resultData
+        )
+
+        val lines = File(
+            filesDir,
+            "hosted_launch_evidence/${HostedActivityEvidenceFiles.result("inst-001")}"
+        ).readLines().map { it.trim() }
+        assertEquals(listOf("inst-001" to "token-001"), operations.consumeResultCalls)
+        assertEquals(1, baseInstrumentation.resultCallbackCount)
+        assertTrue("status=ACTIVITY_RESULT_DELIVERED" in lines)
+        assertTrue("stage=ACTIVITY_RESULT_DELIVERY" in lines)
+        assertTrue("requestCode=42" in lines)
+        assertTrue("baseCallbackInvoked=true" in lines)
+        assertTrue("virtualResultConsumed=true" in lines)
+        assertTrue("resultCodeMatches=true" in lines)
+        assertTrue("reason=" in lines)
+    }
+
+    @Test
+    fun `destroy finish records result through injected activity operations`(@TempDir filesDir: File) {
+        val operations = RecordingVirtualActivityOperations(
+            finishResult = VirtualActivityFinishResultRecord(
+                instanceId = "inst-001",
+                sourceToken = "source-token",
+                requestCode = 42,
+                resultCode = Activity.RESULT_CANCELED,
+                recorded = true,
+                reason = ""
+            )
+        )
+        val instrumentation = VirtualInstrumentation(
+            base = mockk<Instrumentation>(relaxed = true),
+            activityOperations = operations
+        )
+        val hostApplication = mockk<Application>(relaxed = true) {
+            every { this@mockk.filesDir } returns filesDir
+        }
+        val activity = mockk<Activity>(relaxed = true) {
+            every { isFinishing } returns true
+            every { intent } returns hostedIdentityIntent()
+        }
+        mockkObject(ActivityThreadCompat)
+        every { ActivityThreadCompat.currentApplication() } returns hostApplication
+
+        invokePrivate(
+            instrumentation,
+            "markActivityFinishedIfNeeded",
+            arrayOf(Activity::class.java),
+            activity
+        )
+
+        val lines = File(
+            filesDir,
+            "hosted_launch_evidence/${HostedActivityEvidenceFiles.result("inst-001")}"
+        ).readLines().map { it.trim() }
+        assertEquals(listOf(Triple("inst-001", "token-001", Activity.RESULT_CANCELED)), operations.finishResultCalls)
+        assertEquals(listOf("inst-001" to "token-001"), operations.finishCalls)
+        assertTrue("status=ACTIVITY_FINISH_RESULT_RECORDED" in lines)
+        assertTrue("stage=ACTIVITY_FINISH_RESULT" in lines)
+        assertTrue("sourceToken=<redacted>" in lines)
+        assertTrue("requestCode=42" in lines)
+        assertTrue("virtualResultRecorded=true" in lines)
+        assertTrue("activityThreadSendActivityResultVerdict=SKIPPED" in lines)
+        assertTrue("activityThreadSendActivityResultReason=SOURCE_ACTIVITY_THREAD_TOKEN_MISSING" in lines)
+    }
+
+    @Test
     fun `remap start activity uses instrumentation activity record manager`(@TempDir filesDir: File) {
         val recordManager = VirtualActivityRecordManager()
         val processRuntime = VirtualProcessRuntime()
@@ -414,6 +575,78 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         assertEquals("com.test.minimal.DetailActivity", record.guestActivityClassName)
         assertSame(record, recordManager.resolveByProxy(record.proxyActivityClassName))
         assertTrue(VirtualActivityRecordManager.global.list().isEmpty())
+    }
+
+    @Test
+    fun `remap start activity records result route for hosted source activity`(@TempDir filesDir: File) {
+        val recordManager = VirtualActivityRecordManager()
+        val processRuntime = VirtualProcessRuntime()
+        val instrumentation = VirtualInstrumentation(
+            base = mockk<Instrumentation>(relaxed = true),
+            processRuntime = processRuntime,
+            activityRecordManager = recordManager
+        )
+        val snapshot = snapshotForInstance(
+            instanceId = "inst-001",
+            virtualPackageName = "com.multiapp.instance.minimal"
+        ).copy(
+            activities = listOf(
+                ResolvedComponent(
+                    name = "com.test.minimal.DetailActivity",
+                    taskAffinity = "com.test.minimal.task"
+                )
+            )
+        )
+        val hostApplication = mockk<Application>(relaxed = true) {
+            every { packageName } returns "com.multiapp.app"
+            every { this@mockk.filesDir } returns filesDir
+        }
+        VirtualPackageRegistry.global.register(snapshot)
+        mockkStatic(Log::class)
+        every { Log.i(any(), any()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } returns 0
+        rememberHostedRuntime(
+            instrumentation = instrumentation,
+            instanceId = "inst-001",
+            hostApplication = hostApplication,
+            result = hostedBootstrapResult(snapshot = snapshot)
+        )
+        val sourceActivity = mockk<Activity>(relaxed = true) {
+            every { intent } returns hostedIdentityIntent(token = "source-token-001")
+        }
+        val who = mockk<Context>(relaxed = true) {
+            every { packageName } returns "com.multiapp.instance.minimal"
+        }
+        val component = mockk<ComponentName>(relaxed = true) {
+            every { packageName } returns "com.test.minimal"
+            every { className } returns "com.test.minimal.DetailActivity"
+        }
+        val intent = mockk<Intent>(relaxed = true) {
+            every { this@mockk.component } returns component
+            every { selector } returns null
+            every { `package` } returns null
+            every { flags } returns 0
+            every { action } returns null
+            every { dataString } returns null
+            every { categories } returns emptySet()
+            every { extras } returns null
+        }
+        every { Log.w(any(), any<String>(), any()) } answers {
+            0
+        }
+
+        instrumentation.remapStartActivityIntent(
+            target = sourceActivity,
+            who = who,
+            intent = intent,
+            api = "execStartActivity:test",
+            requestCode = 42
+        )
+
+        val record = assertNotNull(recordManager.list().singleOrNull())
+        assertEquals("source-token-001", record.resultToToken)
+        assertEquals(42, record.resultRequestCode)
     }
 
     @Test
@@ -571,6 +804,47 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         assertTrue("reason=RUNTIME_CACHE_MISS_ON_MAIN_THREAD" in lines)
     }
 
+    @Test
+    fun `substitution evidence redacts activity token without prefix leakage`(@TempDir filesDir: File) {
+        val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
+        val rawToken = "raw-activity-token-super-secret"
+        val recovery = VirtualInstrumentation.ActivityRecordRecoveryResult(
+            record = VirtualActivityRecord(
+                token = rawToken,
+                instanceId = "inst-001",
+                originPackageName = "com.test.minimal",
+                guestActivityClassName = "com.test.minimal.MainActivity",
+                proxyActivityClassName = "com.multiapp.app.container.ProxyActivity0"
+            ),
+            activityRecordFound = true
+        )
+
+        invokePrivate(
+            instrumentation,
+            "writeSubstitutionEvidence",
+            arrayOf(
+                File::class.java,
+                String::class.java,
+                String::class.java,
+                String::class.java,
+                VirtualInstrumentation.ActivityRecordRecoveryResult::class.java
+            ),
+            filesDir,
+            "inst-001",
+            "com.multiapp.app.container.ProxyActivity0",
+            "com.test.minimal.MainActivity",
+            recovery
+        )
+
+        val text = File(
+            filesDir,
+            "hosted_launch_evidence/${HostedActivityEvidenceFiles.instrumentation("inst-001")}"
+        ).readText()
+        assertTrue(text.contains("token=<redacted>"))
+        assertTrue(!text.contains(rawToken), "substitution evidence leaked raw token in $text")
+        assertTrue(!text.contains(rawToken.take(8)), "substitution evidence leaked token prefix in $text")
+    }
+
     private fun remapEvidenceLines(filesDir: File): List<String> {
         val file = File(filesDir, "hosted_launch_evidence/inst-001.activity-remap.properties")
         assertTrue(file.isFile)
@@ -603,6 +877,16 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         every { dataString } returns null
         every { categories } returns emptySet()
         every { extras } returns null
+    }
+
+    private fun hostedIdentityIntent(
+        instanceId: String = "inst-001",
+        token: String = "token-001",
+        guestActivityClassName: String = "com.test.minimal.MainActivity"
+    ): Intent = mockk(relaxed = true) {
+        every { getStringExtra("multiapp.instanceId") } returns instanceId
+        every { getStringExtra("multiapp.virtualActivityToken") } returns token
+        every { getStringExtra("multiapp.guestActivityClassName") } returns guestActivityClassName
     }
 
     private fun sourceIntentForRecovery(
@@ -681,5 +965,95 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         val method = target.javaClass.getDeclaredMethod(methodName, *parameterTypes)
         method.isAccessible = true
         method.invoke(target, *args)
+    }
+
+    private class RecordingVirtualActivityOperations(
+        private val pending: VirtualActivityPendingNewIntent? = null,
+        private val finishResult: VirtualActivityFinishResultRecord? = null,
+        private val consumedResult: VirtualActivityResult? = null
+    ) : VirtualActivityOperations {
+        val pendingCalls = mutableListOf<Pair<String, String>>()
+        val finishCalls = mutableListOf<Pair<String, String>>()
+        val finishResultCalls = mutableListOf<Triple<String, String, Int>>()
+        val setResultCalls = mutableListOf<Triple<String, String, Int>>()
+        val consumeResultCalls = mutableListOf<Pair<String, String>>()
+
+        override fun consumePendingNewIntent(
+            instanceId: String,
+            token: String
+        ): VirtualActivityPendingNewIntent? {
+            pendingCalls += instanceId to token
+            return pending
+        }
+
+        override fun recordActivityResultForFinish(
+            instanceId: String,
+            token: String,
+            resultCode: Int,
+            dataIntent: VirtualIntentSnapshot?
+        ): VirtualActivityFinishResultRecord {
+            finishResultCalls += Triple(instanceId, token, resultCode)
+            return finishResult ?: VirtualActivityFinishResultRecord(
+                instanceId = instanceId,
+                resultCode = resultCode,
+                dataIntent = dataIntent,
+                recorded = false,
+                reason = "RESULT_ROUTE_MISSING"
+            )
+        }
+
+        override fun setActivityResult(
+            instanceId: String,
+            token: String,
+            resultCode: Int,
+            dataIntent: VirtualIntentSnapshot?,
+            requestCode: Int,
+            resultWho: String?,
+            frameworkDispatchAttempted: Boolean,
+            frameworkDispatchInvoked: Boolean
+        ): Boolean {
+            setResultCalls += Triple(instanceId, token, resultCode)
+            return true
+        }
+
+        override fun consumeActivityResult(instanceId: String, token: String): VirtualActivityResult? {
+            consumeResultCalls += instanceId to token
+            return consumedResult
+        }
+
+        override fun consumeActivityResultForResumeFallback(
+            instanceId: String,
+            token: String
+        ): VirtualActivityResult? {
+            consumeResultCalls += instanceId to token
+            return consumedResult?.takeIf { !it.frameworkDispatchInvoked && it.requestCode >= 0 }
+        }
+
+        override fun markActivityResultDispatchState(
+            instanceId: String,
+            token: String,
+            frameworkDispatchAttempted: Boolean,
+            frameworkDispatchInvoked: Boolean
+        ): Boolean = true
+
+        override fun finishActivity(instanceId: String, token: String): Boolean {
+            finishCalls += instanceId to token
+            return true
+        }
+    }
+
+    @Suppress("unused")
+    private class ResultCallbackInstrumentation : Instrumentation() {
+        var resultCallbackCount = 0
+
+        fun callActivityOnActivityResult(
+            activity: Activity,
+            id: String?,
+            requestCode: Int,
+            resultCode: Int,
+            data: Intent?
+        ) {
+            resultCallbackCount++
+        }
     }
 }

@@ -58,26 +58,26 @@ object VirtualIntentExtras {
  */
 interface GmsServiceRouter {
     /** Check if this intent targets a GMS or Play Store service */
-    fun isGmsServiceIntent(intent: android.content.Intent): Boolean
+    fun isGmsServiceIntent(intent: VirtualServiceIntentSpec): Boolean
 
-    /** Route a GMS bind intent and return a proxied IBinder, or null if not handled */
+    /** Route a GMS bind intent and return a virtual binder handle, or null if not handled */
     fun routeGmsBindIntent(
-        intent: android.content.Intent,
+        intent: VirtualServiceIntentSpec,
         instanceId: String,
         guestPackageName: String
-    ): android.os.IBinder?
+    ): VirtualBinderHandle?
 
     /** Intercept and route a GMS auth intent, returns modified intent or null */
     fun interceptAuthIntent(
-        intent: android.content.Intent,
+        intent: VirtualServiceIntentSpec,
         instanceId: String
-    ): android.content.Intent?
+    ): VirtualServiceIntentSpec?
 
     /** Check if a package name belongs to GMS ecosystem */
     fun isGmsPackage(packageName: String): Boolean
 
     /** Get synthesized PackageInfo for a GMS package (gms, gsf, vending) */
-    fun synthesizeGmsPackageInfo(packageName: String): android.content.pm.PackageInfo?
+    fun synthesizeGmsPackageInfo(packageName: String): VirtualPackageIdentity?
 
     /**
      * Get the isolated Google accounts for a specific virtual instance.
@@ -88,8 +88,34 @@ interface GmsServiceRouter {
      * - If the instance has signed in -> return only that instance's account
      * - If not yet signed in -> return null (fall back to host accounts for sign-in flow)
      */
-    fun getVirtualGoogleAccounts(instanceId: String): List<android.accounts.Account>?
+    fun getVirtualGoogleAccounts(instanceId: String): List<VirtualAccountRecord>?
 }
+
+data class VirtualServiceIntentSpec(
+    val action: String? = null,
+    val packageName: String? = null,
+    val className: String? = null,
+    val dataUri: String? = null,
+    val categories: List<String> = emptyList(),
+    val extras: Map<String, String> = emptyMap()
+)
+
+data class VirtualBinderHandle(
+    val descriptor: String,
+    val routeId: String? = null
+)
+
+data class VirtualPackageIdentity(
+    val packageName: String,
+    val versionName: String? = null,
+    val versionCode: Long = 0,
+    val signatures: List<String> = emptyList()
+)
+
+data class VirtualAccountRecord(
+    val name: String,
+    val type: String
+)
 
 /**
  * Constants for the virtual engine.

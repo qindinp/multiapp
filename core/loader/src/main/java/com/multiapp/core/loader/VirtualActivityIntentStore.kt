@@ -43,6 +43,20 @@ object VirtualActivityIntentStore {
     fun size(): Int = intents.size
 
     @Synchronized
+    fun snapshot(): Map<String, Intent> = intents.mapValues { (_, intent) -> intentCopier(intent) }
+
+    @Synchronized
+    fun restore(snapshot: Map<String, Intent>) {
+        intents.clear()
+        snapshot.forEach { (token, intent) ->
+            if (token.isNotBlank()) {
+                intents[token] = intentCopier(intent)
+            }
+        }
+        trimToMaxEntries()
+    }
+
+    @Synchronized
     internal fun setIntentCopierForTest(copier: (Intent) -> Intent) {
         intentCopier = copier
     }

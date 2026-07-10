@@ -97,6 +97,31 @@ class VirtualActivityManagerTest {
     }
 
     @Test
+    fun `allocateGuestActivity preserves activity result route metadata`() {
+        val context = mockk<Context>(relaxed = true)
+        every { context.packageName } returns "com.multiapp.app"
+        val registry = ProxyActivityRegistry(listOf("com.multiapp.app.container.ProxyActivity0"))
+        val recordManager = VirtualActivityRecordManager()
+        val manager = VirtualActivityManager(context, registry, activityRecordManager = recordManager)
+        val request = VirtualActivityLaunchRequest(
+            instanceId = "inst-001",
+            originPackageName = "com.test.minimal",
+            guestActivityClassName = "com.test.minimal.SecondActivity",
+            sourceIntent = intentWithFlags(),
+            reason = "explicit",
+            resultToToken = "token-parent",
+            resultRequestCode = 42
+        )
+
+        val record = manager.allocateGuestActivity(request)
+
+        assertEquals("token-parent", record.resultToToken)
+        assertEquals(42, record.resultRequestCode)
+        assertEquals("token-parent", recordManager.resolve(record.token)?.resultToToken)
+        assertEquals(42, recordManager.resolve(record.token)?.resultRequestCode)
+    }
+
+    @Test
     fun `same origin package instances use instance scoped task affinity`() {
         val context = mockk<Context>(relaxed = true)
         every { context.packageName } returns "com.multiapp.app"
@@ -258,6 +283,33 @@ class VirtualActivityManagerTest {
         listOf("user:pass", "private", "token=", "password=", "secret", "fragment").forEach { leaked ->
             assertFalse(pending?.dataUri?.contains(leaked) == true, "snapshot leaked $leaked in ${pending?.dataUri}")
         }
+    }
+
+    @Test
+    fun `activity records and intent store keep raw token for internal routing`() {
+        val context = mockk<Context>(relaxed = true)
+        every { context.packageName } returns "com.multiapp.app"
+        val registry = ProxyActivityRegistry(listOf("com.multiapp.app.container.ProxyActivity0"))
+        val recordManager = VirtualActivityRecordManager()
+        val manager = VirtualActivityManager(context, registry, activityRecordManager = recordManager)
+        val sourceIntent = intentWithFlags()
+        val record = manager.allocateGuestActivity(
+            VirtualActivityLaunchRequest(
+                instanceId = "inst-001",
+                originPackageName = "com.test.minimal",
+                guestActivityClassName = "com.test.minimal.MainActivity",
+                sourceIntent = sourceIntent,
+                reason = "explicit"
+            )
+        )
+        VirtualActivityIntentStore.remember(record.token, sourceIntent)
+        val spec = manager.createProxyLaunchSpec(record)
+
+        assertEquals(record.token, spec.token)
+        assertTrue(VirtualActivityIntentStore.find(record.token) != null)
+        assertSame(record, recordManager.resolve(record.token))
+        assertNull(VirtualActivityIntentStore.find("<redacted>"))
+        assertNull(recordManager.resolve("<redacted>"))
     }
 
     private fun request(

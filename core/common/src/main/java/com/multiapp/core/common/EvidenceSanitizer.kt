@@ -8,8 +8,12 @@ object EvidenceSanitizer {
     private const val REDACTED = "<redacted>"
     private val SAFE_EVIDENCE_SEGMENT = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
     private val URI_VALUE_PATTERN = Regex("[A-Za-z][A-Za-z0-9+.-]*://\\S+")
-    private val SENSITIVE_VALUE_PATTERN = Regex(
-        "(?i)(multiapp_routeToken|routeToken|route_token|password|secret|credential)\\s*(=|:|%3[dD])"
+    private val TOKEN_ASSIGNMENT_PATTERN = Regex(
+        "(?i)(multiapp[._-]?virtualactivitytoken|virtualactivitytoken|activitytoken|" +
+            "multiapp_routetoken|routetoken|route_token|token)\\s*(=|%3[dD])"
+    )
+    private val SENSITIVE_ASSIGNMENT_PATTERN = Regex(
+        "(?i)(password|secret|credential)\\s*(=|:|%3[dD])"
     )
     private val URI_FIELD_KEYS = setOf(
         "uri",
@@ -20,10 +24,20 @@ object EvidenceSanitizer {
     )
 
     fun sanitizeEvidenceValue(key: String, value: Any?): String {
+        if (isSensitiveEvidenceKey(key)) return REDACTED
         val rawValue = value?.toString().orEmpty()
-        val redactedValue = if (isUriField(key)) redactUriForEvidence(rawValue) else rawValue
+        val redactedEmbeddedUris = URI_VALUE_PATTERN.replace(rawValue) { match ->
+            redactUriForEvidence(match.value)
+        }
+        if (containsSensitiveAssignment(redactedEmbeddedUris)) return REDACTED
+        val redactedValue = if (isUriField(key)) redactUriForEvidence(redactedEmbeddedUris) else redactedEmbeddedUris
         return sanitizeEvidenceLine(redactedValue)
     }
+
+    fun redactTokenForEvidence(value: String?): String = value
+        ?.takeIf { it.isNotBlank() }
+        ?.let { REDACTED }
+        .orEmpty()
 
     fun sanitizeEvidenceEntries(fields: Map<String, Any?>): Map<String, String> {
         return fields
@@ -91,15 +105,17 @@ object EvidenceSanitizer {
     }
 
     private fun isSensitiveEvidenceKey(key: String): Boolean {
-        val normalized = key.lowercase()
-        return normalized.contains("token") ||
+        val normalized = key.trim().lowercase()
+        val compact = normalized.filterNot { it == '.' || it == '_' || it == '-' }
+        return compact == "token" ||
+            compact.endsWith("token") ||
             normalized.contains("password") ||
             normalized.contains("secret") ||
             normalized.contains("credential")
     }
 
     private fun containsSensitiveAssignment(value: String): Boolean =
-        SENSITIVE_VALUE_PATTERN.containsMatchIn(value)
+        TOKEN_ASSIGNMENT_PATTERN.containsMatchIn(value) || SENSITIVE_ASSIGNMENT_PATTERN.containsMatchIn(value)
 
     private fun sanitizedAuthority(uri: URI): String? {
         val host = uri.host

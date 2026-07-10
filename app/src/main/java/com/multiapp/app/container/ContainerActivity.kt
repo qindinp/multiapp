@@ -12,6 +12,8 @@ import android.os.Looper
 import android.util.Log
 import com.multiapp.core.engine.EngineActivityLaunchRequest
 import com.multiapp.core.engine.EngineActivityProxyLauncher
+import com.multiapp.core.engine.EngineActivityTaskController
+import com.multiapp.core.engine.EngineActivityTaskControllers
 import com.multiapp.core.engine.EngineBootstrapStage
 import com.multiapp.core.engine.EngineBootstrapStageResult
 import com.multiapp.core.engine.EngineHostedBootstrapResult
@@ -508,6 +510,7 @@ open class ContainerActivity : Activity() {
         Log.i(TAG, "Launching proxy Activity for guest: $guestActivityClassName")
         val slotAssignmentStore =
             FileBackedProxyActivitySlotAssignmentStore(ContainerRuntimePaths.proxyActivitySlotsFile(this))
+        restoreActivityTaskState(instanceId, "before-proxy-launch")
         pruneProxyActivitySlotAssignments(
             instanceId = instanceId,
             slotAssignmentStore = slotAssignmentStore
@@ -529,7 +532,9 @@ open class ContainerActivity : Activity() {
                 launchMode = launchMode,
                 taskAffinity = taskAffinity
             )
-        )
+        ).onSuccess {
+            persistActivityTaskState(instanceId, "after-proxy-launch")
+        }
     }
 
     private fun proxyActivityCandidatesFromEngineSlot(
@@ -618,6 +623,7 @@ open class ContainerActivity : Activity() {
             liveProxyClasses = liveProxyClasses,
             knownProxyCount = knownProxyClasses.size
         )
+        persistActivityTaskState(instanceId, "after-slot-prune")
     }
 
     @Suppress("DEPRECATION")
@@ -811,6 +817,81 @@ open class ContainerActivity : Activity() {
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to write engine proxy slot evidence for instanceId=$instanceId", error)
+        }
+    }
+
+    private fun activityTaskController(): EngineActivityTaskController =
+        EngineActivityTaskControllers.fileBacked(this)
+
+    private fun restoreActivityTaskState(instanceId: String, stage: String) {
+        runCatching {
+            val result = activityTaskController().restorePersisted(instanceId)
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                status = result.status,
+                stage = stage,
+                activityCount = result.activityCount,
+                taskCount = result.taskCount,
+                detail = result.detail
+            )
+        }.onFailure { error ->
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                status = "FAIL",
+                stage = stage,
+                activityCount = 0,
+                taskCount = null,
+                detail = error.message ?: error.javaClass.name
+            )
+        }
+    }
+
+    private fun persistActivityTaskState(instanceId: String, stage: String) {
+        runCatching {
+            val result = activityTaskController().persist(instanceId)
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                status = result.status,
+                stage = stage,
+                activityCount = result.activityCount,
+                taskCount = result.taskCount,
+                detail = result.detail
+            )
+        }.onFailure { error ->
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                status = "FAIL",
+                stage = stage,
+                activityCount = 0,
+                taskCount = null,
+                detail = error.message ?: error.javaClass.name
+            )
+        }
+    }
+
+    private fun writeActivityTaskStateEvidence(
+        instanceId: String,
+        status: String,
+        stage: String,
+        activityCount: Int,
+        taskCount: Int?,
+        detail: String = ""
+    ) {
+        runCatching {
+            ContainerRuntimeEvidenceWriter.write(
+                context = applicationContext ?: this,
+                instanceId = instanceId,
+                component = "activity-task-state",
+                fields = linkedMapOf(
+                    "status" to status,
+                    "stage" to stage,
+                    "detail" to detail,
+                    "activityCount" to activityCount.toString(),
+                    "taskCount" to (taskCount?.toString() ?: "")
+                )
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write activity task-state evidence for instanceId=$instanceId", error)
         }
     }
 

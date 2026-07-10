@@ -6,10 +6,14 @@ import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.ProviderInfo
+import android.content.pm.PathPermission
+import android.os.PatternMatcher
 import android.content.pm.ResolveInfo
 import android.content.pm.ServiceInfo
 import android.os.Bundle
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
+import com.multiapp.core.model.virtual.VirtualMetaDataValueType
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
 internal object VirtualPackageInfoFactory {
@@ -38,11 +42,15 @@ internal object VirtualPackageInfoFactory {
         processName = snapshot.processName
         taskAffinity = snapshot.taskAffinity
         theme = snapshot.themeId
-        metaData = snapshot.metaData.toBundle()
+        metaData = snapshot.metaData.toBundle(snapshot.typedMetaData)
         enabled = true
     }
 
-    fun packageInfo(snapshot: VirtualPackageSnapshot): PackageInfo = PackageInfo().apply {
+    @Suppress("DEPRECATION")
+    fun packageInfo(
+        snapshot: VirtualPackageSnapshot,
+        packageSigningInfo: VirtualPackageSigningInfo? = null
+    ): PackageInfo = PackageInfo().apply {
         packageName = snapshot.originPackageName
         versionCode = snapshot.versionCode.toInt()
         versionName = snapshot.versionName
@@ -52,6 +60,10 @@ internal object VirtualPackageInfoFactory {
         services = snapshot.services.map { serviceInfo(snapshot, it) }.toTypedArray()
         receivers = snapshot.receivers.map { receiverInfo(snapshot, it) }.toTypedArray()
         providers = snapshot.providers.mapNotNull { providerInfo(snapshot, it) }.toTypedArray()
+        packageSigningInfo?.let { signing ->
+            signatures = signing.legacySignatures.copyOf()
+            signingInfo = signing.signingInfo
+        }
     }
 
     fun activityInfo(snapshot: VirtualPackageSnapshot, component: ResolvedComponent): ActivityInfo =
@@ -68,7 +80,7 @@ internal object VirtualPackageInfoFactory {
             screenOrientation = toActivityInfoScreenOrientation(component.screenOrientation)
             configChanges = toActivityInfoConfigChanges(component.configChanges)
             permission = component.permission
-            metaData = component.metaData.toBundle()
+            metaData = component.metaData.toBundle(component.typedMetaData)
             targetActivity = component.targetActivityName
         }
 
@@ -84,7 +96,7 @@ internal object VirtualPackageInfoFactory {
             enabled = true
             processName = component.processName
             permission = component.permission
-            metaData = component.metaData.toBundle()
+            metaData = component.metaData.toBundle(component.typedMetaData)
         }
 
     fun providerInfo(snapshot: VirtualPackageSnapshot, component: ResolvedComponent): ProviderInfo? {
@@ -97,12 +109,32 @@ internal object VirtualPackageInfoFactory {
             enabled = true
             this.authority = authority
             processName = component.processName
-            readPermission = component.permission
-            writePermission = component.permission
-            grantUriPermissions = component.grantUriPermissions
-            metaData = component.metaData.toBundle()
+            readPermission = component.readPermission ?: component.permission
+            writePermission = component.writePermission ?: component.permission
+            grantUriPermissions = component.grantUriPermissions || component.uriPermissionPatterns.isNotEmpty()
+            pathPermissions = component.pathPermissions.map { permission ->
+                PathPermission(
+                    permission.pattern.path,
+                    permission.pattern.type.toAndroidPatternType(),
+                    permission.readPermission,
+                    permission.writePermission
+                )
+            }.toTypedArray().takeIf { it.isNotEmpty() }
+            uriPermissionPatterns = component.uriPermissionPatterns.map { pattern ->
+                PatternMatcher(pattern.path, pattern.type.toAndroidPatternType())
+            }.toTypedArray().takeIf { it.isNotEmpty() }
+            metaData = component.metaData.toBundle(component.typedMetaData)
         }
     }
+
+    private fun com.multiapp.core.model.virtual.VirtualProviderPathPatternType.toAndroidPatternType(): Int =
+        when (this) {
+            com.multiapp.core.model.virtual.VirtualProviderPathPatternType.LITERAL -> PatternMatcher.PATTERN_LITERAL
+            com.multiapp.core.model.virtual.VirtualProviderPathPatternType.PREFIX -> PatternMatcher.PATTERN_PREFIX
+            com.multiapp.core.model.virtual.VirtualProviderPathPatternType.SIMPLE_GLOB -> PatternMatcher.PATTERN_SIMPLE_GLOB
+            com.multiapp.core.model.virtual.VirtualProviderPathPatternType.ADVANCED_GLOB -> PatternMatcher.PATTERN_ADVANCED_GLOB
+            com.multiapp.core.model.virtual.VirtualProviderPathPatternType.SUFFIX -> PatternMatcher.PATTERN_SUFFIX
+        }
 
     fun launcherResolveInfo(snapshot: VirtualPackageSnapshot): ResolveInfo? {
         val launcherName = snapshot.launcherActivityName
@@ -198,8 +230,38 @@ internal object VirtualPackageInfoFactory {
         else -> 0
     }
 
-    private fun Map<String, String>.toBundle(): Bundle =
-        Bundle(size).apply {
-            forEach { (key, value) -> putString(key, value) }
+    private fun Map<String, String>.toBundle(
+        typedValues: Map<String, VirtualMetaDataValue>
+    ): Bundle =
+        Bundle(size + typedValues.size).apply {
+            this@toBundle.forEach { (key, value) -> putString(key, value) }
+            typedValues.forEach { (key, value) -> value.putInto(this, key) }
         }
+
+    private fun VirtualMetaDataValue.putInto(bundle: Bundle, key: String) {
+        when (val value = toPlatformMetaDataValue()) {
+            is Boolean -> bundle.putBoolean(key, value)
+            is Int -> bundle.putInt(key, value)
+            is Long -> bundle.putLong(key, value)
+            is Float -> bundle.putFloat(key, value)
+            is Double -> bundle.putDouble(key, value)
+            else -> bundle.putString(key, value.toString())
+        }
+    }
+}
+
+internal fun VirtualMetaDataValue.toPlatformMetaDataValue(): Any = when (type) {
+    VirtualMetaDataValueType.STRING -> encodedValue
+    VirtualMetaDataValueType.BOOLEAN -> encodedValue.toBooleanStrictOrNull() ?: encodedValue
+    VirtualMetaDataValueType.INT -> encodedValue.toIntOrNull() ?: encodedValue
+    VirtualMetaDataValueType.LONG -> encodedValue.toLongOrNull() ?: encodedValue
+    VirtualMetaDataValueType.FLOAT -> encodedValue.toFloatOrNull() ?: encodedValue
+    VirtualMetaDataValueType.DOUBLE -> encodedValue.toDoubleOrNull() ?: encodedValue
+    VirtualMetaDataValueType.RESOURCE -> encodedValue.toResourceIdOrNull() ?: encodedValue
+}
+
+private fun String.toResourceIdOrNull(): Int? = when {
+    startsWith("@0x", ignoreCase = true) -> substring(3).toLongOrNull(16)?.toInt()
+    startsWith("0x", ignoreCase = true) -> substring(2).toLongOrNull(16)?.toInt()
+    else -> toIntOrNull()
 }

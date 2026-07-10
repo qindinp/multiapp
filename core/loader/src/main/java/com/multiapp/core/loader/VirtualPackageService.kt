@@ -20,11 +20,16 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
  * callers decide how to fall back when a query does not belong to the snapshot.
  */
 class VirtualPackageService(
-    private val snapshot: VirtualPackageSnapshot
+    private val snapshot: VirtualPackageSnapshot,
+    private val packageSigningInfo: VirtualPackageSigningInfo? = null
 ) {
 
     fun getPackageInfo(packageName: String): PackageInfo? =
-        if (snapshot.matchesPackageName(packageName)) VirtualPackageInfoFactory.packageInfo(snapshot) else null
+        if (snapshot.matchesPackageName(packageName)) {
+            VirtualPackageInfoFactory.packageInfo(snapshot, packageSigningInfo)
+        } else {
+            null
+        }
 
     fun getApplicationInfo(packageName: String): ApplicationInfo? =
         if (snapshot.matchesPackageName(packageName)) VirtualPackageInfoFactory.applicationInfo(snapshot) else null
@@ -109,7 +114,7 @@ class VirtualPackageService(
     }
 
     fun getInstalledPackages(): List<PackageInfo> =
-        listOf(VirtualPackageInfoFactory.packageInfo(snapshot))
+        listOf(VirtualPackageInfoFactory.packageInfo(snapshot, packageSigningInfo))
 
     fun getInstalledApplications(): List<ApplicationInfo> =
         listOf(VirtualPackageInfoFactory.applicationInfo(snapshot))
@@ -141,7 +146,7 @@ class VirtualPackageService(
     fun getPackagesHoldingPermissions(permissions: Array<String>): List<PackageInfo> {
         if (permissions.isEmpty()) return emptyList()
         return if (permissions.any { it in snapshot.permissions }) {
-            listOf(VirtualPackageInfoFactory.packageInfo(snapshot))
+            listOf(VirtualPackageInfoFactory.packageInfo(snapshot, packageSigningInfo))
         } else {
             emptyList()
         }

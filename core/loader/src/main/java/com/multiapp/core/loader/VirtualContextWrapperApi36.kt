@@ -34,6 +34,9 @@ class VirtualContextWrapperApi36(
     amsDispatcher = amsDispatcher
 ) {
     override fun sendBroadcastWithMultiplePermissions(intent: Intent, receiverPermissions: Array<String>) {
-        dispatchBroadcastIntent(intent)
+        dispatchBroadcastIntent(
+            intent,
+            broadcastDispatchOptions(receiverPermissions = receiverPermissions.toSet())
+        )
     }
 }

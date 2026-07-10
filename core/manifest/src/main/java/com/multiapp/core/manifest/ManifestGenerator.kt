@@ -110,6 +110,8 @@ class ManifestGenerator {
 
     private fun providerAttrs(p: ManifestParser.ProviderInfo): String = buildString {
         p.permission?.let { append(""" android:permission="$it"""") }
+        p.readPermission?.let { append(""" android:readPermission="$it"""") }
+        p.writePermission?.let { append(""" android:writePermission="$it"""") }
         if (p.grantUriPermissions) append(""" android:grantUriPermissions="true"""")
     }
 }

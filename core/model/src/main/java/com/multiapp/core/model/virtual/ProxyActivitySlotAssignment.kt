@@ -14,6 +14,11 @@ data class ProxyActivitySlotKey(
 interface ProxyActivitySlotAssignmentStore {
     fun find(key: ProxyActivitySlotKey): String?
     fun save(key: ProxyActivitySlotKey, proxyActivityClassName: String)
+    fun compareAndSet(
+        key: ProxyActivitySlotKey,
+        expectedProxyActivityClassName: String?,
+        newProxyActivityClassName: String?
+    ): Boolean = false
     fun reserve(key: ProxyActivitySlotKey, candidateProxyActivityClassNames: List<String>): String? {
         val assigned = find(key)
         if (assigned != null && assigned in candidateProxyActivityClassNames) {

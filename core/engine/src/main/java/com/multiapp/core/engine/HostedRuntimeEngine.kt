@@ -42,7 +42,7 @@ class DefaultHostedRuntimeEngine @Inject constructor(
     private val engineRuntimeRegistry: EngineRuntimeRegistry =
         EngineRuntimeRegistry.global.attachStateStore(
             FileBackedEngineRuntimeStateStore(
-                File(hostContext.filesDir, DefaultVirtualizationEngine.ENGINE_RUNTIME_STATE_FILE)
+                File(hostContext.filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME)
             )
         )
 

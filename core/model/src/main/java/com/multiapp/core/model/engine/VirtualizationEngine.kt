@@ -30,6 +30,7 @@ enum class EngineSubsystem {
     PACKAGE,
     ACTIVITY,
     PROVIDER,
+    APP_OPS,
     SERVICE,
     BROADCAST,
     STORAGE,

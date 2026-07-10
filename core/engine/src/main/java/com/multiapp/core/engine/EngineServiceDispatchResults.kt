@@ -3,6 +3,7 @@ package com.multiapp.core.engine
 import com.multiapp.core.loader.VirtualServiceDispatchResult
 import com.multiapp.core.loader.VirtualServiceLifecycleEvidence
 import com.multiapp.core.loader.VirtualServiceStartRequest
+import com.multiapp.core.model.engine.EngineResultStatus
 
 data class EngineServiceStartRequestSnapshot(
     val instanceId: String,
@@ -175,6 +176,125 @@ sealed class EngineServiceDispatchResult {
             }
     }
 }
+
+fun EngineServiceDispatchResult.toVirtualServiceOperationResult(): VirtualServiceOperationResult? {
+    val request = startRequest ?: return null
+    val operation = if (request.foreground) {
+        VirtualServiceOperation.START_FOREGROUND
+    } else {
+        VirtualServiceOperation.START
+    }
+    return when (this) {
+        is EngineServiceDispatchResult.ServiceStarted -> VirtualServiceOperationResult(
+            instanceId = request.instanceId,
+            operation = operation,
+            serviceClassName = request.guestServiceClassName,
+            action = null,
+            verdict = EngineResultStatus.PASS,
+            reason = request.reason,
+            started = true,
+            foreground = request.foreground,
+            startCommandResult = startCommandResult,
+            processSlot = request.processSlot,
+            activeStartCount = lifecycleEvidence.activeStartCount,
+            activeBindCount = lifecycleEvidence.activeBindCount,
+            cached = cached,
+            message = if (cached) "loader_service_started_cached" else "loader_service_started"
+        )
+        is EngineServiceDispatchResult.RuntimeNotBound -> VirtualServiceOperationResult(
+            instanceId = request.instanceId,
+            operation = operation,
+            serviceClassName = request.guestServiceClassName,
+            action = null,
+            verdict = EngineResultStatus.FAIL,
+            reason = request.reason,
+            foreground = request.foreground,
+            message = "runtime_not_bound"
+        )
+        is EngineServiceDispatchResult.RuntimeIncomplete -> VirtualServiceOperationResult(
+            instanceId = request.instanceId,
+            operation = operation,
+            serviceClassName = request.guestServiceClassName,
+            action = null,
+            verdict = EngineResultStatus.FAIL,
+            reason = request.reason,
+            foreground = request.foreground,
+            message = "runtime_incomplete:$reason"
+        )
+        is EngineServiceDispatchResult.Unsupported -> VirtualServiceOperationResult(
+            instanceId = request.instanceId,
+            operation = operation,
+            serviceClassName = request.guestServiceClassName,
+            action = null,
+            verdict = EngineResultStatus.UNSUPPORTED,
+            reason = request.reason,
+            foreground = request.foreground,
+            message = "unsupported:$reason"
+        )
+        is EngineServiceDispatchResult.ServiceCreateFailed -> failedOperationResult(
+            request = request,
+            operation = operation,
+            stage = "service_create_failed",
+            foreground = request.foreground,
+            errorClassName = errorClassName,
+            errorMessage = errorMessage
+        )
+        is EngineServiceDispatchResult.ServiceAttachFailed -> failedOperationResult(
+            request = request,
+            operation = operation,
+            stage = "service_attach_failed",
+            foreground = request.foreground,
+            errorClassName = errorClassName,
+            errorMessage = errorMessage
+        )
+        is EngineServiceDispatchResult.ServiceOnCreateFailed -> failedOperationResult(
+            request = request,
+            operation = operation,
+            stage = "service_on_create_failed",
+            foreground = request.foreground,
+            errorClassName = errorClassName,
+            errorMessage = errorMessage
+        )
+        is EngineServiceDispatchResult.ServiceOnStartCommandFailed -> failedOperationResult(
+            request = request,
+            operation = operation,
+            stage = "service_on_start_command_failed",
+            foreground = request.foreground,
+            errorClassName = errorClassName,
+            errorMessage = errorMessage
+        )
+        is EngineServiceDispatchResult.InstanceNotFound -> VirtualServiceOperationResult(
+            instanceId = request.instanceId,
+            operation = operation,
+            serviceClassName = request.guestServiceClassName,
+            action = null,
+            verdict = EngineResultStatus.FAIL,
+            reason = request.reason,
+            foreground = request.foreground,
+            message = "instance_not_found"
+        )
+        is EngineServiceDispatchResult.InvalidProxyIntent -> null
+    }
+}
+
+private fun failedOperationResult(
+    request: EngineServiceStartRequestSnapshot,
+    operation: VirtualServiceOperation,
+    stage: String,
+    foreground: Boolean,
+    errorClassName: String,
+    errorMessage: String?
+): VirtualServiceOperationResult =
+    VirtualServiceOperationResult(
+        instanceId = request.instanceId,
+        operation = operation,
+        serviceClassName = request.guestServiceClassName,
+        action = null,
+        verdict = EngineResultStatus.FAIL,
+        reason = request.reason,
+        foreground = foreground,
+        message = "$stage:$errorClassName:${errorMessage.orEmpty()}"
+    )
 
 data class EngineServiceRuntimeBindEvidence(
     val status: String,

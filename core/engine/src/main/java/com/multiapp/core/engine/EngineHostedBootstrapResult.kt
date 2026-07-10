@@ -1,10 +1,8 @@
 package com.multiapp.core.engine
 
 import android.app.Application
-import com.multiapp.core.hook.NativeDiagnosticsResult
 import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.BootstrapStatus
-import com.multiapp.core.loader.BootstrapSummary
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.model.installer.InstallRecord
@@ -84,6 +82,56 @@ data class EngineBootstrapStageResult(
     }
 }
 
+data class EngineBootstrapStageSummary(
+    val stage: EngineBootstrapStage,
+    val status: EngineBootstrapStatus,
+    val elapsedMs: Long,
+    val evidenceCount: Int,
+    val errorSummary: String?
+)
+
+data class EngineBootstrapSummary(
+    val totalTimeMs: Long,
+    val stageResults: List<EngineBootstrapStageSummary>,
+    val overallStatus: EngineBootstrapStatus,
+    val failedStage: EngineBootstrapStage?,
+    val failureReason: String?
+) {
+    companion object {
+        fun fromLoader(summary: com.multiapp.core.loader.BootstrapSummary): EngineBootstrapSummary =
+            EngineBootstrapSummary(
+                totalTimeMs = summary.totalTimeMs,
+                stageResults = summary.stageResults.map { stage ->
+                    EngineBootstrapStageSummary(
+                        stage = EngineBootstrapStage.fromLoader(stage.stage),
+                        status = EngineBootstrapStatus.fromLoader(stage.status),
+                        elapsedMs = stage.elapsedMs,
+                        evidenceCount = stage.evidenceCount,
+                        errorSummary = stage.errorSummary
+                    )
+                },
+                overallStatus = EngineBootstrapStatus.fromLoader(summary.overallStatus),
+                failedStage = summary.failedStage?.let(EngineBootstrapStage::fromLoader),
+                failureReason = summary.failureReason
+            )
+    }
+}
+
+data class EngineNativeDiagnosticsSummary(
+    val verdict: String,
+    val verdictReason: String,
+    val evidenceCount: Int
+) {
+    companion object {
+        fun fromLoader(result: com.multiapp.core.hook.NativeDiagnosticsResult): EngineNativeDiagnosticsSummary =
+            EngineNativeDiagnosticsSummary(
+                verdict = result.verdict.name,
+                verdictReason = result.verdictReason,
+                evidenceCount = result.evidence.size
+            )
+    }
+}
+
 class EngineHostedBootstrapResult private constructor(
     internal val loaderResult: HostedBootstrapResult
 ) {
@@ -102,9 +150,10 @@ class EngineHostedBootstrapResult private constructor(
     val launcherActivityClassName: String? get() = loaderResult.launcherActivityClassName
     val stageResults: List<EngineBootstrapStageResult> =
         loaderResult.stageResults.map(EngineBootstrapStageResult::fromLoader)
-    val summary: BootstrapSummary get() = loaderResult.summary
+    val summary: EngineBootstrapSummary get() = EngineBootstrapSummary.fromLoader(loaderResult.summary)
     val success: Boolean get() = loaderResult.success
-    val diagnostics: NativeDiagnosticsResult? get() = loaderResult.diagnostics
+    val diagnostics: EngineNativeDiagnosticsSummary? get() =
+        loaderResult.diagnostics?.let(EngineNativeDiagnosticsSummary::fromLoader)
 
     fun firstStageResult(stage: EngineBootstrapStage): EngineBootstrapStageResult? =
         stageResults.firstOrNull { it.stage == stage }

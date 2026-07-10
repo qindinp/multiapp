@@ -43,7 +43,7 @@ class VirtualResourcesManager(
                 className = null
                 name = null
                 sourceDir = config.sourceDir
-                publicSourceDir = config.sourceDir
+                publicSourceDir = config.publicSourceDir
                 applySplitPaths(config)
                 dataDir = config.dataDir
                 ApplicationInfoNativePathCompat.applyTo(this, config.dataDir, config.nativeLibraryDir)
@@ -54,7 +54,7 @@ class VirtualResourcesManager(
 
     @Suppress("DEPRECATION")
     private fun VirtualContextConfig.resourceAssetPaths(): List<String> =
-        listOf(sourceDir) + splitPublicSourceDirs.ifEmpty { splitSourceDirs }
+        publicResourceDirs
 
     private fun ApplicationInfo.applySplitPaths(config: VirtualContextConfig) {
         if (config.splitSourceDirs.isNotEmpty()) {

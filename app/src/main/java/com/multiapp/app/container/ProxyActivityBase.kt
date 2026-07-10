@@ -7,8 +7,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.multiapp.core.common.EvidenceSanitizer
+import com.multiapp.core.engine.EngineActivityTaskController
+import com.multiapp.core.engine.EngineActivityTaskControllers
 import com.multiapp.core.engine.EngineProxyActivityObserveRequest
 import com.multiapp.core.engine.EngineProxyActivityRecords
+import com.multiapp.core.model.virtual.VirtualActivityState
 
 abstract class ProxyActivityBase : Activity() {
 
@@ -38,11 +42,39 @@ abstract class ProxyActivityBase : Activity() {
         handleProxyIntent(intent, lifecycleEvent = "onNewIntent")
     }
 
+    override fun onResume() {
+        super.onResume()
+        markLifecycleState(VirtualActivityState.RESUMED, "onResume")
+    }
+
+    override fun onPause() {
+        markLifecycleState(VirtualActivityState.PAUSED, "onPause")
+        super.onPause()
+    }
+
+    override fun onStop() {
+        markLifecycleState(VirtualActivityState.STOPPED, "onStop")
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        if (isFinishing) {
+            finishActivityRecord("onDestroy")
+        } else {
+            markLifecycleState(VirtualActivityState.STOPPED, "onDestroy")
+        }
+        super.onDestroy()
+    }
+
     private fun handleProxyIntent(proxyIntent: Intent, lifecycleEvent: String) {
         val instanceId = proxyIntent.getStringExtra(EXTRA_INSTANCE_ID)
         val token = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN).orEmpty()
+        val tokenForEvidence = EvidenceSanitizer.redactTokenForEvidence(token)
         val guestActivity = proxyIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME).orEmpty()
         val originPackage = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME).orEmpty()
+        if (!instanceId.isNullOrBlank()) {
+            restoreActivityTaskState(instanceId, lifecycleEvent)
+        }
         val observation = EngineProxyActivityRecords().observeProxyIntent(
             EngineProxyActivityObserveRequest(
                 proxyActivityClassName = javaClass.name,
@@ -75,7 +107,7 @@ abstract class ProxyActivityBase : Activity() {
         Log.i(
             TAG,
             "Proxy resumed: proxy=${javaClass.name}, lifecycle=$lifecycleEvent, instanceId=$instanceId, " +
-                "token=$token, origin=$originPackage, guest=$guestActivity, " +
+                "token=$tokenForEvidence, origin=$originPackage, guest=$guestActivity, " +
                 "recordFound=${observation.recordFound}, recordRecovered=${observation.recordRecovered}, " +
                 "recoveryAttempt=$recoveryAttempt, fallbackAction=$fallbackAction"
         )
@@ -99,9 +131,14 @@ abstract class ProxyActivityBase : Activity() {
                 resultConsumed = false,
                 lifecycleEvent = lifecycleEvent,
                 taskDescriptionLabel = taskDescriptionLabel,
+                taskId = observation.taskId,
+                taskAffinity = observation.taskAffinity,
+                launchMode = observation.launchMode,
+                intentFlags = observation.intentFlags,
                 fallbackAction = fallbackAction
             )
         )
+        persistActivityTaskState(instanceId, lifecycleEvent)
         if (fallbackAction == FALLBACK_ACTION_PREWARM_RELAUNCH) {
             prewarmAndRelaunchUnsubstitutedProxy(
                 instanceId = instanceId,
@@ -206,9 +243,137 @@ abstract class ProxyActivityBase : Activity() {
         Log.w(
             TAG,
             "Finishing unsubstituted proxy Activity: proxy=${javaClass.name}, lifecycle=$lifecycleEvent, " +
-                "instanceId=$instanceId, token=$token, guest=$guestActivity, recoveryAttempt=$recoveryAttempt"
+                "instanceId=$instanceId, token=${EvidenceSanitizer.redactTokenForEvidence(token)}, " +
+                    "guest=$guestActivity, recoveryAttempt=$recoveryAttempt"
         )
         finish()
+    }
+
+    private fun activityTaskController(): EngineActivityTaskController =
+        EngineActivityTaskControllers.fileBacked(this)
+
+    private fun restoreActivityTaskState(instanceId: String, lifecycleEvent: String) {
+        runCatching {
+            val result = activityTaskController().restorePersistedIfEmpty(instanceId)
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                lifecycleEvent = lifecycleEvent,
+                status = result.status,
+                activityCount = result.activityCount,
+                taskCount = result.taskCount,
+                detail = result.detail
+            )
+        }.onFailure { error ->
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                lifecycleEvent = lifecycleEvent,
+                status = "FAIL",
+                activityCount = 0,
+                taskCount = null,
+                detail = error.message ?: error.javaClass.name
+            )
+        }
+    }
+
+    private fun persistActivityTaskState(instanceId: String, lifecycleEvent: String) {
+        runCatching {
+            val result = activityTaskController().persist(instanceId)
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                lifecycleEvent = lifecycleEvent,
+                status = result.status,
+                activityCount = result.activityCount,
+                taskCount = result.taskCount,
+                detail = result.detail
+            )
+        }.onFailure { error ->
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                lifecycleEvent = lifecycleEvent,
+                status = "FAIL",
+                activityCount = 0,
+                taskCount = null,
+                detail = error.message ?: error.javaClass.name
+            )
+        }
+    }
+
+    private fun markLifecycleState(state: VirtualActivityState, lifecycleEvent: String) {
+        val instanceId = intent?.getStringExtra(EXTRA_INSTANCE_ID).orEmpty()
+        val token = intent?.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN).orEmpty()
+        if (instanceId.isBlank() || token.isBlank()) return
+        runCatching {
+            val result = activityTaskController().markState(instanceId, token, state)
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                lifecycleEvent = lifecycleEvent,
+                status = result.status,
+                activityCount = result.activityCount,
+                taskCount = result.taskCount,
+                detail = result.detail
+            )
+        }.onFailure { error ->
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                lifecycleEvent = lifecycleEvent,
+                status = "FAIL",
+                activityCount = 0,
+                taskCount = null,
+                detail = error.message ?: error.javaClass.name
+            )
+        }
+    }
+
+    private fun finishActivityRecord(lifecycleEvent: String) {
+        val instanceId = intent?.getStringExtra(EXTRA_INSTANCE_ID).orEmpty()
+        val token = intent?.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN).orEmpty()
+        if (instanceId.isBlank() || token.isBlank()) return
+        runCatching {
+            val result = activityTaskController().finish(instanceId, token)
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                lifecycleEvent = lifecycleEvent,
+                status = result.status,
+                activityCount = result.activityCount,
+                taskCount = result.taskCount,
+                detail = result.detail
+            )
+        }.onFailure { error ->
+            writeActivityTaskStateEvidence(
+                instanceId = instanceId,
+                lifecycleEvent = lifecycleEvent,
+                status = "FAIL",
+                activityCount = 0,
+                taskCount = null,
+                detail = error.message ?: error.javaClass.name
+            )
+        }
+    }
+
+    private fun writeActivityTaskStateEvidence(
+        instanceId: String,
+        lifecycleEvent: String,
+        status: String,
+        activityCount: Int,
+        taskCount: Int?,
+        detail: String = ""
+    ) {
+        runCatching {
+            ContainerRuntimeEvidenceWriter.write(
+                context = this,
+                instanceId = instanceId,
+                component = "activity-task-state-proxy",
+                fields = linkedMapOf(
+                    "status" to status,
+                    "stage" to "proxy-$lifecycleEvent",
+                    "detail" to detail,
+                    "activityCount" to activityCount.toString(),
+                    "taskCount" to (taskCount?.toString() ?: "")
+                )
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Unable to write proxy task-state evidence for instanceId=$instanceId", error)
+        }
     }
 
     private fun applyTaskDescription(label: String) {

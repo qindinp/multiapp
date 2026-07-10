@@ -345,7 +345,6 @@ class LauncherViewModel @Inject constructor(
             appName = appInfo?.loadLabel(packageManager)?.toString()?.takeIf { it.isNotBlank() }
                 ?: manifest.applicationLabel
                 ?: packageName,
-            icon = runCatching { appInfo?.loadIcon(packageManager) }.getOrNull(),
             versionName = info?.versionName ?: "unknown",
             versionCode = info?.longVersionCode?.takeIf { it > 0L } ?: 1L,
             apkPath = apkFile.absolutePath,

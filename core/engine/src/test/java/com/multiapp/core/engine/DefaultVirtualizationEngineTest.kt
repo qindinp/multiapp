@@ -17,6 +17,10 @@ import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.installer.ImportResult
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.VirtualInstallService
+import com.multiapp.core.model.virtual.VirtualActivityRecord
+import com.multiapp.core.model.virtual.VirtualActivityState
+import com.multiapp.core.model.virtual.VirtualTaskRecord
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -120,6 +124,83 @@ class DefaultVirtualizationEngineTest {
     }
 
     @Test
+    fun `launch snapshot preserves distinct Provider read and write permissions`() {
+        val instance = instance()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(
+                installRecord(
+                    providers = listOf(
+                        ComponentInfo(
+                            name = "com.test.app.DataProvider",
+                            permission = "com.test.app.PROVIDER",
+                            readPermission = "com.test.app.READ_PROVIDER",
+                            writePermission = "com.test.app.WRITE_PROVIDER",
+                            grantUriPermissions = true
+                        )
+                    )
+                )
+            ),
+            activityLauncher = EngineActivityLauncher { },
+            evidenceSessionFactory = { "evidence-provider-permissions" }
+        )
+
+        val provider = assertNotNull(
+            engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+                .runtime
+                ?.packageSnapshot
+                ?.providers
+                ?.single()
+        )
+
+        assertEquals("com.test.app.PROVIDER", provider.permission)
+        assertEquals("com.test.app.READ_PROVIDER", provider.readPermission)
+        assertEquals("com.test.app.WRITE_PROVIDER", provider.writePermission)
+        assertTrue(provider.grantUriPermissions)
+    }
+
+    @Test
+    fun `launch snapshot preserves typed meta-data and signer identity`() {
+        val instance = instance()
+        val installRecord = installRecord().copy(
+            applicationMetaData = mapOf(
+                "feature.enabled" to VirtualMetaDataValue.boolean(true),
+                "retry.count" to VirtualMetaDataValue.int(3)
+            ),
+            signerSha256Digests = listOf("old-signer", "current-signer"),
+            hasMultipleSigners = false,
+            activities = listOf(
+                ComponentInfo(
+                    name = "com.test.app.MainActivity",
+                    exported = true,
+                    metaData = mapOf("mode" to VirtualMetaDataValue.string("main"))
+                )
+            )
+        )
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(installRecord),
+            activityLauncher = EngineActivityLauncher { },
+            evidenceSessionFactory = { "evidence-package-identity" }
+        )
+
+        val snapshot = assertNotNull(
+            engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId)).runtime
+        ).packageSnapshot
+
+        assertEquals(installRecord.applicationMetaData, snapshot.typedMetaData)
+        assertEquals("true", snapshot.metaData["feature.enabled"])
+        assertEquals(installRecord.signerSha256Digests, snapshot.signerSha256Digests)
+        assertFalse(snapshot.hasMultipleSigners)
+        assertEquals(
+            "main",
+            snapshot.activities.single().typedMetaData.getValue("mode").encodedValue
+        )
+    }
+
+    @Test
     fun `launch assigns proxy slot matching launcher launch mode`() {
         val instance = instance()
         val launches = mutableListOf<EngineLaunchSpec>()
@@ -161,16 +242,46 @@ class DefaultVirtualizationEngineTest {
     fun `launch report merges provider and native operation evidence`() {
         val instance = instance()
         val registry = EngineRuntimeRegistry()
+        val taskStore = InMemoryEngineActivityTaskStateStore()
         val engine = DefaultVirtualizationEngineCore(
             hostPackageName = "com.multiapp.app",
             instanceManager = FakeInstanceManager(instance),
             virtualInstallService = FakeVirtualInstallService(installRecord()),
             activityLauncher = EngineActivityLauncher { },
             runtimeRegistry = registry,
-            evidenceSessionFactory = { "evidence-1" }
+            evidenceSessionFactory = { "evidence-1" },
+            systemServerFactory = { runtimeRegistry ->
+                DefaultVirtualSystemServer(
+                    registry = runtimeRegistry,
+                    activityTaskStateStore = taskStore
+                )
+            }
         )
 
         val launch = engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+        taskStore.save(
+            EngineActivityTaskStateSnapshot(
+                tasks = listOf(
+                    VirtualTaskRecord(
+                        taskId = 9,
+                        affinity = "${instance.originPackageName}:${instance.instanceId}",
+                        activities = listOf(
+                            VirtualActivityRecord(
+                                token = "token-main",
+                                activityId = "activity-main",
+                                instanceId = instance.instanceId,
+                                originPackageName = instance.originPackageName,
+                                guestActivityClassName = "com.test.app.MainActivity",
+                                proxyActivityClassName = "com.multiapp.app.container.ProxyActivity0",
+                                state = VirtualActivityState.RESUMED,
+                                taskId = 9,
+                                taskAffinity = "${instance.originPackageName}:${instance.instanceId}"
+                            )
+                        )
+                    )
+                )
+            )
+        )
         val providerAccepted = registry.registerOperationEvidence(
             instance.instanceId,
             EngineOperationEvidence(
@@ -209,12 +320,22 @@ class DefaultVirtualizationEngineTest {
             File(instance.dataRoot, "lib/libfoo.so").absolutePath,
             report.operationEntries("native", "path-redirect").single().entries["redirectedPath"]
         )
+        assertEquals("1", report.operationEntries("activity", "task-state").single().entries["taskCount"])
+        assertEquals(
+            "com.test.app.MainActivity",
+            report.operationEntries("activity", "task-state").single().entries["topActivityClassName"]
+        )
         assertEquals(EngineResultStatus.PARTIAL, report.status)
         assertEquals(
             listOf(
+                "activity:task-state:PASS",
+                "app-ops:runtime-state:PARTIAL",
+                "broadcast:runtime-state:PARTIAL",
                 "hook-profile:profile-gate:PASS",
                 "native:path-redirect:PARTIAL",
-                "provider:route-token:PASS"
+                "provider:route-token:PASS",
+                "provider:runtime-state:PARTIAL",
+                "service:runtime-state:PARTIAL"
             ),
             flattenedEvidence.map { evidence -> "${evidence.component}:${evidence.operation}:${evidence.verdict}" }
         )
@@ -402,7 +523,8 @@ class DefaultVirtualizationEngineTest {
         splitPublicSourceDirs: List<String> = emptyList(),
         splitNames: List<String> = emptyList(),
         isolatedSplits: Boolean = false,
-        activities: List<ComponentInfo> = listOf(ComponentInfo("com.test.app.MainActivity", exported = true))
+        activities: List<ComponentInfo> = listOf(ComponentInfo("com.test.app.MainActivity", exported = true)),
+        providers: List<ComponentInfo> = emptyList()
     ) = InstallRecord(
         packageName = "com.test.app",
         originApkPath = originApkPath,
@@ -420,6 +542,7 @@ class DefaultVirtualizationEngineTest {
         applicationClassName = null,
         packageLabel = "Test",
         activities = activities,
+        providers = providers,
         installTimeMs = 1L
     )
 

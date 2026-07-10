@@ -4,6 +4,9 @@ import android.content.Context
 import android.content.Intent
 import com.multiapp.core.engine.DefaultEngineServiceRouter
 import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.EngineRuntimeAuthorityValidator
+import com.multiapp.core.engine.EngineRuntimeIpcClients
+import com.multiapp.core.engine.EngineRuntimeIpcSnapshot
 import com.multiapp.core.engine.EngineServiceRouter
 import com.multiapp.core.engine.EngineServiceStartRoute
 import com.multiapp.core.engine.HostedRuntimeEngine
@@ -13,7 +16,8 @@ class HostedServiceRuntimeBinder(
     private val serviceRouter: EngineServiceRouter = DefaultEngineServiceRouter(),
     private val requestDecoder: (String, Intent) -> EngineServiceStartRoute? = { hostPackageName, intent ->
         serviceRouter.routeFromProxyIntent(hostPackageName, intent)
-    }
+    },
+    private val authorityQuery: (String) -> EngineRuntimeIpcSnapshot? = EngineRuntimeIpcClients::queryRuntime
 ) {
     fun ensureBound(hostContext: Context, proxyIntent: Intent?): HostedServiceRuntimeBindResult {
         val request = proxyIntent
@@ -24,6 +28,19 @@ class HostedServiceRuntimeBinder(
     }
 
     fun ensureBound(hostContext: Context, route: EngineServiceStartRoute): HostedServiceRuntimeBindResult {
+        val authority = EngineRuntimeAuthorityValidator.validate(
+            snapshot = authorityQuery(route.instanceId),
+            expectedProcessSlot = route.processSlot
+        )
+        if (!authority.allowed) {
+            return HostedServiceRuntimeBindResult.Failed(
+                instanceId = route.instanceId,
+                processSlot = route.processSlot,
+                errorClassName = SecurityException::class.java.name,
+                errorMessage = authority.reason,
+                detail = "engineRuntimeAuthorityRejected"
+            )
+        }
         val runtimeEngine = runtimeEngineFactory(hostContext)
         runtimeEngine.reusableResult(route.instanceId)?.let { result ->
             if (!route.processSlot.isNullOrBlank() && result.processSlot != route.processSlot) {

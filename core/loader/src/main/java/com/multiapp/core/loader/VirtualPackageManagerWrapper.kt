@@ -33,7 +33,10 @@ class VirtualPackageManagerWrapper(
     private val runtimeUid: Int = runCatching { Process.myUid() }.getOrDefault(0)
 ) : PackageManager() {
 
-    private val service = VirtualPackageService(snapshot)
+    private val service = VirtualPackageService(
+        snapshot = snapshot,
+        packageSigningInfo = VirtualPackageArchiveSigningResolver.resolve(base, snapshot)
+    )
 
     override fun getPackageInfo(packageName: String, flags: Int): PackageInfo {
         return service.getPackageInfo(packageName) ?: base.getPackageInfo(packageName, flags)

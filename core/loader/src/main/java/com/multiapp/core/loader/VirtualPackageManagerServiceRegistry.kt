@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.util.concurrent.ConcurrentHashMap
 
@@ -16,8 +17,14 @@ object VirtualPackageManagerServiceRegistry : VirtualPackageManagerServiceResolv
     private val servicesByPackage = ConcurrentHashMap<String, VirtualPackageService>()
     private val servicesByAuthority = ConcurrentHashMap<String, VirtualPackageService>()
 
-    fun register(snapshot: VirtualPackageSnapshot): VirtualPackageService {
-        val service = VirtualPackageService(snapshot)
+    fun register(
+        snapshot: VirtualPackageSnapshot,
+        packageManager: PackageManager? = null
+    ): VirtualPackageService {
+        val service = VirtualPackageService(
+            snapshot = snapshot,
+            packageSigningInfo = VirtualPackageArchiveSigningResolver.resolve(packageManager, snapshot)
+        )
         service.packageAliases().forEach { packageName ->
             servicesByPackage[packageName] = service
         }

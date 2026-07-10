@@ -11,14 +11,32 @@ import com.multiapp.core.loader.VirtualServiceDispatcher
 import com.multiapp.core.loader.VirtualServiceIntentStore
 import com.multiapp.core.loader.VirtualServiceManager
 import com.multiapp.core.loader.VirtualServiceStartRequest
+import com.multiapp.core.model.engine.EngineResultStatus
+import com.multiapp.core.model.engine.ProviderRouteContract
 
 data class EngineProviderDispatchRequest(
     val hostPackageName: String,
     val hostContext: Context,
-    val proxyUri: Uri
+    val proxyUri: Uri,
+    val operationName: String,
+    val verifiedRoute: EngineProviderRouteToken? = null,
+    val providerCallingUid: Int = -1,
+    val providerCallingPid: Int = -1,
+    val hostUid: Int = -1,
+    val callerProcessSlot: String? = null,
+    val accessMode: String? = null,
+    val uriGrantPresent: Boolean = false
 ) {
     init {
         require(hostPackageName.isNotBlank()) { "hostPackageName must not be blank" }
+        require(operationName.isNotBlank()) { "operationName must not be blank" }
+        require(providerCallingUid >= -1) { "providerCallingUid must be -1 or non-negative" }
+        require(providerCallingPid >= -1) { "providerCallingPid must be -1 or non-negative" }
+        require(hostUid >= -1) { "hostUid must be -1 or non-negative" }
+        require(callerProcessSlot == null || callerProcessSlot.isNotBlank()) {
+            "callerProcessSlot must not be blank"
+        }
+        require(accessMode == null || accessMode.isNotBlank()) { "accessMode must not be blank" }
     }
 }
 
@@ -26,11 +44,47 @@ interface EngineProviderDispatcher {
     fun dispatch(request: EngineProviderDispatchRequest): EngineProviderDispatchResult
 }
 
-class DefaultEngineProviderDispatcher(
-    private val processRuntime: VirtualProcessRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
-    private val activityRecordManager: VirtualActivityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager
+class DefaultEngineProviderDispatcher private constructor(
+    private val processRuntime: VirtualProcessRuntime,
+    private val activityRecordManager: VirtualActivityRecordManager,
+    private val providerService: VirtualProviderService,
+    private val loaderDispatch: ((EngineProviderDispatchRequest) -> EngineProviderDispatchResult)?
 ) : EngineProviderDispatcher {
+    constructor() : this(
+        processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
+        activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+        providerService = IpcBackedVirtualProviderService(
+            DefaultVirtualSystemServer(EngineRuntimeRegistry.global).providerService
+        ),
+        loaderDispatch = null
+    )
+
+    constructor(
+        providerService: VirtualProviderService,
+        loaderDispatch: ((EngineProviderDispatchRequest) -> EngineProviderDispatchResult)? = null
+    ) : this(
+        processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
+        activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+        providerService = providerService,
+        loaderDispatch = loaderDispatch
+    )
+
     override fun dispatch(request: EngineProviderDispatchRequest): EngineProviderDispatchResult {
+        val route = request.toProviderPlanRoute()
+            ?: return EngineProviderDispatchResult.InvalidProxyUri("missing provider route")
+        val plan = providerService.planProvider(route.instanceId, route.request)
+        val blockedResult = plan.toProviderBlockResult(route.request)
+        if (blockedResult != null) {
+            providerService.recordDispatchIfPossible(blockedResult, request.operationName)
+            return blockedResult
+        }
+        val result = dispatchThroughLoader(request)
+        providerService.recordDispatchIfPossible(result, request.operationName)
+        return result
+    }
+
+    private fun dispatchThroughLoader(request: EngineProviderDispatchRequest): EngineProviderDispatchResult {
+        loaderDispatch?.invoke(request)?.let { return it }
         val result = VirtualProviderDispatcher(
             hostPackageName = request.hostPackageName,
             hostContext = request.hostContext,
@@ -39,7 +93,82 @@ class DefaultEngineProviderDispatcher(
         ).dispatch(request.proxyUri)
         return EngineProviderDispatchResult.fromLoader(result)
     }
+
+    private fun EngineProviderDispatchRequest.toProviderPlanRoute(): EngineProviderPlanRoute? {
+        val uriInstanceId = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_INSTANCE_ID)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val targetInstanceId = verifiedRoute?.targetInstanceId ?: uriInstanceId
+        val guestAuthority = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_GUEST_AUTHORITY)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val processSlot = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_PROCESS_SLOT)
+            ?.takeIf { it.isNotBlank() }
+        val routeToken = proxyUri.getQueryParameter(ProviderRouteContract.PROXY_ROUTE_TOKEN)
+            ?.takeIf { it.isNotBlank() }
+        return EngineProviderPlanRoute(
+            instanceId = targetInstanceId,
+            request = VirtualProviderDispatchPlanRequest(
+                operation = EngineProviderOperation.fromOperationName(operationName),
+                guestAuthority = guestAuthority,
+                proxyAuthority = proxyUri.authority?.takeIf { it.isNotBlank() },
+                processSlot = processSlot,
+                routeTokenPresent = routeToken != null,
+                routeTokenVerified = verifiedRoute != null,
+                callerInstanceId = verifiedRoute?.callerInstanceId,
+                targetInstanceId = targetInstanceId,
+                callingUid = providerCallingUid,
+                callingPid = providerCallingPid,
+                hostUid = hostUid,
+                callerProcessSlot = callerProcessSlot,
+                accessMode = accessMode ?: operationName.substringAfter(':', "").takeIf { it.isNotBlank() },
+                encodedPath = normalizeProviderGrantPath(proxyUri.encodedPath),
+                uriGrantPresent = uriGrantPresent
+            )
+        )
+    }
+
+    private fun VirtualProviderDispatchPlan.toProviderBlockResult(
+        request: VirtualProviderDispatchPlanRequest
+    ): EngineProviderDispatchResult? =
+        when (verdict) {
+            EngineResultStatus.PASS,
+            EngineResultStatus.PARTIAL -> null
+            EngineResultStatus.UNSUPPORTED -> EngineProviderDispatchResult.InvalidProxyUri(
+                "engine_provider_plan_unsupported:$message"
+            )
+            EngineResultStatus.FAIL -> when {
+                message.startsWith("runtime_not_found:") -> EngineProviderDispatchResult.InstanceNotFound(instanceId)
+                message.startsWith("provider_not_found:") -> EngineProviderDispatchResult.ProviderNotFound(
+                    instanceId = instanceId,
+                    guestAuthority = guestAuthority,
+                    evidence = EngineProviderEvidence(
+                        instanceId = instanceId,
+                        guestAuthority = guestAuthority,
+                        proxyAuthority = request.proxyAuthority,
+                        providerClassName = null,
+                        operation = request.operation,
+                        success = false,
+                        reason = message
+                    )
+                )
+                else -> EngineProviderDispatchResult.InvalidProxyUri("engine_provider_plan_failed:$message")
+            }
+        }
+
+    private fun VirtualProviderService.recordDispatchIfPossible(
+        result: EngineProviderDispatchResult,
+        operationName: String
+    ) {
+        val dispatchResult = result.toVirtualProviderOperationResult(operationName) ?: return
+        recordProviderDispatch(dispatchResult.instanceId, dispatchResult)
+    }
 }
+
+private data class EngineProviderPlanRoute(
+    val instanceId: String,
+    val request: VirtualProviderDispatchPlanRequest
+)
 
 object EngineProviderRouteSlots {
     fun stubAuthority(hostPackageName: String, processSlot: String?): String {
@@ -169,11 +298,65 @@ interface EngineServiceDispatcher {
     fun dispatch(request: EngineServiceDispatchRequest): EngineServiceDispatchResult
 }
 
-class DefaultEngineServiceDispatcher(
-    private val processRuntime: VirtualProcessRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
-    private val activityRecordManager: VirtualActivityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager
+class DefaultEngineServiceDispatcher private constructor(
+    private val processRuntime: VirtualProcessRuntime,
+    private val activityRecordManager: VirtualActivityRecordManager,
+    private val serviceService: VirtualServiceService,
+    private val loaderDispatch: ((EngineServiceDispatchRequest) -> EngineServiceDispatchResult)?
 ) : EngineServiceDispatcher {
+    constructor() : this(
+        processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
+        activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+        serviceService = IpcBackedVirtualServiceService(
+            DefaultVirtualSystemServer(EngineRuntimeRegistry.global).serviceService
+        ),
+        loaderDispatch = null
+    )
+
+    constructor(
+        serviceService: VirtualServiceService,
+        loaderDispatch: ((EngineServiceDispatchRequest) -> EngineServiceDispatchResult)? = null
+    ) : this(
+        processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
+        activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+        serviceService = serviceService,
+        loaderDispatch = loaderDispatch
+    )
+
     override fun dispatch(request: EngineServiceDispatchRequest): EngineServiceDispatchResult {
+        val planResult = request.route?.let { route ->
+            val plan = serviceService.planService(
+                instanceId = route.instanceId,
+                request = route.toServicePlanRequest()
+            )
+            when (plan.verdict) {
+                EngineResultStatus.PASS,
+                EngineResultStatus.PARTIAL -> null
+                EngineResultStatus.UNSUPPORTED -> EngineServiceDispatchResult.Unsupported(
+                    startRequest = EngineServiceStartRequestSnapshot.fromLoader(route.startRequest),
+                    reason = "engine_service_plan_unsupported:${plan.message}"
+                )
+                EngineResultStatus.FAIL -> if (plan.message.startsWith("runtime_not_found:")) {
+                    EngineServiceDispatchResult.RuntimeNotBound(
+                        startRequest = EngineServiceStartRequestSnapshot.fromLoader(route.startRequest)
+                    )
+                } else {
+                    EngineServiceDispatchResult.Unsupported(
+                        startRequest = EngineServiceStartRequestSnapshot.fromLoader(route.startRequest),
+                        reason = "engine_service_plan_failed:${plan.message}"
+                    )
+                }
+            }
+        }
+        if (planResult != null) {
+            serviceService.recordDispatchIfPossible(planResult)
+            return planResult
+        }
+        val injectedResult = loaderDispatch?.invoke(request)
+        if (injectedResult != null) {
+            serviceService.recordDispatchIfPossible(injectedResult)
+            return injectedResult
+        }
         val dispatcher = VirtualServiceDispatcher(
             hostContext = request.hostContext,
             processRuntime = processRuntime,
@@ -183,5 +366,31 @@ class DefaultEngineServiceDispatcher(
             dispatcher.dispatch(startRequest, request.flags, request.startId)
         } ?: dispatcher.dispatch(request.proxyIntent, request.flags, request.startId)
         return EngineServiceDispatchResult.fromLoader(result)
+            .also { engineResult -> serviceService.recordDispatchIfPossible(engineResult) }
+    }
+
+    private fun EngineServiceStartRoute.toServicePlanRequest(): VirtualServiceDispatchPlanRequest {
+        val sourceIntent = startRequest.sourceIntent
+        val data = runCatching { sourceIntent.data }.getOrNull()
+        return VirtualServiceDispatchPlanRequest(
+            operation = if (foreground) {
+                VirtualServiceOperation.START_FOREGROUND
+            } else {
+                VirtualServiceOperation.START
+            },
+            action = runCatching { sourceIntent.action }.getOrNull()?.takeIf { it.isNotBlank() },
+            serviceClassName = guestServiceClassName,
+            targetPackageName = originPackageName,
+            categories = runCatching { sourceIntent.categories.orEmpty() }.getOrDefault(emptySet()),
+            dataScheme = data?.scheme?.takeIf { it.isNotBlank() },
+            dataMimeType = runCatching { sourceIntent.type }.getOrNull()?.takeIf { it.isNotBlank() },
+            dataAuthority = data?.host?.takeIf { it.isNotBlank() },
+            dataPath = data?.path?.takeIf { it.isNotBlank() }
+        )
+    }
+
+    private fun VirtualServiceService.recordDispatchIfPossible(result: EngineServiceDispatchResult) {
+        val dispatchResult = result.toVirtualServiceOperationResult() ?: return
+        recordServiceDispatch(dispatchResult.instanceId, dispatchResult)
     }
 }

@@ -15,7 +15,9 @@ object VirtualInstrumentationInstaller {
 
     fun install(
         processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
-        activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global
+        activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
+        activityOperations: VirtualActivityOperations =
+            ManagerBackedVirtualActivityOperations(activityRecordManager)
     ): Result<Unit> {
         return runCatching {
             val current = ActivityThreadCompat.getInstrumentation()
@@ -25,7 +27,14 @@ object VirtualInstrumentationInstaller {
                 return@runCatching
             }
             originalInstrumentation = current
-            ActivityThreadCompat.setInstrumentation(createVirtualInstrumentation(current, processRuntime, activityRecordManager))
+            ActivityThreadCompat.setInstrumentation(
+                createVirtualInstrumentation(
+                    current,
+                    processRuntime,
+                    activityRecordManager,
+                    activityOperations
+                )
+            )
             ActivityThreadLaunchCallbackInstaller.install(processRuntime).getOrThrow()
             Log.i(TAG, "VirtualInstrumentation installed: base=${current.javaClass.name}")
         }
@@ -34,12 +43,13 @@ object VirtualInstrumentationInstaller {
     private fun createVirtualInstrumentation(
         base: Instrumentation,
         processRuntime: VirtualProcessRuntime,
-        activityRecordManager: VirtualActivityRecordManager
+        activityRecordManager: VirtualActivityRecordManager,
+        activityOperations: VirtualActivityOperations
     ): VirtualInstrumentation {
         return if (Build.VERSION.SDK_INT >= API_LEVEL_COMPONENT_CALLER) {
-            createApi35VirtualInstrumentation(base, processRuntime, activityRecordManager)
+            createApi35VirtualInstrumentation(base, processRuntime, activityRecordManager, activityOperations)
         } else {
-            VirtualInstrumentation(base, processRuntime, activityRecordManager)
+            VirtualInstrumentation(base, processRuntime, activityRecordManager, activityOperations)
         }
     }
 
@@ -47,9 +57,10 @@ object VirtualInstrumentationInstaller {
     private fun createApi35VirtualInstrumentation(
         base: Instrumentation,
         processRuntime: VirtualProcessRuntime,
-        activityRecordManager: VirtualActivityRecordManager
+        activityRecordManager: VirtualActivityRecordManager,
+        activityOperations: VirtualActivityOperations
     ): VirtualInstrumentation {
-        return VirtualInstrumentationApi35(base, processRuntime, activityRecordManager)
+        return VirtualInstrumentationApi35(base, processRuntime, activityRecordManager, activityOperations)
     }
 
     fun restore(): Result<Unit> {

@@ -212,4 +212,54 @@ class ContentProviderHookUriRewriteTest {
             ).status
         )
     }
+
+    @Test
+    fun `target validation preserves token caller for cross instance authorization`() {
+        val route = ProviderRouteTokenRegistry.issue(
+            callerInstanceId = "inst-caller",
+            targetInstanceId = "inst-target",
+            authority = "com.test.minimal.probe",
+            operation = "query",
+            processSlot = "com.multiapp.app:v2",
+            nowMillis = 100L,
+            ttlMillis = 50L
+        )
+
+        val valid = ProviderRouteTokenRegistry.validateTarget(
+            token = route.token,
+            targetInstanceId = "inst-target",
+            authority = "com.test.minimal.probe",
+            operation = "query",
+            expectedProcessSlot = "com.multiapp.app:v2",
+            nowMillis = 120L
+        )
+        val forgedTarget = ProviderRouteTokenRegistry.validateTarget(
+            token = route.token,
+            targetInstanceId = "inst-other",
+            authority = "com.test.minimal.probe",
+            operation = "query",
+            expectedProcessSlot = "com.multiapp.app:v2",
+            nowMillis = 120L
+        )
+
+        assertEquals(ProviderRouteTokenValidationStatus.VALID, valid.status)
+        assertEquals("inst-caller", valid.route?.callerInstanceId)
+        assertEquals(ProviderRouteTokenValidationStatus.TARGET_INSTANCE_MISMATCH, forgedTarget.status)
+    }
+
+    @Test
+    fun `observer routes are stable and omit expiring provider token`() {
+        val register = ContentProviderHook.rewriteEncodedQueryForProviderHook(
+            encodedQuery = "id=7&multiapp_routeToken=stale",
+            instanceId = "inst-001",
+            guestAuthority = "com.test.minimal.probe",
+            routeToken = null
+        )
+
+        assertEquals(false, ContentProviderHook.routeTokenRequiredForOperation("registerContentObserver"))
+        assertEquals(false, ContentProviderHook.routeTokenRequiredForOperation("notifyChange"))
+        assertEquals(true, ContentProviderHook.routeTokenRequiredForOperation("query"))
+        assertTrue("multiapp_routeToken" !in register)
+        assertTrue("multiapp_instanceId=inst-001" in register)
+    }
 }

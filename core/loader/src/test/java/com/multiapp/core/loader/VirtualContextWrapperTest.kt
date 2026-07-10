@@ -3,9 +3,11 @@ package com.multiapp.core.loader
 import android.app.AppOpsManager
 import android.app.Service
 import android.content.BroadcastReceiver
+import android.content.ContentResolver
 import android.content.ComponentName
 import android.content.Context
 import android.content.ContextParams
+import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.IntentSender
@@ -15,6 +17,7 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.IInterface
 import android.os.UserHandle
+import android.net.Uri
 import android.view.LayoutInflater
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualContextConfig
@@ -35,8 +38,117 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
 class VirtualContextWrapperTest {
+
+    @Test
+    fun `guest Context grantUriPermission is owned by engine dispatcher`() {
+        val base = baseContext()
+        val uri = mockk<Uri>(relaxed = true)
+        var captured: VirtualUriPermissionRequest? = null
+        VirtualUriPermissionDispatcherFactories.install {
+            VirtualUriPermissionDispatcher { request ->
+                captured = request
+                VirtualUriPermissionResult(
+                    handled = true,
+                    success = true,
+                    granted = true,
+                    reason = "grant_recorded"
+                )
+            }
+        }
+        try {
+            wrapper(base = base).grantUriPermission("com.example.target", uri, 3)
+
+            assertEquals(VirtualUriPermissionOperation.GRANT, captured?.operation)
+            assertEquals("com.example.target", captured?.targetPackageName)
+            assertEquals(3, captured?.modeFlags)
+            verify(exactly = 0) { base.grantUriPermission(any(), any(), any()) }
+        } finally {
+            VirtualUriPermissionDispatcherFactories.reset()
+        }
+    }
+
+    @Test
+    fun `guest Context URI checks fail closed and enforce throws`() {
+        val base = baseContext()
+        val uri = mockk<Uri>(relaxed = true)
+        VirtualUriPermissionDispatcherFactories.install {
+            VirtualUriPermissionDispatcher {
+                VirtualUriPermissionResult(
+                    handled = true,
+                    success = true,
+                    granted = false,
+                    reason = "grant_not_found"
+                )
+            }
+        }
+        try {
+            val context = wrapper(base = base)
+
+            assertEquals(
+                PackageManager.PERMISSION_DENIED,
+                context.checkUriPermission(uri, 3001, 1000, 1)
+            )
+            assertFailsWith<SecurityException> {
+                context.enforceUriPermission(uri, 3001, 1000, 1, "denied")
+            }
+            verify(exactly = 0) { base.checkUriPermission(any(), any(), any(), any()) }
+        } finally {
+            VirtualUriPermissionDispatcherFactories.reset()
+        }
+    }
+
+    @Test
+    fun `non guest URI permission operations delegate to host Context`() {
+        val base = baseContext()
+        val uri = mockk<Uri>(relaxed = true)
+        every { base.checkUriPermission(uri, 3001, 1000, 1) } returns PackageManager.PERMISSION_GRANTED
+        VirtualUriPermissionDispatcherFactories.install {
+            VirtualUriPermissionDispatcher {
+                VirtualUriPermissionResult.notHandled("system_authority")
+            }
+        }
+        try {
+            val actual = wrapper(base = base).checkUriPermission(uri, 3001, 1000, 1)
+
+            assertEquals(PackageManager.PERMISSION_GRANTED, actual)
+            verify(exactly = 1) { base.checkUriPermission(uri, 3001, 1000, 1) }
+        } finally {
+            VirtualUriPermissionDispatcherFactories.reset()
+        }
+    }
+
+    @Test
+    fun `guest context uses engine owned content resolver factory`() {
+        val resolver = mockk<ContentResolver>(relaxed = true)
+        var request: VirtualContentResolverFactoryRequest? = null
+        VirtualContentResolverFactories.install { candidate ->
+            request = candidate
+            resolver
+        }
+        try {
+            val base = baseContext()
+            val wrapper = wrapper(base = base)
+
+            assertSame(resolver, wrapper.contentResolver)
+            assertSame(base, request?.hostContext)
+            assertEquals("inst-001", request?.config?.instanceId)
+        } finally {
+            VirtualContentResolverFactories.reset()
+        }
+    }
+
+    @Test
+    fun `guest context falls back when engine content resolver is unavailable`() {
+        val base = baseContext()
+        val resolver = mockk<ContentResolver>(relaxed = true)
+        every { base.contentResolver } returns resolver
+        VirtualContentResolverFactories.reset()
+
+        assertSame(resolver, wrapper(base = base).contentResolver)
+    }
 
     @Test
     fun `VirtualContextConfig carries instance identity`() {
@@ -106,6 +218,27 @@ class VirtualContextWrapperTest {
 
         assertEquals("com.test.minimal", wrapper.packageName)
         assertEquals("com.test.minimal", wrapper.applicationInfo.packageName)
+    }
+
+    @Test
+    fun `guest application info preserves distinct public base and split resource paths`() {
+        val wrapper = wrapper(
+            snapshot = snapshot(
+                sourceDir = "/runtime/base.apk",
+                publicSourceDir = "/public/base.apk",
+                splitSourceDirs = listOf("/runtime/feature.apk"),
+                splitPublicSourceDirs = listOf("/public/feature.apk"),
+                splitNames = listOf("feature")
+            )
+        )
+
+        val appInfo = wrapper.applicationInfo
+
+        assertEquals("/runtime/base.apk", appInfo.sourceDir)
+        assertEquals("/public/base.apk", appInfo.publicSourceDir)
+        assertEquals(listOf("/runtime/feature.apk"), appInfo.splitSourceDirs?.toList())
+        assertEquals(listOf("/public/feature.apk"), appInfo.splitPublicSourceDirs?.toList())
+        assertEquals(listOf("feature"), appInfo.splitNames?.toList())
     }
 
     @Test
@@ -309,6 +442,56 @@ class VirtualContextWrapperTest {
         assertEquals("android:fine_location", baseService.lastOp)
         assertEquals(10466, baseService.lastUid)
         assertEquals("com.multiapp.app", baseService.lastPackageName)
+    }
+
+    @Test
+    fun `app ops ServiceManager binder proxy returns explicit virtual mode before host call`() {
+        val baseBinder = mockk<IBinder>(relaxed = true)
+        val baseService = RecordingIntAppOpsService()
+        VirtualAppOpsRuntimeBindings.bindActive(
+            "inst-001",
+            listOf("li.songe.gkd", "com.multiapp.instance.a734")
+        )
+        VirtualAppOpsDispatchers.install { request ->
+            assertEquals("inst-001", request.instanceId)
+            if (request.methodName == "resetAllModes") {
+                VirtualAppOpsDispatchResult(
+                    handled = true,
+                    blockSystemCall = true,
+                    reason = "mutation_blocked"
+                )
+            } else {
+                assertEquals(26, request.opCode)
+                VirtualAppOpsDispatchResult(
+                    handled = true,
+                    mode = AppOpsManager.MODE_IGNORED,
+                    reason = "virtual_mode"
+                )
+            }
+        }
+        try {
+            val proxyBinder = assertNotNull(
+                IntentRemapDiagnostics.createAppOpsServiceManagerBinderProxy(
+                    baseBinder = baseBinder,
+                    baseService = baseService,
+                    appOpsInterface = FakeIntAppOpsService::class.java,
+                    sourcePackages = listOf("li.songe.gkd", "com.multiapp.instance.a734"),
+                    hostPackageName = "com.multiapp.app",
+                    runtimeUidProvider = { 10466 }
+                )
+            )
+            val service = proxyBinder.queryLocalInterface(
+                "com.android.internal.app.IAppOpsService"
+            ) as FakeIntAppOpsService
+
+            assertEquals(AppOpsManager.MODE_IGNORED, service.checkOperation(26, 1000, "li.songe.gkd"))
+            assertEquals(0, baseService.callCount)
+            assertFailsWith<SecurityException> { service.resetAllModes() }
+            assertEquals(0, baseService.callCount)
+        } finally {
+            VirtualAppOpsDispatchers.reset()
+            VirtualAppOpsRuntimeBindings.reset()
+        }
     }
 
     @Test
@@ -580,14 +763,78 @@ class VirtualContextWrapperTest {
 
         assertSame(sourceIntent, dispatcher.lastBroadcastIntent)
         assertSame(wrapper, dispatcher.lastBroadcastContext)
+        assertEquals(VirtualBroadcastDispatchOptions.DEFAULT, dispatcher.lastBroadcastOptions)
         assertSame(delivered, wrapper.lastBroadcastDispatchResult())
         verify(exactly = 0) { base.sendBroadcast(any()) }
+    }
+
+    @Test
+    fun `sendBroadcast passes receiver permission to VirtualAmsComponentDispatcher`() {
+        val base = baseContext()
+        val sourceIntent = explicitReceiverIntent("com.test.minimal.BootReceiver")
+        val dispatcher = FakeAmsDispatcher()
+        val wrapper = wrapper(base = base, amsDispatcher = dispatcher)
+
+        wrapper.sendBroadcast(sourceIntent, "com.test.RECEIVE_BOOT")
+
+        assertEquals(
+            VirtualBroadcastDispatchOptions(
+                receiverPermissions = setOf("com.test.RECEIVE_BOOT")
+            ),
+            dispatcher.lastBroadcastOptions
+        )
+        verify(exactly = 0) { base.sendBroadcast(sourceIntent, "com.test.RECEIVE_BOOT") }
+    }
+
+    @Test
+    fun `sendOrderedBroadcast passes receiver permission and app op to dispatcher`() {
+        val base = baseContext()
+        val sourceIntent = explicitReceiverIntent("com.test.minimal.BootReceiver")
+        every { sourceIntent.flags } returns 0
+        val dispatcher = FakeAmsDispatcher()
+        val wrapper = wrapper(base = base, amsDispatcher = dispatcher)
+        val resultReceiver = mockk<BroadcastReceiver>(relaxed = true)
+
+        wrapper.sendOrderedBroadcast(
+            sourceIntent,
+            "com.test.RECEIVE_BOOT",
+            "android:read_device_identifiers",
+            resultReceiver,
+            null,
+            200,
+            "ok",
+            null
+        )
+
+        assertEquals(
+            VirtualBroadcastDispatchOptions(
+                ordered = true,
+                expectsResultReceiver = true,
+                abortSupportedRequested = true,
+                receiverPermissions = setOf("com.test.RECEIVE_BOOT"),
+                receiverAppOp = "android:read_device_identifiers"
+            ),
+            dispatcher.lastBroadcastOptions
+        )
+        verify(exactly = 0) {
+            base.sendOrderedBroadcast(
+                sourceIntent,
+                "com.test.RECEIVE_BOOT",
+                "android:read_device_identifiers",
+                resultReceiver,
+                null,
+                200,
+                "ok",
+                null
+            )
+        }
     }
 
     @Test
     fun `sendStickyOrderedBroadcast dispatches virtually without host fallback`() {
         val base = baseContext()
         val sourceIntent = explicitReceiverIntent("com.test.minimal.BootReceiver")
+        every { sourceIntent.flags } returns 0
         val delivered = deliveredBroadcastResult(sourceIntent)
         val dispatcher = FakeAmsDispatcher(broadcastResult = delivered)
         val wrapper = wrapper(base = base, amsDispatcher = dispatcher)
@@ -599,6 +846,15 @@ class VirtualContextWrapperTest {
 
         assertSame(sourceIntent, dispatcher.lastBroadcastIntent)
         assertSame(wrapper, dispatcher.lastBroadcastContext)
+        assertEquals(
+            VirtualBroadcastDispatchOptions(
+                ordered = true,
+                sticky = true,
+                expectsResultReceiver = true,
+                abortSupportedRequested = true
+            ),
+            dispatcher.lastBroadcastOptions
+        )
         assertSame(delivered, wrapper.lastBroadcastDispatchResult())
         verify(exactly = 0) {
             base.sendStickyOrderedBroadcast(sourceIntent, resultReceiver, scheduler, 200, "ok", initialExtras)
@@ -610,6 +866,7 @@ class VirtualContextWrapperTest {
     fun `sendStickyOrderedBroadcastAsUser dispatches virtually without host fallback`() {
         val base = baseContext()
         val sourceIntent = explicitReceiverIntent("com.test.minimal.BootReceiver")
+        every { sourceIntent.flags } returns 0
         val delivered = deliveredBroadcastResult(sourceIntent)
         val dispatcher = FakeAmsDispatcher(broadcastResult = delivered)
         val wrapper = wrapper(base = base, amsDispatcher = dispatcher)
@@ -622,10 +879,51 @@ class VirtualContextWrapperTest {
 
         assertSame(sourceIntent, dispatcher.lastBroadcastIntent)
         assertSame(wrapper, dispatcher.lastBroadcastContext)
+        assertEquals(
+            VirtualBroadcastDispatchOptions(
+                ordered = true,
+                sticky = true,
+                expectsResultReceiver = true,
+                abortSupportedRequested = true,
+                asUserRequested = true
+            ),
+            dispatcher.lastBroadcastOptions
+        )
         assertSame(delivered, wrapper.lastBroadcastDispatchResult())
         verify(exactly = 0) {
             base.sendStickyOrderedBroadcastAsUser(sourceIntent, user, resultReceiver, scheduler, 201, "ok-user", initialExtras)
         }
+    }
+
+    @Test
+    fun `removeStickyBroadcastAsUser preserves sticky and user scope metadata`() {
+        val sourceIntent = explicitReceiverIntent("com.test.minimal.BootReceiver")
+        val dispatcher = FakeAmsDispatcher()
+        val wrapper = wrapper(amsDispatcher = dispatcher)
+
+        wrapper.removeStickyBroadcastAsUser(sourceIntent, mockk(relaxed = true))
+
+        assertEquals(
+            VirtualBroadcastDispatchOptions(
+                sticky = true,
+                asUserRequested = true
+            ),
+            dispatcher.lastBroadcastOptions
+        )
+    }
+
+    @Test
+    fun `sendBroadcast options overload preserves platform options presence`() {
+        val sourceIntent = explicitReceiverIntent("com.test.minimal.BootReceiver")
+        val dispatcher = FakeAmsDispatcher()
+        val wrapper = wrapper(amsDispatcher = dispatcher)
+
+        wrapper.sendBroadcast(sourceIntent, null, Bundle())
+
+        assertEquals(
+            VirtualBroadcastDispatchOptions(platformOptionsPresent = true),
+            dispatcher.lastBroadcastOptions
+        )
     }
 
     @Test
@@ -641,8 +939,25 @@ class VirtualContextWrapperTest {
 
         assertSame(sourceIntent, dispatcher.lastBroadcastIntent)
         assertSame(wrapper, dispatcher.lastBroadcastContext)
+        assertEquals(
+            VirtualBroadcastDispatchOptions(
+                receiverPermissions = permissions.toSet()
+            ),
+            dispatcher.lastBroadcastOptions
+        )
         assertSame(delivered, wrapper.lastBroadcastDispatchResult())
         verify(exactly = 0) { base.sendBroadcastWithMultiplePermissions(sourceIntent, permissions) }
+    }
+
+    @Test
+    fun `broadcast options overload falls back to legacy dispatcher implementation`() {
+        val sourceIntent = explicitReceiverIntent("com.test.minimal.BootReceiver")
+        val dispatcher = SequencedAmsDispatcher(emptyList())
+        val wrapper = wrapper(amsDispatcher = dispatcher)
+
+        wrapper.sendStickyBroadcast(sourceIntent)
+
+        assertSame(sourceIntent, dispatcher.lastBroadcastIntent)
     }
 
     @Test
@@ -1854,7 +2169,13 @@ class VirtualContextWrapperTest {
         )
     }
 
-    private fun snapshot() = VirtualPackageSnapshot(
+    private fun snapshot(
+        sourceDir: String = "/data/minimal.apk",
+        publicSourceDir: String = sourceDir,
+        splitSourceDirs: List<String> = emptyList(),
+        splitPublicSourceDirs: List<String> = splitSourceDirs,
+        splitNames: List<String> = emptyList()
+    ) = VirtualPackageSnapshot(
         instanceId = "inst-001",
         originPackageName = "com.test.minimal",
         virtualPackageName = "com.multiapp.instance.abc",
@@ -1863,7 +2184,11 @@ class VirtualContextWrapperTest {
         versionName = "1.0",
         targetSdk = 36,
         minSdk = 28,
-        sourceDir = "/data/minimal.apk",
+        sourceDir = sourceDir,
+        publicSourceDir = publicSourceDir,
+        splitSourceDirs = splitSourceDirs,
+        splitPublicSourceDirs = splitPublicSourceDirs,
+        splitNames = splitNames,
         dataDir = "/data/inst",
         services = listOf(
             ResolvedComponent(
@@ -1895,6 +2220,7 @@ class VirtualContextWrapperTest {
         private val activityResults: List<VirtualContextWrapper.StartActivityMappingResult>
     ) : VirtualAmsComponentDispatcher {
         val resolvedActivityIntents = mutableListOf<Intent>()
+        var lastBroadcastIntent: Intent? = null
         private var activityIndex = 0
 
         override fun resolveStartActivityIntent(intent: Intent): VirtualContextWrapper.StartActivityMappingResult {
@@ -1935,7 +2261,10 @@ class VirtualContextWrapperTest {
             intent: Intent,
             virtualContext: Context,
             receiverClassLoader: ClassLoader
-        ): VirtualBroadcastResult = VirtualBroadcastManager.noPackageSnapshot(intent)
+        ): VirtualBroadcastResult {
+            lastBroadcastIntent = intent
+            return VirtualBroadcastManager.noPackageSnapshot(intent)
+        }
     }
 
     private class FakeAmsDispatcher(
@@ -1948,6 +2277,7 @@ class VirtualContextWrapperTest {
         var lastStartServiceForeground: Boolean? = null
         var lastBroadcastIntent: Intent? = null
         var lastBroadcastContext: Context? = null
+        var lastBroadcastOptions: VirtualBroadcastDispatchOptions? = null
 
         override fun resolveStartActivityIntent(intent: Intent): VirtualContextWrapper.StartActivityMappingResult {
             lastStartActivityIntent = intent
@@ -2013,6 +2343,16 @@ class VirtualContextWrapperTest {
             lastBroadcastContext = virtualContext
             return broadcastResult ?: VirtualBroadcastManager.noPackageSnapshot(intent)
         }
+
+        override fun dispatchBroadcast(
+            intent: Intent,
+            virtualContext: Context,
+            receiverClassLoader: ClassLoader,
+            options: VirtualBroadcastDispatchOptions
+        ): VirtualBroadcastResult {
+            lastBroadcastOptions = options
+            return dispatchBroadcast(intent, virtualContext, receiverClassLoader)
+        }
     }
 
     private class FakeService(
@@ -2056,6 +2396,26 @@ class VirtualContextWrapperTest {
 
     private interface FakeAppOpsService : IInterface {
         fun checkOperation(op: String, uid: Int, packageName: String): Int
+    }
+
+    private interface FakeIntAppOpsService : IInterface {
+        fun checkOperation(op: Int, uid: Int, packageName: String): Int
+        fun resetAllModes()
+    }
+
+    private class RecordingIntAppOpsService : FakeIntAppOpsService {
+        var callCount = 0
+
+        override fun asBinder(): IBinder? = null
+
+        override fun checkOperation(op: Int, uid: Int, packageName: String): Int {
+            callCount += 1
+            return AppOpsManager.MODE_ALLOWED
+        }
+
+        override fun resetAllModes() {
+            callCount += 1
+        }
     }
 
     private class RecordingAppOpsService : FakeAppOpsService {

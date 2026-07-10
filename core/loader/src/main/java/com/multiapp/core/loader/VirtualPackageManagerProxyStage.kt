@@ -48,6 +48,10 @@ class VirtualPackageManagerProxyStage(
         }
 
         val runtimeUid = runtimeUidProvider()
+        VirtualAppOpsRuntimeBindings.bindActive(
+            instanceId = snapshot.instanceId,
+            packageNames = listOf(snapshot.originPackageName, snapshot.virtualPackageName)
+        )
         val installResult = installer.install(hostContext, snapshot, runtimeUid)
         val notificationProxyResult = installNotificationPackageProxy(snapshot)
         val appOpsProxyResult = installAppOpsPackageProxy(snapshot)

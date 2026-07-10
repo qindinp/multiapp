@@ -10,8 +10,9 @@ import android.content.Intent
 internal class VirtualInstrumentationApi35(
     base: Instrumentation,
     processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
-    activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global
-) : VirtualInstrumentation(base, processRuntime, activityRecordManager) {
+    activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
+    activityOperations: VirtualActivityOperations = ManagerBackedVirtualActivityOperations(activityRecordManager)
+) : VirtualInstrumentation(base, processRuntime, activityRecordManager, activityOperations) {
 
     override fun callActivityOnNewIntent(activity: Activity, intent: Intent, caller: ComponentCaller) {
         dispatchHostedNewIntent(activity, intent) { guestIntent ->

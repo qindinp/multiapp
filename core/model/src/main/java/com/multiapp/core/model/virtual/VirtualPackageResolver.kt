@@ -15,6 +15,7 @@ data class ResolvedPackage(
     val taskAffinity: String? = null,
     val themeId: Int = 0,
     val metaData: Map<String, String> = emptyMap(),
+    val typedMetaData: Map<String, VirtualMetaDataValue> = emptyMap(),
     val launcherActivityName: String? = null,
     val activities: List<ResolvedComponent> = emptyList(),
     val services: List<ResolvedComponent> = emptyList(),
@@ -32,14 +33,18 @@ data class ResolvedPackage(
 /**
  * Structured intent-filter metadata used by the hosted container resolver.
  *
- * Only the subset needed by the in-process VPMS model is represented here:
- * action, category, and data scheme. MIME type, authority, host, path, and
- * permission matching remain intentionally out of scope.
+ * Only pure manifest facts are represented here. Android-facing parsers may
+ * populate more fields over time, while engine-side VPMS matching remains
+ * independent from framework IntentFilter objects.
  */
 data class ResolvedIntentFilter(
     val actions: List<String> = emptyList(),
     val categories: List<String> = emptyList(),
-    val dataSchemes: List<String> = emptyList()
+    val dataSchemes: List<String> = emptyList(),
+    val dataMimeTypes: List<String> = emptyList(),
+    val dataAuthorities: List<String> = emptyList(),
+    val dataPaths: List<String> = emptyList(),
+    val priority: Int = 0
 )
 
 /**
@@ -58,8 +63,13 @@ data class ResolvedComponent(
     val screenOrientation: String? = null,
     val configChanges: String? = null,
     val permission: String? = null,
+    val readPermission: String? = null,
+    val writePermission: String? = null,
     val grantUriPermissions: Boolean = false,
+    val pathPermissions: List<VirtualProviderPathPermission> = emptyList(),
+    val uriPermissionPatterns: List<VirtualProviderPathPattern> = emptyList(),
     val metaData: Map<String, String> = emptyMap(),
+    val typedMetaData: Map<String, VirtualMetaDataValue> = emptyMap(),
     val targetActivityName: String? = null
 )
 

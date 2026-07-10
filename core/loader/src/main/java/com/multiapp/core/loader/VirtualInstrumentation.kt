@@ -10,6 +10,7 @@ import android.app.Instrumentation
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
@@ -33,10 +34,13 @@ import java.util.concurrent.ConcurrentHashMap
 open class VirtualInstrumentation(
     protected val base: Instrumentation,
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
-    private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global
+    private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
+    private val activityOperations: VirtualActivityOperations =
+        ManagerBackedVirtualActivityOperations(activityRecordManager)
 ) : Instrumentation() {
 
     private val hostedRuntimeCache = ConcurrentHashMap<String, HostedActivityRuntime>()
+    private val hostedActivityThreadTokens = ConcurrentHashMap<String, IBinder>()
 
     private sealed class StartActivityIntentDecision {
         data class Launch(val intent: Intent) : StartActivityIntentDecision()
@@ -54,6 +58,17 @@ open class VirtualInstrumentation(
         val reason: String
     )
 
+    private data class ActivityResultRoute(
+        val resultToToken: String,
+        val requestCode: Int
+    )
+
+    private data class ActivityResultSnapshot(
+        val resultCode: Int,
+        val data: Intent?,
+        val dataIntent: VirtualIntentSnapshot?
+    )
+
     companion object {
         private const val TAG = "VirtualInstrumentation"
         private const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
@@ -68,7 +83,6 @@ open class VirtualInstrumentation(
         private const val INSTALLS_DIR = "installs"
         private const val INSTANCE_DATA_DIR = "instance_data"
         private const val EVIDENCE_DIR = "hosted_launch_evidence"
-        private const val TOKEN_EVIDENCE_PREFIX_LENGTH = 8
 
         internal fun shouldBlockForegroundRuntimeBootstrap(
             isMainThread: Boolean,
@@ -104,6 +118,7 @@ open class VirtualInstrumentation(
     override fun callActivityOnCreate(activity: Activity, icicle: Bundle?) {
         Log.d(TAG, "callActivityOnCreate activity=${activity.javaClass.name}")
         injectHostedActivityContextIfNeeded(activity)
+        rememberActivityThreadToken(activity)
         base.callActivityOnCreate(activity, icicle)
         writeLifecycleEvidence(activity, "onCreate")
         ensureActivityResultBaselineEvidence(activity)
@@ -116,6 +131,7 @@ open class VirtualInstrumentation(
     ) {
         Log.d(TAG, "callActivityOnCreate persistent activity=${activity.javaClass.name}")
         injectHostedActivityContextIfNeeded(activity)
+        rememberActivityThreadToken(activity)
         base.callActivityOnCreate(activity, icicle, persistentState)
         writeLifecycleEvidence(activity, "onCreate")
         ensureActivityResultBaselineEvidence(activity)
@@ -149,6 +165,8 @@ open class VirtualInstrumentation(
     }
 
     override fun callActivityOnResume(activity: Activity) {
+        rememberActivityThreadToken(activity)
+        dispatchPendingActivityResultBeforeResume(activity)
         base.callActivityOnResume(activity)
         writeLifecycleEvidence(activity, "onResume")
     }
@@ -167,12 +185,63 @@ open class VirtualInstrumentation(
         writeLifecycleEvidence(activity, "onDestroy")
         markActivityFinishedIfNeeded(activity)
         base.callActivityOnDestroy(activity)
+        forgetActivityThreadToken(activity)
     }
 
     override fun callActivityOnNewIntent(activity: Activity, intent: Intent) {
         dispatchHostedNewIntent(activity, intent) { guestIntent ->
             base.callActivityOnNewIntent(activity, guestIntent)
         }
+    }
+
+    @Suppress("unused")
+    fun callActivityOnActivityResult(
+        activity: Activity,
+        id: String?,
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+        val baseCallbackInvoked = invokeBaseCallActivityOnActivityResult(activity, id, requestCode, resultCode, data)
+        writeDeliveredActivityResultEvidence(
+            activity = activity,
+            requestCode = requestCode,
+            resultCode = resultCode,
+            data = data,
+            baseCallbackInvoked = baseCallbackInvoked
+        )
+    }
+
+    private fun invokeBaseCallActivityOnActivityResult(
+        activity: Activity,
+        id: String?,
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ): Boolean {
+        val parameterTypes = arrayOf(
+            Activity::class.java,
+            String::class.java,
+            Integer.TYPE,
+            Integer.TYPE,
+            Intent::class.java
+        )
+        var clazz: Class<*>? = base.javaClass
+        while (clazz != null) {
+            runCatching {
+                val method = clazz.getDeclaredMethod("callActivityOnActivityResult", *parameterTypes)
+                method.isAccessible = true
+                method.invoke(base, activity, id, requestCode, resultCode, data)
+                return true
+            }
+            clazz = clazz.superclass
+        }
+        return runCatching {
+            val method = Instrumentation::class.java.getDeclaredMethod("callActivityOnActivityResult", *parameterTypes)
+            method.isAccessible = true
+            method.invoke(base, activity, id, requestCode, resultCode, data)
+            true
+        }.getOrDefault(false)
     }
 
     protected fun dispatchHostedNewIntent(
@@ -588,6 +657,11 @@ open class VirtualInstrumentation(
             )
             return null
         }
+        val resultRoute = activityResultRouteFor(target, requestCode)
+        val launchRequest = request.copy(
+            resultToToken = resultRoute?.resultToToken,
+            resultRequestCode = resultRoute?.requestCode ?: -1
+        )
 
         return runCatching {
             val registry = ProxyActivityRegistry(
@@ -606,18 +680,19 @@ open class VirtualInstrumentation(
                 hostPackageName = runtime.hostApplication.packageName,
                 activityRecordManager = activityRecordManager
             )
-            val record = manager.allocateGuestActivity(request)
-            manager.createProxyIntent(record, request.sourceIntent).apply {
+            val record = manager.allocateGuestActivity(launchRequest)
+            manager.createProxyIntent(record, launchRequest.sourceIntent).apply {
                 flags = flags or (intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
                 writeRemapEvidence(
                     filesDir = runtime.hostApplication.filesDir,
                     instanceId = instanceId,
-                    guestActivityClassName = request.guestActivityClassName,
+                    guestActivityClassName = launchRequest.guestActivityClassName,
                     proxyActivityClassName = record.proxyActivityClassName,
                     api = api,
                     requestCode = requestCode,
-                    reason = request.reason,
-                    launchMode = record.launchMode
+                    reason = launchRequest.reason,
+                    launchMode = record.launchMode,
+                    resultRoute = resultRoute
                 )
             }
         }.onSuccess { proxyIntent ->
@@ -740,6 +815,19 @@ open class VirtualInstrumentation(
         target: Activity? = null,
         who: Context
     ): Activity? = target ?: who as? Activity
+
+    private fun activityResultRouteFor(target: Activity?, requestCode: Int): ActivityResultRoute? {
+        if (requestCode < 0) return null
+        val sourceIntent = target?.intent ?: return null
+        val sourceToken = sourceIntent
+            .getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        return ActivityResultRoute(
+            resultToToken = sourceToken,
+            requestCode = requestCode
+        )
+    }
 
     internal fun hostedStartActivityInstanceId(
         target: Activity? = null,
@@ -1376,6 +1464,8 @@ open class VirtualInstrumentation(
             val originalGuestIntent = VirtualActivityIntentStore.find(token)
                 ?: legacyOriginalGuestIntent(proxyIntent)
             val sourceIntent = originalGuestIntent ?: guestIntent
+            val resultToToken = proxyIntent.getStringExtra(VirtualActivityManager.EXTRA_RESULT_TO_TOKEN)
+                ?.takeIf { it.isNotBlank() }
             val record = VirtualActivityRecord(
                 token = token,
                 instanceId = instanceId,
@@ -1384,6 +1474,12 @@ open class VirtualInstrumentation(
                 proxyActivityClassName = proxyClassName,
                 launchMode = proxyIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_LAUNCH_MODE)?.takeIf { it.isNotBlank() },
                 taskAffinity = proxyIntent.getStringExtra(EXTRA_GUEST_TASK_AFFINITY)?.takeIf { it.isNotBlank() },
+                resultToToken = resultToToken,
+                resultRequestCode = if (resultToToken == null) {
+                    -1
+                } else {
+                    proxyIntent.getIntExtra(VirtualActivityManager.EXTRA_RESULT_REQUEST_CODE, -1)
+                },
                 state = VirtualActivityState.RESUMED
             )
             activityRecordManager.conflictingProxyOwner(record)?.let { owner ->
@@ -1405,7 +1501,12 @@ open class VirtualInstrumentation(
                 activityRecordRecovered = true
             )
         }.getOrElse { error ->
-            Log.w(TAG, "Unable to recover Activity record from proxy intent: token=$token", error)
+            Log.w(
+                TAG,
+                "Unable to recover Activity record from proxy intent: " +
+                    "token=${EvidenceSanitizer.redactTokenForEvidence(token)}",
+                error
+            )
             ActivityRecordRecoveryResult(skippedReason = "RECOVERY_FAILED:${error.javaClass.name}")
         }
     }
@@ -1514,10 +1615,13 @@ open class VirtualInstrumentation(
         api: String,
         requestCode: Int,
         reason: String,
-        launchMode: String?
+        launchMode: String?,
+        resultRoute: ActivityResultRoute? = null
     ) {
         runCatching {
             val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }
+            val resultRequested = requestCode >= 0
+            val resultRouteRecorded = resultRoute != null
             File(evidenceDir, HostedActivityEvidenceFiles.remap(instanceId)).writeText(
                 listOf(
                     "status=GUEST_ACTIVITY_REMAP",
@@ -1525,9 +1629,20 @@ open class VirtualInstrumentation(
                     "api=$api",
                     "hostFallback=false",
                     "requestCode=$requestCode",
-                    "resultRequested=${requestCode >= 0}",
-                    "activityResultVerdict=${if (requestCode >= 0) "UNSUPPORTED" else "NOT_REQUESTED"}",
-                    "activityResultVerdictReason=${if (requestCode >= 0) "HOST_PROXY_RESULT_ROUTING_NOT_IMPLEMENTED" else ""}",
+                    "resultRequested=$resultRequested",
+                    "activityResultRouteRecorded=$resultRouteRecorded",
+                    "activityResultToToken=${resultRoute?.resultToToken?.redactTokenForEvidence().orEmpty()}",
+                    "activityResultRecordRequestCode=${resultRoute?.requestCode ?: -1}",
+                    "activityResultVerdict=${when {
+                        !resultRequested -> "NOT_REQUESTED"
+                        resultRouteRecorded -> "PARTIAL"
+                        else -> "UNSUPPORTED"
+                    }}",
+                    "activityResultVerdictReason=${when {
+                        !resultRequested -> ""
+                        resultRouteRecorded -> "HOST_PROXY_RESULT_ROUTE_RECORDED_DELIVERY_PENDING"
+                        else -> "HOST_PROXY_RESULT_SOURCE_TOKEN_MISSING"
+                    }}",
                     "guestActivityClassName=$guestActivityClassName",
                     "proxyActivityClassName=$proxyActivityClassName",
                     "reason=$reason",
@@ -1724,7 +1839,10 @@ open class VirtualInstrumentation(
 
     private fun writeNewIntentEvidence(activity: Activity, intent: Intent) {
         val activityIdentity = activity.hostedActivityIdentity() ?: return
-        val pending = activityRecordManager.consumePendingNewIntent(activityIdentity.token)
+        val pending = activityOperations.consumePendingNewIntent(
+            instanceId = activityIdentity.instanceId,
+            token = activityIdentity.token
+        )
         val reason = when {
             activityIdentity.token.isBlank() -> "TOKEN_MISSING"
             pending == null -> "NO_PENDING_NEW_INTENT_RECORD"
@@ -1799,11 +1917,227 @@ open class VirtualInstrumentation(
         )
     }
 
+    private fun writeDeliveredActivityResultEvidence(
+        activity: Activity,
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?,
+        baseCallbackInvoked: Boolean
+    ) {
+        val activityIdentity = activity.hostedActivityIdentity() ?: return
+        val consumedResult = activityOperations.consumeActivityResult(
+            instanceId = activityIdentity.instanceId,
+            token = activityIdentity.token
+        )
+        val resultCodeMatches = consumedResult?.resultCode == resultCode
+        val delivered = consumedResult != null && resultCodeMatches && baseCallbackInvoked
+        val reason = when {
+            delivered -> ""
+            consumedResult == null -> "NO_VIRTUAL_RESULT_RECORD"
+            !baseCallbackInvoked -> "BASE_ACTIVITY_RESULT_CALLBACK_NOT_INVOKED"
+            !resultCodeMatches -> "VIRTUAL_RESULT_CODE_MISMATCH"
+            else -> "UNKNOWN_ACTIVITY_RESULT_DELIVERY_STATE"
+        }
+        writeEvidenceLines(
+            instanceId = activityIdentity.instanceId,
+            fileName = HostedActivityEvidenceFiles.result(activityIdentity.instanceId),
+            lines = listOf(
+                "status=${if (delivered) "ACTIVITY_RESULT_DELIVERED" else "ACTIVITY_RESULT_PARTIAL"}",
+                "stage=ACTIVITY_RESULT_DELIVERY",
+                "instanceId=${activityIdentity.instanceId}",
+                "guestActivityClassName=${activityIdentity.guestActivityClassName}",
+                "token=${activityIdentity.token.redactTokenForEvidence()}",
+                "requestCode=$requestCode",
+                "resultCode=$resultCode",
+                "baseCallbackInvoked=$baseCallbackInvoked",
+                "virtualResultConsumed=${consumedResult != null}",
+                "virtualResultCode=${consumedResult?.resultCode ?: 0}",
+                "resultCodeMatches=$resultCodeMatches",
+                "dataAction=${data?.action.orEmpty()}",
+                "dataUri=${data?.dataString?.redactUriForEvidence().orEmpty()}",
+                "virtualDataAction=${consumedResult?.dataIntent?.action.orEmpty()}",
+                "virtualDataUri=${consumedResult?.dataIntent?.dataUri.orEmpty()}",
+                "reason=$reason"
+            ),
+            append = true
+        )
+    }
+
+    private fun writeResumeFallbackActivityResultEvidence(
+        activity: Activity,
+        pending: VirtualActivityResult,
+        baseCallbackInvoked: Boolean
+    ) {
+        val activityIdentity = activity.hostedActivityIdentity() ?: return
+        writeEvidenceLines(
+            instanceId = activityIdentity.instanceId,
+            fileName = HostedActivityEvidenceFiles.result(activityIdentity.instanceId),
+            lines = listOf(
+                "status=${if (baseCallbackInvoked) "ACTIVITY_RESULT_RESUME_FALLBACK_DELIVERED" else "ACTIVITY_RESULT_RESUME_FALLBACK_PARTIAL"}",
+                "stage=ACTIVITY_RESULT_RESUME_FALLBACK",
+                "instanceId=${activityIdentity.instanceId}",
+                "guestActivityClassName=${activityIdentity.guestActivityClassName}",
+                "token=${activityIdentity.token.redactTokenForEvidence()}",
+                "requestCode=${pending.requestCode}",
+                "resultWho=${pending.resultWho.orEmpty()}",
+                "resultCode=${pending.resultCode}",
+                "baseCallbackInvoked=$baseCallbackInvoked",
+                "frameworkDispatchAttempted=${pending.frameworkDispatchAttempted}",
+                "frameworkDispatchInvoked=${pending.frameworkDispatchInvoked}",
+                "virtualDataAction=${pending.dataIntent?.action.orEmpty()}",
+                "virtualDataUri=${pending.dataIntent?.dataUri.orEmpty()}"
+            ),
+            append = true
+        )
+    }
+
 
     private fun markActivityFinishedIfNeeded(activity: Activity) {
         if (!activity.isFinishing) return
-        val token = activity.hostedActivityIdentity()?.token ?: return
-        activityRecordManager.finish(token)
+        val identity = activity.hostedActivityIdentity() ?: return
+        val result = activity.readActivityResultSnapshot()
+        val recorded = activityOperations.recordActivityResultForFinish(
+            instanceId = identity.instanceId,
+            token = identity.token,
+            resultCode = result.resultCode,
+            dataIntent = result.dataIntent
+        )
+        val activityThreadDispatch = dispatchActivityResultThroughActivityThread(recorded, result)
+        markActivityResultDispatchState(recorded, activityThreadDispatch)
+        writeFinishResultEvidence(
+            activity = activity,
+            result = result,
+            recorded = recorded,
+            activityThreadDispatch = activityThreadDispatch
+        )
+        activityOperations.finishActivity(identity.instanceId, identity.token)
+    }
+
+    private fun dispatchPendingActivityResultBeforeResume(activity: Activity) {
+        val identity = activity.hostedActivityIdentity() ?: return
+        val pending = activityOperations.consumeActivityResultForResumeFallback(
+            instanceId = identity.instanceId,
+            token = identity.token
+        ) ?: return
+        val baseCallbackInvoked = invokeBaseCallActivityOnActivityResult(
+            activity = activity,
+            id = pending.resultWho,
+            requestCode = pending.requestCode,
+            resultCode = pending.resultCode,
+            data = pending.dataIntent?.toIntent()
+        )
+        writeResumeFallbackActivityResultEvidence(
+            activity = activity,
+            pending = pending,
+            baseCallbackInvoked = baseCallbackInvoked
+        )
+    }
+
+    private fun rememberActivityThreadToken(activity: Activity) {
+        val identity = activity.hostedActivityIdentity() ?: return
+        val activityThreadToken = activity.readPrivateField<IBinder>("mToken") ?: return
+        hostedActivityThreadTokens[identity.token] = activityThreadToken
+    }
+
+    private fun forgetActivityThreadToken(activity: Activity) {
+        val identity = activity.hostedActivityIdentity() ?: return
+        hostedActivityThreadTokens.remove(identity.token)
+    }
+
+    private fun dispatchActivityResultThroughActivityThread(
+        recorded: VirtualActivityFinishResultRecord,
+        result: ActivityResultSnapshot
+    ): ActivityThreadActivityResultDispatchResult {
+        if (!recorded.recorded) {
+            return ActivityThreadActivityResultDispatchResult.skipped("VIRTUAL_RESULT_NOT_RECORDED")
+        }
+        val sourceToken = recorded.sourceToken?.takeIf { it.isNotBlank() }
+            ?: return ActivityThreadActivityResultDispatchResult.skipped("SOURCE_TOKEN_MISSING")
+        val activityThreadToken = hostedActivityThreadTokens[sourceToken]
+            ?: return ActivityThreadActivityResultDispatchResult.skipped("SOURCE_ACTIVITY_THREAD_TOKEN_MISSING")
+        return ActivityThreadCompat.sendActivityResult(
+            activityToken = activityThreadToken,
+            resultWho = null,
+            requestCode = recorded.requestCode,
+            resultCode = result.resultCode,
+            data = result.data
+        )
+    }
+
+    private fun markActivityResultDispatchState(
+        recorded: VirtualActivityFinishResultRecord,
+        dispatch: ActivityThreadActivityResultDispatchResult
+    ) {
+        val sourceToken = recorded.sourceToken?.takeIf { it.isNotBlank() } ?: return
+        if (!dispatch.attempted) return
+        activityOperations.markActivityResultDispatchState(
+            instanceId = recorded.instanceId,
+            token = sourceToken,
+            frameworkDispatchAttempted = dispatch.attempted,
+            frameworkDispatchInvoked = dispatch.invoked
+        )
+    }
+
+    private fun Activity.readActivityResultSnapshot(): ActivityResultSnapshot {
+        val resultCode = readPrivateField<Int>("mResultCode") ?: Activity.RESULT_CANCELED
+        val resultData = readPrivateField<Intent>("mResultData")
+        return ActivityResultSnapshot(
+            resultCode = resultCode,
+            data = resultData,
+            dataIntent = resultData?.toVirtualIntentSnapshot()
+        )
+    }
+
+    private inline fun <reified T> Activity.readPrivateField(fieldName: String): T? =
+        runCatching {
+            findActivityField(javaClass, fieldName)
+                ?.apply { isAccessible = true }
+                ?.get(this) as? T
+        }.getOrNull()
+
+    private fun findActivityField(type: Class<*>, fieldName: String): java.lang.reflect.Field? {
+        var current: Class<*>? = type
+        while (current != null) {
+            runCatching { return current.getDeclaredField(fieldName) }
+            current = current.superclass
+        }
+        return runCatching { Activity::class.java.getDeclaredField(fieldName) }.getOrNull()
+    }
+
+    private fun writeFinishResultEvidence(
+        activity: Activity,
+        result: ActivityResultSnapshot,
+        recorded: VirtualActivityFinishResultRecord,
+        activityThreadDispatch: ActivityThreadActivityResultDispatchResult
+    ) {
+        val activityIdentity = activity.hostedActivityIdentity() ?: return
+        writeEvidenceLines(
+            instanceId = activityIdentity.instanceId,
+            fileName = HostedActivityEvidenceFiles.result(activityIdentity.instanceId),
+            lines = listOf(
+                "status=${if (recorded.recorded) "ACTIVITY_FINISH_RESULT_RECORDED" else "ACTIVITY_FINISH_RESULT_SKIPPED"}",
+                "stage=ACTIVITY_FINISH_RESULT",
+                "instanceId=${activityIdentity.instanceId}",
+                "guestActivityClassName=${activityIdentity.guestActivityClassName}",
+                "token=${activityIdentity.token.redactTokenForEvidence()}",
+                "sourceToken=${recorded.sourceToken?.redactTokenForEvidence().orEmpty()}",
+                "requestCode=${recorded.requestCode}",
+                "resultCode=${result.resultCode}",
+                "virtualResultRecorded=${recorded.recorded}",
+                "virtualResultReason=${recorded.reason}",
+                "dataAction=${result.data?.action.orEmpty()}",
+                "dataUri=${result.data?.dataString?.redactUriForEvidence().orEmpty()}",
+                "virtualDataAction=${recorded.dataIntent?.action.orEmpty()}",
+                "virtualDataUri=${recorded.dataIntent?.dataUri.orEmpty()}",
+                "activityThreadSendActivityResultVerdict=${activityThreadDispatch.verdict}",
+                "activityThreadSendActivityResultAttempted=${activityThreadDispatch.attempted}",
+                "activityThreadSendActivityResultInvoked=${activityThreadDispatch.invoked}",
+                "activityThreadSendActivityResultMethod=${activityThreadDispatch.methodName.orEmpty()}",
+                "activityThreadSendActivityResultReason=${activityThreadDispatch.reason}",
+                "activityThreadSendActivityResultErrorClass=${activityThreadDispatch.errorClassName.orEmpty()}"
+            ),
+            append = true
+        )
     }
 
     private fun Activity.hostedActivityIdentity(): HostedActivityIdentity? {
@@ -1865,11 +2199,18 @@ open class VirtualInstrumentation(
         )
     }
 
-    private fun String.redactTokenForEvidence(): String {
-        if (isBlank()) return ""
-        if (length <= TOKEN_EVIDENCE_PREFIX_LENGTH) return "<redacted>"
-        return take(TOKEN_EVIDENCE_PREFIX_LENGTH) + "...<redacted>"
-    }
+    private fun VirtualIntentSnapshot.toIntent(): Intent =
+        Intent(action).also { intent ->
+            dataUri?.takeIf { it.isNotBlank() }?.let { value ->
+                runCatching { intent.data = Uri.parse(value) }
+            }
+            categories.forEach { category ->
+                runCatching { intent.addCategory(category) }
+            }
+            intent.flags = flags
+        }
+
+    private fun String.redactTokenForEvidence(): String = EvidenceSanitizer.redactTokenForEvidence(this)
 
     private data class HostedActivityIdentity(
         val instanceId: String,

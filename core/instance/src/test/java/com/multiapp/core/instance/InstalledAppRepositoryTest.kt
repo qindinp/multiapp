@@ -6,7 +6,6 @@ import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
-import android.graphics.drawable.Drawable
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
@@ -85,15 +84,13 @@ class InstalledAppRepositoryTest {
     }
 
     @Test
-    fun `listInstalledApps preserves application icons`() {
-        val appIcon = mockk<Drawable>(relaxed = true)
+    fun `listInstalledApps does not load Android icons into model`() {
         every { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) } returns listOf(
             packageInfo("com.alpha.app", "Alpha", launcher = true)
         )
         every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
             launcherResolveInfo("com.alpha.app")
         )
-        every { packageManager.getApplicationIcon("com.alpha.app") } returns appIcon
 
         val repository = InstalledAppRepository(
             packageManagerProvider = { packageManager },
@@ -103,7 +100,8 @@ class InstalledAppRepositoryTest {
 
         val apps = repository.listInstalledApps()
 
-        assertEquals(appIcon, apps.single().icon)
+        assertEquals("com.alpha.app", apps.single().packageName)
+        verify(exactly = 0) { packageManager.getApplicationIcon(any<String>()) }
     }
 
     @Test

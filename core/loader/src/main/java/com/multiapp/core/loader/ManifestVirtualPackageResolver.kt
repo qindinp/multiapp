@@ -3,6 +3,8 @@ package com.multiapp.core.loader
 import android.content.Context
 import com.multiapp.core.manifest.ComponentExtractor
 import com.multiapp.core.manifest.ManifestParser
+import com.multiapp.core.manifest.toVirtualMetaDataMap
+import com.multiapp.core.model.virtual.toLegacyMetaDataMap
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.ResolvedPackage
@@ -22,6 +24,7 @@ class ManifestVirtualPackageResolver(
         return runCatching {
             val manifest = parser.parse(apkFile)
             val launcher = extractor.extractLauncherActivity(manifest)
+            val applicationMetaData = manifest.applicationMetaData.toVirtualMetaDataMap()
             ResolvedPackage(
                 packageName = manifest.packageName,
                 versionCode = 1L,
@@ -33,13 +36,15 @@ class ManifestVirtualPackageResolver(
                     manifest.applicationClass
                 ),
                 themeId = manifest.applicationThemeId,
-                metaData = manifest.applicationMetaData.toStringMap(),
+                metaData = applicationMetaData.toLegacyMetaDataMap(),
+                typedMetaData = applicationMetaData,
                 launcherActivityName = normalizeComponentName(
                     manifest.packageName,
                     launcher?.name
                 ),
                 activities = manifest.activities.mapNotNull { component ->
                     normalizeComponentName(manifest.packageName, component.name)?.let { name ->
+                        val componentMetaData = component.metaData.toVirtualMetaDataMap()
                         ResolvedComponent(
                             name = name,
                             exported = component.exported,
@@ -53,6 +58,8 @@ class ManifestVirtualPackageResolver(
                             screenOrientation = component.screenOrientation,
                             configChanges = component.configChanges,
                             permission = component.permission,
+                            metaData = componentMetaData.toLegacyMetaDataMap(),
+                            typedMetaData = componentMetaData,
                             resolvedIntentFilters = component.intentFilters.map { filter ->
                                 ResolvedIntentFilter(
                                     actions = filter.actions,
@@ -69,6 +76,7 @@ class ManifestVirtualPackageResolver(
                 },
                 services = manifest.services.mapNotNull { component ->
                     normalizeComponentName(manifest.packageName, component.name)?.let { name ->
+                        val componentMetaData = component.metaData.toVirtualMetaDataMap()
                         ResolvedComponent(
                             name = name,
                             exported = component.exported,
@@ -83,12 +91,15 @@ class ManifestVirtualPackageResolver(
                                 )
                             },
                             processName = component.process,
-                            permission = component.permission
+                            permission = component.permission,
+                            metaData = componentMetaData.toLegacyMetaDataMap(),
+                            typedMetaData = componentMetaData
                         )
                     }
                 },
                 receivers = manifest.receivers.mapNotNull { component ->
                     normalizeComponentName(manifest.packageName, component.name)?.let { name ->
+                        val componentMetaData = component.metaData.toVirtualMetaDataMap()
                         ResolvedComponent(
                             name = name,
                             exported = component.exported,
@@ -103,12 +114,15 @@ class ManifestVirtualPackageResolver(
                                 )
                             },
                             processName = component.process,
-                            permission = component.permission
+                            permission = component.permission,
+                            metaData = componentMetaData.toLegacyMetaDataMap(),
+                            typedMetaData = componentMetaData
                         )
                     }
                 },
                 providers = manifest.providers.mapNotNull { provider ->
                     normalizeComponentName(manifest.packageName, provider.name)?.let { name ->
+                        val providerMetaData = manifest.providerMetaData[provider.name].toVirtualMetaDataMap()
                         ResolvedComponent(
                             name = name,
                             exported = provider.exported,
@@ -117,8 +131,13 @@ class ManifestVirtualPackageResolver(
                                 .map { it.trim() }
                                 .filter { it.isNotEmpty() },
                             permission = provider.permission,
+                            readPermission = provider.readPermission,
+                            writePermission = provider.writePermission,
                             grantUriPermissions = provider.grantUriPermissions,
-                            metaData = manifest.providerMetaData[provider.name].toStringMap()
+                            pathPermissions = provider.pathPermissions,
+                            uriPermissionPatterns = provider.uriPermissionPatterns,
+                            metaData = providerMetaData.toLegacyMetaDataMap(),
+                            typedMetaData = providerMetaData
                         )
                     }
                 },
@@ -137,13 +156,5 @@ class ManifestVirtualPackageResolver(
                 else -> name
             }
         }
-
-        private fun List<ManifestParser.MetaDataInfo>?.toStringMap(): Map<String, String> =
-            this?.mapNotNull { item ->
-                val value = item.value
-                    ?: item.resource
-                    ?: item.resourceId.takeIf { it != 0 }?.let { "@0x${Integer.toHexString(it)}" }
-                value?.let { item.name to it }
-            }?.toMap().orEmpty()
     }
 }

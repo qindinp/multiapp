@@ -47,6 +47,8 @@ class BinaryXmlEncoder {
             "authorities" to 0x01010018,
             "appComponentFactory" to 0x0101057a,
             "permission" to 0x01010006,
+            "readPermission" to 0x01010007,
+            "writePermission" to 0x01010008,
             "enabled" to 0x0101000e,
             "extractNativeLibs" to 0x010104ea,
             "grantUriPermissions" to 0x0101001b,
@@ -124,6 +126,8 @@ class BinaryXmlEncoder {
         val IDX_AUTHORITIES = attrStr("authorities")
         val IDX_APP_COMP_FACTORY = attrStr("appComponentFactory")
         val IDX_PERMISSION = attrStr("permission")
+        val IDX_READ_PERMISSION = attrStr("readPermission")
+        val IDX_WRITE_PERMISSION = attrStr("writePermission")
         val IDX_ENABLED = attrStr("enabled")
         val IDX_EXTRACT_NATIVE_LIBS = attrStr("extractNativeLibs")
         val IDX_DEBUGGABLE = attrStr("debuggable")
@@ -193,6 +197,8 @@ class BinaryXmlEncoder {
             otherStr(p.name)
             p.authorities?.let { otherStr(it) }
             p.permission?.let { otherStr(it) }
+            p.readPermission?.let { otherStr(it) }
+            p.writePermission?.let { otherStr(it) }
         }
         for ((_, metaList) in manifest.providerMetaData) {
             for (meta in metaList) {
@@ -271,6 +277,12 @@ class BinaryXmlEncoder {
             }
             if (p.permission != null) {
                 attrs.add(XmlAttr(ANDROID_NS_URI, "permission", p.permission))
+            }
+            if (p.readPermission != null) {
+                attrs.add(XmlAttr(ANDROID_NS_URI, "readPermission", p.readPermission))
+            }
+            if (p.writePermission != null) {
+                attrs.add(XmlAttr(ANDROID_NS_URI, "writePermission", p.writePermission))
             }
             nodes.add(Node.ElemStart(null, "provider", attrs))
             if (encodeProviderMetaData) {
