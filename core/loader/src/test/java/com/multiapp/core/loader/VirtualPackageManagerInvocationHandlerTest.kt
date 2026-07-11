@@ -51,7 +51,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = permissionAwareService(),
             runtimeUid = RUNTIME_UID
         )
 
@@ -119,7 +119,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = permissionAwareService(),
             runtimeUid = RUNTIME_UID
         )
 
@@ -617,6 +617,17 @@ class VirtualPackageManagerInvocationHandlerTest {
             name = className
         }
     }
+
+    private fun permissionAwareService() = VirtualPackageService(
+        snapshot = snapshot(),
+        permissionCheckDispatcher = VirtualPermissionCheckDispatcher { request ->
+            VirtualPermissionCheckDispatchResult(
+                handled = true,
+                granted = request.permissionName == "android.permission.CAMERA",
+                reason = "test_permission_state"
+            )
+        }
+    )
 
     private fun snapshot(
         instanceId: String = "inst-001",

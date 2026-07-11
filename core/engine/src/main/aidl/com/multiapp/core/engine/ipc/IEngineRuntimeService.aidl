@@ -18,6 +18,10 @@ interface IEngineRuntimeService {
     Bundle grantProviderUriPermission(String ownerInstanceId, in Bundle request);
     Bundle revokeProviderUriPermission(String ownerInstanceId, in Bundle request);
     Bundle checkProviderUriPermission(String targetInstanceId, in Bundle request);
+    Bundle takePersistableProviderUriPermission(String targetInstanceId, in Bundle request);
+    Bundle releasePersistableProviderUriPermission(String targetInstanceId, in Bundle request);
+    Bundle checkPermission(String instanceId, String permissionName);
+    Bundle queryPermissionRuntimeState(String instanceId);
     Bundle queryAppOp(String instanceId, in Bundle request);
     Bundle planService(String instanceId, in Bundle request);
     boolean recordServiceDispatch(String instanceId, in Bundle result);

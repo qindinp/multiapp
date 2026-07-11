@@ -7,7 +7,9 @@ import com.multiapp.core.model.virtual.VirtualContextConfig
 enum class VirtualUriPermissionOperation {
     GRANT,
     REVOKE,
-    CHECK
+    CHECK,
+    TAKE_PERSISTABLE,
+    RELEASE_PERSISTABLE
 }
 
 data class VirtualUriPermissionRequest(
@@ -75,8 +77,27 @@ object VirtualUriPermissionDispatcherFactories {
 
     fun reset() {
         factory = null
+        VirtualUriPermissionRuntimeBindings.reset()
     }
 
     fun createOrNull(request: VirtualUriPermissionDispatcherFactoryRequest): VirtualUriPermissionDispatcher? =
         factory?.create(request)
+}
+
+/** One hosted process owns one active instance-scoped URI permission dispatcher. */
+object VirtualUriPermissionRuntimeBindings {
+    @Volatile
+    private var activeDispatcher: VirtualUriPermissionDispatcher? = null
+
+    fun bindActive(dispatcher: VirtualUriPermissionDispatcher) {
+        activeDispatcher = dispatcher
+    }
+
+    fun dispatch(request: VirtualUriPermissionRequest): VirtualUriPermissionResult =
+        activeDispatcher?.dispatch(request)
+            ?: VirtualUriPermissionResult.notHandled("active_uri_permission_dispatcher_unavailable")
+
+    fun reset() {
+        activeDispatcher = null
+    }
 }

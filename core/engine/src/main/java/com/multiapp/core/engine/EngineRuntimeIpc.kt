@@ -31,6 +31,7 @@ object EngineRuntimeIpcContract {
     const val KEY_RUNTIME_STATE = "runtimeState"
     const val KEY_PROCESS_ID = "processId"
     const val KEY_PROCESS_NAME = "processName"
+    const val KEY_SAME_PROCESS = "sameProcess"
     const val KEY_COMPONENT = "component"
     const val KEY_OPERATION = "operation"
     const val KEY_VERDICT = "verdict"
@@ -79,6 +80,11 @@ object EngineRuntimeIpcContract {
     const val KEY_OWNER_INSTANCE_ID = "ownerInstanceId"
     const val KEY_GRANTED = "granted"
     const val KEY_AFFECTED_GRANT_COUNT = "affectedGrantCount"
+    const val KEY_PERSISTED_MODE_FLAGS = "persistedModeFlags"
+    const val KEY_REQUESTED = "requested"
+    const val KEY_EXPLICIT = "explicit"
+    const val KEY_SOURCE = "source"
+    const val KEY_PERMISSION_RECORDS = "permissionRecords"
     const val KEY_APP_OP_METHOD = "appOpMethod"
     const val KEY_APP_OP_CODE = "appOpCode"
     const val KEY_APP_OP_MODE = "appOpMode"
@@ -104,6 +110,7 @@ object EngineRuntimeIpcContract {
     const val KEY_STOPPED = "stopped"
     const val KEY_BOUND = "bound"
     const val KEY_UNBOUND = "unbound"
+    const val KEY_DESTROYED = "destroyed"
     const val KEY_START_COMMAND_RESULT = "startCommandResult"
     const val KEY_ACTIVE_START_COUNT = "activeStartCount"
     const val KEY_ACTIVE_BIND_COUNT = "activeBindCount"
@@ -226,6 +233,8 @@ class EngineRuntimeBinderEndpoint(
     private val hostUid: Int,
     private val activityService: VirtualActivityService = DefaultVirtualSystemServer(registry).activityService,
     private val providerService: VirtualProviderService = DefaultVirtualSystemServer(registry).providerService,
+    private val permissionService: VirtualPermissionService =
+        DefaultVirtualSystemServer(registry).permissionService,
     private val appOpsService: VirtualAppOpsService = DefaultVirtualSystemServer(registry).appOpsService,
     private val serviceService: VirtualServiceService = DefaultVirtualSystemServer(registry).serviceService,
     private val broadcastService: VirtualBroadcastService = DefaultVirtualSystemServer(registry).broadcastService,
@@ -450,6 +459,47 @@ class EngineRuntimeBinderEndpoint(
                 decodedRequest.copy(hostUid = hostUid)
             ).toIpcBundle()
         }
+
+    override fun takePersistableProviderUriPermission(
+        targetInstanceId: String,
+        request: Bundle
+    ): Bundle = authorizedBundle {
+        val decodedRequest = request.toProviderUriGrantRequestOrNull()
+            ?: return@authorizedBundle invalidRequestBundle(
+                targetInstanceId,
+                "invalid_provider_persistable_uri_take_request"
+            )
+        providerService.takePersistableUriPermission(
+            targetInstanceId,
+            decodedRequest.withAuthoritativeCaller()
+        ).toIpcBundle()
+    }
+
+    override fun releasePersistableProviderUriPermission(
+        targetInstanceId: String,
+        request: Bundle
+    ): Bundle = authorizedBundle {
+        val decodedRequest = request.toProviderUriGrantRequestOrNull()
+            ?: return@authorizedBundle invalidRequestBundle(
+                targetInstanceId,
+                "invalid_provider_persistable_uri_release_request"
+            )
+        providerService.releasePersistableUriPermission(
+            targetInstanceId,
+            decodedRequest.withAuthoritativeCaller()
+        ).toIpcBundle()
+    }
+
+    override fun checkPermission(instanceId: String, permissionName: String): Bundle = authorizedBundle {
+        if (permissionName.isBlank()) {
+            return@authorizedBundle invalidRequestBundle(instanceId, "invalid_permission_check_request")
+        }
+        permissionService.checkPermission(instanceId, permissionName).toIpcBundle()
+    }
+
+    override fun queryPermissionRuntimeState(instanceId: String): Bundle = authorizedBundle {
+        permissionService.queryRuntimeState(instanceId).toIpcBundle()
+    }
 
     override fun queryAppOp(instanceId: String, request: Bundle): Bundle = authorizedBundle {
         val decodedRequest = request.toAppOpsQueryRequestOrNull()
@@ -759,6 +809,49 @@ object EngineRuntimeIpcClients {
             activeService()?.checkProviderUriPermission(targetInstanceId, request.toIpcBundle())
         }.getOrNull() ?: return null
         return response.toProviderUriGrantResultOrNull()
+    }
+
+    fun takePersistableProviderUriPermission(
+        targetInstanceId: String,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult? {
+        val response = runCatching {
+            activeService()?.takePersistableProviderUriPermission(
+                targetInstanceId,
+                request.toIpcBundle()
+            )
+        }.getOrNull() ?: return null
+        return response.toProviderUriGrantResultOrNull()
+    }
+
+    fun releasePersistableProviderUriPermission(
+        targetInstanceId: String,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult? {
+        val response = runCatching {
+            activeService()?.releasePersistableProviderUriPermission(
+                targetInstanceId,
+                request.toIpcBundle()
+            )
+        }.getOrNull() ?: return null
+        return response.toProviderUriGrantResultOrNull()
+    }
+
+    fun checkPermission(
+        instanceId: String,
+        permissionName: String
+    ): VirtualPermissionCheckResult? {
+        val response = runCatching {
+            activeService()?.checkPermission(instanceId, permissionName)
+        }.getOrNull() ?: return null
+        return response.toPermissionCheckResultOrNull()
+    }
+
+    fun queryPermissionRuntimeState(instanceId: String): VirtualPermissionRuntimeState? {
+        val response = runCatching {
+            activeService()?.queryPermissionRuntimeState(instanceId)
+        }.getOrNull() ?: return null
+        return response.toPermissionRuntimeStateOrNull()
     }
 
     fun queryAppOp(
@@ -1441,6 +1534,7 @@ private fun VirtualProviderUriGrantResult.toIpcBundle(): Bundle = Bundle().apply
     putString(EngineRuntimeIpcContract.KEY_VERDICT, verdict.name)
     putBoolean(EngineRuntimeIpcContract.KEY_GRANTED, granted)
     putInt(EngineRuntimeIpcContract.KEY_AFFECTED_GRANT_COUNT, affectedGrantCount)
+    putInt(EngineRuntimeIpcContract.KEY_PERSISTED_MODE_FLAGS, persistedModeFlags)
     putString(EngineRuntimeIpcContract.KEY_MESSAGE, message)
 }
 
@@ -1458,7 +1552,78 @@ private fun Bundle.toProviderUriGrantResultOrNull(): VirtualProviderUriGrantResu
         ),
         granted = getBoolean(EngineRuntimeIpcContract.KEY_GRANTED),
         affectedGrantCount = getInt(EngineRuntimeIpcContract.KEY_AFFECTED_GRANT_COUNT),
+        persistedModeFlags = getInt(EngineRuntimeIpcContract.KEY_PERSISTED_MODE_FLAGS),
         message = getString(EngineRuntimeIpcContract.KEY_MESSAGE).orEmpty()
+    )
+}.getOrNull()
+
+private fun VirtualPermissionCheckResult.toIpcBundle(): Bundle = Bundle().apply {
+    putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+    putString(EngineRuntimeIpcContract.KEY_PERMISSION, permissionName)
+    putString(EngineRuntimeIpcContract.KEY_VERDICT, verdict.name)
+    putBoolean(EngineRuntimeIpcContract.KEY_REQUESTED, requested)
+    putBoolean(EngineRuntimeIpcContract.KEY_GRANTED, granted)
+    putBoolean(EngineRuntimeIpcContract.KEY_EXPLICIT, explicit)
+    putString(EngineRuntimeIpcContract.KEY_SOURCE, source?.name)
+    putString(EngineRuntimeIpcContract.KEY_MESSAGE, message)
+}
+
+private fun Bundle.toPermissionCheckResultOrNull(): VirtualPermissionCheckResult? = runCatching {
+    VirtualPermissionCheckResult(
+        instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+        permissionName = getString(EngineRuntimeIpcContract.KEY_PERMISSION).orEmpty(),
+        verdict = EngineResultStatus.valueOf(
+            getString(EngineRuntimeIpcContract.KEY_VERDICT).orEmpty()
+        ),
+        requested = getBoolean(EngineRuntimeIpcContract.KEY_REQUESTED),
+        granted = getBoolean(EngineRuntimeIpcContract.KEY_GRANTED),
+        explicit = getBoolean(EngineRuntimeIpcContract.KEY_EXPLICIT),
+        source = getString(EngineRuntimeIpcContract.KEY_SOURCE)
+            ?.let(EnginePermissionGrantSource::valueOf),
+        message = getString(EngineRuntimeIpcContract.KEY_MESSAGE).orEmpty()
+    )
+}.getOrNull()
+
+private fun VirtualPermissionRuntimeState.toIpcBundle(): Bundle = Bundle().apply {
+    putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+    putString(EngineRuntimeIpcContract.KEY_VERDICT, verdict.name)
+    putParcelableArrayList(
+        EngineRuntimeIpcContract.KEY_PERMISSION_RECORDS,
+        ArrayList(records.map { record -> record.toIpcBundle() })
+    )
+    putString(EngineRuntimeIpcContract.KEY_MESSAGE, message)
+}
+
+private fun Bundle.toPermissionRuntimeStateOrNull(): VirtualPermissionRuntimeState? = runCatching {
+    VirtualPermissionRuntimeState(
+        instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+        verdict = EngineResultStatus.valueOf(
+            getString(EngineRuntimeIpcContract.KEY_VERDICT).orEmpty()
+        ),
+        records = getParcelableArrayList<Bundle>(EngineRuntimeIpcContract.KEY_PERMISSION_RECORDS)
+            .orEmpty()
+            .mapNotNull { it.toPermissionGrantRecordOrNull() },
+        message = getString(EngineRuntimeIpcContract.KEY_MESSAGE).orEmpty()
+    )
+}.getOrNull()
+
+private fun EnginePermissionGrantRecord.toIpcBundle(): Bundle = Bundle().apply {
+    putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+    putString(EngineRuntimeIpcContract.KEY_PERMISSION, permissionName)
+    putBoolean(EngineRuntimeIpcContract.KEY_GRANTED, granted)
+    putString(EngineRuntimeIpcContract.KEY_SOURCE, source.name)
+    putLong(EngineRuntimeIpcContract.KEY_UPDATED_AT_MS, updatedAtMs)
+}
+
+private fun Bundle.toPermissionGrantRecordOrNull(): EnginePermissionGrantRecord? = runCatching {
+    EnginePermissionGrantRecord(
+        instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+        permissionName = getString(EngineRuntimeIpcContract.KEY_PERMISSION).orEmpty(),
+        granted = getBoolean(EngineRuntimeIpcContract.KEY_GRANTED),
+        source = EnginePermissionGrantSource.valueOf(
+            getString(EngineRuntimeIpcContract.KEY_SOURCE).orEmpty()
+        ),
+        updatedAtMs = getLong(EngineRuntimeIpcContract.KEY_UPDATED_AT_MS)
     )
 }.getOrNull()
 
@@ -1744,6 +1909,7 @@ private fun VirtualServiceDispatchTarget.toIpcBundle(): Bundle = Bundle().apply 
     putString(EngineRuntimeIpcContract.KEY_SERVICE_OPERATION, operation.name)
     putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, processSlot)
     putString(EngineRuntimeIpcContract.KEY_PROCESS_NAME, processName)
+    putBoolean(EngineRuntimeIpcContract.KEY_SAME_PROCESS, sameProcess)
     putBoolean(EngineRuntimeIpcContract.KEY_FOREGROUND, foreground)
     putInt(EngineRuntimeIpcContract.KEY_PRIORITY, priority)
 }
@@ -1782,6 +1948,7 @@ private fun Bundle.toServiceDispatchTargetOrNull(): VirtualServiceDispatchTarget
         ),
         processSlot = getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT).orEmpty(),
         processName = getString(EngineRuntimeIpcContract.KEY_PROCESS_NAME),
+        sameProcess = getBoolean(EngineRuntimeIpcContract.KEY_SAME_PROCESS, true),
         foreground = getBoolean(EngineRuntimeIpcContract.KEY_FOREGROUND),
         priority = getInt(EngineRuntimeIpcContract.KEY_PRIORITY)
     )
@@ -1798,6 +1965,7 @@ private fun VirtualServiceOperationResult.toIpcBundle(): Bundle = Bundle().apply
     putBoolean(EngineRuntimeIpcContract.KEY_STOPPED, stopped)
     putBoolean(EngineRuntimeIpcContract.KEY_BOUND, bound)
     putBoolean(EngineRuntimeIpcContract.KEY_UNBOUND, unbound)
+    putBoolean(EngineRuntimeIpcContract.KEY_DESTROYED, destroyed)
     putBoolean(EngineRuntimeIpcContract.KEY_FOREGROUND, foreground)
     startCommandResult?.let { putInt(EngineRuntimeIpcContract.KEY_START_COMMAND_RESULT, it) }
     putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, processSlot)
@@ -1821,6 +1989,7 @@ private fun Bundle.toServiceOperationResultOrNull(): VirtualServiceOperationResu
         stopped = getBoolean(EngineRuntimeIpcContract.KEY_STOPPED),
         bound = getBoolean(EngineRuntimeIpcContract.KEY_BOUND),
         unbound = getBoolean(EngineRuntimeIpcContract.KEY_UNBOUND),
+        destroyed = getBoolean(EngineRuntimeIpcContract.KEY_DESTROYED),
         foreground = getBoolean(EngineRuntimeIpcContract.KEY_FOREGROUND),
         startCommandResult = if (containsKey(EngineRuntimeIpcContract.KEY_START_COMMAND_RESULT)) {
             getInt(EngineRuntimeIpcContract.KEY_START_COMMAND_RESULT)

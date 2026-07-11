@@ -20,6 +20,7 @@ class EngineBinderProvider : ContentProvider() {
             hostUid = hostContext.applicationInfo.uid,
             activityService = handle.server.activityService,
             providerService = handle.server.providerService,
+            permissionService = handle.server.permissionService,
             appOpsService = handle.server.appOpsService,
             serviceService = handle.server.serviceService,
             broadcastService = handle.server.broadcastService

@@ -2,9 +2,12 @@ package com.multiapp.core.engine
 
 import android.content.Context
 import com.multiapp.core.loader.ProxyActivitySlots
+import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineEvidenceReport
+import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResult
+import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
@@ -43,14 +46,10 @@ class DefaultVirtualizationEngine @Inject constructor(
     ),
     profilePolicy = CompatibilityProfilePolicy(),
     hookRuntime = hookRuntime,
+    permissionGrantSeeder = SourcePackagePermissionGrantSeeder(context.packageManager),
     evidenceSessionFactory = { UUID.randomUUID().toString() },
-    systemServerFactory = { runtimeRegistry ->
-        DefaultVirtualSystemServer(
-            registry = runtimeRegistry,
-            activityTaskStateStore = FileBackedEngineActivityTaskStateStore(
-                File(context.filesDir, EngineActivityTaskStateFiles.DEFAULT_FILE_NAME)
-            )
-        )
+    systemServerFactory = {
+        EngineRuntimeInstallers.fileBackedSystemServer(context).server
     }
 ) {
     companion object {
@@ -67,6 +66,7 @@ internal class DefaultVirtualizationEngineCore(
     private val runtimeRegistry: EngineRuntimeRegistry = EngineRuntimeRegistry(),
     private val profilePolicy: CompatibilityProfilePolicy = CompatibilityProfilePolicy(),
     private val hookRuntime: EngineHookRuntime = EngineHookRuntime.NO_OP,
+    private val permissionGrantSeeder: EnginePermissionGrantSeeder = EnginePermissionGrantSeeder.NO_OP,
     private val evidenceSessionFactory: () -> String = { UUID.randomUUID().toString() },
     private val runtimeEpochFactory: () -> Long = { System.currentTimeMillis().coerceAtLeast(1L) },
     systemServerFactory: (EngineRuntimeRegistry) -> VirtualSystemServer = { registry ->
@@ -151,8 +151,7 @@ internal class DefaultVirtualizationEngineCore(
 
         val runtime = runCatching {
             pruneRuntimeSlots()
-            val refreshedInstallRecord = refreshInstallRecord(installRecord)
-            buildRuntime(instance, refreshedInstallRecord, request.profile)
+            buildRuntime(instance, installRecord, request.profile)
         }.getOrElse { error ->
             if (error is EngineRuntimeSlotExhaustedException) {
                 return EngineResult.unsupported(
@@ -170,6 +169,33 @@ internal class DefaultVirtualizationEngineCore(
             )
         }
         systemServer.runtimeService.register(runtime)
+        val permissionSeed = runCatching {
+            permissionGrantSeeder.seed(runtime, systemServer.permissionService)
+        }.getOrElse { error ->
+            EnginePermissionSeedResult(
+                verdict = EngineResultStatus.PARTIAL,
+                mirroredGrantCount = 0,
+                mirroredDenyCount = 0,
+                preservedDecisionCount = 0,
+                unresolvedCount = runtime.packageSnapshot.permissions.size,
+                message = "permission_seed_failed:${error.javaClass.simpleName}:${error.message}"
+            )
+        }
+        systemServer.runtimeService.registerOperationEvidence(
+            instance.instanceId,
+            EngineOperationEvidence(
+                component = "permission",
+                operation = "seed",
+                verdict = permissionSeed.verdict,
+                entries = linkedMapOf(
+                    "mirroredGrantCount" to permissionSeed.mirroredGrantCount.toString(),
+                    "mirroredDenyCount" to permissionSeed.mirroredDenyCount.toString(),
+                    "preservedDecisionCount" to permissionSeed.preservedDecisionCount.toString(),
+                    "unresolvedCount" to permissionSeed.unresolvedCount.toString(),
+                    "message" to permissionSeed.message
+                )
+            )
+        )
         systemServer.runtimeService.registerOperationEvidence(
             instance.instanceId,
             hookRuntime.profileEvidence(decision)
@@ -178,21 +204,35 @@ internal class DefaultVirtualizationEngineCore(
             EngineLaunchSpec(
                 instanceId = instance.instanceId,
                 profile = request.profile,
+                evidenceMode = request.evidenceMode,
                 processSlot = runtime.processSlot,
                 proxySlot = runtime.proxySlot,
                 evidenceSessionId = runtime.evidenceSessionId,
-                providerRoutingEnabled = decision.providerRoutingEnabled
+                providerRoutingEnabled = decision.providerRoutingEnabled,
+                legacyProviderHookEnabled = decision.providerRoutingEnabled && decision.lsplantEnabled
             )
         )
         instanceManager.updateLaunchState(instance.instanceId)
-        return EngineResult.pass(
-            operation = OP_LAUNCH,
-            instanceId = instance.instanceId,
-            originPackageName = instance.originPackageName,
-            message = "launch dispatched through engine",
-            runtime = runtime,
-            evidence = systemServer.runtimeService.evidence(instance.instanceId)
-        )
+        val evidence = systemServer.runtimeService.evidence(instance.instanceId)
+        return if (permissionSeed.verdict == EngineResultStatus.PASS) {
+            EngineResult.pass(
+                operation = OP_LAUNCH,
+                instanceId = instance.instanceId,
+                originPackageName = instance.originPackageName,
+                message = "launch dispatched through engine",
+                runtime = runtime,
+                evidence = evidence
+            )
+        } else {
+            EngineResult.partial(
+                operation = OP_LAUNCH,
+                instanceId = instance.instanceId,
+                originPackageName = instance.originPackageName,
+                message = "launch dispatched with partial permission seed",
+                runtime = runtime,
+                evidence = evidence
+            )
+        }
     }
 
     override fun stopInstance(instanceId: String): EngineResult {
@@ -299,20 +339,6 @@ internal class DefaultVirtualizationEngineCore(
             )
         }
 
-    private fun refreshInstallRecord(installRecord: InstallRecord): InstallRecord {
-        virtualInstallService.importFromMetadata(
-            packageName = installRecord.packageName,
-            originApkPath = installRecord.originApkPath,
-            versionCode = installRecord.versionCode,
-            versionName = installRecord.versionName,
-            targetSdk = installRecord.targetSdk,
-            minSdk = installRecord.minSdk,
-            applicationClassName = installRecord.applicationClassName,
-            packageLabel = installRecord.packageLabel
-        ).getOrNull() ?: return installRecord
-        return virtualInstallService.getInstallRecord(installRecord.packageName) ?: installRecord
-    }
-
     private fun launcherComponent(snapshot: VirtualPackageSnapshot): ResolvedComponent? {
         val launcherName = snapshot.launcherActivityName?.takeIf { it.isNotBlank() }
         return snapshot.activities.firstOrNull { component ->
@@ -351,10 +377,12 @@ internal class DefaultVirtualizationEngineCore(
 data class EngineLaunchSpec(
     val instanceId: String,
     val profile: EngineProfile,
+    val evidenceMode: EngineEvidenceMode,
     val processSlot: String,
     val proxySlot: String,
     val evidenceSessionId: String,
-    val providerRoutingEnabled: Boolean
+    val providerRoutingEnabled: Boolean,
+    val legacyProviderHookEnabled: Boolean
 )
 
 fun interface EngineActivityLauncher {

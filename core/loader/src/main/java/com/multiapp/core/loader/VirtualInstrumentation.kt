@@ -1163,6 +1163,8 @@ open class VirtualInstrumentation(
             )
             return context
         }
+        val hostPackageName = runCatching { hostContext.packageName }.getOrNull().orEmpty()
+        val contextPatch = FrameworkApplicationContextCompat.prepare(context, hostPackageName)
         val runtime = processRuntime.get(snapshot.instanceId)?.result
         val config = VirtualContextConfig(
             instanceId = snapshot.instanceId,
@@ -1182,12 +1184,16 @@ open class VirtualInstrumentation(
         )
         Log.i(
             TAG,
-            "Virtualized framework Application context at $phase: instanceId=${snapshot.instanceId}, " +
+            "Prepared framework Application context at $phase: instanceId=${snapshot.instanceId}, " +
                 "origin=${snapshot.originPackageName}, virtual=${snapshot.virtualPackageName}, " +
-                "host=${runCatching { hostContext.packageName }.getOrNull().orEmpty()}"
+                "host=$hostPackageName, target=${contextPatch.targetClassName}, " +
+                "wrapperDepth=${contextPatch.wrapperDepth}, cycleDetected=${contextPatch.cycleDetected}, " +
+                "binderIdentityReady=${contextPatch.binderIdentityReady}, " +
+                "patchedFields=${contextPatch.patchedFields.joinToString(",")}, " +
+                "skippedFields=${contextPatch.skippedFieldReasons.joinToString(",")}"
         )
         return VirtualContextWrappers.create(
-            base = hostContext,
+            base = context,
             config = config,
             guestClassLoader = config.classLoader,
             processRuntime = processRuntime,

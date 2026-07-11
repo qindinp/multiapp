@@ -103,6 +103,38 @@ class EngineVirtualUriPermissionDispatcherTest {
         verify(exactly = 0) { service.checkUriPermission(any(), any()) }
     }
 
+    @Test
+    fun `persistable take for another virtual provider routes as target instance`() {
+        val service = mockk<VirtualProviderService>(relaxed = true)
+        val requestSlot = slot<VirtualProviderUriGrantRequest>()
+        every {
+            service.takePersistableUriPermission("owner", capture(requestSlot))
+        } returns result(
+            ownerInstanceId = "provider-owner",
+            targetInstanceId = "owner",
+            granted = true,
+            message = "provider_persistable_uri_grant_taken:modes=1"
+        )
+        val dispatcher = dispatcher(
+            service = service,
+            runtimes = listOf(runtime("provider-owner", 4001, "com.external.provider"))
+        )
+
+        val actual = dispatcher.dispatch(
+            VirtualUriPermissionRequest(
+                operation = VirtualUriPermissionOperation.TAKE_PERSISTABLE,
+                uri = uri("com.external.provider", "/documents/7"),
+                modeFlags = EngineProviderUriGrantModes.READ
+            )
+        )
+
+        assertTrue(actual.handled)
+        assertTrue(actual.success)
+        assertEquals(null, requestSlot.captured.ownerInstanceId)
+        assertEquals("owner", requestSlot.captured.targetInstanceId)
+        assertEquals(3001, requestSlot.captured.callingPid)
+    }
+
     private fun dispatcher(
         service: VirtualProviderService,
         runtimes: List<VirtualInstanceRuntime> = emptyList()
@@ -146,13 +178,22 @@ class EngineVirtualUriPermissionDispatcherTest {
         packageSnapshot = snapshot("owner", "com.test.app", "com.multiapp.virtual.owner")
     )
 
-    private fun runtime(instanceId: String, processId: Int) = VirtualInstanceRuntime(
+    private fun runtime(
+        instanceId: String,
+        processId: Int,
+        authority: String = "com.test.provider"
+    ) = VirtualInstanceRuntime(
         instanceId = instanceId,
         hostPackageName = "com.multiapp.app",
         originPackageName = "com.target.app",
         virtualPackageName = "com.multiapp.virtual.$instanceId",
         dataRoot = "/data/$instanceId",
-        packageSnapshot = snapshot(instanceId, "com.target.app", "com.multiapp.virtual.$instanceId"),
+        packageSnapshot = snapshot(
+            instanceId,
+            "com.target.app",
+            "com.multiapp.virtual.$instanceId",
+            authority
+        ),
         profile = EngineProfile.BASELINE,
         processSlot = "com.multiapp.app:v2",
         proxySlot = "com.multiapp.app.container.ProxyActivity2",
@@ -164,7 +205,12 @@ class EngineVirtualUriPermissionDispatcherTest {
         state = VirtualRuntimeState.RUNNING
     )
 
-    private fun snapshot(instanceId: String, origin: String, virtual: String) = VirtualPackageSnapshot(
+    private fun snapshot(
+        instanceId: String,
+        origin: String,
+        virtual: String,
+        authority: String = "com.test.provider"
+    ) = VirtualPackageSnapshot(
         instanceId = instanceId,
         originPackageName = origin,
         virtualPackageName = virtual,
@@ -178,7 +224,7 @@ class EngineVirtualUriPermissionDispatcherTest {
         providers = listOf(
             ResolvedComponent(
                 name = "$origin.Provider",
-                authorities = listOf("com.test.provider"),
+                authorities = listOf(authority),
                 grantUriPermissions = true
             )
         )

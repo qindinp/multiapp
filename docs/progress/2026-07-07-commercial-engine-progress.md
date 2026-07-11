@@ -3312,6 +3312,159 @@ Remaining gate:
   still incomplete.
 - The commercial engine decision remains `BLOCK`.
 
+## Execution Update - 2026-07-11 GKD Application Context Chain
+
+Device artifact `.tmp/manual-after-user-20260711-082728` identified a generic
+Application attachment defect rather than a GKD-specific compatibility rule:
+
+- `com.multiapp.app:v2` reached `LoadedApk.makeApplication`, then remained in
+  `ContextImpl.getImpl -> Application.attach -> Instrumentation.newApplication`
+  for more than 45 seconds.
+- Android reported an input ANR for `ContainerActivityV2`; `exit-info` recorded
+  `reason=6 (ANR)` and the process was killed.
+- The direct cause was `VirtualContextWrapper.getBaseContext()` returning the
+  wrapper itself. AOSP unwraps `ContextWrapper` repeatedly in
+  `ContextImpl.getImpl()`, so that contract created a non-terminating chain.
+
+Current dirty-tree correction:
+
+- `VirtualContextWrapper.getBaseContext()` now returns its actual base.
+- `VirtualInstrumentation` wraps the guest `ContextImpl` created by
+  `LoadedApk.makeApplication`, instead of replacing that base with the host
+  Context. This preserves `Application.mLoadedApk` as the guest LoadedApk.
+- `FrameworkApplicationContextCompat` rewrites only ContextImpl/ContentResolver
+  caller identity fields to `com.multiapp.app`, following VirtualApp's
+  ContextFixer pattern, while guest-facing package identity remains the origin
+  package.
+- `LoadedApk.mPackageName` now uses `originPackageName`; the virtual package is
+  retained only as an ActivityThread lookup alias.
+
+Verification:
+
+- 95 focused loader tests passed for Application creation, Context identity,
+  finite wrapper chains, LoadedApk identity, and existing Context behavior.
+
+Remaining gate:
+
+- A new device run must prove `MAKE_APPLICATION_FINISHED`, Provider preinstall,
+  and `Application.onCreate()` completion without ANR.
+- The current launch still presents a foreground Container Activity before the
+  process is fully prewarmed. The VirtualApp-style process bootstrap handshake
+  remains required so a proxy Activity is launched only after the guest
+  Application reports ready.
+- Commercial engine decision remains **BLOCK**.
+
+## Execution Update - 2026-07-10 Launch Ordering and Slot Guardrails
+
+The launch path now avoids two process-wide correctness hazards before adding
+more compatibility behavior.
+
+Implemented:
+
+- Launcher-triggered engine launch work runs on the injected IO dispatcher and
+  duplicate taps for the same instance are coalesced until the request ends.
+- Launch no longer reparses and rewrites the installed APK record on every
+  start. Install refresh remains an explicit install/refresh operation.
+- Runtime slot reuse now checks every live instance, not only instances with
+  the same origin package. A stale persisted assignment that collides with
+  another instance is repaired before reuse.
+- The baseline profile no longer enables the legacy provider hook merely
+  because engine Provider routing is active. That hook is now restricted to a
+  profile where LSPlant is explicitly enabled.
+- Guest Application creation, runtime publication, same-process Provider
+  preinstall, and `Application.onCreate()` are serialized through the Android
+  main Looper. `LoadedApk.makeApplication(..., null)` creates and attaches the
+  Application without invoking `onCreate`; the engine invokes `onCreate`
+  exactly once through ActivityThread Instrumentation after Provider
+  preinstall.
+- Background prewarm threads no longer create permanent custom Loopers or
+  enter `Looper.loop()` after bootstrap.
+
+Verification:
+
+- Focused launcher, slot-store, Application-stage, hosted-bootstrap, and
+  virtualization-engine tests passed in this dirty tree.
+
+Remaining gate:
+
+- Main-Looper ordering is locally covered but still needs device evidence for
+  ANR behavior, process death, OEM ActivityThread variants, and Provider
+  ordering before protected-app compatibility can be claimed.
+- Real process-slot isolation is still constrained by declared Android stub
+  processes and the device matrix. Decision remains `BLOCK`.
+
+## Execution Update - 2026-07-10 Virtual Permission Ownership
+
+The earlier statement that the engine had no virtual permission service is now
+partially superseded. Declaring a permission in the guest manifest no longer
+implicitly grants it.
+
+Implemented:
+
+- Added a `PERMISSION` engine subsystem with a file-backed, per-instance grant
+  store and explicit grant/revoke sources.
+- PackageManager `checkPermission()` and
+  `getPackagesHoldingPermissions()` consult the active engine permission
+  dispatcher. Unknown state and unrequested permissions deny access instead
+  of falling through to a manifest-declared grant.
+- Permission checks and runtime-state queries cross the engine Binder;
+  malformed responses from a connected authority fail closed.
+- Provider read/write/path permission gates consult the same virtual
+  permission service, allowing only an explicitly granted target instance.
+- On first launch, a compatibility seeder mirrors the currently installed
+  source package's Android grant result. Existing per-instance decisions are
+  preserved and are not overwritten on later launches.
+- Permission seed counts and unresolved checks are exported as structured
+  engine evidence. An unresolved seed keeps launch at `PARTIAL`.
+
+Verification:
+
+- Focused grant-store, service, IPC, PackageManager, Provider-permission, and
+  source-seeding tests passed.
+
+Remaining gate:
+
+- `requestPermissions()` UI/result delivery, permission flags, groups,
+  one-time grants, auto-reset, shared UID, AppOps coupling, and user-facing
+  per-clone permission controls remain incomplete.
+- Source-package mirroring is only an initial compatibility policy; it is not
+  a replacement for virtual runtime permission UX or device evidence.
+- Decision remains `BLOCK`.
+
+## Execution Update - 2026-07-10 Same-Process Service Binding
+
+Service binding is no longer globally reported as unsupported. The engine now
+admits the lifecycle path that the loader can actually execute and rejects the
+process models it cannot yet reproduce.
+
+Implemented:
+
+- `VirtualServiceService` plans same-guest-process `BIND` and connection-based
+  `UNBIND` before loader dispatch.
+- The existing loader lifecycle path performs `onBind`, connection callback,
+  binder reuse, `onUnbind`, optional `onRebind`, and idle destruction.
+- Bind/unbind results are converted into engine-owned dispatch evidence and a
+  durable Service runtime state including the new `BOUND` state and active
+  bind counts.
+- Service target IPC preserves whether the component belongs to the guest
+  Application process.
+- A Service with a custom/remote guest process fails closed as
+  `service_cross_process_unsupported` before loader dispatch.
+
+Verification:
+
+- Focused server, AMS dispatcher, and file-backed Service-state tests passed
+  for bind, unbind, bound-only recovery, stopped state, and cross-process
+  rejection.
+
+Remaining gate:
+
+- Cross-process Service hosting, binder-death rebind, foreground-service type
+  mapping, sticky restart, bind callback ordering after process death, and
+  device evidence remain incomplete.
+- Same-process local tests do not establish full Android `VService` parity.
+  Decision remains `BLOCK`.
+
 ## Execution Update - 2026-07-10 Global Provider Authority Routing
 
 Provider data-plane routing can now resolve authorities owned by another
@@ -3399,9 +3552,9 @@ Verification:
 
 Remaining gate:
 
-- A full virtual permission service is still required to grant manifest
-  permissions to cross-instance callers; protected paths remain
-  `UNSUPPORTED`, not falsely allowed.
+- The Virtual Permission Ownership update above now provides explicit
+  per-instance grants for protected cross-instance paths. Runtime permission
+  request/result UI, flags, groups, and AppOps coupling remain incomplete.
 - Persistable take/release, external non-virtual recipients, advanced/simple
   glob device parity on API 28-36, custom Provider processes, and device
   process-death evidence remain open.
@@ -3434,3 +3587,119 @@ Result:
 This is a local gate only. Device process-death, recents, component lifecycle,
 native namespace/IO, and compatibility-matrix evidence are still required, so
 the commercial engine decision remains `BLOCK`.
+
+## Execution Update - 2026-07-10 Persistable URI Grants and Live Authority Resolution
+
+The Provider control plane now distinguishes a persistable grant offer from a
+grant that the target instance has actually persisted. Authority discovery no
+longer freezes a process-local authority set on first resolver use.
+
+Implemented:
+
+- `EngineProviderUriGrantRecord` stores transient access modes, persistable
+  eligibility, persisted access modes, and persisted timestamp separately.
+- Locked in-memory/file stores implement take/release semantics. Releasing a
+  persisted mode keeps a transient grant; an owner revoke removes both the
+  transient and persisted mode.
+- `VirtualProviderService`, engine AIDL, IPC codecs/client, and the IPC-backed
+  service expose target-owned take/release operations with UID/PID, target,
+  authority, path, mode, and ambiguous-owner validation.
+- The loader URI permission dispatcher handles `TAKE_PERSISTABLE` and
+  `RELEASE_PERSISTABLE`, including authorities owned by another virtual
+  package. Non-virtual/system authorities remain Android-owned.
+- Added an API 29+ `uri_grants` ServiceManager Binder proxy. It routes
+  `ContentResolver.takePersistableUriPermission()` and
+  `releasePersistableUriPermission()` to the active instance and delegates
+  unhandled system URIs to Android. Rejected virtual mutations fail closed.
+- Provider authority resolution now asks `VirtualProviderService` on every
+  non-self lookup, so a package installed after the first lookup is visible
+  without a stale process-local authority index.
+- The implementation follows the current AOSP split where `ContentResolver`
+  calls `UriGrantsManager`, whose singleton is backed by the `uri_grants`
+  Binder:
+  - https://android.googlesource.com/platform/frameworks/base/+/master/core/java/android/content/ContentResolver.java
+  - https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/app/IUriGrantsManager.aidl
+  - https://android.googlesource.com/platform/frameworks/base/+/android16-qpr2-release/core/java/android/app/UriGrantsManager.java
+
+Verification:
+
+- Focused engine tests passed for store recreation, take/release behavior,
+  owner revoke, target identity, IPC ownership, external virtual authorities,
+  and live authority discovery.
+- Focused loader tests passed for Binder interception, system-URI delegation,
+  fail-closed denial, proxy-stage evidence, and existing Context URI grant
+  behavior.
+
+Remaining gate:
+
+- `getPersistedUriPermissions()`/outgoing persisted lists are not virtualized.
+- API 28 still uses the older ActivityManager path and is not covered by the
+  API 29+ `uri_grants` proxy.
+- Reflection/OEM behavior and persistence across real process death require
+  device evidence. External non-virtual recipients, complete virtual runtime
+  permission UX/flags, and custom Provider processes remain open.
+- The commercial engine decision remains `BLOCK`.
+
+## Execution Update - 2026-07-11 Startup Hot Path and Caller Identity Proxies
+
+The current dirty tree reduces startup work on the foreground path and adds
+general caller-identity proxies for Android services that validate package and
+UID ownership. These changes follow the VirtualApp/DroidPlugin structure of
+patching both an already-created manager and the ServiceManager Binder cache;
+they are not package-specific GKD rules.
+
+Implemented:
+
+- `FileBackedEngineRuntimeStateStore` uses a process-shared snapshot cache
+  keyed by file identity, size, and modification time. Stable sorted snapshots
+  avoid reparsing the multi-megabyte runtime-state file for every Binder query.
+- `EngineEvidenceMode` is propagated through the engine launch contract.
+  Baseline `DEFAULT` resolves to `MINIMAL`; full storage/Provider diagnostics
+  run after the guest first-frame path instead of blocking it.
+- Added manager plus `ServiceManager.sCache` proxies for LauncherApps and
+  Clipboard caller identity. Clipboard rewrites use method-specific AOSP API
+  30-36 argument positions, preserve `ClipData` and source-package semantics,
+  and clear a guest attribution tag rather than misrepresenting it as a host
+  attribution.
+- Clipboard evidence now distinguishes
+  `clipboardManagerProxyStatus` from
+  `clipboardServiceManagerProxyStatus`. Both must install for the aggregate
+  status to be `INSTALLED`; one-sided injection is `PARTIAL`.
+
+Device evidence:
+
+- `.tmp/gkd-clipboard-current-20260711-144555` contains two GKD clone launches
+  in distinct `com.multiapp.app:v1` and `com.multiapp.app:v3` processes.
+- Guest Application creation completed in 103 ms and 81 ms respectively, both
+  through `LOADED_APK_MAKE_APPLICATION`; no new Java fatal or ANR was recorded
+  in that capture.
+- The deployed build reported `clipboardPackageProxyStatus=INSTALLED` for both
+  instances. The stricter split manager/Binder fields are locally tested in
+  the current source but are not yet device-proven, and the exact clipboard
+  mutation flow was not exercised as a pass gate.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:common:testDebugUnitTest :core:model:testDebugUnitTest :core:instance:testDebugUnitTest :core:manifest:testDebugUnitTest :core:identity:testDebugUnitTest :core:loader:testDebugUnitTest :core:hook:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 --build-cache "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `BUILD SUCCESSFUL` in 6m03s; 514 Gradle tasks executed or reused.
+- APK size: 99,483,305 bytes.
+- APK SHA-256:
+  `0D3A2A5D0A9EAC453ED362467C5270176ACD26BAB6DAAE7E22E522397D816CD9`.
+- `git diff --check` passed; existing LF/CRLF warnings remain.
+
+Remaining gate:
+
+- The VirtualApp-style process bootstrap readiness handshake is still absent;
+  foreground proxy Activity launch can still precede a fully ready guest.
+- Runtime permission request/result UI, flags, groups, one-time grants, and
+  per-clone controls remain incomplete.
+- System-service proxies are not yet owned by one engine
+  `SystemServiceProxyRegistry`; Account, Alarm, Job, and Shortcut remain open.
+- The latest device evidence still shows a partial GKD Provider preinstall,
+  and AstroBox black-screen behavior has not been closed.
+- The commercial engine decision remains `BLOCK`.

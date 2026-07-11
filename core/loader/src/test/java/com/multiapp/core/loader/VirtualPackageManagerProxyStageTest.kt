@@ -69,6 +69,10 @@ class VirtualPackageManagerProxyStageTest {
                 capturedHostPackageName = hostPackageName
                 true
             },
+            launcherAppsPackageProxyInstaller = LauncherAppsPackageProxyInstallAction { _, _ -> true },
+            clipboardPackageProxyInstaller = ClipboardPackageProxyInstallAction { _, _ ->
+                completeClipboardProxyInstallResult()
+            },
             appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
             appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
             runtimeUidProvider = { RUNTIME_UID },
@@ -88,6 +92,94 @@ class VirtualPackageManagerProxyStageTest {
     }
 
     @Test
+    fun `execute installs launcher apps caller package proxy`() {
+        val snapshot = snapshot()
+        val hostContext = mockk<Context>()
+        var capturedSourcePackages = emptyList<String>()
+        var capturedHostPackageName = ""
+        every { hostContext.packageName } returns "com.multiapp.app"
+        val stage = VirtualPackageManagerProxyStage(
+            hostContext = hostContext,
+            installer = VirtualPackageManagerGlobalInstallAction { _, _, _ ->
+                installResult(
+                    status = VirtualPackageManagerGlobalInstallStatus.INSTALLED,
+                    sPackageManagerRead = true,
+                    sPackageManagerPatched = true
+                )
+            },
+            notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { _, _ -> true },
+            launcherAppsPackageProxyInstaller = LauncherAppsPackageProxyInstallAction { sourcePackages, hostPackageName ->
+                capturedSourcePackages = sourcePackages.toList()
+                capturedHostPackageName = hostPackageName
+                true
+            },
+            clipboardPackageProxyInstaller = ClipboardPackageProxyInstallAction { _, _ ->
+                completeClipboardProxyInstallResult()
+            },
+            appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
+            appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            runtimeUidProvider = { RUNTIME_UID },
+            clock = fixedClock(100L, 109L)
+        )
+
+        val output = stage.execute(BootstrapStageInput(instanceId = snapshot.instanceId, packageSnapshot = snapshot))
+
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(listOf("com.test.minimal", "com.multiapp.instance.abc"), capturedSourcePackages)
+        assertEquals("com.multiapp.app", capturedHostPackageName)
+        assertEquals("INSTALLED", evidence["launcherAppsPackageProxyStatus"])
+        assertEquals(
+            "launcherapps-manager-servicemanager-binder",
+            evidence["launcherAppsPackageProxyMode"]
+        )
+    }
+
+    @Test
+    fun `execute installs clipboard caller package proxy`() {
+        val snapshot = snapshot()
+        val hostContext = mockk<Context>()
+        var capturedSourcePackages = emptyList<String>()
+        var capturedHostPackageName = ""
+        every { hostContext.packageName } returns "com.multiapp.app"
+        val stage = VirtualPackageManagerProxyStage(
+            hostContext = hostContext,
+            installer = VirtualPackageManagerGlobalInstallAction { _, _, _ ->
+                installResult(
+                    status = VirtualPackageManagerGlobalInstallStatus.INSTALLED,
+                    sPackageManagerRead = true,
+                    sPackageManagerPatched = true
+                )
+            },
+            notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { _, _ -> true },
+            launcherAppsPackageProxyInstaller = LauncherAppsPackageProxyInstallAction { _, _ -> true },
+            clipboardPackageProxyInstaller = ClipboardPackageProxyInstallAction { sourcePackages, hostPackageName ->
+                capturedSourcePackages = sourcePackages.toList()
+                capturedHostPackageName = hostPackageName
+                completeClipboardProxyInstallResult()
+            },
+            appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
+            appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            runtimeUidProvider = { RUNTIME_UID },
+            clock = fixedClock(100L, 109L)
+        )
+
+        val output = stage.execute(BootstrapStageInput(instanceId = snapshot.instanceId, packageSnapshot = snapshot))
+
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(listOf("com.test.minimal", "com.multiapp.instance.abc"), capturedSourcePackages)
+        assertEquals("com.multiapp.app", capturedHostPackageName)
+        assertEquals("INSTALLED", evidence["clipboardPackageProxyStatus"])
+        assertEquals("INSTALLED", evidence["clipboardManagerProxyStatus"])
+        assertEquals("INSTALLED", evidence["clipboardServiceManagerProxyStatus"])
+        assertEquals(
+            "clipboard-manager-servicemanager-binder",
+            evidence["clipboardPackageProxyMode"]
+        )
+    }
+
+    @Test
     fun `execute installs app ops package proxy for origin and virtual package aliases`() {
         val snapshot = snapshot()
         val hostContext = mockk<Context>()
@@ -104,6 +196,10 @@ class VirtualPackageManagerProxyStageTest {
                 )
             },
             notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { _, _ -> true },
+            launcherAppsPackageProxyInstaller = LauncherAppsPackageProxyInstallAction { _, _ -> true },
+            clipboardPackageProxyInstaller = ClipboardPackageProxyInstallAction { _, _ ->
+                completeClipboardProxyInstallResult()
+            },
             appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { sourcePackages, hostPackageName ->
                 capturedSourcePackages = sourcePackages.toList()
                 capturedHostPackageName = hostPackageName
@@ -143,6 +239,10 @@ class VirtualPackageManagerProxyStageTest {
                 )
             },
             notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { _, _ -> true },
+            launcherAppsPackageProxyInstaller = LauncherAppsPackageProxyInstallAction { _, _ -> true },
+            clipboardPackageProxyInstaller = ClipboardPackageProxyInstallAction { _, _ ->
+                completeClipboardProxyInstallResult()
+            },
             appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
             appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { sourcePackages, hostPackageName ->
                 capturedSourcePackages = sourcePackages.toList()
@@ -163,6 +263,50 @@ class VirtualPackageManagerProxyStageTest {
         assertEquals("com.test.minimal,com.multiapp.instance.abc", evidence["appOpsServiceManagerProxySourcePackages"])
         assertEquals("com.multiapp.app", evidence["appOpsServiceManagerProxyHostPackage"])
         assertEquals("servicemanager-appops-binder", evidence["appOpsServiceManagerProxyMode"])
+    }
+
+    @Test
+    fun `execute installs uri grants ServiceManager binder proxy`() {
+        val snapshot = snapshot()
+        val hostContext = mockk<Context>()
+        var installed = false
+        every { hostContext.packageName } returns "com.multiapp.app"
+        val stage = VirtualPackageManagerProxyStage(
+            hostContext = hostContext,
+            installer = VirtualPackageManagerGlobalInstallAction { _, _, _ ->
+                installResult(
+                    status = VirtualPackageManagerGlobalInstallStatus.INSTALLED,
+                    sPackageManagerRead = true,
+                    sPackageManagerPatched = true
+                )
+            },
+            notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { _, _ -> true },
+            launcherAppsPackageProxyInstaller = LauncherAppsPackageProxyInstallAction { _, _ -> true },
+            clipboardPackageProxyInstaller = ClipboardPackageProxyInstallAction { _, _ ->
+                completeClipboardProxyInstallResult()
+            },
+            appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
+            appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            uriGrantsServiceManagerProxyInstaller = UriGrantsServiceManagerProxyInstallAction {
+                installed = true
+                true
+            },
+            runtimeUidProvider = { RUNTIME_UID },
+            clock = fixedClock(100L, 109L)
+        )
+
+        val output = stage.execute(
+            BootstrapStageInput(instanceId = snapshot.instanceId, packageSnapshot = snapshot)
+        )
+
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertTrue(installed)
+        assertEquals("INSTALLED", evidence["uriGrantsServiceManagerProxyStatus"])
+        assertEquals(
+            "com.test.minimal,com.multiapp.instance.abc",
+            evidence["uriGrantsServiceManagerProxySourcePackages"]
+        )
+        assertEquals("servicemanager-uri-grants-binder", evidence["uriGrantsServiceManagerProxyMode"])
     }
 
     @Test
@@ -232,6 +376,12 @@ class VirtualPackageManagerProxyStageTest {
         applicationPackageManagerPatchResults = applicationPatchResults,
         degradedReasons = degradedReasons
     )
+
+    private fun completeClipboardProxyInstallResult() =
+        VirtualClipboardServiceProxyInstallResult(
+            managerPatched = true,
+            serviceManagerPatched = true
+        )
 
     private fun snapshot() = VirtualPackageSnapshot(
         instanceId = "inst-001",

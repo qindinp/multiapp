@@ -24,15 +24,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.graphics.drawable.toBitmap
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
@@ -40,6 +39,7 @@ import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
+import com.multiapp.core.designsystem.components.rememberAppIconBitmap
 import com.multiapp.core.instance.isCloneCandidate
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
@@ -50,7 +50,7 @@ import com.multiapp.core.model.VirtualApp
 fun LauncherScreen(
     viewModel: LauncherViewModel = hiltViewModel()
 ) {
-    val uiState by viewModel.uiState.collectAsState()
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var showAppPicker by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf<VirtualInstanceRecord?>(null) }
@@ -282,23 +282,14 @@ private fun AppGrid(
     ) {
         itemsIndexed(
             instances,
-            key = { _, instance -> instance.instanceId }
-        ) { index, instance ->
-            var visible by remember { mutableStateOf(false) }
-            LaunchedEffect(instance) {
-                kotlinx.coroutines.delay(index * 40L)
-                visible = true
-            }
-            AnimatedVisibility(
-                visible = visible,
-                enter = fadeIn(tween(300)) + scaleIn(tween(300), initialScale = 0.85f),
-            ) {
-                AppGridItem(
-                    instance = instance,
-                    onLaunch = { onLaunch(instance) },
-                    onDelete = { onDelete(instance) }
-                )
-            }
+            key = { _, instance -> instance.instanceId },
+            contentType = { _, _ -> "instance" }
+        ) { _, instance ->
+            AppGridItem(
+                instance = instance,
+                onLaunch = { onLaunch(instance) },
+                onDelete = { onDelete(instance) }
+            )
         }
     }
 }
@@ -311,16 +302,7 @@ private fun AppGridItem(
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-
-    // Load app icon from origin package
-    val appIcon = remember(instance.originPackageName) {
-        try {
-            context.packageManager.getApplicationIcon(instance.originPackageName)
-        } catch (_: Exception) {
-            null
-        }
-    }
+    val appIcon = rememberInstalledAppIconBitmap(instance.originPackageName, 128)
 
     ElevatedCard(
         modifier = Modifier
@@ -355,9 +337,8 @@ private fun AppGridItem(
                 contentAlignment = Alignment.Center
             ) {
                 if (appIcon != null) {
-                    val bitmap = remember(appIcon) { appIcon.toBitmap(128, 128) }
                     Image(
-                        bitmap = bitmap.asImageBitmap(),
+                        bitmap = appIcon,
                         contentDescription = instance.displayName,
                         modifier = Modifier.size(48.dp).clip(RoundedCornerShape(12.dp))
                     )
@@ -372,23 +353,13 @@ private fun AppGridItem(
 
                 // Running indicator
                 if (instance.state == InstanceState.RUNNING) {
-                    val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-                    val pulseAlpha by infiniteTransition.animateFloat(
-                        initialValue = 0.5f,
-                        targetValue = 1f,
-                        animationSpec = infiniteRepeatable(
-                            tween(600, easing = FastOutSlowInEasing),
-                            RepeatMode.Reverse
-                        ),
-                        label = "pulseAlpha"
-                    )
                     Box(
                         modifier = Modifier
                             .align(Alignment.TopEnd)
                             .offset(x = 2.dp, y = (-2).dp)
                             .size(10.dp)
                             .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.tertiary.copy(alpha = pulseAlpha))
+                            .background(MaterialTheme.colorScheme.tertiary)
                     )
                 }
             }
@@ -524,10 +495,10 @@ private fun AppPickerSheet(
     onAppSelected: (VirtualApp) -> Unit,
     viewModel: LauncherViewModel
 ) {
-    val allApps by viewModel.allApps.collectAsState()
+    val allApps by viewModel.allApps.collectAsStateWithLifecycle()
     var searchQuery by remember { mutableStateOf("") }
     var showAdvancedApps by remember { mutableStateOf(false) }
-    val uiState by viewModel.uiState.collectAsState()
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
 
     LaunchedEffect(Unit) {
         viewModel.loadAllApps()
@@ -676,23 +647,14 @@ private fun AppPickerSheet(
                 ) {
                     lazyItemsIndexed(
                         filteredApps,
-                        key = { _, app -> app.packageName }
-                    ) { index, app ->
-                    var visible by remember { mutableStateOf(false) }
-                    LaunchedEffect(app) {
-                        kotlinx.coroutines.delay(index * 20L)
-                        visible = true
-                    }
-                    AnimatedVisibility(
-                        visible = visible,
-                        enter = fadeIn(tween(200)) + scaleIn(tween(200), initialScale = 0.9f),
-                    ) {
+                        key = { _, app -> app.packageName },
+                        contentType = { _, _ -> "app-picker-item" }
+                    ) { _, app ->
                         AppPickerItem(
                             app = app,
                             existingCount = instanceCounts[app.packageName] ?: 0,
                             onClick = { onAppSelected(app) }
                         )
-                    }
                 }
             }
             }
@@ -709,10 +671,7 @@ private fun AppPickerItem(
     onClick: () -> Unit
 ) {
     val canCreate = app.mainActivity != null
-    val context = LocalContext.current
-    val appIcon = remember(app.packageName, app.apkPath) {
-        loadVirtualAppIcon(context.applicationContext, app)
-    }
+    val appIcon = rememberVirtualAppIconBitmap(app, 112)
     ElevatedCard(
         onClick = { if (canCreate) onClick() },
         shape = RoundedCornerShape(14.dp),
@@ -738,10 +697,9 @@ private fun AppPickerItem(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                appIcon?.let { drawable ->
-                    val bitmap = remember(drawable) { drawable.toBitmap(112, 112) }
+                appIcon?.let { bitmap ->
                     Image(
-                        bitmap = bitmap.asImageBitmap(),
+                        bitmap = bitmap,
                         contentDescription = app.appName,
                         modifier = Modifier.size(42.dp).clip(RoundedCornerShape(10.dp))
                     )
@@ -799,10 +757,7 @@ private fun CreateInstanceDialog(
     onConfirm: (String) -> Unit
 ) {
     var displayName by remember(app.packageName, defaultName) { mutableStateOf(defaultName) }
-    val context = LocalContext.current
-    val appIcon = remember(app.packageName, app.apkPath) {
-        loadVirtualAppIcon(context.applicationContext, app)
-    }
+    val appIcon = rememberVirtualAppIconBitmap(app, 96)
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -818,9 +773,8 @@ private fun CreateInstanceDialog(
                         contentAlignment = Alignment.Center
                     ) {
                         if (appIcon != null) {
-                            val bitmap = remember(appIcon) { appIcon.toBitmap(96, 96) }
                             Image(
-                                bitmap = bitmap.asImageBitmap(),
+                                bitmap = appIcon,
                                 contentDescription = app.appName,
                                 modifier = Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))
                             )
@@ -979,6 +933,24 @@ private fun loadArchiveIcon(packageManager: PackageManager, apkPath: String): Dr
         appInfo.loadIcon(packageManager)
     }.getOrNull()
 }
+
+@Composable
+private fun rememberInstalledAppIconBitmap(packageName: String, sizePx: Int) =
+    rememberAppIconBitmap(
+        cacheKey = "installed:$packageName",
+        sizePx = sizePx
+    ) { context ->
+        context.packageManager.getApplicationIcon(packageName)
+    }
+
+@Composable
+private fun rememberVirtualAppIconBitmap(app: VirtualApp, sizePx: Int) =
+    rememberAppIconBitmap(
+        cacheKey = "virtual:${app.packageName}:${app.versionCode}:${app.apkPath}",
+        sizePx = sizePx
+    ) { context ->
+        loadVirtualAppIcon(context, app)
+    }
 
 private fun LauncherUiState.formattedError(): String {
     return listOfNotNull(

@@ -18,6 +18,8 @@ data class EngineProviderUriGrantRecord(
     val modeFlags: Int,
     val prefix: Boolean,
     val persistable: Boolean,
+    val persistedModeFlags: Int = 0,
+    val persistedAtMs: Long? = null,
     val createdAtMs: Long = System.currentTimeMillis(),
     val updatedAtMs: Long = createdAtMs
 ) {
@@ -27,7 +29,19 @@ data class EngineProviderUriGrantRecord(
         require(targetPackageName.isNotBlank()) { "targetPackageName must not be blank" }
         require(guestAuthority.isNotBlank()) { "guestAuthority must not be blank" }
         require(encodedPath.startsWith('/')) { "encodedPath must be absolute" }
-        require(modeFlags > 0) { "modeFlags must be positive" }
+        require(modeFlags > 0 || persistedModeFlags > 0) {
+            "transient or persisted modeFlags must be positive"
+        }
+        require(persistedModeFlags and EngineProviderUriGrantModes.ACCESS_MASK == persistedModeFlags) {
+            "persistedModeFlags must contain only read/write access modes"
+        }
+        require(persistedModeFlags == 0 || persistable) {
+            "persisted modes require a persistable grant"
+        }
+        require((persistedModeFlags == 0) == (persistedAtMs == null)) {
+            "persistedAtMs must match persistedModeFlags"
+        }
+        require(persistedAtMs == null || persistedAtMs > 0L) { "persistedAtMs must be positive" }
         require(createdAtMs > 0L) { "createdAtMs must be positive" }
         require(updatedAtMs >= createdAtMs) { "updatedAtMs must not precede createdAtMs" }
     }
@@ -35,6 +49,18 @@ data class EngineProviderUriGrantRecord(
 
 interface EngineProviderUriGrantStore {
     fun grant(record: EngineProviderUriGrantRecord): EngineProviderUriGrantRecord
+    fun takePersistable(
+        record: EngineProviderUriGrantRecord,
+        modeFlags: Int,
+        persistedAtMs: Long
+    ): EngineProviderUriGrantRecord?
+
+    fun releasePersistable(
+        record: EngineProviderUriGrantRecord,
+        modeFlags: Int,
+        updatedAtMs: Long
+    ): EngineProviderUriGrantRecord?
+
     fun revoke(
         ownerInstanceId: String,
         targetInstanceId: String?,
@@ -52,6 +78,7 @@ interface EngineProviderUriGrantStore {
     ): EngineProviderUriGrantRecord?
 
     fun listForInstance(instanceId: String): List<EngineProviderUriGrantRecord>
+    fun listPersistedForTarget(instanceId: String): List<EngineProviderUriGrantRecord>
     fun clearInstance(instanceId: String)
 }
 
@@ -80,6 +107,32 @@ class InMemoryEngineProviderUriGrantStore : EngineProviderUriGrantStore {
     }
 
     @Synchronized
+    override fun takePersistable(
+        record: EngineProviderUriGrantRecord,
+        modeFlags: Int,
+        persistedAtMs: Long
+    ): EngineProviderUriGrantRecord? = updatePersistedGrant(
+        records = records,
+        record = record,
+        modeFlags = modeFlags,
+        take = true,
+        timestampMs = persistedAtMs
+    )
+
+    @Synchronized
+    override fun releasePersistable(
+        record: EngineProviderUriGrantRecord,
+        modeFlags: Int,
+        updatedAtMs: Long
+    ): EngineProviderUriGrantRecord? = updatePersistedGrant(
+        records = records,
+        record = record,
+        modeFlags = modeFlags,
+        take = false,
+        timestampMs = updatedAtMs
+    )
+
+    @Synchronized
     override fun revoke(
         ownerInstanceId: String,
         targetInstanceId: String?,
@@ -105,10 +158,10 @@ class InMemoryEngineProviderUriGrantStore : EngineProviderUriGrantStore {
     ): EngineProviderUriGrantRecord? = records.values
         .asSequence()
         .filter {
-            it.ownerInstanceId == ownerInstanceId &&
+                it.ownerInstanceId == ownerInstanceId &&
                 it.targetInstanceId == targetInstanceId &&
                 it.guestAuthority == guestAuthority &&
-                it.modeFlags and requiredModeFlags == requiredModeFlags &&
+                it.effectiveModeFlags() and requiredModeFlags == requiredModeFlags &&
                 it.matchesPath(encodedPath)
         }
         .maxByOrNull { it.encodedPath.length }
@@ -116,6 +169,11 @@ class InMemoryEngineProviderUriGrantStore : EngineProviderUriGrantStore {
     @Synchronized
     override fun listForInstance(instanceId: String): List<EngineProviderUriGrantRecord> = records.values
         .filter { it.ownerInstanceId == instanceId || it.targetInstanceId == instanceId }
+        .sortedWith(grantComparator)
+
+    @Synchronized
+    override fun listPersistedForTarget(instanceId: String): List<EngineProviderUriGrantRecord> = records.values
+        .filter { it.targetInstanceId == instanceId && it.persistedModeFlags > 0 }
         .sortedWith(grantComparator)
 
     @Synchronized
@@ -144,6 +202,26 @@ class FileBackedEngineProviderUriGrantStore(
         records[merged.key()] = merged
         writeRecords(records.values.toList())
         merged
+    }
+
+    override fun takePersistable(
+        record: EngineProviderUriGrantRecord,
+        modeFlags: Int,
+        persistedAtMs: Long
+    ): EngineProviderUriGrantRecord? = withFileLock {
+        val records = readRecords().associateByTo(linkedMapOf()) { it.key() }
+        updatePersistedGrant(records, record, modeFlags, take = true, timestampMs = persistedAtMs)
+            ?.also { writeRecords(records.values.toList()) }
+    }
+
+    override fun releasePersistable(
+        record: EngineProviderUriGrantRecord,
+        modeFlags: Int,
+        updatedAtMs: Long
+    ): EngineProviderUriGrantRecord? = withFileLock {
+        val records = readRecords().associateByTo(linkedMapOf()) { it.key() }
+        updatePersistedGrant(records, record, modeFlags, take = false, timestampMs = updatedAtMs)
+            ?.also { writeRecords(records.values.toList()) }
     }
 
     override fun revoke(
@@ -191,6 +269,12 @@ class FileBackedEngineProviderUriGrantStore(
             .sortedWith(grantComparator)
     }
 
+    override fun listPersistedForTarget(instanceId: String): List<EngineProviderUriGrantRecord> = withFileLock {
+        readRecords()
+            .filter { it.targetInstanceId == instanceId && it.persistedModeFlags > 0 }
+            .sortedWith(grantComparator)
+    }
+
     override fun clearInstance(instanceId: String) = withFileLock {
         writeRecords(
             readRecords().filterNot {
@@ -215,6 +299,8 @@ class FileBackedEngineProviderUriGrantStore(
                     modeFlags = properties.required(prefix + MODE_FLAGS).toInt(),
                     prefix = properties.required(prefix + PREFIX).toBooleanStrict(),
                     persistable = properties.required(prefix + PERSISTABLE).toBooleanStrict(),
+                    persistedModeFlags = properties.int(prefix + PERSISTED_MODE_FLAGS),
+                    persistedAtMs = properties.longOrNull(prefix + PERSISTED_AT_MS),
                     createdAtMs = properties.required(prefix + CREATED_AT_MS).toLong(),
                     updatedAtMs = properties.required(prefix + UPDATED_AT_MS).toLong()
                 )
@@ -236,6 +322,8 @@ class FileBackedEngineProviderUriGrantStore(
                 setProperty(prefix + MODE_FLAGS, record.modeFlags.toString())
                 setProperty(prefix + PREFIX, record.prefix.toString())
                 setProperty(prefix + PERSISTABLE, record.persistable.toString())
+                setProperty(prefix + PERSISTED_MODE_FLAGS, record.persistedModeFlags.toString())
+                record.persistedAtMs?.let { setProperty(prefix + PERSISTED_AT_MS, it.toString()) }
                 setProperty(prefix + CREATED_AT_MS, record.createdAtMs.toString())
                 setProperty(prefix + UPDATED_AT_MS, record.updatedAtMs.toString())
             }
@@ -272,6 +360,8 @@ class FileBackedEngineProviderUriGrantStore(
 
     private fun Properties.int(key: String): Int = getProperty(key)?.toIntOrNull() ?: 0
 
+    private fun Properties.longOrNull(key: String): Long? = getProperty(key)?.toLongOrNull()
+
     private companion object {
         const val RECORD_COUNT = "record.count"
         const val RECORD_PREFIX = "record"
@@ -283,11 +373,15 @@ class FileBackedEngineProviderUriGrantStore(
         const val MODE_FLAGS = "modeFlags"
         const val PREFIX = "prefix"
         const val PERSISTABLE = "persistable"
+        const val PERSISTED_MODE_FLAGS = "persistedModeFlags"
+        const val PERSISTED_AT_MS = "persistedAtMs"
         const val CREATED_AT_MS = "createdAtMs"
         const val UPDATED_AT_MS = "updatedAtMs"
         val FILE_MONITORS = ConcurrentHashMap<String, Any>()
     }
 }
+
+private fun EngineProviderUriGrantRecord.effectiveModeFlags(): Int = modeFlags or persistedModeFlags
 
 private val grantComparator = compareBy(
     EngineProviderUriGrantRecord::ownerInstanceId,
@@ -305,7 +399,7 @@ private fun EngineProviderUriGrantRecord.key(): String = listOf(
     prefix.toString()
 ).joinToString("\u0000")
 
-private fun EngineProviderUriGrantRecord.matchesPath(requestedPath: String): Boolean =
+internal fun EngineProviderUriGrantRecord.matchesPath(requestedPath: String): Boolean =
     encodedPath == requestedPath || prefix && requestedPath.isSameOrDescendantOf(encodedPath)
 
 private fun String.isSameOrDescendantOf(parent: String): Boolean =
@@ -337,15 +431,56 @@ private fun revokeRecords(
             continue
         }
         val remainingModes = record.modeFlags and modeFlags.inv()
-        if (remainingModes == record.modeFlags) continue
+        val remainingPersistedModes = record.persistedModeFlags and modeFlags.inv()
+        if (
+            remainingModes == record.modeFlags &&
+            remainingPersistedModes == record.persistedModeFlags
+        ) {
+            continue
+        }
         iterator.remove()
         changed += 1
-        if (remainingModes > 0) {
-            replacements += record.copy(modeFlags = remainingModes, updatedAtMs = System.currentTimeMillis())
+        if (remainingModes > 0 || remainingPersistedModes > 0) {
+            replacements += record.copy(
+                modeFlags = remainingModes,
+                persistedModeFlags = remainingPersistedModes,
+                persistedAtMs = record.persistedAtMs.takeIf { remainingPersistedModes > 0 },
+                updatedAtMs = System.currentTimeMillis()
+            )
         }
     }
     replacements.forEach { records[it.key()] = it }
     return changed
+}
+
+private fun updatePersistedGrant(
+    records: MutableMap<String, EngineProviderUriGrantRecord>,
+    record: EngineProviderUriGrantRecord,
+    modeFlags: Int,
+    take: Boolean,
+    timestampMs: Long
+): EngineProviderUriGrantRecord? {
+    val requestedModes = modeFlags and EngineProviderUriGrantModes.ACCESS_MASK
+    if (requestedModes == 0 || timestampMs <= 0L) return null
+    val current = records[record.key()] ?: return null
+    val persistedModes = if (take) {
+        if (!current.persistable || current.modeFlags and requestedModes != requestedModes) return null
+        current.persistedModeFlags or requestedModes
+    } else {
+        if (current.persistedModeFlags and requestedModes == 0) return null
+        current.persistedModeFlags and requestedModes.inv()
+    }
+    val updated = current.copy(
+        persistedModeFlags = persistedModes,
+        persistedAtMs = timestampMs.takeIf { persistedModes > 0 },
+        updatedAtMs = maxOf(current.updatedAtMs, timestampMs)
+    )
+    if (updated.modeFlags == 0 && updated.persistedModeFlags == 0) {
+        records.remove(current.key())
+    } else {
+        records[current.key()] = updated
+    }
+    return updated
 }
 
 internal fun normalizeProviderGrantPath(encodedPath: String?): String =

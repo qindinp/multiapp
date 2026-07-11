@@ -35,6 +35,7 @@ class VirtualSystemServerTest {
         assertEquals(EngineSubsystem.PACKAGE, server.packageService.subsystem)
         assertEquals(EngineSubsystem.ACTIVITY, server.activityService.subsystem)
         assertEquals(EngineSubsystem.PROVIDER, server.providerService.subsystem)
+        assertEquals(EngineSubsystem.PERMISSION, server.permissionService.subsystem)
         assertEquals(EngineSubsystem.APP_OPS, server.appOpsService.subsystem)
         assertEquals(EngineSubsystem.SERVICE, server.serviceService.subsystem)
         assertEquals(EngineSubsystem.BROADCAST, server.broadcastService.subsystem)
@@ -76,6 +77,7 @@ class VirtualSystemServerTest {
 
         val activity = server.activityService.queryRuntimeBinding(runtime.instanceId)
         val provider = server.providerService.queryRuntimeBinding(runtime.instanceId)
+        val permission = server.permissionService.queryRuntimeBinding(runtime.instanceId)
         val appOps = server.appOpsService.queryRuntimeBinding(runtime.instanceId)
         val service = server.serviceService.queryRuntimeBinding(runtime.instanceId)
         val broadcast = server.broadcastService.queryRuntimeBinding(runtime.instanceId)
@@ -100,6 +102,10 @@ class VirtualSystemServerTest {
         assertTrue("same-process-preinstall" in provider.supportedOperations)
         assertTrue("custom-process-provider" in provider.unsupportedOperations)
 
+        assertEquals(EngineSubsystem.PERMISSION, permission.subsystem)
+        assertTrue("check-permission" in permission.supportedOperations)
+        assertTrue("runtime-permission-dialog" in permission.unsupportedOperations)
+
         assertEquals(EngineSubsystem.APP_OPS, appOps.subsystem)
         assertTrue("check-operation" in appOps.supportedOperations)
         assertTrue("note-operation" in appOps.unsupportedOperations)
@@ -110,7 +116,10 @@ class VirtualSystemServerTest {
         assertTrue("implicit-service-route" in service.supportedOperations)
         assertTrue("stop-service-route" in service.supportedOperations)
         assertTrue("on-start-command-result" in service.supportedOperations)
-        assertTrue("bind-service" in service.unsupportedOperations)
+        assertTrue("bind-service" in service.supportedOperations)
+        assertTrue("unbind-service" in service.supportedOperations)
+        assertTrue("cross-process-service" in service.unsupportedOperations)
+        assertTrue("binder-death-rebind" in service.unsupportedOperations)
 
         assertEquals(EngineSubsystem.BROADCAST, broadcast.subsystem)
         assertTrue("manifest-route-plan" in broadcast.supportedOperations)
@@ -560,8 +569,8 @@ class VirtualSystemServerTest {
         assertEquals(EngineResultStatus.FAIL, internalPlan.verdict)
         assertEquals("provider_cross_instance_not_exported", internalPlan.message)
         assertTrue(internalPlan.targets.isEmpty())
-        assertEquals(EngineResultStatus.UNSUPPORTED, protectedPlan.verdict)
-        assertTrue(protectedPlan.message.startsWith("provider_permission_service_unsupported:"))
+        assertEquals(EngineResultStatus.FAIL, protectedPlan.verdict)
+        assertTrue(protectedPlan.message.startsWith("provider_permission_denied:"))
         assertTrue(protectedPlan.targets.isEmpty())
     }
 
@@ -607,7 +616,7 @@ class VirtualSystemServerTest {
             )
         )
 
-        assertEquals(EngineResultStatus.UNSUPPORTED, writePlan.verdict)
+        assertEquals(EngineResultStatus.FAIL, writePlan.verdict)
         assertTrue(writePlan.message.contains("com.test.app.WRITE_FILES:access=WRITE"))
         assertEquals(EngineResultStatus.PARTIAL, typePlan.verdict)
         assertEquals("provider_route_planned", typePlan.message)
@@ -845,6 +854,72 @@ class VirtualSystemServerTest {
     }
 
     @Test
+    fun `provider persistable URI take and release are target owned and keep transient access`() {
+        val store = InMemoryEngineProviderUriGrantStore()
+        val server = DefaultVirtualSystemServer(
+            registry = EngineRuntimeRegistry(),
+            providerUriGrantStore = store
+        )
+        val target = server.runtimeService.register(runtime(instanceId = "target", processId = 4311))
+        val owner = server.runtimeService.register(
+            runtime(
+                instanceId = "owner",
+                processId = 4312,
+                providers = listOf(
+                    ResolvedComponent(
+                        name = "com.test.app.DocumentsProvider",
+                        authorities = listOf("com.test.app.documents"),
+                        exported = false,
+                        grantUriPermissions = true
+                    )
+                )
+            )
+        )
+        server.providerService.grantUriPermission(
+            owner.instanceId,
+            VirtualProviderUriGrantRequest(
+                guestAuthority = "com.test.app.documents",
+                encodedPath = "/documents/7",
+                modeFlags = EngineProviderUriGrantModes.READ or
+                    EngineProviderUriGrantModes.PERSISTABLE,
+                targetInstanceId = target.instanceId,
+                callingUid = 1000,
+                callingPid = 4312,
+                hostUid = 1000
+            )
+        )
+        val persistRequest = VirtualProviderUriGrantRequest(
+            guestAuthority = "com.test.app.documents",
+            encodedPath = "/documents/7",
+            modeFlags = EngineProviderUriGrantModes.READ,
+            ownerInstanceId = owner.instanceId,
+            targetInstanceId = target.instanceId,
+            callingUid = 1000,
+            callingPid = 4311,
+            hostUid = 1000
+        )
+
+        val taken = server.providerService.takePersistableUriPermission(
+            target.instanceId,
+            persistRequest
+        )
+        val released = server.providerService.releasePersistableUriPermission(
+            target.instanceId,
+            persistRequest
+        )
+        val transientCheck = server.providerService.checkUriPermission(
+            target.instanceId,
+            persistRequest.copy(callingPid = 4311)
+        )
+
+        assertEquals(EngineResultStatus.PARTIAL, taken.verdict)
+        assertEquals(EngineProviderUriGrantModes.READ, taken.persistedModeFlags)
+        assertEquals(0, released.persistedModeFlags)
+        assertTrue(store.listPersistedForTarget(target.instanceId).isEmpty())
+        assertTrue(transientCheck.granted)
+    }
+
+    @Test
     fun `provider path permission overrides unguarded provider permission by URI path`() {
         val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
         val caller = server.runtimeService.register(runtime(instanceId = "caller", processId = 4351))
@@ -894,10 +969,62 @@ class VirtualSystemServerTest {
             )
         )
 
-        assertEquals(EngineResultStatus.UNSUPPORTED, protectedPath.verdict)
+        assertEquals(EngineResultStatus.FAIL, protectedPath.verdict)
         assertTrue(protectedPath.message.contains("com.test.app.READ_PRIVATE:access=READ"))
         assertEquals(EngineResultStatus.PARTIAL, publicPath.verdict)
         assertEquals("provider_route_planned", publicPath.message)
+    }
+
+    @Test
+    fun `explicit virtual permission grant allows protected cross instance provider path`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val permission = "com.test.app.READ_PRIVATE"
+        val caller = server.runtimeService.register(
+            runtime(
+                instanceId = "caller",
+                processId = 4353,
+                permissions = listOf(permission)
+            )
+        )
+        val owner = server.runtimeService.register(
+            runtime(
+                instanceId = "owner",
+                processId = 4354,
+                providers = listOf(
+                    ResolvedComponent(
+                        name = "com.test.app.ProtectedProvider",
+                        authorities = listOf("com.test.app.protected"),
+                        exported = true,
+                        readPermission = permission
+                    )
+                )
+            )
+        )
+        server.permissionService.setPermissionGrant(
+            caller.instanceId,
+            permission,
+            granted = true,
+            source = EnginePermissionGrantSource.USER_DECISION
+        )
+
+        val plan = server.providerService.planProvider(
+            owner.instanceId,
+            authorizedProviderRequest(
+                target = owner,
+                caller = caller,
+                operation = EngineProviderOperation.QUERY,
+                guestAuthority = "com.test.app.protected",
+                callingPid = 4353
+            )
+        )
+
+        assertEquals(EngineResultStatus.PARTIAL, plan.verdict)
+        assertEquals("provider_route_planned_with_virtual_permission", plan.message)
+        assertEquals(1, plan.targets.size)
+        val evidence = server.runtimeService.evidence(owner.instanceId)
+            .operationEntries("provider", "plan")
+            .last()
+        assertEquals("VIRTUAL_PERMISSION_GRANTED:USER_DECISION", evidence.entries["providerPermissionVerdict"])
     }
 
     @Test
@@ -1090,8 +1217,7 @@ class VirtualSystemServerTest {
             runtime(
                 services = listOf(
                     ResolvedComponent(
-                        name = "com.test.app.SyncService",
-                        processName = "com.test.app:sync"
+                        name = "com.test.app.SyncService"
                     )
                 )
             )
@@ -1113,7 +1239,8 @@ class VirtualSystemServerTest {
         assertEquals("explicit", plan.targets.single().reason)
         assertEquals(VirtualServiceOperation.START, plan.targets.single().operation)
         assertEquals(runtime.processSlot, plan.targets.single().processSlot)
-        assertEquals("com.test.app:sync", plan.targets.single().processName)
+        assertEquals(runtime.processName, plan.targets.single().processName)
+        assertTrue(plan.targets.single().sameProcess)
         val evidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("service", "plan")
             ?.single()
@@ -1189,12 +1316,13 @@ class VirtualSystemServerTest {
         assertEquals(EngineResultStatus.PARTIAL, plan.verdict)
         assertEquals("explicit_service_stop_route_planned", plan.message)
         assertEquals("explicitStop", plan.targets.single().reason)
-        assertTrue("bind-service" in plan.unsupportedOperations)
+        assertTrue("cross-process-service" in plan.unsupportedOperations)
+        assertTrue("binder-death-rebind" in plan.unsupportedOperations)
         assertTrue("sticky-restart" in plan.unsupportedOperations)
     }
 
     @Test
-    fun `service service reports unsupported bind foreground type and sticky restart semantics`() {
+    fun `service service reports unsupported foreground type and sticky restart semantics`() {
         val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
         val runtime = server.runtimeService.register(runtime())
 
@@ -1210,14 +1338,77 @@ class VirtualSystemServerTest {
 
         assertEquals(EngineResultStatus.UNSUPPORTED, plan.verdict)
         assertTrue(plan.targets.isEmpty())
-        assertTrue("bind-service" in plan.unsupportedOperations)
         assertTrue("foreground-service-type" in plan.unsupportedOperations)
         assertTrue("sticky-restart" in plan.unsupportedOperations)
         val evidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("service", "plan")
             ?.single()
         assertEquals(EngineResultStatus.UNSUPPORTED, evidence?.verdict)
-        assertTrue(evidence?.entries?.get("unsupportedOperations").orEmpty().contains("bind-service"))
+        assertTrue(evidence?.entries?.get("unsupportedOperations").orEmpty().contains("foreground-service-type"))
+    }
+
+    @Test
+    fun `service service plans same process bind and connection unbind`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(
+            runtime(
+                services = listOf(
+                    ResolvedComponent(
+                        name = "com.test.app.SyncService",
+                        resolvedIntentFilters = listOf(
+                            ResolvedIntentFilter(actions = listOf("test.SYNC"))
+                        )
+                    )
+                )
+            )
+        )
+
+        val bindPlan = server.serviceService.planService(
+            instanceId = runtime.instanceId,
+            request = VirtualServiceDispatchPlanRequest(
+                operation = VirtualServiceOperation.BIND,
+                action = "test.SYNC"
+            )
+        )
+        val unbindPlan = server.serviceService.planService(
+            instanceId = runtime.instanceId,
+            request = VirtualServiceDispatchPlanRequest(operation = VirtualServiceOperation.UNBIND)
+        )
+
+        assertEquals(EngineResultStatus.PARTIAL, bindPlan.verdict)
+        assertEquals("implicit_service_route_planned", bindPlan.message)
+        assertTrue(bindPlan.targets.single().sameProcess)
+        assertEquals("implicitBind", bindPlan.targets.single().reason)
+        assertEquals(EngineResultStatus.PARTIAL, unbindPlan.verdict)
+        assertEquals("service_unbind_connection_route_planned", unbindPlan.message)
+    }
+
+    @Test
+    fun `service service rejects custom process routes before loader dispatch`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(
+            runtime(
+                services = listOf(
+                    ResolvedComponent(
+                        name = "com.test.app.RemoteService",
+                        processName = ":remote"
+                    )
+                )
+            )
+        )
+
+        val plan = server.serviceService.planService(
+            instanceId = runtime.instanceId,
+            request = VirtualServiceDispatchPlanRequest(
+                operation = VirtualServiceOperation.BIND,
+                serviceClassName = "RemoteService"
+            )
+        )
+
+        assertEquals(EngineResultStatus.UNSUPPORTED, plan.verdict)
+        assertEquals("service_cross_process_unsupported", plan.message)
+        assertTrue(plan.targets.isEmpty())
+        assertEquals(setOf("cross-process-service"), plan.unsupportedOperations)
     }
 
     @Test
@@ -1526,7 +1717,8 @@ class VirtualSystemServerTest {
         processId: Int? = null,
         services: List<ResolvedComponent> = emptyList(),
         receivers: List<ResolvedComponent> = emptyList(),
-        providers: List<ResolvedComponent> = emptyList()
+        providers: List<ResolvedComponent> = emptyList(),
+        permissions: List<String> = emptyList()
     ) = VirtualInstanceRuntime(
         instanceId = instanceId,
         hostPackageName = "com.multiapp.app",
@@ -1546,7 +1738,8 @@ class VirtualSystemServerTest {
             dataDir = "build/tmp/$instanceId",
             services = services,
             receivers = receivers,
-            providers = providers
+            providers = providers,
+            permissions = permissions
         ),
         profile = EngineProfile.BASELINE,
         processSlot = "com.multiapp.app:v0",

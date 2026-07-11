@@ -21,7 +21,9 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
  */
 class VirtualPackageService(
     private val snapshot: VirtualPackageSnapshot,
-    private val packageSigningInfo: VirtualPackageSigningInfo? = null
+    private val packageSigningInfo: VirtualPackageSigningInfo? = null,
+    private val permissionCheckDispatcher: VirtualPermissionCheckDispatcher =
+        VirtualPermissionCheckDispatcher(VirtualPermissionCheckDispatchers::dispatch)
 ) {
 
     fun getPackageInfo(packageName: String): PackageInfo? =
@@ -124,7 +126,15 @@ class VirtualPackageService(
 
     fun checkPermission(permissionName: String, packageName: String): Int? {
         if (!snapshot.matchesPackageName(packageName)) return null
-        return if (permissionName in snapshot.permissions) {
+        if (permissionName !in snapshot.permissions) return PackageManager.PERMISSION_DENIED
+        val result = permissionCheckDispatcher.dispatch(
+            VirtualPermissionCheckRequest(
+                instanceId = snapshot.instanceId,
+                packageName = packageName,
+                permissionName = permissionName
+            )
+        )
+        return if (result.handled && result.granted) {
             PackageManager.PERMISSION_GRANTED
         } else {
             PackageManager.PERMISSION_DENIED
@@ -145,7 +155,11 @@ class VirtualPackageService(
 
     fun getPackagesHoldingPermissions(permissions: Array<String>): List<PackageInfo> {
         if (permissions.isEmpty()) return emptyList()
-        return if (permissions.any { it in snapshot.permissions }) {
+        return if (
+            permissions.any {
+                checkPermission(it, snapshot.originPackageName) == PackageManager.PERMISSION_GRANTED
+            }
+        ) {
             listOf(VirtualPackageInfoFactory.packageInfo(snapshot, packageSigningInfo))
         } else {
             emptyList()

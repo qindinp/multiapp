@@ -10,6 +10,8 @@ class ApplicationStage(
     private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String?,
     private val guestApplicationCreator: GuestApplicationCreator = LoadedApkGuestApplicationCreator(),
     private val providerPreinstaller: GuestProviderPreinstaller = GuestProviderPreinstaller(),
+    private val applicationThreadRunner: ApplicationThreadRunner = DirectApplicationThreadRunner,
+    private val applicationOnCreateInvoker: (Application) -> Unit = Application::onCreate,
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
@@ -58,8 +60,7 @@ class ApplicationStage(
             )
         }
 
-        val applicationThread = currentApplicationThreadEvidence()
-
+        var applicationThread: ApplicationThreadEvidence? = null
         var runtimePublishedBeforeOnCreate = false
         var providerPreinstallEvidence = emptyList<BootstrapEvidence>()
         fun progress(status: String, detail: String, extra: Map<String, String> = emptyMap()) {
@@ -82,64 +83,67 @@ class ApplicationStage(
         }
 
         return runCatching {
-            val context = hostContext
-                ?: throw IllegalStateException("hostContext is required for Application creation")
-            progress("STARTED", "guest Application creation started")
-            val virtualContextConfig = VirtualContextConfig(
-                instanceId = input.instanceId,
-                originPackageName = instance.originPackageName,
-                virtualPackageName = instance.virtualPackageName,
-                dataDir = instance.dataRoot,
-                sourceDir = originApkPath,
-                nativeLibraryDir = input.nativeLibraryDir,
-                classLoader = guestClassLoader,
-                applicationLabel = packageSnapshot.applicationLabel,
-                packageSnapshot = packageSnapshot,
-                splitSourceDirs = packageSnapshot.splitSourceDirs,
-                splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
-                splitNames = packageSnapshot.splitNames,
-                isolatedSplits = packageSnapshot.isolatedSplits,
-                processSlot = input.processSlot
-            )
-            val creation = guestApplicationCreator.create(
-                GuestApplicationCreateRequest(
-                    applicationClassName = appClassName,
-                    applicationClassSource = appClassSource,
-                    hostContext = context,
-                    virtualContextConfig = virtualContextConfig,
-                    guestClassLoader = guestClassLoader,
-                    processRuntime = processRuntime,
-                    activityRecordManager = activityRecordManager,
-                    progress = { status, detail, extra -> progress(status, detail, extra) }
+            applicationThreadRunner.run {
+                applicationThread = currentApplicationThreadEvidence()
+                val context = hostContext
+                    ?: throw IllegalStateException("hostContext is required for Application creation")
+                progress("STARTED", "guest Application creation started")
+                val virtualContextConfig = VirtualContextConfig(
+                    instanceId = input.instanceId,
+                    originPackageName = instance.originPackageName,
+                    virtualPackageName = instance.virtualPackageName,
+                    dataDir = instance.dataRoot,
+                    sourceDir = originApkPath,
+                    nativeLibraryDir = input.nativeLibraryDir,
+                    classLoader = guestClassLoader,
+                    applicationLabel = packageSnapshot.applicationLabel,
+                    packageSnapshot = packageSnapshot,
+                    splitSourceDirs = packageSnapshot.splitSourceDirs,
+                    splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
+                    splitNames = packageSnapshot.splitNames,
+                    isolatedSplits = packageSnapshot.isolatedSplits,
+                    processSlot = input.processSlot
                 )
-            )
-            progress(
-                "APPLICATION_ATTACHED",
-                "guest Application attachBaseContext returned",
-                mapOf("attachedContextPackageName" to creation.attachedContextPackageName.orEmpty())
-            )
-            publishRuntimeBeforeOnCreate(input, creation.application)
-            runtimePublishedBeforeOnCreate = true
-            progress("RUNTIME_PUBLISHED", "runtime published before Application.onCreate")
-            val providerPreinstallResult = providerPreinstaller.preinstall(
-                GuestProviderPreinstallRequest(
-                    hostPackageName = runCatching { context.packageName }.getOrNull().orEmpty(),
-                    snapshot = packageSnapshot,
-                    application = creation.application,
-                    guestClassLoader = guestClassLoader,
-                    config = virtualContextConfig
+                val creation = guestApplicationCreator.create(
+                    GuestApplicationCreateRequest(
+                        applicationClassName = appClassName,
+                        applicationClassSource = appClassSource,
+                        hostContext = context,
+                        virtualContextConfig = virtualContextConfig,
+                        guestClassLoader = guestClassLoader,
+                        processRuntime = processRuntime,
+                        activityRecordManager = activityRecordManager,
+                        progress = { status, detail, extra -> progress(status, detail, extra) }
+                    )
                 )
-            )
-            providerPreinstallEvidence = providerPreinstallResult.toEvidence()
-            progress(
-                "PROVIDER_PREINSTALL_FINISHED",
-                "same-process provider preinstall finished before Application.onCreate",
-                providerPreinstallEvidence.associate { it.key to it.value }
-            )
-            progress("ON_CREATE_STARTED", "guest Application.onCreate started")
-            creation.application.onCreate()
-            progress("ON_CREATE_FINISHED", "guest Application.onCreate returned")
-            creation
+                progress(
+                    "APPLICATION_ATTACHED",
+                    "guest Application attachBaseContext returned",
+                    mapOf("attachedContextPackageName" to creation.attachedContextPackageName.orEmpty())
+                )
+                publishRuntimeBeforeOnCreate(input, creation.application)
+                runtimePublishedBeforeOnCreate = true
+                progress("RUNTIME_PUBLISHED", "runtime published before Application.onCreate")
+                val providerPreinstallResult = providerPreinstaller.preinstall(
+                    GuestProviderPreinstallRequest(
+                        hostPackageName = runCatching { context.packageName }.getOrNull().orEmpty(),
+                        snapshot = packageSnapshot,
+                        application = creation.application,
+                        guestClassLoader = guestClassLoader,
+                        config = virtualContextConfig
+                    )
+                )
+                providerPreinstallEvidence = providerPreinstallResult.toEvidence()
+                progress(
+                    "PROVIDER_PREINSTALL_FINISHED",
+                    "same-process provider preinstall finished before Application.onCreate",
+                    providerPreinstallEvidence.associate { it.key to it.value }
+                )
+                progress("ON_CREATE_STARTED", "guest Application.onCreate started")
+                applicationOnCreateInvoker(creation.application)
+                progress("ON_CREATE_FINISHED", "guest Application.onCreate returned")
+                creation
+            }
         }.fold(
             onSuccess = { creation ->
                 BootstrapStageOutput(
@@ -150,12 +154,12 @@ class ApplicationStage(
                         evidence = listOf(
                             BootstrapEvidence("applicationClass", appClassName),
                             BootstrapEvidence("applicationClassSource", appClassSource),
-                            BootstrapEvidence("applicationThreadName", applicationThread.name),
-                            BootstrapEvidence("applicationThreadHasLooper", applicationThread.hasLooper.toString()),
-                            BootstrapEvidence("applicationThreadIsMain", applicationThread.isMain.toString()),
+                            BootstrapEvidence("applicationThreadName", applicationThread?.name.orEmpty()),
+                            BootstrapEvidence("applicationThreadHasLooper", applicationThread?.hasLooper.toString()),
+                            BootstrapEvidence("applicationThreadIsMain", applicationThread?.isMain.toString()),
                             BootstrapEvidence(
                                 "applicationThreadLooperProbeSkippedReason",
-                                applicationThread.looperProbeSkippedReason.orEmpty()
+                                applicationThread?.looperProbeSkippedReason.orEmpty()
                             ),
                             BootstrapEvidence("attached", "true"),
                             BootstrapEvidence("onCreate", "true"),
@@ -265,9 +269,6 @@ class ApplicationStage(
 class LoadedApkGuestApplicationCreator(
     private val fallback: GuestApplicationCreator = ReflectiveGuestApplicationCreator(),
     private val activityThreadProvider: () -> Any = { ActivityThreadCompat.currentActivityThread() },
-    private val instrumentationProvider: (Any) -> android.app.Instrumentation = { activityThread ->
-        ActivityThreadCompat.getInstrumentation(activityThread)
-    },
     private val loadedApkInstaller: (
         activityThread: Any,
         state: LoadedApkRuntimeState,
@@ -281,7 +282,7 @@ class LoadedApkGuestApplicationCreator(
     },
     private val resourceBundleProvider: (Context, VirtualContextConfig) -> VirtualResourceBundle =
         { context, config -> VirtualResourcesManager(context).create(config) },
-    private val makeApplicationInvoker: (Any, android.app.Instrumentation) -> Application =
+    private val makeApplicationInvoker: (Any, android.app.Instrumentation?) -> Application =
         { loadedApk, instrumentation -> invokeMakeApplication(loadedApk, instrumentation) }
 ) : GuestApplicationCreator {
     override fun create(request: GuestApplicationCreateRequest): GuestApplicationCreateResult {
@@ -317,7 +318,7 @@ class LoadedApkGuestApplicationCreator(
             name = className
         }
         val state = LoadedApkRuntimeState(
-            packageName = snapshot.virtualPackageName,
+            packageName = snapshot.originPackageName,
             applicationInfo = applicationInfo,
             resources = resourceBundle.resources,
             classLoader = request.guestClassLoader,
@@ -337,9 +338,12 @@ class LoadedApkGuestApplicationCreator(
                 "loadedApkAliasCount" to installResult.installedAliasCount.toString()
             )
         )
-        val instrumentation = instrumentationProvider(activityThread)
-        request.progress("MAKE_APPLICATION_STARTED", "calling LoadedApk.makeApplication", emptyMap())
-        val application = makeApplicationInvoker(loadedApk, instrumentation)
+        request.progress(
+            "MAKE_APPLICATION_STARTED",
+            "calling LoadedApk.makeApplication without Application.onCreate",
+            mapOf("instrumentationArgument" to "null")
+        )
+        val application = makeApplicationInvoker(loadedApk, null)
         request.progress(
             "MAKE_APPLICATION_FINISHED",
             "LoadedApk.makeApplication returned",
@@ -364,7 +368,8 @@ class LoadedApkGuestApplicationCreator(
                 BootstrapEvidence("loadedApkApplicationCreatorSkippedFields", installResult.patchResult.skippedFieldReasons.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationCreatorInstalledAliasCount", installResult.installedAliasCount.toString()),
                 BootstrapEvidence("loadedApkApplicationCreatorBindPatchedFields", bindResult.patchedFields.joinToString(",")),
-                BootstrapEvidence("loadedApkApplicationCreatorBindSkippedFields", bindResult.skippedFieldReasons.joinToString(","))
+                BootstrapEvidence("loadedApkApplicationCreatorBindSkippedFields", bindResult.skippedFieldReasons.joinToString(",")),
+                BootstrapEvidence("loadedApkApplicationOnCreateDeferred", "true")
             )
         )
     }
@@ -372,7 +377,7 @@ class LoadedApkGuestApplicationCreator(
     companion object {
         private fun invokeMakeApplication(
             loadedApk: Any,
-            instrumentation: android.app.Instrumentation
+            instrumentation: android.app.Instrumentation?
         ): Application {
             val method = findMakeApplicationMethod(loadedApk.javaClass)
                 ?: throw NoSuchMethodException("LoadedApk.makeApplication(boolean, Instrumentation)")

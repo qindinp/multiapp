@@ -291,6 +291,16 @@ class ApplicationStageTest {
                 )
             },
             providerPreinstaller = GuestProviderPreinstaller(providerRuntime = providerRuntime),
+            applicationThreadRunner = object : ApplicationThreadRunner {
+                override fun <T> run(block: () -> T): T {
+                    ProviderPreinstallOrderApplication.events += "applicationThread"
+                    return block()
+                }
+            },
+            applicationOnCreateInvoker = { application ->
+                ProviderPreinstallOrderApplication.events += "instrumentationOnCreate"
+                application.onCreate()
+            },
             runtimePublisher = { _, _ -> ProviderPreinstallOrderApplication.events += "runtimePublished" },
             clock = fixedClock(700L, 733L)
         )
@@ -299,7 +309,13 @@ class ApplicationStageTest {
 
         assertEquals(BootstrapStatus.SUCCESS, output.result.status)
         assertEquals(
-            listOf("runtimePublished", "providerAttach:com.example.app.preinstall", "onCreate"),
+            listOf(
+                "applicationThread",
+                "runtimePublished",
+                "providerAttach:com.example.app.preinstall",
+                "instrumentationOnCreate",
+                "onCreate"
+            ),
             ProviderPreinstallOrderApplication.events
         )
         val evidence = output.result.evidence.associate { it.key to it.value }
@@ -318,7 +334,6 @@ class ApplicationStageTest {
         val progressStatuses = mutableListOf<String>()
         val creator = LoadedApkGuestApplicationCreator(
             activityThreadProvider = { Any() },
-            instrumentationProvider = { mockk(relaxed = true) },
             resourceBundleProvider = { _, _ ->
                 VirtualResourceBundle(
                     applicationInfo = ApplicationInfo(),
@@ -342,8 +357,9 @@ class ApplicationStageTest {
                     loadedApk = loadedApk
                 )
             },
-            makeApplicationInvoker = { actualLoadedApk, _ ->
+            makeApplicationInvoker = { actualLoadedApk, instrumentation ->
                 assertSame(loadedApk, actualLoadedApk)
+                assertNull(instrumentation)
                 application
             }
         )
@@ -371,7 +387,7 @@ class ApplicationStageTest {
         )
 
         assertSame(application, result.application)
-        assertEquals(snapshot.virtualPackageName, capturedState?.packageName)
+        assertEquals(snapshot.originPackageName, capturedState?.packageName)
         assertEquals(TestApplication::class.java.name, capturedState?.applicationInfo?.className)
         assertEquals(listOf(snapshot.originPackageName, snapshot.virtualPackageName), capturedAliases?.toList())
         assertTrue("LOADED_APK_CREATE_STARTED" in progressStatuses)
@@ -380,6 +396,7 @@ class ApplicationStageTest {
         assertEquals("LOADED_APK_MAKE_APPLICATION", evidence["applicationCreator"])
         assertEquals("PASS", evidence["loadedApkApplicationCreatorStatus"])
         assertEquals("GUEST_SANDBOX", evidence["loadedApkApplicationCreatorSource"])
+        assertEquals("true", evidence["loadedApkApplicationOnCreateDeferred"])
     }
 
     private fun stageInput(packageSnapshot: VirtualPackageSnapshot = packageSnapshot()) = BootstrapStageInput(

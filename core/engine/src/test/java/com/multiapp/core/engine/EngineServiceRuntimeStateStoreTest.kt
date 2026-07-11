@@ -28,17 +28,42 @@ class EngineServiceRuntimeStateStoreTest {
         assertEquals("com.test.PushService", reader.list("instance-2").single().serviceClassName)
     }
 
+    @Test
+    fun `file backed store restores bound only Service lifecycle`(@TempDir tempDir: File) {
+        val file = File(tempDir, EngineServiceRuntimeStateFiles.DEFAULT_FILE_NAME)
+        FileBackedEngineServiceRuntimeStateStore(file).upsert(
+            record(
+                instanceId = "instance-1",
+                serviceClassName = "com.test.BoundService",
+                state = EngineServiceLifecycleState.BOUND,
+                activeStartCount = 0,
+                activeBindCount = 2
+            )
+        )
+
+        val restored = FileBackedEngineServiceRuntimeStateStore(file)
+            .list("instance-1")
+            .single()
+
+        assertEquals(EngineServiceLifecycleState.BOUND, restored.state)
+        assertEquals(0, restored.activeStartCount)
+        assertEquals(2, restored.activeBindCount)
+    }
+
     private fun record(
         instanceId: String,
-        serviceClassName: String
+        serviceClassName: String,
+        state: EngineServiceLifecycleState = EngineServiceLifecycleState.STARTED,
+        activeStartCount: Int = 2,
+        activeBindCount: Int = 1
     ) = EngineServiceRuntimeRecord(
         instanceId = instanceId,
         serviceClassName = serviceClassName,
         processSlot = "com.multiapp.app:v1",
         runtimeEpoch = 1L,
-        state = EngineServiceLifecycleState.STARTED,
-        activeStartCount = 2,
-        activeBindCount = 1,
+        state = state,
+        activeStartCount = activeStartCount,
+        activeBindCount = activeBindCount,
         cached = true,
         startCommandResult = 3,
         updatedAtMs = 100L

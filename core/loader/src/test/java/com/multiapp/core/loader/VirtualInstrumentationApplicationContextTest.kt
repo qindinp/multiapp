@@ -37,7 +37,7 @@ class VirtualInstrumentationApplicationContextTest {
     }
 
     @Test
-    fun `newApplication wraps framework virtual context before guest attach`() {
+    fun `newApplication wraps the framework guest context without breaking its base chain`() {
         val snapshot = snapshot()
         VirtualPackageRegistry.global.register(snapshot)
         val hostContext = contextForPackage("com.multiapp.app")
@@ -59,6 +59,7 @@ class VirtualInstrumentationApplicationContextTest {
         assertSame(application, created)
         val guestContext = assertIs<VirtualContextWrapper>(contextSlot.captured)
         assertEquals(snapshot.originPackageName, guestContext.packageName)
+        assertSame(frameworkContext, guestContext.baseContext)
         verify(exactly = 1) {
             base.newApplication(classLoader, "li.songe.gkd.App", any())
         }

@@ -26,6 +26,7 @@ interface VirtualSystemServer {
     val packageService: VirtualPackageService
     val activityService: VirtualActivityService
     val providerService: VirtualProviderService
+    val permissionService: VirtualPermissionService
     val appOpsService: VirtualAppOpsService
     val serviceService: VirtualServiceService
     val broadcastService: VirtualBroadcastService
@@ -154,6 +155,16 @@ interface VirtualProviderService : VirtualRuntimeBoundSubsystemService {
     ): VirtualProviderUriGrantResult
 
     fun checkUriPermission(
+        targetInstanceId: String,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult
+
+    fun takePersistableUriPermission(
+        targetInstanceId: String,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult
+
+    fun releasePersistableUriPermission(
         targetInstanceId: String,
         request: VirtualProviderUriGrantRequest
     ): VirtualProviderUriGrantResult
@@ -506,6 +517,7 @@ data class VirtualProviderUriGrantResult(
     val verdict: EngineResultStatus,
     val granted: Boolean,
     val affectedGrantCount: Int = 0,
+    val persistedModeFlags: Int = 0,
     val message: String
 )
 
@@ -643,6 +655,7 @@ data class VirtualServiceDispatchTarget(
     val operation: VirtualServiceOperation,
     val processSlot: String,
     val processName: String? = null,
+    val sameProcess: Boolean = true,
     val foreground: Boolean = false,
     val priority: Int = 0
 ) {
@@ -688,6 +701,7 @@ data class VirtualServiceOperationResult(
     val stopped: Boolean = false,
     val bound: Boolean = false,
     val unbound: Boolean = false,
+    val destroyed: Boolean = false,
     val foreground: Boolean = false,
     val startCommandResult: Int? = null,
     val processSlot: String? = null,
@@ -930,6 +944,7 @@ class DefaultVirtualSystemServer(
     serviceRuntimeStateStore: EngineServiceRuntimeStateStore = InMemoryEngineServiceRuntimeStateStore(),
     providerRuntimeStateStore: EngineProviderRuntimeStateStore = InMemoryEngineProviderRuntimeStateStore(),
     providerUriGrantStore: EngineProviderUriGrantStore = InMemoryEngineProviderUriGrantStore(),
+    permissionGrantStore: EnginePermissionGrantStore = InMemoryEnginePermissionGrantStore(),
     appOpsStateStore: EngineAppOpsStateStore = InMemoryEngineAppOpsStateStore(),
     broadcastRuntimeStateStore: EngineBroadcastRuntimeStateStore = InMemoryEngineBroadcastRuntimeStateStore()
 ) : VirtualSystemServer {
@@ -941,11 +956,16 @@ class DefaultVirtualSystemServer(
         activityTaskStateStore,
         activityRecordManager
     )
+    override val permissionService: VirtualPermissionService = RegistryBackedVirtualPermissionService(
+        runtimeService,
+        permissionGrantStore
+    )
     override val providerService: VirtualProviderService = RegistryBackedVirtualProviderService(
         runtimeService,
         packageService,
         providerRuntimeStateStore,
-        providerUriGrantStore
+        providerUriGrantStore,
+        permissionService
     )
     override val appOpsService: VirtualAppOpsService = RegistryBackedVirtualAppOpsService(
         runtimeService,
@@ -969,7 +989,8 @@ class DefaultVirtualSystemServer(
         serviceService,
         providerService,
         broadcastService,
-        appOpsService
+        appOpsService,
+        permissionService
     )
 }
 
@@ -1556,7 +1577,10 @@ internal class RegistryBackedVirtualProviderService(
     private val runtimeService: VirtualRuntimeService,
     private val packageService: VirtualPackageService,
     private val stateStore: EngineProviderRuntimeStateStore = InMemoryEngineProviderRuntimeStateStore(),
-    private val uriGrantStore: EngineProviderUriGrantStore = InMemoryEngineProviderUriGrantStore()
+    private val uriGrantStore: EngineProviderUriGrantStore = InMemoryEngineProviderUriGrantStore(),
+    private val permissionService: VirtualPermissionService = RegistryBackedVirtualPermissionService(
+        runtimeService
+    )
 ) : RegistryBackedRuntimeBoundSubsystemService(
     runtimeService = runtimeService,
     subsystem = EngineSubsystem.PROVIDER,
@@ -1567,10 +1591,11 @@ internal class RegistryBackedVirtualProviderService(
         "operation-route-plan",
         "uri-grant-record",
         "uri-grant-check",
-        "uri-grant-revoke"
+        "uri-grant-revoke",
+        "persisted-uri-grant-take",
+        "persisted-uri-grant-release"
     ),
     unsupportedOperations = setOf(
-        "persisted-uri-grant-take-release",
         "external-uri-grant",
         "custom-process-provider"
     )
@@ -1582,10 +1607,11 @@ internal class RegistryBackedVirtualProviderService(
         "operation-route-plan",
         "uri-grant-record",
         "uri-grant-check",
-        "uri-grant-revoke"
+        "uri-grant-revoke",
+        "persisted-uri-grant-take",
+        "persisted-uri-grant-release"
     )
     private val unsupportedProviderOperations = setOf(
-        "persisted-uri-grant-take-release",
         "external-uri-grant",
         "custom-process-provider"
     )
@@ -1980,6 +2006,141 @@ internal class RegistryBackedVirtualProviderService(
         ).also(::recordUriGrantEvidence)
     }
 
+    override fun takePersistableUriPermission(
+        targetInstanceId: String,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult {
+        val target = runtimeService.get(targetInstanceId)
+            ?: return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                "runtime_not_found:$targetInstanceId",
+                targetInstanceId
+            )
+        validateUriGrantCaller(target, request)?.let { return it }
+        validatePersistableUriGrantRequest(target, request)?.let { return it }
+        val requestedModes = request.modeFlags and EngineProviderUriGrantModes.ACCESS_MASK
+        val candidates = uriGrantStore.listForInstance(target.instanceId)
+            .asSequence()
+            .filter { it.targetInstanceId == target.instanceId }
+            .filter { request.ownerInstanceId == null || it.ownerInstanceId == request.ownerInstanceId }
+            .filter { it.guestAuthority == request.guestAuthority }
+            .filter { it.persistable && it.modeFlags and requestedModes == requestedModes }
+            .filter { it.matchesPath(request.encodedPath) }
+            .toList()
+        val selected = selectPersistableGrant(candidates, request, target.instanceId, "take")
+            ?: return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                "provider_persistable_uri_grant_not_offered",
+                target.instanceId
+            ).also(::recordUriGrantEvidence)
+        if (selected is PersistableGrantSelection.Ambiguous) {
+            return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                selected.message,
+                target.instanceId,
+                EngineResultStatus.UNSUPPORTED
+            ).also(::recordUriGrantEvidence)
+        }
+        val record = (selected as PersistableGrantSelection.Selected).record
+        val owner = runtimeService.get(record.ownerInstanceId)
+            ?: return uriGrantFailure(
+                record.ownerInstanceId,
+                request,
+                "provider_uri_grant_owner_runtime_not_found:${record.ownerInstanceId}",
+                target.instanceId
+            ).also(::recordUriGrantEvidence)
+        val persisted = uriGrantStore.takePersistable(
+            record = record,
+            modeFlags = requestedModes,
+            persistedAtMs = System.currentTimeMillis()
+        ) ?: return uriGrantFailure(
+            owner.instanceId,
+            request,
+            "provider_persistable_uri_grant_take_rejected",
+            target.instanceId
+        ).also(::recordUriGrantEvidence)
+        return uriGrantResult(
+            owner = owner,
+            target = target,
+            request = request,
+            verdict = EngineResultStatus.PARTIAL,
+            granted = true,
+            affectedGrantCount = 1,
+            persistedModeFlags = persisted.persistedModeFlags,
+            message = "provider_persistable_uri_grant_taken:modes=${persisted.persistedModeFlags}"
+        ).also(::recordUriGrantEvidence)
+    }
+
+    override fun releasePersistableUriPermission(
+        targetInstanceId: String,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult {
+        val target = runtimeService.get(targetInstanceId)
+            ?: return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                "runtime_not_found:$targetInstanceId",
+                targetInstanceId
+            )
+        validateUriGrantCaller(target, request)?.let { return it }
+        validatePersistableUriGrantRequest(target, request)?.let { return it }
+        val requestedModes = request.modeFlags and EngineProviderUriGrantModes.ACCESS_MASK
+        val candidates = uriGrantStore.listPersistedForTarget(target.instanceId)
+            .asSequence()
+            .filter { request.ownerInstanceId == null || it.ownerInstanceId == request.ownerInstanceId }
+            .filter { it.guestAuthority == request.guestAuthority }
+            .filter { it.persistedModeFlags and requestedModes == requestedModes }
+            .filter { it.matchesPath(request.encodedPath) }
+            .toList()
+        val selected = selectPersistableGrant(candidates, request, target.instanceId, "release")
+            ?: return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                "provider_persistable_uri_grant_not_found",
+                target.instanceId
+            ).also(::recordUriGrantEvidence)
+        if (selected is PersistableGrantSelection.Ambiguous) {
+            return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                selected.message,
+                target.instanceId,
+                EngineResultStatus.UNSUPPORTED
+            ).also(::recordUriGrantEvidence)
+        }
+        val record = (selected as PersistableGrantSelection.Selected).record
+        val owner = runtimeService.get(record.ownerInstanceId)
+            ?: return uriGrantFailure(
+                record.ownerInstanceId,
+                request,
+                "provider_uri_grant_owner_runtime_not_found:${record.ownerInstanceId}",
+                target.instanceId
+            ).also(::recordUriGrantEvidence)
+        val released = uriGrantStore.releasePersistable(
+            record = record,
+            modeFlags = requestedModes,
+            updatedAtMs = System.currentTimeMillis()
+        ) ?: return uriGrantFailure(
+            owner.instanceId,
+            request,
+            "provider_persistable_uri_grant_release_rejected",
+            target.instanceId
+        ).also(::recordUriGrantEvidence)
+        return uriGrantResult(
+            owner = owner,
+            target = target,
+            request = request,
+            verdict = EngineResultStatus.PARTIAL,
+            granted = false,
+            affectedGrantCount = 1,
+            persistedModeFlags = released.persistedModeFlags,
+            message = "provider_persistable_uri_grant_released:modes=${released.persistedModeFlags}"
+        ).also(::recordUriGrantEvidence)
+    }
+
     override fun recordProviderDispatch(
         instanceId: String,
         result: VirtualProviderOperationResult
@@ -2068,6 +2229,33 @@ internal class RegistryBackedVirtualProviderService(
         val verdict: EngineResultStatus,
         val message: String
     )
+
+    private sealed interface PersistableGrantSelection {
+        data class Selected(val record: EngineProviderUriGrantRecord) : PersistableGrantSelection
+        data class Ambiguous(val message: String) : PersistableGrantSelection
+    }
+
+    private fun selectPersistableGrant(
+        candidates: List<EngineProviderUriGrantRecord>,
+        request: VirtualProviderUriGrantRequest,
+        targetInstanceId: String,
+        operation: String
+    ): PersistableGrantSelection? {
+        if (candidates.isEmpty()) return null
+        val owners = candidates.mapTo(linkedSetOf()) { it.ownerInstanceId }
+        if (owners.size > 1) {
+            return PersistableGrantSelection.Ambiguous(
+                "provider_persistable_uri_grant_owner_ambiguous:" +
+                    "operation=$operation:authority=${request.guestAuthority}:target=$targetInstanceId"
+            )
+        }
+        return PersistableGrantSelection.Selected(
+            candidates.maxWithOrNull(
+                compareBy<EngineProviderUriGrantRecord> { it.encodedPath.length }
+                    .thenBy { it.prefix }
+            ) ?: return null
+        )
+    }
 
     private fun resolveUriGrantTarget(
         owner: VirtualInstanceRuntime,
@@ -2187,6 +2375,51 @@ internal class RegistryBackedVirtualProviderService(
         return null
     }
 
+    private fun validatePersistableUriGrantRequest(
+        target: VirtualInstanceRuntime,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult? {
+        if (request.targetInstanceId != null && request.targetInstanceId != target.instanceId) {
+            return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                "provider_persistable_uri_grant_target_mismatch:" +
+                    "expected=${target.instanceId}:actual=${request.targetInstanceId}",
+                target.instanceId
+            )
+        }
+        if (
+            request.targetPackageName != null &&
+            !target.matchesUriGrantPackage(request.targetPackageName)
+        ) {
+            return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                "provider_persistable_uri_grant_target_package_mismatch:${request.targetPackageName}",
+                target.instanceId
+            )
+        }
+        if (request.modeFlags and EngineProviderUriGrantModes.ACCESS_MASK == 0) {
+            return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                "provider_persistable_uri_grant_access_mode_missing",
+                target.instanceId
+            )
+        }
+        val unsupported = request.modeFlags and EngineProviderUriGrantModes.ACCESS_MASK.inv()
+        if (unsupported != 0) {
+            return uriGrantFailure(
+                request.ownerInstanceId,
+                request,
+                "provider_persistable_uri_grant_flags_unsupported:$unsupported",
+                target.instanceId,
+                EngineResultStatus.UNSUPPORTED
+            )
+        }
+        return null
+    }
+
     private fun VirtualInstanceRuntime.matchesUriGrantPackage(packageName: String): Boolean =
         packageName == originPackageName || packageName == virtualPackageName
 
@@ -2214,6 +2447,7 @@ internal class RegistryBackedVirtualProviderService(
         verdict: EngineResultStatus,
         granted: Boolean,
         affectedGrantCount: Int,
+        persistedModeFlags: Int = 0,
         message: String
     ): VirtualProviderUriGrantResult = VirtualProviderUriGrantResult(
         ownerInstanceId = owner.instanceId,
@@ -2224,6 +2458,7 @@ internal class RegistryBackedVirtualProviderService(
         verdict = verdict,
         granted = granted,
         affectedGrantCount = affectedGrantCount,
+        persistedModeFlags = persistedModeFlags,
         message = message
     )
 
@@ -2235,6 +2470,10 @@ internal class RegistryBackedVirtualProviderService(
                 component = "provider",
                 operation = when {
                     result.message.startsWith("provider_uri_grant_revoked") -> "revoke-uri-permission"
+                    result.message.startsWith("provider_persistable_uri_grant_taken") ->
+                        "take-persistable-uri-permission"
+                    result.message.startsWith("provider_persistable_uri_grant_released") ->
+                        "release-persistable-uri-permission"
                     result.message.contains("confirmed") || result.message.contains("denied") ->
                         "check-uri-permission"
                     else -> "grant-uri-permission"
@@ -2248,6 +2487,7 @@ internal class RegistryBackedVirtualProviderService(
                     "modeFlags" to result.modeFlags.toString(),
                     "granted" to result.granted.toString(),
                     "affectedGrantCount" to result.affectedGrantCount.toString(),
+                    "persistedModeFlags" to result.persistedModeFlags.toString(),
                     "message" to result.message
                 )
             )
@@ -2456,12 +2696,32 @@ internal class RegistryBackedVirtualProviderService(
             )
         }
         if (requiredPermission != null) {
-            return reject(
-                message = "provider_permission_service_unsupported:$requiredPermission:access=${accessType.name}",
-                verdict = EngineResultStatus.UNSUPPORTED,
+            val permissionResult = permissionService.checkPermission(
+                callerRuntime.instanceId,
+                requiredPermission
+            )
+            if (!permissionResult.granted) {
+                return reject(
+                    message = "provider_permission_denied:$requiredPermission:" +
+                        "access=${accessType.name}:${permissionResult.message}",
+                    verdict = permissionResult.verdict,
+                    callerIdentityVerdict = "PASS",
+                    permissionVerdict = when (permissionResult.verdict) {
+                        EngineResultStatus.UNSUPPORTED -> "VIRTUAL_PERMISSION_STATE_UNKNOWN"
+                        else -> "VIRTUAL_PERMISSION_DENIED"
+                    },
+                    appOpsVerdict = "DENIED_BEFORE_APPOPS"
+                )
+            }
+            return ProviderAuthorizationDecision(
+                verdict = EngineResultStatus.PARTIAL,
+                message = "provider_route_planned_with_virtual_permission",
+                accessType = accessType,
+                requiredPermission = requiredPermission,
                 callerIdentityVerdict = "PASS",
-                permissionVerdict = "VIRTUAL_PERMISSION_SERVICE_UNAVAILABLE",
-                appOpsVerdict = "VIRTUAL_APPOPS_SERVICE_UNAVAILABLE"
+                permissionVerdict = "VIRTUAL_PERMISSION_GRANTED:" +
+                    (permissionResult.source?.name ?: "UNKNOWN"),
+                appOpsVerdict = "ENGINE_PERMISSION_POLICY"
             )
         }
         return ProviderAuthorizationDecision(
@@ -2605,9 +2865,18 @@ internal class RegistryBackedVirtualServiceService(
         "start-service-dispatch",
         "stop-service-route",
         "on-start-command-result",
+        "bind-service",
+        "unbind-service",
+        "on-bind-result",
+        "on-unbind-result",
         "process-slot-service-stub"
     ),
-    unsupportedOperations = setOf("bind-service", "foreground-service-type", "sticky-restart")
+    unsupportedOperations = setOf(
+        "cross-process-service",
+        "binder-death-rebind",
+        "foreground-service-type",
+        "sticky-restart"
+    )
 ), VirtualServiceService {
     private val supportedServiceOperations = setOf(
         "manifest-route-plan",
@@ -2616,10 +2885,15 @@ internal class RegistryBackedVirtualServiceService(
         "start-service-dispatch",
         "stop-service-route",
         "on-start-command-result",
+        "bind-service",
+        "unbind-service",
+        "on-bind-result",
+        "on-unbind-result",
         "process-slot-service-stub"
     )
     private val unsupportedServiceOperations = setOf(
-        "bind-service",
+        "cross-process-service",
+        "binder-death-rebind",
         "foreground-service-type",
         "sticky-restart"
     )
@@ -2660,10 +2934,40 @@ internal class RegistryBackedVirtualServiceService(
             return plan
         }
 
+        if (
+            request.operation == VirtualServiceOperation.UNBIND &&
+            request.serviceClassName == null &&
+            request.action == null
+        ) {
+            val plan = VirtualServiceDispatchPlan(
+                instanceId = runtime.instanceId,
+                operation = request.operation,
+                verdict = EngineResultStatus.PARTIAL,
+                supportedOperations = supportedServiceOperations,
+                unsupportedOperations = unsupportedServiceOperations,
+                message = "service_unbind_connection_route_planned"
+            )
+            recordPlanEvidence(plan, runtime, request)
+            return plan
+        }
+
         val targets = if (request.serviceClassName != null) {
             explicitTargets(runtime, request)
         } else {
             implicitTargets(runtime, request)
+        }
+        if (targets.any { !it.sameProcess }) {
+            val plan = VirtualServiceDispatchPlan(
+                instanceId = runtime.instanceId,
+                operation = request.operation,
+                verdict = EngineResultStatus.UNSUPPORTED,
+                action = request.action,
+                supportedOperations = supportedServiceOperations,
+                unsupportedOperations = setOf("cross-process-service"),
+                message = "service_cross_process_unsupported"
+            )
+            recordPlanEvidence(plan, runtime, request)
+            return plan
         }
         val plan = VirtualServiceDispatchPlan(
             instanceId = runtime.instanceId,
@@ -2678,6 +2982,9 @@ internal class RegistryBackedVirtualServiceService(
                 targets.isEmpty() -> "no_manifest_service_match"
                 request.serviceClassName != null && request.operation == VirtualServiceOperation.STOP -> {
                     "explicit_service_stop_route_planned"
+                }
+                request.serviceClassName != null && request.operation == VirtualServiceOperation.BIND -> {
+                    "explicit_service_bind_route_planned"
                 }
                 request.serviceClassName != null -> "explicit_service_route_planned"
                 else -> "implicit_service_route_planned"
@@ -2710,6 +3017,7 @@ internal class RegistryBackedVirtualServiceService(
                     "stopped" to result.stopped.toString(),
                     "bound" to result.bound.toString(),
                     "unbound" to result.unbound.toString(),
+                    "destroyed" to result.destroyed.toString(),
                     "foreground" to result.foreground.toString(),
                     "startCommandResult" to (result.startCommandResult?.toString() ?: ""),
                     "processSlot" to (result.processSlot ?: runtime.processSlot),
@@ -2781,20 +3089,67 @@ internal class RegistryBackedVirtualServiceService(
             }
             VirtualServiceOperation.STOP -> {
                 if (!result.stopped) return
+                val activeBindCount = result.activeBindCount
                 EngineServiceRuntimeRecord(
                     instanceId = runtime.instanceId,
                     serviceClassName = serviceClassName,
                     processSlot = result.processSlot ?: existing?.processSlot ?: runtime.processSlot,
                     runtimeEpoch = runtime.runtimeEpoch,
-                    state = EngineServiceLifecycleState.STOPPED,
+                    state = if (activeBindCount > 0 && !result.destroyed) {
+                        EngineServiceLifecycleState.BOUND
+                    } else {
+                        EngineServiceLifecycleState.STOPPED
+                    },
                     activeStartCount = 0,
-                    activeBindCount = existing?.activeBindCount ?: 0,
+                    activeBindCount = activeBindCount,
                     cached = existing?.cached ?: false,
                     startCommandResult = existing?.startCommandResult
                 )
             }
-            VirtualServiceOperation.BIND,
-            VirtualServiceOperation.UNBIND -> return
+            VirtualServiceOperation.BIND -> {
+                if (!result.bound) return
+                val activeStartCount = existing?.activeStartCount ?: result.activeStartCount
+                EngineServiceRuntimeRecord(
+                    instanceId = runtime.instanceId,
+                    serviceClassName = serviceClassName,
+                    processSlot = result.processSlot ?: existing?.processSlot ?: runtime.processSlot,
+                    runtimeEpoch = runtime.runtimeEpoch,
+                    state = when {
+                        existing?.state == EngineServiceLifecycleState.FOREGROUND ->
+                            EngineServiceLifecycleState.FOREGROUND
+                        activeStartCount > 0 -> EngineServiceLifecycleState.STARTED
+                        else -> EngineServiceLifecycleState.BOUND
+                    },
+                    activeStartCount = activeStartCount,
+                    activeBindCount = result.activeBindCount.takeIf { it > 0 }
+                        ?: ((existing?.activeBindCount ?: 0) + if (result.cached) 0 else 1),
+                    cached = result.cached,
+                    startCommandResult = existing?.startCommandResult
+                )
+            }
+            VirtualServiceOperation.UNBIND -> {
+                if (!result.unbound) return
+                val activeStartCount = existing?.activeStartCount ?: result.activeStartCount
+                val activeBindCount = result.activeBindCount
+                EngineServiceRuntimeRecord(
+                    instanceId = runtime.instanceId,
+                    serviceClassName = serviceClassName,
+                    processSlot = result.processSlot ?: existing?.processSlot ?: runtime.processSlot,
+                    runtimeEpoch = runtime.runtimeEpoch,
+                    state = when {
+                        result.destroyed || activeStartCount == 0 && activeBindCount == 0 ->
+                            EngineServiceLifecycleState.STOPPED
+                        existing?.state == EngineServiceLifecycleState.FOREGROUND ->
+                            EngineServiceLifecycleState.FOREGROUND
+                        activeStartCount > 0 -> EngineServiceLifecycleState.STARTED
+                        else -> EngineServiceLifecycleState.BOUND
+                    },
+                    activeStartCount = activeStartCount,
+                    activeBindCount = activeBindCount,
+                    cached = existing?.cached ?: false,
+                    startCommandResult = existing?.startCommandResult
+                )
+            }
         }
         stateStore.upsert(record)
     }
@@ -2868,9 +3223,6 @@ internal class RegistryBackedVirtualServiceService(
 
     private fun VirtualServiceDispatchPlanRequest.unsupportedSemantics(): Set<String> =
         buildSet {
-            if (operation == VirtualServiceOperation.BIND || operation == VirtualServiceOperation.UNBIND) {
-                add("bind-service")
-            }
             if (requestedForegroundServiceTypes.isNotEmpty()) {
                 add("foreground-service-type")
             }
@@ -2906,9 +3258,24 @@ internal class RegistryBackedVirtualServiceService(
             operation = request.operation,
             processSlot = runtime.processSlot,
             processName = processName ?: runtime.processName,
+            sameProcess = isSameGuestProcess(runtime),
             foreground = request.operation == VirtualServiceOperation.START_FOREGROUND,
             priority = resolvedIntentFilters.maxOfOrNull { it.priority } ?: 0
         )
+
+    private fun ResolvedComponent.isSameGuestProcess(runtime: VirtualInstanceRuntime): Boolean {
+        val applicationProcess = runtime.packageSnapshot.processName
+            ?.normalizeGuestProcessName(runtime.originPackageName)
+            ?: runtime.originPackageName
+        val componentProcess = processName
+            ?.normalizeGuestProcessName(runtime.originPackageName)
+            ?: applicationProcess
+        return componentProcess == applicationProcess
+    }
+
+    private fun String.normalizeGuestProcessName(packageName: String): String =
+        if (startsWith(':')) packageName + this else this
+
 
     private fun VirtualServiceDispatchPlanRequest.explicitReason(): String =
         when (operation) {
@@ -3248,7 +3615,8 @@ internal class RegistryBackedVirtualEvidenceService(
     private val serviceService: VirtualServiceService? = null,
     private val providerService: VirtualProviderService? = null,
     private val broadcastService: VirtualBroadcastService? = null,
-    private val appOpsService: VirtualAppOpsService? = null
+    private val appOpsService: VirtualAppOpsService? = null,
+    private val permissionService: VirtualPermissionService? = null
 ) : VirtualEvidenceService {
     override val subsystem: EngineSubsystem = EngineSubsystem.EVIDENCE
 
@@ -3339,6 +3707,23 @@ internal class RegistryBackedVirtualEvidenceService(
                         "appOpsModeCount" to appOpsState.records.size.toString(),
                         "appOpsModes" to appOpsState.records.joinToString(",") { record ->
                             "${record.opCode}:${record.mode}"
+                        }
+                    )
+                )
+            )
+        }
+        permissionService?.queryRuntimeState(instanceId)?.let { permissionState ->
+            report = report.withOperationEvidence(
+                EngineOperationEvidence(
+                    component = "permission",
+                    operation = "runtime-state",
+                    verdict = permissionState.verdict,
+                    entries = linkedMapOf(
+                        "permissionStateVerdict" to permissionState.verdict.name,
+                        "permissionStateMessage" to permissionState.message,
+                        "permissionGrantCount" to permissionState.records.size.toString(),
+                        "permissionGrants" to permissionState.records.joinToString(",") { record ->
+                            "${record.permissionName}:${record.granted}:${record.source.name}"
                         }
                     )
                 )

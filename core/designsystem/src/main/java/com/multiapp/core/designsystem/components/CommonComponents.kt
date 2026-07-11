@@ -1,6 +1,5 @@
 package com.multiapp.core.designsystem.components
 
-import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -10,7 +9,6 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.PhoneAndroid
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -103,17 +101,6 @@ fun EmptyState(
     subtitle: String? = null,
     action: (@Composable () -> Unit)? = null
 ) {
-    val infiniteTransition = rememberInfiniteTransition(label = "emptyFloat")
-    val offsetY by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = -10f,
-        animationSpec = infiniteRepeatable(
-            tween(1800, easing = FastOutSlowInEasing),
-            RepeatMode.Reverse
-        ),
-        label = "floatAnim"
-    )
-
     Column(
         modifier = Modifier.fillMaxSize().padding(40.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -121,7 +108,6 @@ fun EmptyState(
     ) {
         Box(
             modifier = Modifier
-                .offset(y = offsetY.dp)
                 .size(120.dp)
                 .clip(RoundedCornerShape(28.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant),

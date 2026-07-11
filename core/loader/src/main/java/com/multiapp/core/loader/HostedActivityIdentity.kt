@@ -10,7 +10,7 @@ internal object HostedActivityIdentity {
         config: VirtualContextConfig,
         source: ApplicationInfo
     ): ApplicationInfo = ApplicationInfo(source).apply {
-        packageName = config.virtualPackageName
+        packageName = config.originPackageName
         className = source.className
         name = source.name
         sourceDir = config.sourceDir
@@ -47,7 +47,7 @@ internal object HostedActivityIdentity {
         }
         if (snapshot != null && componentInfo != null) {
             return ActivityInfo(VirtualPackageInfoFactory.activityInfo(snapshot, componentInfo)).apply {
-                packageName = config.virtualPackageName
+                packageName = config.originPackageName
                 name = guestActivityClassName
                 theme = componentInfo.themeId.takeIf { it != 0 } ?: snapshot.themeId
                 this.applicationInfo = applicationInfo
@@ -56,7 +56,7 @@ internal object HostedActivityIdentity {
             }
         }
         return ActivityInfo().apply {
-            packageName = config.virtualPackageName
+            packageName = config.originPackageName
             name = guestActivityClassName
             this.applicationInfo = applicationInfo
             enabled = true

@@ -186,6 +186,39 @@ class ActivityThreadLoadedApkInstallerTest {
     }
 
     @Test
+    fun `findInstalledGuest reuses the bound sandbox without creating another LoadedApk`() {
+        val activityThread = FakeActivityThread()
+        val appInfo = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            sourceDir = "/data/app/minimal.apk"
+            publicSourceDir = "/data/app/minimal.apk"
+        }
+        val state = LoadedApkRuntimeState(
+            packageName = "com.test.minimal",
+            applicationInfo = appInfo,
+            resources = mockk(relaxed = true),
+            classLoader = ClassLoader.getSystemClassLoader()
+        )
+        val installed = ActivityThreadLoadedApkInstaller.installGuestSandbox(
+            activityThread = activityThread,
+            state = state,
+            packageAliases = listOf("com.test.minimal", "com.multiapp.instance.abc")
+        )
+        val application = mockk<Application>(relaxed = true)
+        ActivityThreadLoadedApkInstaller.bindApplication(installed, state, application)
+
+        val reused = ActivityThreadLoadedApkInstaller.findInstalledGuest(
+            activityThread = activityThread,
+            packageAliases = listOf("com.test.minimal", "com.multiapp.instance.abc")
+        )
+
+        assertEquals(1, activityThread.createCount)
+        assertEquals(LoadedApkInstallSource.PREWARMED_GUEST, reused?.source)
+        assertSame(installed.loadedApk, reused?.loadedApk)
+        assertSame(application, reused?.loadedApk?.let(LoadedApkBridge::application))
+    }
+
+    @Test
     fun `install records package map skip reasons`() {
         val activityThread = FakeActivityThreadWithoutResourcePackages()
         val loadedApk = FakeLoadedApk()

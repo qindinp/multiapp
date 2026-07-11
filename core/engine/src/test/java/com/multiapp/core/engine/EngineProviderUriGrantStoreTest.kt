@@ -52,10 +52,54 @@ class EngineProviderUriGrantStoreTest {
         assertTrue(store.listForInstance("target-1").any { it.encodedPath == "/other" })
     }
 
+    @Test
+    fun `persisted modes survive store recreation and release keeps transient access`(@TempDir tempDir: File) {
+        val file = File(tempDir, EngineProviderUriGrantFiles.DEFAULT_FILE_NAME)
+        val writer = FileBackedEngineProviderUriGrantStore(file)
+        val offered = writer.grant(
+            record(path = "/documents/7", modes = READ or WRITE, persistable = true)
+        )
+
+        val taken = writer.takePersistable(offered, READ, persistedAtMs = 200L)
+        val restored = FileBackedEngineProviderUriGrantStore(file)
+
+        assertEquals(READ, taken?.persistedModeFlags)
+        assertEquals(200L, restored.listPersistedForTarget("target-1").single().persistedAtMs)
+        assertNotNull(restored.findGrant("owner-1", "target-1", AUTHORITY, "/documents/7", READ))
+
+        val released = restored.releasePersistable(
+            restored.listPersistedForTarget("target-1").single(),
+            READ,
+            updatedAtMs = 300L
+        )
+
+        assertEquals(0, released?.persistedModeFlags)
+        assertTrue(restored.listPersistedForTarget("target-1").isEmpty())
+        assertNotNull(restored.findGrant("owner-1", "target-1", AUTHORITY, "/documents/7", READ))
+    }
+
+    @Test
+    fun `non persistable offer cannot be taken and owner revoke removes persisted access`() {
+        val store = InMemoryEngineProviderUriGrantStore()
+        val transient = store.grant(record(path = "/documents/7", modes = READ))
+        assertNull(store.takePersistable(transient, READ, persistedAtMs = 200L))
+
+        val offered = store.grant(
+            record(path = "/documents/8", modes = READ, persistable = true)
+        )
+        assertNotNull(store.takePersistable(offered, READ, persistedAtMs = 200L))
+
+        store.revoke("owner-1", "target-1", AUTHORITY, "/documents/8", READ)
+
+        assertNull(store.findGrant("owner-1", "target-1", AUTHORITY, "/documents/8", READ))
+        assertTrue(store.listPersistedForTarget("target-1").isEmpty())
+    }
+
     private fun record(
         path: String,
         modes: Int,
-        prefix: Boolean = false
+        prefix: Boolean = false,
+        persistable: Boolean = false
     ) = EngineProviderUriGrantRecord(
         ownerInstanceId = "owner-1",
         targetInstanceId = "target-1",
@@ -64,7 +108,7 @@ class EngineProviderUriGrantStoreTest {
         encodedPath = path,
         modeFlags = modes,
         prefix = prefix,
-        persistable = false,
+        persistable = persistable,
         createdAtMs = 100L,
         updatedAtMs = 100L
     )

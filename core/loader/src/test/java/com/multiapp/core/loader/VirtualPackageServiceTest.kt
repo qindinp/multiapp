@@ -201,7 +201,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `permission and installed queries are snapshot scoped`() {
-        val service = VirtualPackageService(snapshot())
+        val service = permissionAwareService()
 
         assertEquals(PackageManager.PERMISSION_GRANTED, service.checkPermission("android.permission.CAMERA", "com.test.minimal"))
         assertEquals(PackageManager.PERMISSION_DENIED, service.checkPermission("android.permission.RECORD_AUDIO", "com.test.minimal"))
@@ -231,7 +231,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `packages holding permissions are answered from snapshot permissions`() {
-        val service = VirtualPackageService(snapshot())
+        val service = permissionAwareService()
 
         val packages = service.getPackagesHoldingPermissions(
             arrayOf("android.permission.CAMERA", "android.permission.ACCESS_FINE_LOCATION")
@@ -240,6 +240,16 @@ class VirtualPackageServiceTest {
         assertEquals(listOf("com.test.minimal"), packages.map { it.packageName })
         assertTrue(service.getPackagesHoldingPermissions(arrayOf("android.permission.RECORD_AUDIO")).isEmpty())
         assertTrue(service.getPackagesHoldingPermissions(emptyArray()).isEmpty())
+    }
+
+    @Test
+    fun `declared permission is denied when engine grant state is unavailable`() {
+        val service = VirtualPackageService(snapshot())
+
+        assertEquals(
+            PackageManager.PERMISSION_DENIED,
+            service.checkPermission("android.permission.CAMERA", "com.test.minimal")
+        )
     }
 
     @Test
@@ -263,6 +273,17 @@ class VirtualPackageServiceTest {
         every { this@mockk.packageName } returns packageName
         every { this@mockk.className } returns className
     }
+
+    private fun permissionAwareService() = VirtualPackageService(
+        snapshot = snapshot(),
+        permissionCheckDispatcher = VirtualPermissionCheckDispatcher { request ->
+            VirtualPermissionCheckDispatchResult(
+                handled = true,
+                granted = request.permissionName == "android.permission.CAMERA",
+                reason = "test_permission_state"
+            )
+        }
+    )
 
     private fun intent(
         action: String,

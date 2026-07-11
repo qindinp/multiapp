@@ -7,6 +7,8 @@ import com.multiapp.core.engine.EngineHostedBootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.RuntimeStage
 import com.multiapp.core.loader.toSummary
+import com.multiapp.core.model.engine.EngineEvidenceMode
+import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -68,6 +70,39 @@ class ContainerActivityTest {
     fun extraEnableProviderHookKeyMatchesContract() {
         val expectedKey = "multiapp.profile.providerHookEnabled"
         assertEquals(expectedKey, ContainerActivity.EXTRA_ENABLE_PROVIDER_HOOK)
+    }
+
+    @Test
+    fun `baseline default evidence stays off the launch critical path`() {
+        assertEquals(
+            EngineEvidenceMode.MINIMAL,
+            ContainerActivity.resolveEvidenceMode(
+                profileName = EngineProfile.BASELINE.name,
+                evidenceModeName = EngineEvidenceMode.DEFAULT.name
+            )
+        )
+    }
+
+    @Test
+    fun `diagnostics profile defaults to full delayed evidence`() {
+        assertEquals(
+            EngineEvidenceMode.FULL,
+            ContainerActivity.resolveEvidenceMode(
+                profileName = EngineProfile.DIAGNOSTICS_ONLY.name,
+                evidenceModeName = EngineEvidenceMode.DEFAULT.name
+            )
+        )
+    }
+
+    @Test
+    fun `explicit full evidence overrides baseline default`() {
+        assertEquals(
+            EngineEvidenceMode.FULL,
+            ContainerActivity.resolveEvidenceMode(
+                profileName = EngineProfile.BASELINE.name,
+                evidenceModeName = EngineEvidenceMode.FULL.name
+            )
+        )
     }
 
     @Test

@@ -7,12 +7,27 @@ fun interface NotificationPackageProxyInstallAction {
     fun install(sourcePackages: Collection<String>, hostPackageName: String): Boolean
 }
 
+fun interface LauncherAppsPackageProxyInstallAction {
+    fun install(sourcePackages: Collection<String>, hostPackageName: String): Boolean
+}
+
+fun interface ClipboardPackageProxyInstallAction {
+    fun install(
+        sourcePackages: Collection<String>,
+        hostPackageName: String
+    ): VirtualClipboardServiceProxyInstallResult
+}
+
 fun interface AppOpsPackageProxyInstallAction {
     fun install(sourcePackages: Collection<String>, hostPackageName: String): Boolean
 }
 
 fun interface AppOpsServiceManagerProxyInstallAction {
     fun install(sourcePackages: Collection<String>, hostPackageName: String): Boolean
+}
+
+fun interface UriGrantsServiceManagerProxyInstallAction {
+    fun install(): Boolean
 }
 
 class VirtualPackageManagerProxyStage(
@@ -22,6 +37,14 @@ class VirtualPackageManagerProxyStage(
         NotificationPackageProxyInstallAction { sourcePackages, hostPackageName ->
             IntentRemapDiagnostics.installNotificationManagerPackageProxy(sourcePackages, hostPackageName)
         },
+    private val launcherAppsPackageProxyInstaller: LauncherAppsPackageProxyInstallAction =
+        LauncherAppsPackageProxyInstallAction { sourcePackages, hostPackageName ->
+            VirtualLauncherAppsServiceProxy.install(hostContext, sourcePackages, hostPackageName)
+        },
+    private val clipboardPackageProxyInstaller: ClipboardPackageProxyInstallAction =
+        ClipboardPackageProxyInstallAction { sourcePackages, hostPackageName ->
+            VirtualClipboardServiceProxy.installDetailed(hostContext, sourcePackages, hostPackageName)
+        },
     private val appOpsPackageProxyInstaller: AppOpsPackageProxyInstallAction =
         AppOpsPackageProxyInstallAction { sourcePackages, hostPackageName ->
             IntentRemapDiagnostics.installAppOpsManagerPackageProxy(hostContext, sourcePackages, hostPackageName)
@@ -30,6 +53,8 @@ class VirtualPackageManagerProxyStage(
         AppOpsServiceManagerProxyInstallAction { sourcePackages, hostPackageName ->
             IntentRemapDiagnostics.installAppOpsServiceManagerPackageProxy(sourcePackages, hostPackageName)
         },
+    private val uriGrantsServiceManagerProxyInstaller: UriGrantsServiceManagerProxyInstallAction =
+        UriGrantsServiceManagerProxyInstallAction(VirtualUriGrantsServiceProxy::install),
     private val runtimeUidProvider: () -> Int = { runCatching { Process.myUid() }.getOrDefault(0) },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
@@ -54,16 +79,24 @@ class VirtualPackageManagerProxyStage(
         )
         val installResult = installer.install(hostContext, snapshot, runtimeUid)
         val notificationProxyResult = installNotificationPackageProxy(snapshot)
+        val launcherAppsProxyResult = installLauncherAppsPackageProxy(snapshot)
+        val clipboardProxyResult = installClipboardPackageProxy(snapshot)
         val appOpsProxyResult = installAppOpsPackageProxy(snapshot)
         val appOpsServiceManagerProxyResult = installAppOpsServiceManagerPackageProxy(snapshot)
+        val uriGrantsServiceManagerProxyResult = installUriGrantsServiceManagerProxy(snapshot)
         val evidence = installResult.toEvidence() +
             notificationProxyResult.evidence +
+            launcherAppsProxyResult.evidence +
+            clipboardProxyResult.evidence +
             appOpsProxyResult.evidence +
-            appOpsServiceManagerProxyResult.evidence
+            appOpsServiceManagerProxyResult.evidence +
+            uriGrantsServiceManagerProxyResult.evidence
         val durationMs = clock() - startMs
         val result = when (installResult.status) {
             VirtualPackageManagerGlobalInstallStatus.INSTALLED -> {
                 if (notificationProxyResult.degradesStage ||
+                    launcherAppsProxyResult.degradesStage ||
+                    clipboardProxyResult.degradesStage ||
                     appOpsProxyResult.degradesStage ||
                     appOpsServiceManagerProxyResult.degradesStage
                 ) {
@@ -176,6 +209,102 @@ class VirtualPackageManagerProxyStage(
         }
     }
 
+    private fun installLauncherAppsPackageProxy(
+        snapshot: com.multiapp.core.model.virtual.VirtualPackageSnapshot
+    ): AppOpsPackageProxyResult {
+        val sourcePackages = listOf(snapshot.originPackageName, snapshot.virtualPackageName).distinct()
+        val hostPackageName = hostContext?.packageName?.takeIf { it.isNotBlank() }
+            ?: return AppOpsPackageProxyResult(
+                evidence = launcherAppsProxyEvidence(
+                    status = "SKIPPED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = "",
+                    reason = "HOST_CONTEXT_MISSING"
+                ),
+                degradesStage = false
+            )
+        return runCatching {
+            val installed = launcherAppsPackageProxyInstaller.install(sourcePackages, hostPackageName)
+            AppOpsPackageProxyResult(
+                evidence = launcherAppsProxyEvidence(
+                    status = if (installed) "INSTALLED" else "SKIPPED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    reason = if (installed) "" else "INSTALLER_RETURNED_FALSE"
+                ),
+                degradesStage = !installed
+            )
+        }.getOrElse { error ->
+            AppOpsPackageProxyResult(
+                evidence = launcherAppsProxyEvidence(
+                    status = "FAILED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    reason = error.message ?: error.javaClass.name,
+                    errorClass = error.javaClass.name
+                ),
+                degradesStage = true
+            )
+        }
+    }
+
+    private fun installClipboardPackageProxy(
+        snapshot: com.multiapp.core.model.virtual.VirtualPackageSnapshot
+    ): AppOpsPackageProxyResult {
+        val sourcePackages = listOf(snapshot.originPackageName, snapshot.virtualPackageName).distinct()
+        val hostPackageName = hostContext?.packageName?.takeIf { it.isNotBlank() }
+            ?: return AppOpsPackageProxyResult(
+                evidence = clipboardProxyEvidence(
+                    status = "SKIPPED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = "",
+                    reason = "HOST_CONTEXT_MISSING",
+                    managerStatus = "SKIPPED",
+                    serviceManagerStatus = "SKIPPED"
+                ),
+                degradesStage = false
+            )
+        return runCatching {
+            val installResult = clipboardPackageProxyInstaller.install(sourcePackages, hostPackageName)
+            val status = when {
+                installResult.complete -> "INSTALLED"
+                installResult.installed -> "PARTIAL"
+                else -> "FAILED"
+            }
+            val reason = when {
+                installResult.complete -> ""
+                !installResult.managerPatched && !installResult.serviceManagerPatched ->
+                    "MANAGER_AND_SERVICE_MANAGER_PATCH_FAILED"
+                !installResult.managerPatched -> "MANAGER_PATCH_FAILED"
+                else -> "SERVICE_MANAGER_PATCH_FAILED"
+            }
+            AppOpsPackageProxyResult(
+                evidence = clipboardProxyEvidence(
+                    status = status,
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    reason = reason,
+                    managerStatus = if (installResult.managerPatched) "INSTALLED" else "FAILED",
+                    serviceManagerStatus = if (installResult.serviceManagerPatched) "INSTALLED" else "FAILED"
+                ),
+                degradesStage = !installResult.complete
+            )
+        }.getOrElse { error ->
+            AppOpsPackageProxyResult(
+                evidence = clipboardProxyEvidence(
+                    status = "FAILED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    reason = error.message ?: error.javaClass.name,
+                    errorClass = error.javaClass.name,
+                    managerStatus = "FAILED",
+                    serviceManagerStatus = "FAILED"
+                ),
+                degradesStage = true
+            )
+        }
+    }
+
     private fun installAppOpsServiceManagerPackageProxy(snapshot: com.multiapp.core.model.virtual.VirtualPackageSnapshot): AppOpsPackageProxyResult {
         val hostPackageName = hostContext?.packageName?.takeIf { it.isNotBlank() }
             ?: return AppOpsPackageProxyResult(
@@ -213,6 +342,43 @@ class VirtualPackageManagerProxyStage(
         }
     }
 
+    private fun installUriGrantsServiceManagerProxy(
+        snapshot: com.multiapp.core.model.virtual.VirtualPackageSnapshot
+    ): AppOpsPackageProxyResult {
+        val sourcePackages = listOf(snapshot.originPackageName, snapshot.virtualPackageName).distinct()
+        if (hostContext == null) {
+            return AppOpsPackageProxyResult(
+                evidence = uriGrantsServiceManagerProxyEvidence(
+                    status = "SKIPPED",
+                    sourcePackages = sourcePackages,
+                    reason = "HOST_CONTEXT_MISSING"
+                ),
+                degradesStage = false
+            )
+        }
+        return runCatching {
+            val installed = uriGrantsServiceManagerProxyInstaller.install()
+            AppOpsPackageProxyResult(
+                evidence = uriGrantsServiceManagerProxyEvidence(
+                    status = if (installed) "INSTALLED" else "UNSUPPORTED",
+                    sourcePackages = sourcePackages,
+                    reason = if (installed) "" else "INSTALLER_RETURNED_FALSE"
+                ),
+                degradesStage = false
+            )
+        }.getOrElse { error ->
+            AppOpsPackageProxyResult(
+                evidence = uriGrantsServiceManagerProxyEvidence(
+                    status = "FAILED",
+                    sourcePackages = sourcePackages,
+                    reason = error.message ?: error.javaClass.name,
+                    errorClass = error.javaClass.name
+                ),
+                degradesStage = false
+            )
+        }
+    }
+
     private fun notificationProxyEvidence(
         status: String,
         sourcePackages: List<String>,
@@ -243,6 +409,60 @@ class VirtualPackageManagerProxyStage(
         BootstrapEvidence("appOpsPackageProxyErrorClass", errorClass, APP_OPS_PROXY_SOURCE)
     )
 
+    private fun launcherAppsProxyEvidence(
+        status: String,
+        sourcePackages: List<String>,
+        hostPackageName: String,
+        reason: String,
+        errorClass: String = ""
+    ): List<BootstrapEvidence> = listOf(
+        BootstrapEvidence("launcherAppsPackageProxyStatus", status, LAUNCHER_APPS_PROXY_SOURCE),
+        BootstrapEvidence(
+            "launcherAppsPackageProxySourcePackages",
+            sourcePackages.joinToString(","),
+            LAUNCHER_APPS_PROXY_SOURCE
+        ),
+        BootstrapEvidence("launcherAppsPackageProxyHostPackage", hostPackageName, LAUNCHER_APPS_PROXY_SOURCE),
+        BootstrapEvidence(
+            "launcherAppsPackageProxyMode",
+            "launcherapps-manager-servicemanager-binder",
+            LAUNCHER_APPS_PROXY_SOURCE
+        ),
+        BootstrapEvidence("launcherAppsPackageProxyReason", reason, LAUNCHER_APPS_PROXY_SOURCE),
+        BootstrapEvidence("launcherAppsPackageProxyErrorClass", errorClass, LAUNCHER_APPS_PROXY_SOURCE)
+    )
+
+    private fun clipboardProxyEvidence(
+        status: String,
+        sourcePackages: List<String>,
+        hostPackageName: String,
+        reason: String,
+        errorClass: String = "",
+        managerStatus: String,
+        serviceManagerStatus: String
+    ): List<BootstrapEvidence> = listOf(
+        BootstrapEvidence("clipboardPackageProxyStatus", status, CLIPBOARD_PROXY_SOURCE),
+        BootstrapEvidence(
+            "clipboardPackageProxySourcePackages",
+            sourcePackages.joinToString(","),
+            CLIPBOARD_PROXY_SOURCE
+        ),
+        BootstrapEvidence("clipboardPackageProxyHostPackage", hostPackageName, CLIPBOARD_PROXY_SOURCE),
+        BootstrapEvidence(
+            "clipboardPackageProxyMode",
+            "clipboard-manager-servicemanager-binder",
+            CLIPBOARD_PROXY_SOURCE
+        ),
+        BootstrapEvidence("clipboardPackageProxyReason", reason, CLIPBOARD_PROXY_SOURCE),
+        BootstrapEvidence("clipboardPackageProxyErrorClass", errorClass, CLIPBOARD_PROXY_SOURCE),
+        BootstrapEvidence("clipboardManagerProxyStatus", managerStatus, CLIPBOARD_PROXY_SOURCE),
+        BootstrapEvidence(
+            "clipboardServiceManagerProxyStatus",
+            serviceManagerStatus,
+            CLIPBOARD_PROXY_SOURCE
+        )
+    )
+
     private fun appOpsServiceManagerProxyEvidence(
         status: String,
         sourcePackages: List<String>,
@@ -258,6 +478,31 @@ class VirtualPackageManagerProxyStage(
         BootstrapEvidence("appOpsServiceManagerProxyErrorClass", errorClass, APP_OPS_SERVICE_MANAGER_PROXY_SOURCE)
     )
 
+    private fun uriGrantsServiceManagerProxyEvidence(
+        status: String,
+        sourcePackages: List<String>,
+        reason: String,
+        errorClass: String = ""
+    ): List<BootstrapEvidence> = listOf(
+        BootstrapEvidence("uriGrantsServiceManagerProxyStatus", status, URI_GRANTS_SERVICE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence(
+            "uriGrantsServiceManagerProxySourcePackages",
+            sourcePackages.joinToString(","),
+            URI_GRANTS_SERVICE_MANAGER_PROXY_SOURCE
+        ),
+        BootstrapEvidence(
+            "uriGrantsServiceManagerProxyMode",
+            "servicemanager-uri-grants-binder",
+            URI_GRANTS_SERVICE_MANAGER_PROXY_SOURCE
+        ),
+        BootstrapEvidence("uriGrantsServiceManagerProxyReason", reason, URI_GRANTS_SERVICE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence(
+            "uriGrantsServiceManagerProxyErrorClass",
+            errorClass,
+            URI_GRANTS_SERVICE_MANAGER_PROXY_SOURCE
+        )
+    )
+
     private data class NotificationPackageProxyResult(
         val evidence: List<BootstrapEvidence>,
         val degradesStage: Boolean
@@ -270,7 +515,10 @@ class VirtualPackageManagerProxyStage(
 
     private companion object {
         const val NOTIFICATION_PROXY_SOURCE = "NotificationPackageProxy"
+        const val LAUNCHER_APPS_PROXY_SOURCE = "LauncherAppsPackageProxy"
+        const val CLIPBOARD_PROXY_SOURCE = "ClipboardPackageProxy"
         const val APP_OPS_PROXY_SOURCE = "AppOpsPackageProxy"
         const val APP_OPS_SERVICE_MANAGER_PROXY_SOURCE = "AppOpsServiceManagerProxy"
+        const val URI_GRANTS_SERVICE_MANAGER_PROXY_SOURCE = "UriGrantsServiceManagerProxy"
     }
 }

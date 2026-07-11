@@ -162,7 +162,7 @@ object ActivityThreadLaunchRecordPatcher {
         val applicationInfo = resourceBundle
             ?.let { HostedActivityIdentity.applicationInfoForRuntime(config, it.applicationInfo) }
             ?: android.content.pm.ApplicationInfo().apply {
-                packageName = config.virtualPackageName
+                packageName = config.originPackageName
                 sourceDir = config.sourceDir
                 publicSourceDir = config.publicSourceDir
                 if (config.splitSourceDirs.isNotEmpty()) {
@@ -188,21 +188,19 @@ object ActivityThreadLaunchRecordPatcher {
             if (!spec.taskAffinity.isNullOrBlank()) taskAffinity = spec.taskAffinity
         }
         val guestIntent = buildGuestIntent(spec, proxyIntent)
-        val loadedApk = if (resourceBundle != null) {
-            installLoadedApk(spec, applicationInfo, resourceBundle, classLoader)
-        } else {
-            null
-        }
+        val loadedApk = resolvePrewarmedLoadedApk(
+            spec = spec,
+            snapshot = snapshot,
+            runtimeResult = runtimeResult,
+            classLoader = classLoader
+        )
         return LaunchRuntimeState(
             activityInfo = activityInfo,
             guestIntent = guestIntent,
             loadedApk = loadedApk?.loadedApk,
             loadedApkSource = loadedApk?.source?.name,
-            loadedApkSkippedReason = if (loadedApk == null) {
-                "LOADED_APK_PRELAUNCH_RESOURCE_BUNDLE_UNAVAILABLE"
-            } else {
-                loadedApk.skippedReason
-            }
+            loadedApkSkippedReason = loadedApk?.skippedReason
+                ?: "PREWARMED_LOADED_APK_NOT_FOUND"
         )
     }
 
@@ -245,26 +243,51 @@ object ActivityThreadLaunchRecordPatcher {
         }
     }
 
-    private fun installLoadedApk(
+    private fun resolvePrewarmedLoadedApk(
         spec: LaunchSpec,
-        applicationInfo: android.content.pm.ApplicationInfo,
-        resourceBundle: VirtualResourceBundle,
+        snapshot: VirtualPackageSnapshot,
+        runtimeResult: HostedBootstrapResult?,
         classLoader: ClassLoader
-    ): ActivityThreadLoadedApkInstallResult? =
-        runCatching {
-            ActivityThreadLoadedApkInstaller.installGuestSandbox(
-                activityThread = ActivityThreadCompat.currentActivityThread(),
-                state = LoadedApkRuntimeState(
-                    packageName = applicationInfo.packageName,
-                    applicationInfo = applicationInfo,
-                    resources = resourceBundle.resources,
-                    classLoader = classLoader
-                ),
-                packageAliases = listOf(spec.originPackageName, applicationInfo.packageName)
+    ): ActivityThreadLoadedApkInstallResult? {
+        val aliases = listOf(spec.originPackageName, snapshot.virtualPackageName)
+        val activityThread = runCatching { ActivityThreadCompat.currentActivityThread() }
+            .onFailure { error ->
+                safeLogWarning("Unable to inspect prewarmed LoadedApk for ${spec.guestActivityClassName}", error)
+            }
+            .getOrNull() ?: return null
+        val resolved = ActivityThreadLoadedApkInstaller.findInstalledGuest(activityThread, aliases)
+            ?: return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = "",
+                packageAliases = aliases,
+                skippedReason = "PREWARMED_LOADED_APK_NOT_FOUND",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
             )
-        }.onFailure { error ->
-            safeLogWarning("Unable to install prelaunch LoadedApk for ${spec.guestActivityClassName}", error)
-        }.getOrNull()
+        val loadedApk = resolved.loadedApk ?: return resolved
+        val expectedApplication = runtimeResult?.guestApplication
+            ?: return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = loadedApk.javaClass.name,
+                packageAliases = aliases,
+                skippedReason = "PREWARMED_GUEST_APPLICATION_MISSING",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
+            )
+        if (LoadedApkBridge.application(loadedApk) !== expectedApplication) {
+            return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = loadedApk.javaClass.name,
+                packageAliases = aliases,
+                skippedReason = "PREWARMED_LOADED_APK_APPLICATION_MISMATCH",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
+            )
+        }
+        if (LoadedApkBridge.classLoader(loadedApk) !== classLoader) {
+            return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = loadedApk.javaClass.name,
+                packageAliases = aliases,
+                skippedReason = "PREWARMED_LOADED_APK_CLASS_LOADER_MISMATCH",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
+            )
+        }
+        return resolved
+    }
 
     @Suppress("DEPRECATION")
     private fun legacyOriginalGuestIntent(proxyIntent: Intent): Intent? =

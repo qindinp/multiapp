@@ -21,6 +21,14 @@ class IpcBackedVirtualProviderService(
         EngineRuntimeIpcClients::revokeProviderUriPermission,
     private val remoteCheck: (String, VirtualProviderUriGrantRequest) -> VirtualProviderUriGrantResult? =
         EngineRuntimeIpcClients::checkProviderUriPermission,
+    private val remoteTakePersistable: (
+        String,
+        VirtualProviderUriGrantRequest
+    ) -> VirtualProviderUriGrantResult? = EngineRuntimeIpcClients::takePersistableProviderUriPermission,
+    private val remoteReleasePersistable: (
+        String,
+        VirtualProviderUriGrantRequest
+    ) -> VirtualProviderUriGrantResult? = EngineRuntimeIpcClients::releasePersistableProviderUriPermission,
     private val authorityConnected: () -> Boolean = EngineRuntimeIpcClients::isConnected
 ) : VirtualProviderService {
     override val subsystem: EngineSubsystem = EngineSubsystem.PROVIDER
@@ -101,6 +109,28 @@ class IpcBackedVirtualProviderService(
         remote = remoteCheck,
         fallbackCall = fallback::checkUriPermission,
         invalidMessage = "engine_provider_ipc_uri_check_invalid"
+    )
+
+    override fun takePersistableUriPermission(
+        targetInstanceId: String,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult = authorityOwnedUriGrantResult(
+        primaryInstanceId = targetInstanceId,
+        request = request,
+        remote = remoteTakePersistable,
+        fallbackCall = fallback::takePersistableUriPermission,
+        invalidMessage = "engine_provider_ipc_persistable_uri_take_invalid"
+    )
+
+    override fun releasePersistableUriPermission(
+        targetInstanceId: String,
+        request: VirtualProviderUriGrantRequest
+    ): VirtualProviderUriGrantResult = authorityOwnedUriGrantResult(
+        primaryInstanceId = targetInstanceId,
+        request = request,
+        remote = remoteReleasePersistable,
+        fallbackCall = fallback::releasePersistableUriPermission,
+        invalidMessage = "engine_provider_ipc_persistable_uri_release_invalid"
     )
 
     override fun queryRuntimeBinding(instanceId: String): VirtualSubsystemRuntimeBinding =

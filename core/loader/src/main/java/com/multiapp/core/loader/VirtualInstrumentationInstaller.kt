@@ -4,6 +4,7 @@ import android.annotation.TargetApi
 import android.app.Instrumentation
 import android.os.Build
 import android.util.Log
+import com.multiapp.core.common.AndroidCompat
 
 object VirtualInstrumentationInstaller {
 
@@ -20,6 +21,10 @@ object VirtualInstrumentationInstaller {
             ManagerBackedVirtualActivityOperations(activityRecordManager)
     ): Result<Unit> {
         return runCatching {
+            val hiddenApiBypassApplied = AndroidCompat.bypassHiddenApis()
+            if (!hiddenApiBypassApplied) {
+                Log.w(TAG, "Hidden API bypass unavailable before runtime instrumentation install")
+            }
             val current = ActivityThreadCompat.getInstrumentation()
             if (current is VirtualInstrumentation) {
                 ActivityThreadLaunchCallbackInstaller.install(processRuntime).getOrThrow()

@@ -30,6 +30,7 @@ enum class EngineSubsystem {
     PACKAGE,
     ACTIVITY,
     PROVIDER,
+    PERMISSION,
     APP_OPS,
     SERVICE,
     BROADCAST,
@@ -287,6 +288,7 @@ object EngineLaunchIntentContract {
     const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
     const val EXTRA_ENABLE_PROVIDER_HOOK = "multiapp.profile.providerHookEnabled"
     const val EXTRA_ENGINE_PROFILE = "multiapp.engine.profile"
+    const val EXTRA_ENGINE_EVIDENCE_MODE = "multiapp.engine.evidenceMode"
     const val EXTRA_ENGINE_PROCESS_SLOT = "multiapp.engine.processSlot"
     const val EXTRA_ENGINE_PROXY_SLOT = "multiapp.engine.proxySlot"
     const val EXTRA_ENGINE_EVIDENCE_SESSION_ID = "multiapp.engine.evidenceSessionId"

@@ -11,12 +11,12 @@ class HostedActivityContextEvidenceFormatterTest {
             contextInjected = true,
             applicationInjected = true,
             dataDir = "/data/user/0/com.multiapp.app/files/instance_data/inst-001",
-            packageName = "com.multiapp.instance.abc",
+            packageName = "com.test.minimal",
             applicationClassName = "com.test.minimal.MinimalApp",
             originPackageName = "com.test.minimal",
             virtualPackageName = "com.multiapp.instance.abc",
-            activityInfoPackageName = "com.multiapp.instance.abc",
-            applicationInfoPackageName = "com.multiapp.instance.abc",
+            activityInfoPackageName = "com.test.minimal",
+            applicationInfoPackageName = "com.test.minimal",
             loadedApkTargetClassName = "android.app.LoadedApk",
             loadedApkPatchedFields = listOf(
                 "mApplicationInfo",
@@ -33,7 +33,7 @@ class HostedActivityContextEvidenceFormatterTest {
             ),
             loadedApkAliasSkippedReasonsByField = emptyMap(),
             loadedApkSkippedReason = null,
-            loadedApkSource = "GUEST_SANDBOX",
+            loadedApkSource = "PREWARMED_GUEST",
             activityRecordPatchedFields = listOf("activityInfo", "intent", "packageInfo"),
             activityRecordSkippedReason = null,
             appCompatThemeGuardApplied = false,
@@ -65,13 +65,13 @@ class HostedActivityContextEvidenceFormatterTest {
         assertTrue("stage=ACTIVITY_CONTEXT" in text)
         assertTrue("injectionPhase=preOnPostCreate" in text)
         assertTrue("guestActivityClassName=com.test.minimal.MainActivity" in text)
-        assertTrue("packageName=com.multiapp.instance.abc" in text)
+        assertTrue("packageName=com.test.minimal" in text)
         assertTrue("originPackageName=com.test.minimal" in text)
         assertTrue("virtualPackageName=com.multiapp.instance.abc" in text)
-        assertTrue("activityInfo.packageName=com.multiapp.instance.abc" in text)
-        assertTrue("applicationInfo.packageName=com.multiapp.instance.abc" in text)
+        assertTrue("activityInfo.packageName=com.test.minimal" in text)
+        assertTrue("applicationInfo.packageName=com.test.minimal" in text)
         assertTrue("loadedApkTargetClassName=android.app.LoadedApk" in text)
-        assertTrue("loadedApkSource=GUEST_SANDBOX" in text)
+        assertTrue("loadedApkSource=PREWARMED_GUEST" in text)
         assertTrue("loadedApkEvidenceVerdict=PASS" in text)
         assertTrue("loadedApkInstalledAliasCount=4" in text)
         assertTrue(

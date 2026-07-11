@@ -30,6 +30,48 @@ import kotlin.test.assertTrue
 
 class EngineVirtualContentResolverTest {
     @Test
+    fun `authority resolver observes providers added after first lookup`() {
+        val context = mockk<Context>(relaxed = true)
+        val service = mockk<VirtualProviderService>(relaxed = true)
+        val uri = mockk<Uri>(relaxed = true)
+        var ownerInstalled = false
+        every { uri.authority } returns "com.dynamic.provider"
+        every { uri.encodedPath } returns "/items/7"
+        every { service.resolveProviderAuthority("inst-001", any()) } answers {
+            VirtualProviderAuthorityResolveResult(
+                callerInstanceId = "inst-001",
+                guestAuthority = "com.dynamic.provider",
+                verdict = if (ownerInstalled) {
+                    com.multiapp.core.model.engine.EngineResultStatus.PARTIAL
+                } else {
+                    com.multiapp.core.model.engine.EngineResultStatus.FAIL
+                },
+                virtualAuthority = ownerInstalled,
+                targetInstanceId = "owner-2".takeIf { ownerInstalled },
+                message = if (ownerInstalled) {
+                    "provider_authority_resolved_unique_owner"
+                } else {
+                    "provider_authority_not_virtual:com.dynamic.provider"
+                }
+            )
+        }
+        val resolver = DefaultEngineProviderAuthorityResolver(
+            hostContext = context,
+            config = config(),
+            providerServiceFactory = { service }
+        )
+
+        val beforeInstall = resolver.resolve(uri, EngineProviderOperation.QUERY, null)
+        ownerInstalled = true
+        val afterInstall = resolver.resolve(uri, EngineProviderOperation.QUERY, null)
+
+        assertTrue(!beforeInstall.virtualAuthority)
+        assertTrue(afterInstall.virtualAuthority)
+        assertEquals("owner-2", afterInstall.targetInstanceId)
+        verify(exactly = 2) { service.resolveProviderAuthority("inst-001", any()) }
+    }
+
+    @Test
     fun `resolver factory is baseline on api 29 and falls back on api 28`() {
         val context = mockk<Context>(relaxed = true)
         val resolver = mockk<ContentResolver>(relaxed = true)

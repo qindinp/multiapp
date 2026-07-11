@@ -216,6 +216,23 @@ class LauncherViewModelTest {
     }
 
     @Test
+    fun `launchInstance coalesces duplicate requests before engine dispatch`() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+        launcherIoDispatcher = dispatcher
+        val viewModel = createViewModel()
+        runCurrent()
+
+        viewModel.launchInstance("instance-1")
+        viewModel.launchInstance("instance-1")
+        runCurrent()
+
+        verify(exactly = 1) {
+            virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1"))
+        }
+    }
+
+    @Test
     fun `normalizeApkComponentName expands manifest component names`() {
         assertEquals(
             "com.example.app.MainActivity",

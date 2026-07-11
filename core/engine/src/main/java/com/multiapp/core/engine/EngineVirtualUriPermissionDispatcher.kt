@@ -53,8 +53,20 @@ internal class EngineVirtualUriPermissionDispatcher(
     override fun dispatch(request: VirtualUriPermissionRequest): VirtualUriPermissionResult {
         val authority = request.uri.authority?.takeIf { it.isNotBlank() }
             ?: return VirtualUriPermissionResult.notHandled("uri_authority_missing")
-        if (authority !in guestAuthorities()) {
-            return VirtualUriPermissionResult.notHandled("uri_authority_not_owned_by_guest")
+        val guestOwned = authority in guestAuthorities()
+        val virtualAuthority = guestOwned || runtimes().any { runtime ->
+            runtime.packageSnapshot.providers.any { authority in it.authorities }
+        }
+        if (!virtualAuthority) {
+            return VirtualUriPermissionResult.notHandled("uri_authority_not_virtual")
+        }
+        if (
+            request.operation == VirtualUriPermissionOperation.GRANT ||
+            request.operation == VirtualUriPermissionOperation.REVOKE
+        ) {
+            if (!guestOwned) {
+                return VirtualUriPermissionResult.notHandled("uri_authority_not_owned_by_guest")
+            }
         }
         val engineResult = when (request.operation) {
             VirtualUriPermissionOperation.GRANT -> providerService.grantUriPermission(
@@ -73,12 +85,38 @@ internal class EngineVirtualUriPermissionDispatcher(
                     callingPid = processId
                 )
             )
-            VirtualUriPermissionOperation.CHECK -> checkUriPermission(request, authority)
+            VirtualUriPermissionOperation.CHECK -> checkUriPermission(
+                request,
+                authority,
+                config.instanceId.takeIf { guestOwned }
+            )
                 ?: return VirtualUriPermissionResult(
                     handled = true,
                     success = false,
                     granted = false,
                     reason = "provider_uri_grant_target_process_unresolved:pid=${request.pid}:uid=${request.uid}"
+                )
+            VirtualUriPermissionOperation.TAKE_PERSISTABLE ->
+                providerService.takePersistableUriPermission(
+                    targetInstanceId = config.instanceId,
+                    request = request.toEngineRequest(
+                        authority = authority,
+                        ownerInstanceId = null,
+                        targetInstanceId = config.instanceId,
+                        callingUid = hostUid,
+                        callingPid = processId
+                    )
+                )
+            VirtualUriPermissionOperation.RELEASE_PERSISTABLE ->
+                providerService.releasePersistableUriPermission(
+                    targetInstanceId = config.instanceId,
+                    request = request.toEngineRequest(
+                        authority = authority,
+                        ownerInstanceId = null,
+                        targetInstanceId = config.instanceId,
+                        callingUid = hostUid,
+                        callingPid = processId
+                    )
                 )
         }
         val successful = engineResult.verdict == EngineResultStatus.PASS ||
@@ -93,7 +131,8 @@ internal class EngineVirtualUriPermissionDispatcher(
 
     private fun checkUriPermission(
         request: VirtualUriPermissionRequest,
-        authority: String
+        authority: String,
+        ownerInstanceId: String?
     ): VirtualProviderUriGrantResult? {
         if (request.uid != hostUid || request.pid <= 0) return null
         val candidates = runtimes().filter { it.processId == request.pid }
@@ -106,7 +145,7 @@ internal class EngineVirtualUriPermissionDispatcher(
             targetInstanceId = targetInstanceId,
             request = request.toEngineRequest(
                 authority = authority,
-                ownerInstanceId = config.instanceId,
+                ownerInstanceId = ownerInstanceId,
                 targetInstanceId = targetInstanceId,
                 callingUid = request.uid,
                 callingPid = request.pid

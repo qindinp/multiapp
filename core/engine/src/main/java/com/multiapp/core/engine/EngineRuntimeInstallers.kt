@@ -12,6 +12,7 @@ import com.multiapp.core.loader.VirtualContentServiceOperationRecorder
 import com.multiapp.core.loader.VirtualContentServiceOperationRecorders
 import com.multiapp.core.loader.VirtualContentServiceProxyInstaller
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
+import com.multiapp.core.loader.VirtualPermissionCheckDispatchers
 import com.multiapp.core.loader.VirtualUriPermissionDispatcherFactories
 import java.io.File
 
@@ -27,7 +28,11 @@ data class EngineContentRuntimeInstallResult(
 )
 
 object EngineRuntimeInstallers {
+    @Volatile
+    private var processHostContext: Context? = null
+
     fun installSystemServerClient(context: Context): Boolean {
+        rememberProcessHostContext(context)
         val connected = EngineRuntimeIpcClients.install(context)
         if (connected) {
             EngineOperationEvidenceSinks.install(EngineRuntimeIpcClients.evidenceSink())
@@ -36,6 +41,7 @@ object EngineRuntimeInstallers {
     }
 
     fun installAmsComponentDispatcher(context: Context) {
+        rememberProcessHostContext(context)
         val systemServer = fileBackedSystemServer(context).server
         val activityService = IpcBackedVirtualActivityService(
             fallback = systemServer.activityService,
@@ -44,6 +50,10 @@ object EngineRuntimeInstallers {
         val serviceService = IpcBackedVirtualServiceService(systemServer.serviceService)
         val broadcastService = IpcBackedVirtualBroadcastService(systemServer.broadcastService)
         val appOpsService = IpcBackedVirtualAppOpsService(systemServer.appOpsService)
+        val permissionService = IpcBackedVirtualPermissionService(systemServer.permissionService)
+        VirtualPermissionCheckDispatchers.install(
+            EngineVirtualPermissionDispatcher(permissionService)
+        )
         VirtualAppOpsDispatchers.install(
             EngineVirtualAppOpsDispatcher(
                 service = appOpsService,
@@ -105,12 +115,14 @@ object EngineRuntimeInstallers {
         }
     }
 
-    fun installInstrumentation(context: Context): Result<Unit> =
-        VirtualInstrumentationInstaller.install(
+    fun installInstrumentation(context: Context): Result<Unit> {
+        rememberProcessHostContext(context)
+        return VirtualInstrumentationInstaller.install(
             processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
             activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
             activityOperations = EngineVirtualActivityOperationsFactory.hotPath(context.filesDir)
         )
+    }
 
     fun installBroadcastRecorder(recorder: EngineBroadcastRecorder) {
         VirtualBroadcastRecorders.install(
@@ -125,7 +137,7 @@ object EngineRuntimeInstallers {
     }
 
     fun fileBackedSystemServer(context: Context): EngineSystemServerHandle {
-        val filesDir = context.applicationContext.filesDir
+        val filesDir = resolveProcessHostContext(context).filesDir
         val registry = EngineRuntimeRegistry.global.attachStateStore(
             FileBackedEngineRuntimeStateStore(
                 File(filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME)
@@ -146,6 +158,9 @@ object EngineRuntimeInstallers {
             providerUriGrantStore = FileBackedEngineProviderUriGrantStore(
                 File(filesDir, EngineProviderUriGrantFiles.DEFAULT_FILE_NAME)
             ),
+            permissionGrantStore = FileBackedEnginePermissionGrantStore(
+                File(filesDir, EnginePermissionGrantFiles.DEFAULT_FILE_NAME)
+            ),
             appOpsStateStore = FileBackedEngineAppOpsStateStore(
                 File(filesDir, EngineAppOpsStateFiles.DEFAULT_FILE_NAME)
             ),
@@ -154,5 +169,30 @@ object EngineRuntimeInstallers {
             )
         )
         return EngineSystemServerHandle(registry = registry, server = server)
+    }
+
+    private fun rememberProcessHostContext(context: Context) {
+        val applicationContext = runCatching { context.applicationContext }.getOrNull()
+        processHostContext = applicationContext ?: context
+    }
+
+    private fun resolveProcessHostContext(context: Context): Context {
+        processHostContext?.let { return it }
+        val applicationContext = runCatching { context.applicationContext }.getOrNull()
+        return applicationContext
+            ?: throw IllegalStateException(
+                "Engine process host Context is unavailable during guest component attachment"
+            )
+    }
+
+    internal fun rememberProcessHostContextForTest(context: Context) {
+        rememberProcessHostContext(context)
+    }
+
+    internal fun resolveProcessHostContextForTest(context: Context): Context =
+        resolveProcessHostContext(context)
+
+    internal fun clearProcessHostContextForTest() {
+        processHostContext = null
     }
 }

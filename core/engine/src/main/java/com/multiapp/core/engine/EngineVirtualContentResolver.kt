@@ -79,19 +79,16 @@ fun interface EngineProviderAuthorityResolver {
     ): VirtualProviderAuthorityResolveResult
 }
 
-private class DefaultEngineProviderAuthorityResolver(
+internal class DefaultEngineProviderAuthorityResolver(
     private val hostContext: Context,
-    private val config: VirtualContextConfig
+    private val config: VirtualContextConfig,
+    private val providerServiceFactory: (Context) -> VirtualProviderService = { context ->
+        val handle = EngineRuntimeInstallers.fileBackedSystemServer(context)
+        IpcBackedVirtualProviderService(handle.server.providerService)
+    }
 ) : EngineProviderAuthorityResolver {
-    private val backend by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        val handle = EngineRuntimeInstallers.fileBackedSystemServer(hostContext)
-        AuthorityResolverBackend(
-            service = IpcBackedVirtualProviderService(handle.server.providerService),
-            authorities = handle.server.runtimeService.list()
-                .flatMapTo(linkedSetOf()) { runtime ->
-                    runtime.packageSnapshot.providers.flatMap { it.authorities }
-                }
-        )
+    private val providerService by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        providerServiceFactory(hostContext)
     }
 
     override fun resolve(
@@ -111,12 +108,9 @@ private class DefaultEngineProviderAuthorityResolver(
                 message = "provider_authority_resolved_self_snapshot"
             )
         }
-        val currentBackend = runCatching { backend }.getOrNull()
+        val currentService = runCatching { providerService }.getOrNull()
             ?: return nonVirtualResult("provider_authority_index_unavailable")
-        if (authority !in currentBackend.authorities) {
-            return nonVirtualResult("provider_authority_not_virtual:$authority", authority)
-        }
-        return currentBackend.service.resolveProviderAuthority(
+        return currentService.resolveProviderAuthority(
             config.instanceId,
             VirtualProviderAuthorityResolveRequest(
                 guestAuthority = authority,
@@ -138,10 +132,6 @@ private class DefaultEngineProviderAuthorityResolver(
         message = message
     )
 
-    private data class AuthorityResolverBackend(
-        val service: VirtualProviderService,
-        val authorities: Set<String>
-    )
 }
 
 /**

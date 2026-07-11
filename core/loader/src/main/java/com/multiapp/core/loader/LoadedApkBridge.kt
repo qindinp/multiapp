@@ -24,6 +24,15 @@ object LoadedApkBridge {
         )
     }
 
+    fun application(target: Any): Application? =
+        readField(target, "mApplication") as? Application
+
+    fun applicationInfo(target: Any): ApplicationInfo? =
+        readField(target, "mApplicationInfo") as? ApplicationInfo
+
+    fun classLoader(target: Any): ClassLoader? =
+        readField(target, "mClassLoader") as? ClassLoader
+
     fun patch(target: Any, state: LoadedApkRuntimeState): LoadedApkPatchResult {
         val patched = mutableListOf<String>()
         val skipped = mutableListOf<LoadedApkSkippedField>()

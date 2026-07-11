@@ -49,7 +49,14 @@ class VirtualPackageManagerWrapperTest {
         val pm = VirtualPackageManagerWrapper(
             base = mockk<PackageManager>(relaxed = true),
             snapshot = snapshot(),
-            runtimeUid = runtimeUid
+            runtimeUid = runtimeUid,
+            permissionCheckDispatcher = VirtualPermissionCheckDispatcher {
+                VirtualPermissionCheckDispatchResult(
+                    handled = true,
+                    granted = true,
+                    reason = "test_permission_state"
+                )
+            }
         )
 
         assertEquals(runtimeUid, pm.getPackageUid("com.test.minimal", 0))

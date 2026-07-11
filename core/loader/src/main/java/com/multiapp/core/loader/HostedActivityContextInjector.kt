@@ -67,16 +67,25 @@ internal object HostedActivityContextInjector {
         injectionPhase: String = "preOnCreate",
         allowHostAppCompatFallback: Boolean = false
     ): InjectionResult {
+        val frameworkActivityContext = runCatching { activity.baseContext }.getOrNull()
+            ?: hostContext
+        val resolvedHostPackageName = hostPackageName
+            ?.takeIf { it.isNotBlank() }
+            ?: runCatching { hostContext.packageName }.getOrNull().orEmpty()
+        val hiddenApiBypassApplied = runCatching { AndroidCompat.bypassHiddenApis() }
+            .onFailure { error -> Log.d(TAG, "Hidden API bypass unavailable: ${error.message}") }
+            .getOrDefault(false)
+        FrameworkApplicationContextCompat.prepare(
+            context = frameworkActivityContext,
+            hostPackageName = resolvedHostPackageName
+        )
         val guestContext = VirtualContextWrappers.create(
-            base = hostContext,
+            base = frameworkActivityContext,
             config = config,
             guestClassLoader = guestClassLoader,
             processRuntime = processRuntime,
             activityRecordManager = activityRecordManager
         )
-        val hiddenApiBypassApplied = runCatching { AndroidCompat.bypassHiddenApis() }
-            .onFailure { error -> Log.d(TAG, "Hidden API bypass unavailable: ${error.message}") }
-            .getOrDefault(false)
         val guestActivityClassName = activity.intent?.getStringExtra("multiapp.guestActivityClassName")
             ?.takeIf { it.isNotBlank() }
             ?: activity.javaClass.name
@@ -94,11 +103,12 @@ internal object HostedActivityContextInjector {
         replaceFieldIfPresent(activity, "mResources", guestContext.resources)
         val loadedApkPatch = patchLoadedApkIfPresent(
             activity = activity,
-            hostPackageName = hostPackageName,
+            hostPackageName = resolvedHostPackageName,
             guestContext = guestContext,
             config = config,
             applicationInfo = runtimeApplicationInfo,
-            guestClassLoader = guestClassLoader
+            guestClassLoader = guestClassLoader,
+            guestApplication = guestApplication
         )
         val activityRecordPatch = patchActivityClientRecordIfPresent(
             activity = activity,
@@ -122,7 +132,7 @@ internal object HostedActivityContextInjector {
             contextInjected = contextInjected,
             applicationInjected = applicationInjected,
             dataDir = config.dataDir,
-            packageName = config.virtualPackageName,
+            packageName = config.originPackageName,
             applicationClassName = guestApplication?.javaClass?.name,
             originPackageName = config.originPackageName,
             virtualPackageName = config.virtualPackageName,
@@ -650,33 +660,42 @@ internal object HostedActivityContextInjector {
         guestContext: VirtualContextWrapper,
         config: VirtualContextConfig,
         applicationInfo: android.content.pm.ApplicationInfo,
-        guestClassLoader: ClassLoader
+        guestClassLoader: ClassLoader,
+        guestApplication: Application?
     ): ActivityThreadLoadedApkInstallResult? {
-        val state = LoadedApkRuntimeState(
-            packageName = config.virtualPackageName,
-            applicationInfo = applicationInfo,
-            resources = guestContext.resources,
-            classLoader = guestClassLoader
-        )
         val aliases = listOf(config.originPackageName, config.virtualPackageName)
         val activityThread = ActivityThreadCompat.currentActivityThread()
-        var sandboxFailureClassName: String? = null
-
-        runCatching {
-            return ActivityThreadLoadedApkInstaller.installGuestSandbox(
-                activityThread = activityThread,
-                state = state,
-                packageAliases = aliases
+        val loadedApk = findLoadedApk(activity)
+            ?: ActivityThreadLoadedApkInstaller.findInstalledGuest(activityThread, aliases)?.loadedApk
+            ?: return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = "",
+                packageAliases = aliases,
+                skippedReason = "PREWARMED_ACTIVITY_LOADED_APK_NOT_FOUND",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
             )
-        }.onFailure { error ->
-            sandboxFailureClassName = error.javaClass.simpleName
-            Log.w(TAG, "Guest LoadedApk sandbox creation failed; falling back to existing LoadedApk patch", error)
+        if (guestApplication == null) {
+            return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = loadedApk.javaClass.name,
+                packageAliases = aliases,
+                skippedReason = "PREWARMED_GUEST_APPLICATION_MISSING",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
+            )
         }
-
-        val loadedApk = findLoadedApk(activity) ?: return ActivityThreadLoadedApkInstaller.skippedInstallResult(
-            targetClassName = "",
-            packageAliases = aliases,
-            skippedReason = "LOADED_APK_TARGET_NOT_FOUND_AFTER_GUEST_SANDBOX_FAILED:${sandboxFailureClassName.orEmpty()}"
+        val boundApplication = LoadedApkBridge.application(loadedApk)
+        if (boundApplication !== guestApplication) {
+            return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = loadedApk.javaClass.name,
+                packageAliases = aliases,
+                skippedReason = "ACTIVITY_LOADED_APK_APPLICATION_MISMATCH",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
+            )
+        }
+        val state = LoadedApkRuntimeState(
+            packageName = config.originPackageName,
+            applicationInfo = applicationInfo,
+            resources = guestContext.resources,
+            classLoader = guestClassLoader,
+            application = guestApplication
         )
         val guardPackageName = hostPackageName
             ?.takeIf { it.isNotBlank() }
@@ -684,7 +703,8 @@ internal object HostedActivityContextInjector {
             ?: return ActivityThreadLoadedApkInstaller.skippedInstallResult(
                 targetClassName = loadedApk.javaClass.name,
                 packageAliases = aliases,
-                skippedReason = "HOST_PACKAGE_GUARD_UNAVAILABLE_AFTER_GUEST_SANDBOX_FAILED:${sandboxFailureClassName.orEmpty()}"
+                skippedReason = "HOST_PACKAGE_GUARD_UNAVAILABLE_FOR_PREWARMED_GUEST",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
             )
         return runCatching {
             ActivityThreadLoadedApkInstaller.install(
@@ -692,7 +712,8 @@ internal object HostedActivityContextInjector {
                 loadedApk = loadedApk,
                 state = state,
                 packageAliases = aliases,
-                hostPackageName = guardPackageName
+                hostPackageName = guardPackageName,
+                source = LoadedApkInstallSource.PREWARMED_GUEST
             )
         }.onFailure { error ->
             Log.w(TAG, "Unable to install ActivityThread LoadedApk aliases", error)
@@ -700,7 +721,8 @@ internal object HostedActivityContextInjector {
             ActivityThreadLoadedApkInstaller.skippedInstallResult(
                 targetClassName = loadedApk.javaClass.name,
                 packageAliases = aliases,
-                skippedReason = "EXISTING_LOADED_APK_PATCH_FAILED:${error.javaClass.simpleName}"
+                skippedReason = "PREWARMED_LOADED_APK_PATCH_FAILED:${error.javaClass.simpleName}",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
             )
         }
     }

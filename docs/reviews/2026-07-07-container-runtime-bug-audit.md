@@ -2168,3 +2168,156 @@ Decision remains **BLOCK**. Local tests prove contract and regression coverage;
 they do not prove API 30-36/HyperOS Binder behavior, process-death recovery,
 multi-instance recents, native isolation, or QQ/WeChat/QQ Reader/GKD device
 compatibility. The AGP 8.7.3 versus compileSdk 36 warning also remains open.
+
+## Execution Update - 2026-07-10 Persistable URI Grant Control Plane
+
+The earlier statement that persistable take/release and live authority-index
+invalidation were entirely missing is now partially superseded.
+
+What changed:
+
+- URI grant storage now separates transient modes, persistable eligibility,
+  and modes actually persisted by the target instance.
+- Target-owned take/release operations cross the main-process engine Binder and
+  validate authoritative caller UID/PID, instance, authority, path, mode, and
+  duplicate virtual owners.
+- Owner revoke clears both transient and persisted access; target release
+  clears only persisted access.
+- API 29+ `ContentResolver` take/release calls are intercepted at the AOSP
+  `uri_grants` Binder boundary. Only virtual authorities are consumed; system
+  authorities delegate to Android and denied virtual calls fail closed.
+- External virtual authorities are recognized by the URI permission dispatcher
+  using live runtime snapshots.
+- Non-self Provider authority lookup now calls the engine service on every
+  request instead of relying on a first-use process-local authority cache.
+- Focused store/server/IPC/dispatcher/resolver/Binder-proxy/stage/Context tests
+  passed.
+
+### Still BLOCK
+
+- Persisted incoming/outgoing `UriPermission` list objects are not virtualized.
+- API 28's ActivityManager URI-grant path, OEM hidden-API behavior, process
+  death, and reboot-like restore have no device evidence.
+- External non-virtual recipients, virtual manifest-permission ownership,
+  custom Provider processes, and ContentObserver/notify semantics remain open.
+- This is generic Provider infrastructure, not compatibility proof for QQ,
+  WeChat, QQ Reader, or GKD. Decision remains **BLOCK**.
+
+## Execution Update - 2026-07-10 Launch Ordering and Permission Authority
+
+Two earlier findings are partially superseded in the current dirty tree:
+
+- Guest Application creation through `LoadedApk.makeApplication`, runtime
+  publication, same-process Provider preinstall, and Instrumentation-driven
+  `Application.onCreate()` are now serialized on the Android main Looper.
+  Background prewarm threads no longer own permanent custom Loopers.
+- A file-backed, per-instance virtual permission service now owns PMS and
+  Provider permission decisions. Manifest declaration alone no longer grants
+  a permission, and connected malformed Binder responses fail closed.
+- First launch mirrors the installed source package's current Android grant
+  state only when the clone has no existing decision. Later explicit clone
+  decisions are preserved.
+- Launcher work is off the UI dispatcher, duplicate launch requests are
+  coalesced, global slot collisions are repaired, and the baseline profile no
+  longer enables the legacy LSPlant Provider hook.
+- Focused launcher, slot, Application, engine, permission, PMS, Provider, and
+  IPC tests passed.
+
+### Still BLOCK
+
+- Main-thread behavior, ActivityThread hidden APIs, ANR avoidance, and Provider
+  install ordering have no current device proof.
+- Runtime permission request/result UI, flags/groups, one-time grants,
+  auto-reset, shared UID, AppOps coupling, and user-facing clone permission
+  controls remain incomplete.
+- Source-package permission mirroring is a conservative bootstrap policy, not
+  complete virtual PackageManager permission semantics.
+
+## Execution Update - 2026-07-10 Same-Process Service Bind and Unbind
+
+The earlier blanket `bind-service`/`unbind-service` unsupported statement is
+partially superseded.
+
+What changed:
+
+- The engine admits same-guest-process `BIND` and connection-based `UNBIND`,
+  then records loader lifecycle results in Binder-owned evidence and durable
+  Service state.
+- Durable Service state can represent a bound-only `BOUND` record and retains
+  active start/bind counts across state-store recreation.
+- Service route IPC carries `sameProcess`; custom/remote guest process routes
+  fail closed before loader dispatch.
+- Focused engine plan, AMS dispatcher, lifecycle-state, and persistence tests
+  passed.
+
+### Still BLOCK
+
+- Cross-process Service hosting and callbacks, binder-death rebind, foreground
+  service types, sticky restart, process-death ordering, and device evidence
+  remain incomplete.
+- This closes a same-process control-plane gap only. It is not full Service
+  parity or compatibility proof for QQ, WeChat, QQ Reader, or GKD. Decision
+  remains **BLOCK**.
+
+## Device Finding - 2026-07-11 GKD Application Attach ANR
+
+Artifact: `.tmp/manual-after-user-20260711-082728`.
+
+The latest GKD failure is now attributed to a general framework-contract bug:
+
+- The hosted process reached `LoadedApk.makeApplication` but never returned
+  from `Application.attach()`.
+- MIUI's repeated stack samples remained at `ContextImpl.getImpl()` through
+  `VirtualInstrumentation.newApplication()` for over 45 seconds.
+- `VirtualContextWrapper.getBaseContext()` returned itself, while AOSP
+  `ContextImpl.getImpl()` repeatedly follows `ContextWrapper.getBaseContext()`.
+  This produced an infinite unwrap loop and an input ANR, not a slow GKD
+  `Application.onCreate()`.
+
+The current dirty tree removes the self-cycle and adopts the VirtualApp-style
+identity split: the framework-created guest ContextImpl/LoadedApk is retained,
+guest-visible identity is the origin package, and only ContextImpl /
+ContentResolver caller fields are rewritten to the host package for Android
+Binder validation. Focused loader tests pass.
+
+### Still BLOCK
+
+- No post-fix device artifact yet proves that GKD passes
+  `MAKE_APPLICATION_FINISHED` and `Application.onCreate()`.
+- A process-bootstrap readiness handshake must still precede foreground proxy
+  Activity launch to prevent any future guest initialization stall from
+  becoming an input ANR.
+- This finding does not establish QQ, WeChat, or QQ Reader compatibility.
+
+## Execution Update - 2026-07-11 Startup and System-Service Identity
+
+The post-fix device capture `.tmp/gkd-clipboard-current-20260711-144555`
+supersedes the statement that no post-fix GKD Application evidence exists:
+
+- Two GKD clones reached guest `onResume` in separate `:v1` and `:v3`
+  processes with `loadedApkApplicationCreatorStatus=PASS`.
+- Guest Application creation completed in 103 ms and 81 ms, and the capture
+  contains no new Java fatal or ANR.
+- Runtime-state snapshot caching and minimal baseline evidence remove repeated
+  full-file parsing and synchronous storage/Provider diagnostics from the
+  foreground launch path.
+- LauncherApps and Clipboard now have guest-to-host caller identity proxies at
+  both manager and ServiceManager Binder layers. Clipboard package argument
+  positions are explicit per method for API 30-36 rather than using a broad
+  first/last-String rewrite.
+- Current source reports manager and ServiceManager Clipboard injection
+  separately and degrades one-sided installation to `PARTIAL`.
+
+### Still BLOCK
+
+- GKD Provider preinstall remains `PARTIAL`; `androidx-startup` failed because
+  a `VirtualContextWrapperApi36` was cast to `Application`.
+- Runtime permission request/result UX is not implemented, and AstroBox still
+  has an unresolved black-screen device result.
+- No process-bootstrap readiness handshake prevents a proxy Activity from
+  becoming foreground before guest readiness.
+- Clipboard install evidence is not yet a device proof of the actual copy
+  operation, and the stricter split evidence fields require a new device run.
+- Activity process-death recovery, full Service/Broadcast semantics,
+  custom-process Providers, native/linker coverage, and the compatibility
+  matrix remain open. Decision remains **BLOCK**.

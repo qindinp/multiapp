@@ -179,7 +179,6 @@ abstract class ProxyActivityBase : Activity() {
         val hostContext = applicationContext ?: this
         Thread(
             {
-                prepareBackgroundLooperIfNeeded()
                 val bindResult = HostedActivityRuntimeBinder().ensureBound(hostContext, instanceId)
                 Handler(Looper.getMainLooper()).post {
                     val relaunched = relaunchProxyAfterPrewarm(
@@ -198,21 +197,9 @@ abstract class ProxyActivityBase : Activity() {
                     )
                     finish()
                 }
-                if (bindResult is HostedActivityRuntimeBindResult.Bound &&
-                    bindResult.status == "BOUND" &&
-                    bindResult.result.guestApplication != null
-                ) {
-                    Looper.loop()
-                }
             },
             "multiapp-proxy-recover-${instanceId.take(8)}"
         ).start()
-    }
-
-    private fun prepareBackgroundLooperIfNeeded() {
-        if (Looper.myLooper() == null) {
-            Looper.prepare()
-        }
     }
 
     private fun relaunchProxyAfterPrewarm(

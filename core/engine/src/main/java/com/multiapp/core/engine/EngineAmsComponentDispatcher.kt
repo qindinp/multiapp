@@ -408,6 +408,9 @@ class DefaultEngineAmsComponentDispatcher(
                 verdict = EngineResultStatus.PASS,
                 reason = stopRequest.reason,
                 stopped = true,
+                destroyed = lifecycleEvidence.activeBindCount == 0,
+                activeStartCount = lifecycleEvidence.activeStartCount,
+                activeBindCount = lifecycleEvidence.activeBindCount,
                 message = "loader_service_stopped"
             )
             is VirtualServiceStopDispatchResult.ServiceNotFound -> VirtualServiceOperationResult(
@@ -449,6 +452,8 @@ class DefaultEngineAmsComponentDispatcher(
                 action = sourceIntent.safeAction(),
                 verdict = EngineResultStatus.PASS,
                 bound = true,
+                activeBindCount = activeConnectionCount,
+                cached = cached,
                 message = if (cached) "loader_service_bound_cached" else "loader_service_bound"
             )
             is VirtualServiceBindDispatchResult.Blocked -> VirtualServiceOperationResult(
@@ -472,6 +477,8 @@ class DefaultEngineAmsComponentDispatcher(
         action: String?,
         verdict: EngineResultStatus,
         bound: Boolean,
+        activeBindCount: Int = 0,
+        cached: Boolean = false,
         message: String
     ): VirtualServiceOperationResult =
         VirtualServiceOperationResult(
@@ -483,6 +490,9 @@ class DefaultEngineAmsComponentDispatcher(
             reason = reason,
             bound = bound,
             foreground = foreground,
+            processSlot = processSlot,
+            activeBindCount = activeBindCount,
+            cached = cached,
             message = message
         )
 
@@ -498,6 +508,9 @@ class DefaultEngineAmsComponentDispatcher(
                 verdict = EngineResultStatus.PASS,
                 reason = startRequest.reason,
                 unbound = true,
+                destroyed = destroyed,
+                processSlot = startRequest.processSlot,
+                activeBindCount = activeBindCount,
                 message = "loader_service_unbound"
             )
             is VirtualServiceUnbindDispatchResult.Failed -> VirtualServiceOperationResult(

@@ -1,8 +1,10 @@
 package com.multiapp.core.engine
 
 import android.content.Context
+import com.multiapp.core.loader.ActivityThreadCompat
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.HostedRuntimeBootstrap
+import com.multiapp.core.loader.MainLooperApplicationThreadRunner
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.installer.InstallRecordStore
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -70,6 +72,12 @@ class DefaultHostedRuntimeEngine @Inject constructor(
             installRecordStore = installRecordStore,
             hostContext = hostContext,
             providerHookInstallEnabled = providerHookEnabled,
+            applicationThreadRunner = MainLooperApplicationThreadRunner(),
+            applicationOnCreateInvoker = { application ->
+                val activityThread = ActivityThreadCompat.currentActivityThread()
+                ActivityThreadCompat.getInstrumentation(activityThread)
+                    .callApplicationOnCreate(application)
+            },
             processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
             activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
             runtimePublisher = { publishedInstanceId, result ->

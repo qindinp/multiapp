@@ -237,6 +237,46 @@ class EngineProviderIpcServiceTest {
         verify(exactly = 0) { fallback.grantUriPermission(any(), any()) }
     }
 
+    @Test
+    fun `connected authority owns persistable Provider URI take and release`() {
+        val fallback = mockk<VirtualProviderService>(relaxed = true)
+        val request = VirtualProviderUriGrantRequest(
+            guestAuthority = "com.example.provider",
+            encodedPath = "/documents/7",
+            modeFlags = EngineProviderUriGrantModes.READ,
+            ownerInstanceId = "instance-1",
+            targetInstanceId = "instance-2"
+        )
+        val taken = VirtualProviderUriGrantResult(
+            ownerInstanceId = "instance-1",
+            targetInstanceId = "instance-2",
+            guestAuthority = request.guestAuthority,
+            encodedPath = request.encodedPath,
+            modeFlags = request.modeFlags,
+            verdict = EngineResultStatus.PARTIAL,
+            granted = true,
+            affectedGrantCount = 1,
+            persistedModeFlags = EngineProviderUriGrantModes.READ,
+            message = "remote_provider_persistable_uri_taken"
+        )
+        val released = taken.copy(
+            granted = false,
+            persistedModeFlags = 0,
+            message = "remote_provider_persistable_uri_released"
+        )
+        val service = IpcBackedVirtualProviderService(
+            fallback = fallback,
+            remoteTakePersistable = { _, _ -> taken },
+            remoteReleasePersistable = { _, _ -> released },
+            authorityConnected = { true }
+        )
+
+        assertSame(taken, service.takePersistableUriPermission("instance-2", request))
+        assertSame(released, service.releasePersistableUriPermission("instance-2", request))
+        verify(exactly = 0) { fallback.takePersistableUriPermission(any(), any()) }
+        verify(exactly = 0) { fallback.releasePersistableUriPermission(any(), any()) }
+    }
+
     private fun request() = VirtualProviderDispatchPlanRequest(
         operation = EngineProviderOperation.QUERY,
         guestAuthority = "com.example.provider",

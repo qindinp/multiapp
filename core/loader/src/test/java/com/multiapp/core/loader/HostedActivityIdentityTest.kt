@@ -11,7 +11,7 @@ import kotlin.test.assertSame
 class HostedActivityIdentityTest {
 
     @Test
-    fun `application info for runtime uses virtual package and instance paths without mutating source`() {
+    fun `application info for runtime uses origin package and instance paths without mutating source`() {
         val source = ApplicationInfo().apply {
             packageName = "com.test.minimal"
             className = "com.test.minimal.MinimalApp"
@@ -28,7 +28,7 @@ class HostedActivityIdentityTest {
 
         val runtimeInfo = HostedActivityIdentity.applicationInfoForRuntime(config, source)
 
-        assertEquals("com.multiapp.instance.abc", runtimeInfo.packageName)
+        assertEquals("com.test.minimal", runtimeInfo.packageName)
         assertEquals("com.test.minimal.MinimalApp", runtimeInfo.className)
         assertEquals("com.test.minimal.MinimalApp", runtimeInfo.name)
         assertEquals("/data/apks/minimal.apk", runtimeInfo.sourceDir)
@@ -109,7 +109,7 @@ class HostedActivityIdentityTest {
     }
 
     @Test
-    fun `activity info for record uses virtual package and supplied virtual application info`() {
+    fun `activity info for record uses origin package and supplied guest application info`() {
         val config = config(snapshot = snapshot())
         val runtimeInfo = HostedActivityIdentity.applicationInfoForRuntime(
             config = config,
@@ -128,13 +128,13 @@ class HostedActivityIdentityTest {
             applicationInfo = runtimeInfo
         )
 
-        assertEquals("com.multiapp.instance.abc", activityInfo.packageName)
+        assertEquals("com.test.minimal", activityInfo.packageName)
         assertEquals("com.test.minimal.MainActivity", activityInfo.name)
         assertEquals(0x7f010002, activityInfo.theme)
         assertEquals("com.test.minimal", activityInfo.processName)
         assertEquals("com.test.minimal", activityInfo.taskAffinity)
         assertSame(runtimeInfo, activityInfo.applicationInfo)
-        assertEquals("com.multiapp.instance.abc", activityInfo.applicationInfo.packageName)
+        assertEquals("com.test.minimal", activityInfo.applicationInfo.packageName)
     }
 
     @Test
@@ -170,7 +170,7 @@ class HostedActivityIdentityTest {
     }
 
     @Test
-    fun `activity info fallback uses virtual package when snapshot component is missing`() {
+    fun `activity info fallback uses origin package when snapshot component is missing`() {
         val config = config(snapshot = snapshot())
         val runtimeInfo = HostedActivityIdentity.applicationInfoForRuntime(
             config = config,
@@ -188,7 +188,7 @@ class HostedActivityIdentityTest {
             applicationInfo = runtimeInfo
         )
 
-        assertEquals("com.multiapp.instance.abc", activityInfo.packageName)
+        assertEquals("com.test.minimal", activityInfo.packageName)
         assertEquals("com.test.minimal.MissingActivity", activityInfo.name)
         assertEquals(0x7f010001, activityInfo.theme)
         assertEquals(false, activityInfo.exported)

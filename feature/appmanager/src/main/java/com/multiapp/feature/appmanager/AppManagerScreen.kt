@@ -17,17 +17,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.graphics.drawable.toBitmap
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
+import com.multiapp.core.designsystem.components.rememberAppIconBitmap
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 
@@ -36,7 +35,7 @@ import com.multiapp.core.model.instance.VirtualInstanceRecord
 fun AppManagerScreen(
     viewModel: AppManagerViewModel = hiltViewModel()
 ) {
-    val uiState by viewModel.uiState.collectAsState()
+    val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var showDetailDialog by remember { mutableStateOf<VirtualInstanceRecord?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -110,36 +109,27 @@ fun AppManagerScreen(
                     ) {
                         itemsIndexed(
                             uiState.instances,
-                            key = { _, instance -> instance.instanceId }
-                        ) { index, instance ->
-                            var visible by remember { mutableStateOf(false) }
-                            LaunchedEffect(instance) {
-                                kotlinx.coroutines.delay(index * 40L)
-                                visible = true
-                            }
-                            AnimatedVisibility(
-                                visible = visible,
-                                enter = fadeIn(tween(300)) + slideInVertically { it / 2 }
-                            ) {
-                                AppManagerCard(
-                                    instance = instance,
-                                    isExpanded = uiState.expandedInstanceId == instance.instanceId,
-                                    onToggleExpand = {
-                                        viewModel.onEvent(
-                                            AppManagerEvent.ToggleExpand(instance.instanceId)
-                                        )
-                                    },
-                                    onShowDetail = { showDetailDialog = instance },
-                                    onLaunch = {
-                                        viewModel.launchInstance(instance.instanceId)
-                                    },
-                                    onDelete = {
-                                        viewModel.onEvent(
-                                            AppManagerEvent.DeleteInstance(instance.instanceId)
-                                        )
-                                    }
-                                )
-                            }
+                            key = { _, instance -> instance.instanceId },
+                            contentType = { _, _ -> "instance-manager-item" }
+                        ) { _, instance ->
+                            AppManagerCard(
+                                instance = instance,
+                                isExpanded = uiState.expandedInstanceId == instance.instanceId,
+                                onToggleExpand = {
+                                    viewModel.onEvent(
+                                        AppManagerEvent.ToggleExpand(instance.instanceId)
+                                    )
+                                },
+                                onShowDetail = { showDetailDialog = instance },
+                                onLaunch = {
+                                    viewModel.launchInstance(instance.instanceId)
+                                },
+                                onDelete = {
+                                    viewModel.onEvent(
+                                        AppManagerEvent.DeleteInstance(instance.instanceId)
+                                    )
+                                }
+                            )
                         }
                     }
                 }
@@ -164,15 +154,7 @@ private fun AppManagerCard(
     onLaunch: () -> Unit,
     onDelete: () -> Unit
 ) {
-    val context = LocalContext.current
-
-    val appIcon = remember(instance.originPackageName) {
-        try {
-            context.packageManager.getApplicationIcon(instance.originPackageName)
-        } catch (_: Exception) {
-            null
-        }
-    }
+    val appIcon = rememberInstalledAppIconBitmap(instance.originPackageName, 96)
 
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
@@ -203,9 +185,8 @@ private fun AppManagerCard(
                     contentAlignment = Alignment.Center
                 ) {
                     if (appIcon != null) {
-                        val bitmap = remember(appIcon) { appIcon.toBitmap(96, 96) }
                         Image(
-                            bitmap = bitmap.asImageBitmap(),
+                            bitmap = appIcon,
                             contentDescription = null,
                             modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp))
                         )
@@ -219,23 +200,13 @@ private fun AppManagerCard(
                     }
 
                     if (instance.state == InstanceState.RUNNING) {
-                        val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-                        val pulseAlpha by infiniteTransition.animateFloat(
-                            initialValue = 0.5f,
-                            targetValue = 1f,
-                            animationSpec = infiniteRepeatable(
-                                tween(600, easing = FastOutSlowInEasing),
-                                RepeatMode.Reverse
-                            ),
-                            label = "pulseAlpha"
-                        )
                         Box(
                             modifier = Modifier
                                 .align(Alignment.BottomEnd)
                                 .offset(x = 2.dp, y = 2.dp)
                                 .size(10.dp)
                                 .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.tertiary.copy(alpha = pulseAlpha))
+                                .background(MaterialTheme.colorScheme.tertiary)
                         )
                     }
                 }
@@ -470,3 +441,12 @@ private fun EmptyState() {
         subtitle = "在首页添加应用分身后，\n可以在这里管理所有实例。"
     )
 }
+
+@Composable
+private fun rememberInstalledAppIconBitmap(packageName: String, sizePx: Int) =
+    rememberAppIconBitmap(
+        cacheKey = "installed:$packageName",
+        sizePx = sizePx
+    ) { context ->
+        context.packageManager.getApplicationIcon(packageName)
+    }

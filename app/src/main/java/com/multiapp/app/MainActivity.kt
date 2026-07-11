@@ -1,11 +1,12 @@
 package com.multiapp.app
 
 import android.os.Bundle
+import android.view.Display
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.multiapp.core.designsystem.theme.MultiAppTheme
 import com.multiapp.feature.settings.SettingsRepository
 import com.multiapp.feature.settings.ThemeMode
@@ -18,9 +19,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestHighestRefreshRate()
         enableEdgeToEdge()
         setContent {
-            val themeMode by settingsRepository.themeMode.collectAsState(initial = ThemeMode.SYSTEM)
+            val themeMode by settingsRepository.themeMode.collectAsStateWithLifecycle(
+                initialValue = ThemeMode.SYSTEM
+            )
             MultiAppTheme(
                 darkTheme = when (themeMode) {
                     ThemeMode.SYSTEM -> androidx.compose.foundation.isSystemInDarkTheme()
@@ -30,6 +34,34 @@ class MainActivity : ComponentActivity() {
             ) {
                 MultiAppNavHost()
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        requestHighestRefreshRate()
+    }
+
+    @Suppress("DEPRECATION")
+    private fun requestHighestRefreshRate() {
+        val currentDisplay = display ?: windowManager.defaultDisplay
+        val currentMode = currentDisplay.mode
+        val preferredMode = currentDisplay.supportedModes
+            .asSequence()
+            .filter {
+                it.physicalWidth == currentMode.physicalWidth &&
+                    it.physicalHeight == currentMode.physicalHeight
+            }
+            .sortedWith(
+                compareByDescending<Display.Mode> { it.refreshRate }
+                    .thenByDescending { it.modeId == currentMode.modeId }
+                    .thenBy { it.modeId }
+            )
+            .firstOrNull()
+            ?: return
+        window.attributes = window.attributes.apply {
+            preferredDisplayModeId = preferredMode.modeId
+            preferredRefreshRate = preferredMode.refreshRate
         }
     }
 }

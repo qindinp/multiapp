@@ -191,17 +191,9 @@ private fun assignFrom(
     require(processCandidates.isNotEmpty()) { "processCandidates must not be empty" }
     require(proxyCandidates.isNotEmpty()) { "proxyCandidates must not be empty" }
 
-    if (existing != null &&
-        existing.originPackageName == originPackageName &&
-        existing.processSlot in processCandidates &&
-        existing.proxySlot in proxyCandidates
-    ) {
-        return existing.copy(updatedAtMs = nowMs)
-    }
-
     val usedProcessSlots = current
         .asSequence()
-        .filter { it.instanceId != instanceId && it.originPackageName == originPackageName }
+        .filter { it.instanceId != instanceId }
         .map { it.processSlot }
         .toSet()
     val usedProxySlots = current
@@ -209,6 +201,16 @@ private fun assignFrom(
         .filter { it.instanceId != instanceId }
         .map { it.proxySlot }
         .toSet()
+
+    if (existing != null &&
+        existing.originPackageName == originPackageName &&
+        existing.processSlot in processCandidates &&
+        existing.proxySlot in proxyCandidates &&
+        existing.processSlot !in usedProcessSlots &&
+        existing.proxySlot !in usedProxySlots
+    ) {
+        return existing.copy(updatedAtMs = nowMs)
+    }
 
     val pairedMode = processCandidates.size == proxyCandidates.size
     val pairedSlot = if (pairedMode) {

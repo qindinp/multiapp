@@ -1,9 +1,11 @@
 package com.multiapp.core.engine
 
+import android.content.pm.PackageManager
 import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.model.InstallArtifactManifest
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.VirtualPackageRecord
+import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResultStatus
@@ -61,7 +63,10 @@ class DefaultVirtualizationEngineTest {
         assertEquals(1, launches.size)
         assertEquals(instance.instanceId, launches.single().instanceId)
         assertEquals(EngineProfile.BASELINE, launches.single().profile)
+        assertEquals(EngineEvidenceMode.DEFAULT, launches.single().evidenceMode)
         assertTrue(launches.single().providerRoutingEnabled)
+        assertFalse(launches.single().legacyProviderHookEnabled)
+        assertEquals(0, installs.metadataImportCalls)
         assertNotNull(registry.get(instance.instanceId))
         assertEquals("engine-evidence-1", registry.evidence(instance.instanceId).entries["engineSessionId"])
         assertEquals("CREATED", registry.evidence(instance.instanceId).entries["runtimeState"])
@@ -158,6 +163,74 @@ class DefaultVirtualizationEngineTest {
         assertEquals("com.test.app.READ_PROVIDER", provider.readPermission)
         assertEquals("com.test.app.WRITE_PROVIDER", provider.writePermission)
         assertTrue(provider.grantUriPermissions)
+    }
+
+    @Test
+    fun `launch seeds source permission state once and preserves explicit instance decision`() {
+        val instance = instance()
+        val registry = EngineRuntimeRegistry()
+        val server = DefaultVirtualSystemServer(registry)
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(
+                installRecord(
+                    permissions = listOf(
+                        "android.permission.CAMERA",
+                        "android.permission.RECORD_AUDIO"
+                    )
+                )
+            ),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = registry,
+            permissionGrantSeeder = SourcePackagePermissionGrantSeeder { permissionName, _ ->
+                if (permissionName == "android.permission.CAMERA") {
+                    PackageManager.PERMISSION_GRANTED
+                } else {
+                    PackageManager.PERMISSION_DENIED
+                }
+            },
+            systemServerFactory = { server }
+        )
+
+        val first = engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+        server.permissionService.setPermissionGrant(
+            instance.instanceId,
+            "android.permission.CAMERA",
+            granted = false,
+            source = EnginePermissionGrantSource.USER_DECISION
+        )
+        val second = engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+
+        assertEquals(EngineResultStatus.PASS, first.status)
+        assertTrue(
+            first.evidence
+                ?.operationEntries("permission", "seed")
+                ?.single()
+                ?.entries
+                ?.get("mirroredGrantCount") == "1"
+        )
+        assertFalse(
+            server.permissionService.checkPermission(
+                instance.instanceId,
+                "android.permission.CAMERA"
+            ).granted
+        )
+        assertEquals(
+            EnginePermissionGrantSource.USER_DECISION,
+            server.permissionService.checkPermission(
+                instance.instanceId,
+                "android.permission.CAMERA"
+            ).source
+        )
+        assertEquals(
+            "2",
+            second.evidence
+                ?.operationEntries("permission", "seed")
+                ?.last()
+                ?.entries
+                ?.get("preservedDecisionCount")
+        )
     }
 
     @Test
@@ -333,6 +406,8 @@ class DefaultVirtualizationEngineTest {
                 "broadcast:runtime-state:PARTIAL",
                 "hook-profile:profile-gate:PASS",
                 "native:path-redirect:PARTIAL",
+                "permission:runtime-state:PARTIAL",
+                "permission:seed:PASS",
                 "provider:route-token:PASS",
                 "provider:runtime-state:PARTIAL",
                 "service:runtime-state:PARTIAL"
@@ -386,11 +461,12 @@ class DefaultVirtualizationEngineTest {
     fun `compat hook launch uses engine hook runtime when allow listed`() {
         val instance = instance()
         val decisions = mutableListOf<EngineProfileDecision>()
+        val launches = mutableListOf<EngineLaunchSpec>()
         val engine = DefaultVirtualizationEngineCore(
             hostPackageName = "com.multiapp.app",
             instanceManager = FakeInstanceManager(instance),
             virtualInstallService = FakeVirtualInstallService(installRecord()),
-            activityLauncher = EngineActivityLauncher { },
+            activityLauncher = EngineActivityLauncher { launches += it },
             profilePolicy = CompatibilityProfilePolicy(
                 allowList = setOf(
                     EngineProfileAllowKey(
@@ -413,6 +489,7 @@ class DefaultVirtualizationEngineTest {
 
         assertEquals(EngineResultStatus.PASS, result.status)
         assertEquals(listOf(EngineProfile.COMPAT_HOOK), decisions.map { it.profile })
+        assertTrue(launches.single().legacyProviderHookEnabled)
         assertEquals(EngineResultStatus.PARTIAL, hookEvidence?.verdict)
         assertEquals("true", hookEvidence?.entries?.get("lsplantEnabled"))
         assertEquals("core:engine-test", hookEvidence?.entries?.get("hookRuntimeOwner"))
@@ -524,7 +601,8 @@ class DefaultVirtualizationEngineTest {
         splitNames: List<String> = emptyList(),
         isolatedSplits: Boolean = false,
         activities: List<ComponentInfo> = listOf(ComponentInfo("com.test.app.MainActivity", exported = true)),
-        providers: List<ComponentInfo> = emptyList()
+        providers: List<ComponentInfo> = emptyList(),
+        permissions: List<String> = emptyList()
     ) = InstallRecord(
         packageName = "com.test.app",
         originApkPath = originApkPath,
@@ -543,6 +621,7 @@ class DefaultVirtualizationEngineTest {
         packageLabel = "Test",
         activities = activities,
         providers = providers,
+        permissions = permissions,
         installTimeMs = 1L
     )
 
@@ -580,6 +659,8 @@ class DefaultVirtualizationEngineTest {
     private class FakeVirtualInstallService(
         private val record: InstallRecord
     ) : VirtualInstallService {
+        var metadataImportCalls: Int = 0
+
         override suspend fun importFromInstalledPackage(packageName: String): Result<ImportResult> =
             Result.failure(UnsupportedOperationException())
 
@@ -592,7 +673,10 @@ class DefaultVirtualizationEngineTest {
             minSdk: Int,
             applicationClassName: String?,
             packageLabel: String?
-        ): Result<ImportResult> = Result.failure(UnsupportedOperationException())
+        ): Result<ImportResult> {
+            metadataImportCalls += 1
+            return Result.failure(UnsupportedOperationException())
+        }
 
         override fun ensureInstallRecord(app: VirtualApp): Result<ImportResult> =
             Result.failure(UnsupportedOperationException())

@@ -21,12 +21,16 @@ import com.multiapp.core.engine.EngineProxyActivityRecords
 import com.multiapp.core.engine.EngineProxyActivitySlots
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.engine.HostedRuntimeBindOutcome
+import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineLaunchIntentContract
+import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 internal sealed class BootstrapCompletionAction {
     data class FinishWithEvidence(
@@ -70,6 +74,16 @@ open class ContainerActivity : Activity() {
 
     companion object {
         private const val TAG = "ContainerActivity"
+        private const val DETAILED_EVIDENCE_DELAY_MS = 2_000L
+        private val diagnosticsExecutor = ScheduledThreadPoolExecutor(
+            1
+        ) { runnable ->
+            Thread(runnable, "multiapp-runtime-evidence").apply { isDaemon = true }
+        }.apply {
+            removeOnCancelPolicy = true
+            setKeepAliveTime(10L, TimeUnit.SECONDS)
+            allowCoreThreadTimeOut(true)
+        }
 
         /** Key for the hosted-instance identifier in intent extras. */
         const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
@@ -107,6 +121,24 @@ open class ContainerActivity : Activity() {
 
         internal fun shouldFinishAfterBootstrap(result: EngineHostedBootstrapResult): Boolean =
             !result.success || result.guestClassLoader == null
+
+        internal fun resolveEvidenceMode(
+            profileName: String?,
+            evidenceModeName: String?
+        ): EngineEvidenceMode {
+            val requestedMode = evidenceModeName
+                ?.let { value -> runCatching { EngineEvidenceMode.valueOf(value) }.getOrNull() }
+                ?: EngineEvidenceMode.DEFAULT
+            if (requestedMode != EngineEvidenceMode.DEFAULT) return requestedMode
+            val profile = profileName
+                ?.let { value -> runCatching { EngineProfile.valueOf(value) }.getOrNull() }
+                ?: EngineProfile.BASELINE
+            return if (profile == EngineProfile.DIAGNOSTICS_ONLY) {
+                EngineEvidenceMode.FULL
+            } else {
+                EngineEvidenceMode.MINIMAL
+            }
+        }
 
         internal fun buildVirtualContextConfig(
             instanceId: String,
@@ -257,6 +289,10 @@ open class ContainerActivity : Activity() {
         val providerHookEnabled = intent.getBooleanExtra(EXTRA_ENABLE_PROVIDER_HOOK, true)
         val engineProcessSlot = intent.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROCESS_SLOT)
         val engineProxySlot = intent.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT)
+        val evidenceMode = resolveEvidenceMode(
+            profileName = intent.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROFILE),
+            evidenceModeName = intent.getStringExtra(EngineLaunchIntentContract.EXTRA_ENGINE_EVIDENCE_MODE)
+        )
         if (!verifyProcessSlotBinding(instanceId, engineProcessSlot, engineProxySlot)) {
             finish()
             return
@@ -268,7 +304,7 @@ open class ContainerActivity : Activity() {
                 "engineProcessSlot=$engineProcessSlot, engineProxySlot=$engineProxySlot"
         )
 
-        startBootstrap(instanceId, providerHookEnabled, engineProcessSlot, engineProxySlot)
+        startBootstrap(instanceId, providerHookEnabled, engineProcessSlot, engineProxySlot, evidenceMode)
     }
 
     private fun verifyProcessSlotBinding(
@@ -321,7 +357,8 @@ open class ContainerActivity : Activity() {
         instanceId: String,
         providerHookEnabled: Boolean,
         engineProcessSlot: String?,
-        engineProxySlot: String?
+        engineProxySlot: String?,
+        evidenceMode: EngineEvidenceMode
     ) {
         val hostContext = applicationContext ?: this
         writeBootstrapProgressEvidence(
@@ -335,7 +372,6 @@ open class ContainerActivity : Activity() {
         )
         Thread(
             {
-                prepareBackgroundLooperIfNeeded()
                 val startedAtMs = System.currentTimeMillis()
                 val outcome = runCatching {
                     hostedRuntimeEngine.reusableResult(instanceId)?.let { cached ->
@@ -349,7 +385,7 @@ open class ContainerActivity : Activity() {
                             engineProxySlot = engineProxySlot,
                             elapsedMs = System.currentTimeMillis() - startedAtMs
                         )
-                        writeBootstrapEvidence(hostContext, instanceId, cached)
+                        writeBootstrapEvidence(hostContext, instanceId, cached, evidenceMode)
                         return@runCatching HostedRuntimeBindOutcome(
                             result = cached,
                             ranBootstrapOnThisThread = false
@@ -380,7 +416,7 @@ open class ContainerActivity : Activity() {
                             engineProxySlot = engineProxySlot,
                             elapsedMs = System.currentTimeMillis() - startedAtMs
                         )
-                        writeBootstrapEvidence(hostContext, instanceId, bindOutcome.result)
+                        writeBootstrapEvidence(hostContext, instanceId, bindOutcome.result, evidenceMode)
                     }
                 }.onFailure { error ->
                     writeBootstrapProgressEvidence(
@@ -398,33 +434,27 @@ open class ContainerActivity : Activity() {
                 mainHandler.post {
                     handleBootstrapOutcome(instanceId, resultOutcome, engineProxySlot)
                 }
-                val bindOutcome = outcome.getOrNull()
-                if (bindOutcome?.ranBootstrapOnThisThread == true && bindOutcome.result.guestApplication != null) {
-                    Looper.loop()
-                }
             },
             "multiapp-prewarm-${instanceId.take(8)}"
         ).start()
     }
 
-    private fun prepareBackgroundLooperIfNeeded() {
-        if (Looper.myLooper() == null) {
-            Looper.prepare()
-        }
-    }
-
     private fun writeBootstrapEvidence(
         hostContext: Context,
         instanceId: String,
-        result: EngineHostedBootstrapResult
+        result: EngineHostedBootstrapResult,
+        evidenceMode: EngineEvidenceMode
     ) {
         writePackageManagerProxyEvidence(hostContext, instanceId, result)
         writeApplicationEvidence(hostContext, instanceId, result)
         writeLauncherActivityEvidence(hostContext, instanceId, result)
 
-        if (result.success && result.guestClassLoader != null) {
-            writeStorageDiagnosticsEvidence(hostContext, result)
-            writeProviderOperationEvidence(hostContext, result)
+        if (
+            evidenceMode == EngineEvidenceMode.FULL &&
+            result.success &&
+            result.guestClassLoader != null
+        ) {
+            scheduleDetailedBootstrapEvidence(hostContext, result)
         }
 
         val guestApp = result.guestApplication
@@ -930,6 +960,20 @@ open class ContainerActivity : Activity() {
         }.onFailure { error ->
             Log.w(TAG, "Unable to write PR-10 storage diagnostics for instanceId=${result.instanceId}", error)
         }
+    }
+
+    private fun scheduleDetailedBootstrapEvidence(
+        context: Context,
+        result: EngineHostedBootstrapResult
+    ) {
+        diagnosticsExecutor.schedule(
+            {
+                writeStorageDiagnosticsEvidence(context, result)
+                writeProviderOperationEvidence(context, result)
+            },
+            DETAILED_EVIDENCE_DELAY_MS,
+            TimeUnit.MILLISECONDS
+        )
     }
 
     private fun writeProviderOperationEvidence(context: Context, result: EngineHostedBootstrapResult) {

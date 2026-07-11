@@ -2,6 +2,7 @@ package com.multiapp.core.engine
 
 import android.content.Intent
 import android.content.Context
+import android.content.ComponentName
 import android.content.ServiceConnection
 import android.net.Uri
 import com.multiapp.core.loader.BootstrapResult
@@ -18,6 +19,7 @@ import com.multiapp.core.loader.VirtualServiceBindDispatchResult
 import com.multiapp.core.loader.VirtualServiceLifecycleEvidence
 import com.multiapp.core.loader.VirtualServiceIntentStore
 import com.multiapp.core.loader.VirtualServiceManager
+import com.multiapp.core.loader.VirtualServiceStartRequest
 import com.multiapp.core.loader.VirtualServiceStopDispatchResult
 import com.multiapp.core.loader.VirtualServiceStopRequest
 import com.multiapp.core.loader.VirtualServiceUnbindDispatchResult
@@ -320,11 +322,41 @@ class EngineContainerDispatchersTest {
     }
 
     @Test
-    fun `ams bind service gate blocks unsupported bind before fallback dispatch`() {
+    fun `ams bind service gate dispatches same process bind and records runtime state`() {
         val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
         val runtime = server.runtimeService.register(runtime())
         val intent = serviceSourceIntent(action = "test.SYNC")
+        val startRequest = VirtualServiceStartRequest(
+            instanceId = runtime.instanceId,
+            originPackageName = runtime.originPackageName,
+            guestServiceClassName = "com.example.app.SyncService",
+            sourceIntent = intent,
+            reason = "implicitBind",
+            processSlot = runtime.processSlot
+        )
+        val connection = mockk<ServiceConnection>(relaxed = true)
         val fallback = mockk<VirtualAmsComponentDispatcher>(relaxed = true)
+        every {
+            fallback.dispatchBindService(
+                intent,
+                any(),
+                any(),
+                connection,
+                Context.BIND_AUTO_CREATE,
+                null
+            )
+        } returns VirtualServiceBindDispatchResult.Bound(
+            startRequest = startRequest,
+            componentName = ComponentName(runtime.originPackageName, startRequest.guestServiceClassName),
+            binder = null,
+            cached = false,
+            bindKey = "test.SYNC",
+            flags = Context.BIND_AUTO_CREATE,
+            bindCount = 1,
+            activeConnectionCount = 1,
+            reusedBinder = false,
+            rebindDelivered = false
+        )
         val dispatcher = DefaultEngineAmsComponentDispatcher(
             fallback = fallback,
             instanceId = runtime.instanceId,
@@ -336,7 +368,7 @@ class EngineContainerDispatchersTest {
             intent = intent,
             virtualContext = mockk(relaxed = true),
             guestClassLoader = ClassLoader.getSystemClassLoader(),
-            connection = mockk<ServiceConnection>(relaxed = true),
+            connection = connection,
             flags = Context.BIND_AUTO_CREATE,
             executor = null
         )
@@ -344,12 +376,17 @@ class EngineContainerDispatchersTest {
             ?.operationEntries("service", "dispatch")
             ?.single()
 
-        assertTrue(result is VirtualServiceBindDispatchResult.Blocked)
-        assertTrue(result.reason.contains("engine_service_plan_unsupported"))
-        assertEquals(EngineResultStatus.UNSUPPORTED, dispatchEvidence?.verdict)
+        assertTrue(result is VirtualServiceBindDispatchResult.Bound)
+        assertEquals(EngineResultStatus.PASS, dispatchEvidence?.verdict)
         assertEquals("BIND", dispatchEvidence?.entries?.get("operation"))
-        verify(exactly = 0) {
-            fallback.dispatchBindService(any(), any(), any(), any(), any(), any())
+        assertEquals("true", dispatchEvidence?.entries?.get("bound"))
+        val runtimeRecord = server.serviceService.queryServiceRuntimeState(runtime.instanceId)
+            .records
+            .single()
+        assertEquals(EngineServiceLifecycleState.BOUND, runtimeRecord.state)
+        assertEquals(1, runtimeRecord.activeBindCount)
+        verify(exactly = 1) {
+            fallback.dispatchBindService(intent, any(), any(), connection, Context.BIND_AUTO_CREATE, null)
         }
     }
 
@@ -421,10 +458,30 @@ class EngineContainerDispatchersTest {
     }
 
     @Test
-    fun `ams unbind service gate blocks unsupported unbind before fallback dispatch`() {
+    fun `ams unbind service gate dispatches connection unbind and records stopped state`() {
         val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
         val runtime = server.runtimeService.register(runtime())
         val fallback = mockk<VirtualAmsComponentDispatcher>(relaxed = true)
+        val connection = mockk<ServiceConnection>(relaxed = true)
+        val intent = serviceSourceIntent(action = "test.SYNC")
+        val startRequest = VirtualServiceStartRequest(
+            instanceId = runtime.instanceId,
+            originPackageName = runtime.originPackageName,
+            guestServiceClassName = "com.example.app.SyncService",
+            sourceIntent = intent,
+            reason = "implicitBind",
+            processSlot = runtime.processSlot
+        )
+        every { fallback.dispatchUnbindService(connection) } returns
+            VirtualServiceUnbindDispatchResult.Unbound(
+                startRequest = startRequest,
+                destroyed = true,
+                onUnbindResult = false,
+                onUnbindCalled = true,
+                bindKey = "test.SYNC",
+                activeConnectionCount = 0,
+                activeBindCount = 0
+            )
         val dispatcher = DefaultEngineAmsComponentDispatcher(
             fallback = fallback,
             instanceId = runtime.instanceId,
@@ -432,15 +489,22 @@ class EngineContainerDispatchersTest {
             broadcastService = server.broadcastService
         )
 
-        val result = dispatcher.dispatchUnbindService(mockk<ServiceConnection>(relaxed = true))
+        val result = dispatcher.dispatchUnbindService(connection)
         val dispatchEvidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("service", "dispatch")
             ?.single()
 
-        assertEquals(VirtualServiceUnbindDispatchResult.NotFound, result)
-        assertEquals(EngineResultStatus.UNSUPPORTED, dispatchEvidence?.verdict)
+        assertTrue(result is VirtualServiceUnbindDispatchResult.Unbound)
+        assertEquals(EngineResultStatus.PASS, dispatchEvidence?.verdict)
         assertEquals("UNBIND", dispatchEvidence?.entries?.get("operation"))
-        verify(exactly = 0) { fallback.dispatchUnbindService(any()) }
+        assertEquals("true", dispatchEvidence?.entries?.get("unbound"))
+        assertEquals("true", dispatchEvidence?.entries?.get("destroyed"))
+        val runtimeRecord = server.serviceService.queryServiceRuntimeState(runtime.instanceId)
+            .records
+            .single()
+        assertEquals(EngineServiceLifecycleState.STOPPED, runtimeRecord.state)
+        assertEquals(0, runtimeRecord.activeBindCount)
+        verify(exactly = 1) { fallback.dispatchUnbindService(connection) }
     }
 
     @Test
@@ -891,7 +955,6 @@ class EngineContainerDispatchersTest {
             services = listOf(
                 ResolvedComponent(
                     name = "com.example.app.SyncService",
-                    processName = "com.example.app:sync",
                     resolvedIntentFilters = listOf(
                         ResolvedIntentFilter(actions = listOf("test.SYNC"))
                     )

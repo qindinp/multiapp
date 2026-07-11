@@ -54,7 +54,7 @@ internal object HostedActivityContextEvidenceFormatter {
     private fun loadedApkEvidenceVerdict(injection: HostedActivityContextInjector.InjectionResult): String {
         val requiredActivityRecordFields = setOf("activityInfo", "intent", "packageInfo")
         val activityRecordComplete = injection.activityRecordPatchedFields.containsAll(requiredActivityRecordFields)
-        val loadedApkComplete = injection.loadedApkSource == "GUEST_SANDBOX" &&
+        val loadedApkComplete = injection.loadedApkSource in setOf("GUEST_SANDBOX", "PREWARMED_GUEST") &&
             injection.loadedApkInstalledAliasCount >= 2 &&
             injection.loadedApkPatchedFields.isNotEmpty() &&
             injection.loadedApkSkippedReason.isNullOrBlank()

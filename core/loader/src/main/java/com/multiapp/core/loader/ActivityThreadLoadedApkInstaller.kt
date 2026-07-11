@@ -12,6 +12,52 @@ import android.app.Application
  */
 object ActivityThreadLoadedApkInstaller {
 
+    fun findInstalledGuest(
+        activityThread: Any,
+        packageAliases: Collection<String>
+    ): ActivityThreadLoadedApkInstallResult? {
+        val aliases = packageAliases.filter { it.isNotBlank() }.distinct()
+        val resolvedByField = linkedMapOf<String, MutableList<String>>()
+        val skippedFields = linkedMapOf<String, String>()
+        val candidates = mutableListOf<Any>()
+        for (fieldName in listOf("mPackages", "mResourcePackages")) {
+            val map = ActivityThreadCompat.packageMap(fieldName, activityThread)
+            if (map == null) {
+                skippedFields[fieldName] = "PACKAGE_MAP_UNAVAILABLE"
+                continue
+            }
+            for (alias in aliases) {
+                val loadedApk = map[alias].unwrapLoadedApkReference() ?: continue
+                resolvedByField.getOrPut(fieldName) { mutableListOf() } += alias
+                candidates += loadedApk
+            }
+        }
+        val loadedApk = candidates.firstOrNull() ?: return null
+        if (candidates.any { it !== loadedApk }) {
+            return skippedInstallResult(
+                targetClassName = loadedApk.javaClass.name,
+                packageAliases = aliases,
+                skippedReason = "PREWARMED_LOADED_APK_ALIAS_TARGET_MISMATCH",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
+            )
+        }
+        return ActivityThreadLoadedApkInstallResult(
+            targetClassName = loadedApk.javaClass.name,
+            aliases = aliases,
+            patchResult = LoadedApkPatchResult(
+                targetClassName = loadedApk.javaClass.name,
+                patchedFields = emptyList(),
+                skippedFields = emptyList(),
+                skippedFieldReasons = emptyList()
+            ),
+            installedAliasesByField = resolvedByField.mapValues { it.value.toList() },
+            skippedAliasInstallReasonsByField = skippedFields,
+            skippedReason = null,
+            source = LoadedApkInstallSource.PREWARMED_GUEST,
+            loadedApk = loadedApk
+        )
+    }
+
     fun skippedInstallResult(
         targetClassName: String,
         packageAliases: Collection<String>,
@@ -143,7 +189,13 @@ object ActivityThreadLoadedApkInstaller {
 
 enum class LoadedApkInstallSource {
     GUEST_SANDBOX,
+    PREWARMED_GUEST,
     EXISTING_PATCH
+}
+
+private fun Any?.unwrapLoadedApkReference(): Any? = when (this) {
+    is java.lang.ref.Reference<*> -> get()
+    else -> this
 }
 
 data class ActivityThreadLoadedApkInstallResult(

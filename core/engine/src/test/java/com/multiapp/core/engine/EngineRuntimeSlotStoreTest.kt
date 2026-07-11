@@ -42,6 +42,56 @@ class EngineRuntimeSlotStoreTest {
     }
 
     @Test
+    fun `different origin instances cannot share a process slot`() {
+        val store = InMemoryEngineRuntimeSlotStore()
+        val processCandidates = listOf("host:v0", "host:v1")
+
+        val first = store.assign(
+            "inst_001",
+            "com.example.one",
+            processCandidates,
+            listOf("ProxyStandard0", "ProxyStandard1")
+        )
+        val second = store.assign(
+            "inst_002",
+            "com.example.two",
+            processCandidates,
+            listOf("ProxySingleTask0", "ProxySingleTask1")
+        )
+
+        assertNotEquals(first.processSlot, second.processSlot)
+    }
+
+    @Test
+    fun `file store repairs a persisted cross-package process slot collision`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_slots.properties")
+        file.writeText(
+            """
+            inst_001.originPackageName=com.example.one
+            inst_001.processSlot=host:v0
+            inst_001.proxySlot=ProxyStandard0
+            inst_001.updatedAtMs=1
+            inst_002.originPackageName=com.example.two
+            inst_002.processSlot=host:v0
+            inst_002.proxySlot=ProxySingleTask0
+            inst_002.updatedAtMs=1
+            """.trimIndent()
+        )
+        val store = FileBackedEngineRuntimeSlotStore(file)
+
+        val repaired = store.assign(
+            "inst_001",
+            "com.example.one",
+            listOf("host:v0", "host:v1"),
+            listOf("ProxyStandard0", "ProxyStandard1")
+        )
+
+        assertEquals("host:v1", repaired.processSlot)
+        assertEquals("ProxyStandard1", repaired.proxySlot)
+        assertEquals("host:v0", store.get("inst_002")?.processSlot)
+    }
+
+    @Test
     fun `paired candidates keep process slot aligned with proxy slot`() {
         val store = InMemoryEngineRuntimeSlotStore()
         val processCandidates = listOf("host:v0", "host:v1", "host:v2")

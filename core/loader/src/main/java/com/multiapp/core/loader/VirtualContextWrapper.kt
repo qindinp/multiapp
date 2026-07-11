@@ -130,14 +130,13 @@ open class VirtualContextWrapper(
         ) ?: base.contentResolver
     }
 
-    private val uriPermissionDispatcher: VirtualUriPermissionDispatcher? by lazy(LazyThreadSafetyMode.NONE) {
+    private val uriPermissionDispatcher: VirtualUriPermissionDispatcher? =
         VirtualUriPermissionDispatcherFactories.createOrNull(
             VirtualUriPermissionDispatcherFactoryRequest(
                 hostContext = base,
                 config = config
             )
-        )
-    }
+        )?.also(VirtualUriPermissionRuntimeBindings::bindActive)
 
     private var lastStartActivityMappingResult: StartActivityMappingResult? = null
 
@@ -373,11 +372,14 @@ open class VirtualContextWrapper(
 
     override fun getPackageName(): String = config.originPackageName
 
-    override fun getOpPackageName(): String = base.packageName
+    override fun getOpPackageName(): String = runCatching { base.opPackageName }
+        .getOrNull()
+        ?.takeIf { it.isNotBlank() }
+        ?: base.packageName
 
     override fun getApplicationContext(): Context = this
 
-    override fun getBaseContext(): Context = this
+    override fun getBaseContext(): Context = base
 
     override fun createContextForSplit(splitName: String?): Context = this
 
@@ -408,6 +410,34 @@ open class VirtualContextWrapper(
                 sourcePackages = listOf(config.originPackageName, config.virtualPackageName),
                 hostPackageName = base.packageName
             )
+        }
+        if (name == Context.LAUNCHER_APPS_SERVICE) {
+            val sourcePackages = listOf(config.originPackageName, config.virtualPackageName)
+            val hostPackageName = listOf(
+                runCatching { base.opPackageName }.getOrNull(),
+                runCatching { base.packageName }.getOrNull()
+            ).firstOrNull { !it.isNullOrBlank() && it !in sourcePackages }
+            if (hostPackageName != null) {
+                VirtualLauncherAppsServiceProxy.install(
+                    context = base,
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName
+                )
+            }
+        }
+        if (name == Context.CLIPBOARD_SERVICE) {
+            val sourcePackages = listOf(config.originPackageName, config.virtualPackageName)
+            val hostPackageName = listOf(
+                runCatching { base.opPackageName }.getOrNull(),
+                runCatching { base.packageName }.getOrNull()
+            ).firstOrNull { !it.isNullOrBlank() && it !in sourcePackages }
+            if (hostPackageName != null) {
+                VirtualClipboardServiceProxy.install(
+                    context = base,
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName
+                )
+            }
         }
         return service
     }

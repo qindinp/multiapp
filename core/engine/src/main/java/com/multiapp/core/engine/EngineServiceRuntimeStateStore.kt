@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap
 enum class EngineServiceLifecycleState {
     STARTED,
     FOREGROUND,
+    BOUND,
     STOPPED
 }
 

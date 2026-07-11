@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 import java.util.zip.ZipFile
 import javax.inject.Inject
 
@@ -80,6 +81,7 @@ class LauncherViewModel @Inject constructor(
     private var loadTimeoutJob: Job? = null
     private var allAppsJob: Job? = null
     private var allAppsTimeoutJob: Job? = null
+    private val launchRequestsInFlight = ConcurrentHashMap.newKeySet<String>()
 
     init {
         loadInstances()
@@ -184,13 +186,18 @@ class LauncherViewModel @Inject constructor(
     }
 
     fun launchInstance(instanceId: String) {
-        viewModelScope.launch {
-            val result = virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = instanceId))
-            if (!result.success) {
-                Timber.e("Failed to launch instance via engine: ${result.message}")
-                _uiState.update {
-                    it.copy(error = "启动失败", errorDetail = result.message ?: "无法打开分身")
+        if (!launchRequestsInFlight.add(instanceId)) return
+        viewModelScope.launch(launcherIoDispatcher) {
+            try {
+                val result = virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = instanceId))
+                if (!result.success) {
+                    Timber.e("Failed to launch instance via engine: ${result.message}")
+                    _uiState.update {
+                        it.copy(error = "启动失败", errorDetail = result.message ?: "无法打开分身")
+                    }
                 }
+            } finally {
+                launchRequestsInFlight.remove(instanceId)
             }
         }
     }

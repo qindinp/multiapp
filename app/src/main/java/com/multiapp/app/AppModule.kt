@@ -64,12 +64,13 @@ object AppModule {
             val intent = ContainerActivity.createIntent(
                 context = appContext,
                 instanceId = spec.instanceId,
-                providerHookEnabled = spec.providerRoutingEnabled
+                providerHookEnabled = spec.legacyProviderHookEnabled
             ).apply {
                 processSlotContainerActivityClassName(appContext.packageName, spec.processSlot)?.let { className ->
                     setClassName(appContext.packageName, className)
                 }
                 putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROFILE, spec.profile.name)
+                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_EVIDENCE_MODE, spec.evidenceMode.name)
                 putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROCESS_SLOT, spec.processSlot)
                 putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT, spec.proxySlot)
                 putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_EVIDENCE_SESSION_ID, spec.evidenceSessionId)

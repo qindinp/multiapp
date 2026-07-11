@@ -17,6 +17,7 @@ import java.io.RandomAccessFile
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.Base64
 import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
@@ -278,19 +279,30 @@ class FileBackedEngineRuntimeStateStore(
         if (file.exists()) file.delete()
         val tempFile = tempFile()
         if (tempFile.exists()) tempFile.delete()
+        updateReadCache(emptyList())
     }
 
     private fun load(): List<EngineRuntimeStateRecord> {
-        if (!file.isFile) return emptyList()
+        val fingerprint = currentFingerprint()
+        val cache = readCache()
+        if (cache.fingerprint == fingerprint) return cache.records
+        if (!fingerprint.exists) {
+            cache.fingerprint = fingerprint
+            cache.records = emptyList()
+            return emptyList()
+        }
         val properties = Properties()
         file.inputStream().use { input -> properties.load(input) }
-        return properties.stringPropertyNames()
+        val records = properties.stringPropertyNames()
             .asSequence()
             .mapNotNull { name -> name.substringBefore('.').takeIf { it.isNotBlank() } }
             .distinct()
             .sorted()
             .mapNotNull { instanceId -> decodeRecord(properties, instanceId) }
             .toList()
+        cache.fingerprint = fingerprint
+        cache.records = records
+        return records
     }
 
     private fun store(records: List<EngineRuntimeStateRecord>) {
@@ -361,6 +373,7 @@ class FileBackedEngineRuntimeStateStore(
                     StandardCopyOption.REPLACE_EXISTING
                 )
             }
+            updateReadCache(records)
         } finally {
             if (tempFile.exists()) tempFile.delete()
         }
@@ -370,7 +383,7 @@ class FileBackedEngineRuntimeStateStore(
 
     private fun <T> withFileLock(block: () -> T): T {
         file.parentFile?.mkdirs()
-        val normalizedPath = file.absoluteFile.normalize().path
+        val normalizedPath = normalizedPath()
         val monitor = FILE_MONITORS.computeIfAbsent(normalizedPath) { Any() }
         return synchronized(monitor) {
             val lockFile = File(file.absolutePath + LOCK_SUFFIX)
@@ -382,6 +395,38 @@ class FileBackedEngineRuntimeStateStore(
                     lock.release()
                 }
             }
+        }
+    }
+
+    private fun updateReadCache(records: List<EngineRuntimeStateRecord>) {
+        readCache().apply {
+            fingerprint = currentFingerprint()
+            this.records = records.sortedBy { it.instanceId }
+        }
+    }
+
+    private fun readCache(): RuntimeStateReadCache =
+        FILE_READ_CACHES.computeIfAbsent(normalizedPath()) { RuntimeStateReadCache() }
+
+    private fun normalizedPath(): String = file.absoluteFile.normalize().path
+
+    private fun currentFingerprint(): RuntimeStateFileFingerprint {
+        if (!file.isFile) return RuntimeStateFileFingerprint.MISSING
+        return runCatching {
+            val attributes = Files.readAttributes(file.toPath(), BasicFileAttributes::class.java)
+            RuntimeStateFileFingerprint(
+                exists = true,
+                size = attributes.size(),
+                lastModifiedMs = attributes.lastModifiedTime().toMillis(),
+                fileKey = attributes.fileKey()?.toString().orEmpty()
+            )
+        }.getOrElse {
+            RuntimeStateFileFingerprint(
+                exists = true,
+                size = file.length(),
+                lastModifiedMs = file.lastModified(),
+                fileKey = ""
+            )
         }
     }
 
@@ -648,6 +693,7 @@ class FileBackedEngineRuntimeStateStore(
         private const val LOCK_SUFFIX = ".lock"
         private const val TEMP_SUFFIX = ".tmp"
         private val FILE_MONITORS = ConcurrentHashMap<String, Any>()
+        private val FILE_READ_CACHES = ConcurrentHashMap<String, RuntimeStateReadCache>()
         private const val HOST_PACKAGE_NAME = "hostPackageName"
         private const val ORIGIN_PACKAGE_NAME = "originPackageName"
         private const val VIRTUAL_PACKAGE_NAME = "virtualPackageName"
@@ -726,4 +772,25 @@ class FileBackedEngineRuntimeStateStore(
         private const val PATH_WRITE_PERMISSION = "writePermission"
         private const val LIST_SEPARATOR = ","
     }
+}
+
+private data class RuntimeStateFileFingerprint(
+    val exists: Boolean,
+    val size: Long,
+    val lastModifiedMs: Long,
+    val fileKey: String
+) {
+    companion object {
+        val MISSING = RuntimeStateFileFingerprint(
+            exists = false,
+            size = 0L,
+            lastModifiedMs = 0L,
+            fileKey = ""
+        )
+    }
+}
+
+private class RuntimeStateReadCache {
+    var fingerprint: RuntimeStateFileFingerprint? = null
+    var records: List<EngineRuntimeStateRecord> = emptyList()
 }

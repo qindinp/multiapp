@@ -30,12 +30,15 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 class VirtualPackageManagerWrapper(
     private val base: PackageManager,
     snapshot: VirtualPackageSnapshot,
-    private val runtimeUid: Int = runCatching { Process.myUid() }.getOrDefault(0)
+    private val runtimeUid: Int = runCatching { Process.myUid() }.getOrDefault(0),
+    permissionCheckDispatcher: VirtualPermissionCheckDispatcher =
+        VirtualPermissionCheckDispatcher(VirtualPermissionCheckDispatchers::dispatch)
 ) : PackageManager() {
 
     private val service = VirtualPackageService(
         snapshot = snapshot,
-        packageSigningInfo = VirtualPackageArchiveSigningResolver.resolve(base, snapshot)
+        packageSigningInfo = VirtualPackageArchiveSigningResolver.resolve(base, snapshot),
+        permissionCheckDispatcher = permissionCheckDispatcher
     )
 
     override fun getPackageInfo(packageName: String, flags: Int): PackageInfo {

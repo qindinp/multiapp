@@ -200,7 +200,7 @@ class VirtualContextWrapperTest {
         val wrapper = wrapper(base = base)
 
         assertSame(wrapper, wrapper.applicationContext)
-        assertSame(wrapper, wrapper.baseContext)
+        assertSame(base, wrapper.baseContext)
         assertSame(wrapper, wrapper.createContextForSplit("feature"))
         assertSame(wrapper, wrapper.createPackageContext("com.any", 0))
         assertSame(wrapper, wrapper.createConfigurationContext(mockk(relaxed = true)))
