@@ -1,16 +1,148 @@
 package com.multiapp.core.model.engine
 
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import com.multiapp.core.model.instance.CompatibilityMode
 
 interface VirtualizationEngine {
     fun installOrRefreshPackage(originPackageName: String): EngineResult
     fun createInstance(originPackageName: String): EngineResult
+    fun createInstance(request: CreateInstanceRequest): EngineResult =
+        createInstance(request.originPackageName)
     fun launchInstance(request: LaunchInstanceRequest): EngineResult
     fun stopInstance(instanceId: String): EngineResult
     fun deleteInstance(instanceId: String): EngineResult
     fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime?
     fun exportEvidence(instanceId: String): EngineEvidenceReport
 }
+
+data class EnginePackageInstallRequest(
+    val originPackageName: String,
+    val originApkPath: String,
+    val versionCode: Long,
+    val versionName: String,
+    val targetSdk: Int,
+    val minSdk: Int,
+    val applicationClassName: String? = null,
+    val packageLabel: String,
+    val requestedPermissions: List<String> = emptyList(),
+    val activityClassNames: List<String> = emptyList(),
+    val serviceClassNames: List<String> = emptyList(),
+    val receiverClassNames: List<String> = emptyList(),
+    val providerClassNames: List<String> = emptyList(),
+    val nativeAbis: List<String> = emptyList(),
+    val splitApkPaths: List<String> = emptyList(),
+    val splitPublicSourceDirs: List<String> = emptyList(),
+    val splitNames: List<String> = emptyList(),
+    val isolatedSplits: Boolean = false
+) {
+    init {
+        require(originPackageName.isNotBlank() && originPackageName.length <= MAX_IDENTITY_LENGTH) {
+            "originPackageName must be non-blank and at most $MAX_IDENTITY_LENGTH characters"
+        }
+        require(originPackageName.none { it == '/' || it == '\\' || it == '\u0000' }) {
+            "originPackageName contains unsafe characters"
+        }
+        require(!originPackageName.contains("..")) { "originPackageName contains an unsafe segment" }
+        require(originApkPath.isNotBlank() && originApkPath.length <= MAX_PATH_LENGTH) {
+            "originApkPath must be non-blank and at most $MAX_PATH_LENGTH characters"
+        }
+        require('\u0000' !in originApkPath) { "originApkPath contains NUL" }
+        require(versionCode > 0L) { "versionCode must be positive" }
+        require(versionName.isNotBlank() && versionName.length <= MAX_LABEL_LENGTH) {
+            "versionName must be non-blank and at most $MAX_LABEL_LENGTH characters"
+        }
+        require(targetSdk > 0) { "targetSdk must be positive" }
+        require(minSdk > 0) { "minSdk must be positive" }
+        require(
+            applicationClassName == null ||
+                applicationClassName.isNotBlank() &&
+                applicationClassName.length <= MAX_IDENTITY_LENGTH &&
+                '\u0000' !in applicationClassName
+        ) {
+            "applicationClassName must be null or a valid class name"
+        }
+        require(packageLabel.isNotBlank() && packageLabel.length <= MAX_LABEL_LENGTH) {
+            "packageLabel must be non-blank and at most $MAX_LABEL_LENGTH characters"
+        }
+        validateEntries("requestedPermissions", requestedPermissions)
+        validateEntries("activityClassNames", activityClassNames)
+        validateEntries("serviceClassNames", serviceClassNames)
+        validateEntries("receiverClassNames", receiverClassNames)
+        validateEntries("providerClassNames", providerClassNames)
+        validateEntries("nativeAbis", nativeAbis)
+        validatePaths("splitApkPaths", splitApkPaths)
+        validatePaths("splitPublicSourceDirs", splitPublicSourceDirs)
+        validateEntries("splitNames", splitNames)
+        require(splitPublicSourceDirs.isEmpty() || splitPublicSourceDirs.size == splitApkPaths.size) {
+            "splitPublicSourceDirs size must match splitApkPaths size"
+        }
+        require(splitNames.isEmpty() || splitNames.size == splitApkPaths.size) {
+            "splitNames size must match splitApkPaths size"
+        }
+        val ipcTextSize = listOf(
+            requestedPermissions,
+            activityClassNames,
+            serviceClassNames,
+            receiverClassNames,
+            providerClassNames,
+            nativeAbis,
+            splitApkPaths,
+            splitPublicSourceDirs,
+            splitNames
+        ).flatten().sumOf { value -> value.length } +
+            originApkPath.length + packageLabel.length + versionName.length
+        require(ipcTextSize <= MAX_IPC_TEXT_LENGTH) {
+            "install metadata exceeds the engine IPC text budget"
+        }
+    }
+
+    private fun validateEntries(name: String, entries: List<String>) {
+        require(entries.size <= MAX_ENTRY_COUNT) { "$name exceeds $MAX_ENTRY_COUNT entries" }
+        require(entries.all { it.isNotBlank() && it.length <= MAX_IDENTITY_LENGTH && '\u0000' !in it }) {
+            "$name contains an invalid entry"
+        }
+    }
+
+    private fun validatePaths(name: String, paths: List<String>) {
+        require(paths.size <= MAX_SPLIT_COUNT) { "$name exceeds $MAX_SPLIT_COUNT entries" }
+        require(paths.all { it.isNotBlank() && it.length <= MAX_PATH_LENGTH && '\u0000' !in it }) {
+            "$name contains an invalid path"
+        }
+    }
+}
+
+data class CreateInstanceRequest(
+    val creationRequestId: String,
+    val install: EnginePackageInstallRequest,
+    val displayName: String,
+    val compatibilityMode: CompatibilityMode = CompatibilityMode.DEFAULT
+) {
+    val originPackageName: String
+        get() = install.originPackageName
+
+    init {
+        require(creationRequestId.isNotBlank() && creationRequestId.length <= MAX_IDENTITY_LENGTH) {
+            "creationRequestId must be non-blank and at most $MAX_IDENTITY_LENGTH characters"
+        }
+        require(creationRequestId.all { it.isLetterOrDigit() || it == '-' || it == '_' || it == '.' }) {
+            "creationRequestId contains unsafe characters"
+        }
+        require(displayName.isNotBlank() && displayName == displayName.trim()) {
+            "displayName must be non-blank and trimmed"
+        }
+        require(displayName.length <= MAX_LABEL_LENGTH) {
+            "displayName must be at most $MAX_LABEL_LENGTH characters"
+        }
+        require('\u0000' !in displayName) { "displayName contains NUL" }
+    }
+}
+
+private const val MAX_IDENTITY_LENGTH = 512
+private const val MAX_LABEL_LENGTH = 256
+private const val MAX_PATH_LENGTH = 4_096
+private const val MAX_ENTRY_COUNT = 4_096
+private const val MAX_SPLIT_COUNT = 256
+private const val MAX_IPC_TEXT_LENGTH = 262_144
 
 enum class EngineProfile {
     BASELINE,

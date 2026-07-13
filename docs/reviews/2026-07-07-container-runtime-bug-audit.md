@@ -2659,3 +2659,54 @@ record/dataRoot operation.
 - PMS/AMS/Provider/Service/Broadcast/runtime-permission/native completeness and
   the GKD/AstroBox/QQ/WeChat/QQ Reader matrix remain unresolved. Review
   decision remains **BLOCK**.
+
+## Review Update - 2026-07-13 Authoritative Create and Package Generation
+
+The prior finding that product creation bypassed the engine is closed for the
+current production path. The review also found and closed three related
+integrity defects before accepting the batch: incomplete request-id matching,
+split artifact filename collisions, and APK/package identity fallback.
+
+### Findings closed in the current tree
+
+- Create metadata and the mandatory `creationRequestId` cross the engine Binder
+  boundary. The old package-name-only endpoint is explicitly unsupported.
+- The persisted instance record contains both request ID and a full payload
+  fingerprint. Same-ID/different-payload retries fail; same-ID/same-payload
+  retries return the original instance after an unknown Binder result.
+- Launcher state preserves a pending attempt across page/process recreation
+  without locally creating an instance or retrying through another authority.
+- Sibling create does not refresh or recopy matching shared package artifacts.
+  Generation mismatch is an explicit refresh-required failure.
+- Archive and manifest package names are validated against the requested
+  package. Metadata resolver failures propagate instead of silently falling
+  back to installed-package metadata.
+- Base/split imports use content-addressed targets and staging. Sanitized split
+  name collisions cannot overwrite one another, final files are re-hashed, and
+  covered failures roll back new artifacts while preserving the old record and
+  generation.
+- Instance deletion rejects a persisted `dataRoot` outside the canonical
+  instance root and restores staged data when record deletion is rejected.
+
+### Verification
+
+- Full local gate passed in 4m34s.
+- UTF-8 JUnit aggregation: 2,054 tests, 0 failures, 0 errors, 12 skipped.
+- Debug APK SHA-256:
+  `5102D551B4E9A25E6D9B48FA01681489929C82624D9B7A689076245E3C4BDDDA`.
+- Static search confirms no product clone-create call to
+  `InstanceManager.createInstance`.
+
+### Still BLOCK
+
+- Proxy Activity allocation is still multi-writer. Eight production
+  `FileBackedProxyActivitySlotAssignmentStore` constructions remain across
+  app/engine/loader paths; process-local locks do not serialize `:vN` writers.
+- Package staging does not yet have crash-time journal reconciliation. The
+  current guarantees cover normal completion and caught failure, not power or
+  process loss at every file/record boundary.
+- The Binder Provider remains in the host process, direct owner-file reads and
+  local server construction remain, and commercial component/native semantics
+  plus device evidence are incomplete.
+- This batch is infrastructure proof only. GKD, AstroBox, QQ, WeChat, and QQ
+  Reader compatibility remain unproven; review decision remains **BLOCK**.

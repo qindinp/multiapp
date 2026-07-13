@@ -32,15 +32,40 @@ class DefaultInstanceManager(
         originPackageName: String,
         displayName: String,
         compatibilityMode: CompatibilityMode
-    ): Result<VirtualInstanceRecord> {
+    ): Result<VirtualInstanceRecord> = createInstance(
+        InstanceManager.CreationRequest(
+            originPackageName = originPackageName,
+            displayName = displayName,
+            compatibilityMode = compatibilityMode
+        )
+    )
+
+    @Synchronized
+    override fun createInstance(request: InstanceManager.CreationRequest): Result<VirtualInstanceRecord> {
+        request.creationRequestId?.let { creationRequestId ->
+            store.listAll().firstOrNull { it.creationRequestId == creationRequestId }?.let { existing ->
+                return if (
+                    existing.originPackageName == request.originPackageName &&
+                    existing.displayName == request.displayName &&
+                    existing.compatibilityMode == request.compatibilityMode &&
+                    existing.creationRequestFingerprint == request.creationRequestFingerprint
+                ) {
+                    Result.success(existing)
+                } else {
+                    Result.failure(
+                        IllegalStateException("creationRequestId already belongs to a different instance request")
+                    )
+                }
+            }
+        }
         val baseDirRef = arrayOfNulls<File>(1)
         return runCatching {
             // Validate that InstallRecord exists if store is provided.
             // This prevents creating instances that HostedRuntimeBootstrap cannot start.
             if (installRecordStore != null) {
-                val installRecord = installRecordStore.load(originPackageName)
+                val installRecord = installRecordStore.load(request.originPackageName)
                 require(installRecord != null) {
-                    "InstallRecord not found for package: $originPackageName. " +
+                    "InstallRecord not found for package: ${request.originPackageName}. " +
                         "Call VirtualInstallService.importFromMetadata() before creating an instance."
                 }
             }
@@ -53,27 +78,35 @@ class DefaultInstanceManager(
             baseDirRef[0] = baseDir
             val dataRoot = InstanceDataRoot.fromBaseDir(instanceId, baseDir)
 
-            // Create directory structure
-            baseDir.mkdirs()
-            dataRoot.dataDir.mkdirs()
-            dataRoot.cacheDir.mkdirs()
-            dataRoot.filesDir.mkdirs()
-            dataRoot.sharedPrefsDir.mkdirs()
-            dataRoot.databaseDir.mkdirs()
-            dataRoot.externalFilesDir?.mkdirs()
+            // A persisted instance must never point at a partially-created data root.
+            listOfNotNull(
+                baseDir,
+                dataRoot.dataDir,
+                dataRoot.cacheDir,
+                dataRoot.filesDir,
+                dataRoot.sharedPrefsDir,
+                dataRoot.databaseDir,
+                dataRoot.externalFilesDir
+            ).forEach { directory ->
+                check(directory.isDirectory || directory.mkdirs()) {
+                    "Failed to create instance data directory: ${directory.absolutePath}"
+                }
+            }
 
             val now = clock()
 
             val record = VirtualInstanceRecord(
                 instanceId = instanceId,
-                originPackageName = originPackageName,
+                originPackageName = request.originPackageName,
                 virtualPackageName = virtualPackageName,
-                displayName = displayName,
+                displayName = request.displayName,
                 dataRoot = baseDir.absolutePath,
-                compatibilityMode = compatibilityMode,
+                compatibilityMode = request.compatibilityMode,
                 createdAtMs = now,
                 updatedAtMs = now,
-                state = InstanceState.READY
+                state = InstanceState.READY,
+                creationRequestId = request.creationRequestId,
+                creationRequestFingerprint = request.creationRequestFingerprint
             )
 
             store.save(record).getOrThrow()
@@ -97,15 +130,25 @@ class DefaultInstanceManager(
 
     override fun deleteInstance(instanceId: String): Boolean {
         val record = store.load(instanceId) ?: return false
+        val rootBase = runCatching { dataRootBase.canonicalFile }.getOrNull() ?: return false
+        val expectedDataRoot = runCatching { File(rootBase, instanceId).canonicalFile }.getOrNull() ?: return false
+        val recordedDataRoot = runCatching { File(record.dataRoot).canonicalFile }.getOrNull() ?: return false
+        if (recordedDataRoot != expectedDataRoot || recordedDataRoot.parentFile != rootBase) return false
+        if (!recordedDataRoot.exists()) return store.delete(instanceId)
 
-        // Clean up data root directory
-        val baseDir = File(record.dataRoot)
-        if (baseDir.exists()) {
-            val deleted = runCatching { dataRootDeleter(baseDir) }.getOrDefault(false)
-            if (!deleted || baseDir.exists()) return false
+        val tombstone = File(rootBase, ".$instanceId.delete-${UUID.randomUUID()}")
+        if (!recordedDataRoot.renameTo(tombstone)) return false
+        if (!store.delete(instanceId)) {
+            tombstone.renameTo(recordedDataRoot)
+            return false
         }
 
-        return store.delete(instanceId)
+        val deleted = runCatching { dataRootDeleter(tombstone) }.getOrDefault(false)
+        if (deleted && !tombstone.exists()) return true
+
+        if (!recordedDataRoot.exists()) tombstone.renameTo(recordedDataRoot)
+        store.save(record)
+        return false
     }
 
     override fun updateLaunchState(instanceId: String): VirtualInstanceRecord? {

@@ -4176,3 +4176,76 @@ Remaining gate:
 - The Binder Provider remains in the host process. Process-role routing,
   atomic migration to `:engine`, server-death tests, and API 28-36/HyperOS
   evidence remain open. Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-13 Authoritative Idempotent Create
+
+This batch closes the production instance-create bypass and makes create a
+server-owned, idempotent command. It also hardens the package generation that
+the command references; create is no longer allowed to combine metadata from
+one package with APK bytes from another package.
+
+Implemented:
+
+- Added `CreateInstanceRequest` and `EnginePackageInstallRequest`, including
+  base/split paths, package/component metadata, ABI data, display name,
+  compatibility mode, and a mandatory `creationRequestId`.
+- Added `engineCreateInstanceWithMetadata` across AIDL, the Binder endpoint,
+  strict Bundle codecs, the IPC facade, and `DefaultVirtualizationEngineCore`.
+  The legacy string-only create entry returns `UNSUPPORTED` instead of
+  bypassing package generation and idempotency checks.
+- `CloneCreateUseCase` no longer calls `VirtualInstallService` or
+  `InstanceManager.createInstance`. The engine imports or reuses the package
+  generation and creates the instance as one authority.
+- The complete create payload is hashed into a persisted SHA-256 request
+  fingerprint. Reusing an ID with changed version, split, component, ABI,
+  display, or compatibility payload fails with
+  `creation_request_id_conflict`; a matching retry returns the committed
+  instance.
+- Launcher pending-attempt state is stored in `SavedStateHandle` using only
+  supported string collections. Unknown Binder results and process/page
+  recreation reuse the same request ID; success and deterministic failures
+  clear it.
+- Existing sibling instances reuse the matching package artifact generation.
+  A changed base/split digest fails with
+  `package_generation_mismatch_refresh_required` instead of overwriting shared
+  code.
+- APK archive and manifest package identities must match the requested origin
+  package. Resolver or identity failures are fail-closed and cannot fall back
+  to unrelated installed-package metadata.
+- Package artifacts use content-addressed names and same-directory staging.
+  Split names that sanitize to the same text remain distinct by stable index,
+  committed artifacts are re-hashed, and exceptions/record-save failures roll
+  back files created by the transaction while preserving an existing
+  generation.
+- `DefaultInstanceManager` now validates canonical `dataRootBase/instanceId`
+  containment before deletion and stages the directory while deleting the
+  record, restoring it on covered failure paths.
+- The pre-existing bootstrap tombstone timeout test now prestarts its executor,
+  removing a scheduler-start race without changing production timeout policy.
+
+Verification:
+
+- Final full local gate passed in 4m34s with 531 Gradle tasks executed or
+  reused.
+- Aggregated UTF-8 JUnit reports contain 2,054 tests, 0 failures, 0 errors, and
+  12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,719,617 bytes.
+- APK SHA-256:
+  `5102D551B4E9A25E6D9B48FA01681489929C82624D9B7A689076245E3C4BDDDA`.
+- `git diff --check` passed; existing LF/CRLF conversion warnings remain.
+- Production search has no `InstanceManager.createInstance` call under app,
+  launcher, app-manager, or the clone-create use case.
+
+Remaining gate:
+
+- Eight production constructors can still write the file-backed proxy Activity
+  slot map from app, engine-client, and guest loader processes. The next batch
+  must move query/reserve/CAS/prune into `VirtualActivityService` and retain
+  only the server-owned store construction.
+- Content-addressed staging is exception-safe, but a crash-recovery journal or
+  startup reconciliation for abandoned staging/orphan artifacts is still open.
+- Direct file-backed server reads/constructions, dedicated `:engine` process
+  migration, full PMS/AMS/Provider/Service/Broadcast/native semantics, and
+  API 28-36/HyperOS evidence remain incomplete.
+- No new device artifact proves GKD, AstroBox, QQ, WeChat, or QQ Reader. The
+  commercial decision remains **BLOCK**.

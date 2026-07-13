@@ -29,7 +29,7 @@ import java.io.File
  * @property state             Current lifecycle state.
  */
 data class VirtualInstanceRecord(
-    val schemaVersion: Int = 1,
+    val schemaVersion: Int = 2,
     val instanceId: String,
     val originPackageName: String,
     val virtualPackageName: String,
@@ -42,7 +42,9 @@ data class VirtualInstanceRecord(
     val updatedAtMs: Long,
     val lastLaunchAtMs: Long? = null,
     val launchCount: Int = 0,
-    val state: InstanceState = InstanceState.READY
+    val state: InstanceState = InstanceState.READY,
+    val creationRequestId: String? = null,
+    val creationRequestFingerprint: String? = null
 )
 
 enum class IconPolicy {

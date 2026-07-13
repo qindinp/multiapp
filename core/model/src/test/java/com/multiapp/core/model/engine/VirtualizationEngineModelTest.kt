@@ -5,6 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.assertFailsWith
 
 class VirtualizationEngineModelTest {
 
@@ -27,6 +28,73 @@ class VirtualizationEngineModelTest {
         assertEquals(EngineEvidenceMode.DEFAULT, request.evidenceMode)
         assertEquals(0, request.launchFlags)
         assertEquals(null, request.targetComponentClassName)
+    }
+
+    @Test
+    fun `create request carries immutable package generation and idempotency identity`() {
+        val install = EnginePackageInstallRequest(
+            originPackageName = "com.test.app",
+            originApkPath = "/data/app/com.test.app/base.apk",
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 35,
+            minSdk = 28,
+            packageLabel = "Test",
+            splitApkPaths = listOf("/data/app/com.test.app/config.apk"),
+            splitNames = listOf("config")
+        )
+        val request = CreateInstanceRequest(
+            creationRequestId = "create-request-1",
+            install = install,
+            displayName = "Test Work"
+        )
+
+        assertEquals("com.test.app", request.originPackageName)
+        assertEquals("create-request-1", request.creationRequestId)
+        assertEquals(listOf("config"), request.install.splitNames)
+    }
+
+    @Test
+    fun `create request rejects unsafe identity and inconsistent split metadata`() {
+        assertFailsWith<IllegalArgumentException> {
+            EnginePackageInstallRequest(
+                originPackageName = "../unsafe",
+                originApkPath = "/tmp/base.apk",
+                versionCode = 1L,
+                versionName = "1.0",
+                targetSdk = 35,
+                minSdk = 28,
+                packageLabel = "Unsafe"
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            EnginePackageInstallRequest(
+                originPackageName = "com.test.app",
+                originApkPath = "/tmp/base.apk",
+                versionCode = 1L,
+                versionName = "1.0",
+                targetSdk = 35,
+                minSdk = 28,
+                packageLabel = "Test",
+                splitApkPaths = listOf("/tmp/one.apk", "/tmp/two.apk"),
+                splitNames = listOf("one")
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            CreateInstanceRequest(
+                creationRequestId = "unsafe/request",
+                install = EnginePackageInstallRequest(
+                    originPackageName = "com.test.app",
+                    originApkPath = "/tmp/base.apk",
+                    versionCode = 1L,
+                    versionName = "1.0",
+                    targetSdk = 35,
+                    minSdk = 28,
+                    packageLabel = "Test"
+                ),
+                displayName = "Test"
+            )
+        }
     }
 
     @Test

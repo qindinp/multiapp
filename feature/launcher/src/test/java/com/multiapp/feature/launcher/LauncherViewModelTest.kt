@@ -1,5 +1,7 @@
 package com.multiapp.feature.launcher
 
+import androidx.lifecycle.SavedStateHandle
+import com.multiapp.core.instance.CloneCreateAttempt
 import com.multiapp.core.instance.CloneCreateFailureException
 import com.multiapp.core.instance.CloneCreateResult
 import com.multiapp.core.instance.CloneCreateUseCase
@@ -66,8 +68,10 @@ class LauncherViewModelTest {
     fun `createInstance delegates to create use case and refreshes instances`() = runTest {
         val app = testApp()
         val record = testRecord(originPackageName = app.packageName, displayName = app.appName)
-        every { cloneCreateUseCase.create(app, null) } returns Result.success(
-            CloneCreateResult(record, createLatencyMs = 42L, cleanupStatus = "not_required")
+        val attempt = testAttempt()
+        every { cloneCreateUseCase.prepareAttempt(app, null, null) } returns attempt
+        every { cloneCreateUseCase.create(app, attempt) } returns Result.success(
+            CloneCreateResult(record.instanceId, createLatencyMs = 42L, cleanupStatus = "engine_owned")
         )
         every { instanceManager.listInstances() } returnsMany listOf(emptyList(), listOf(record))
 
@@ -75,7 +79,8 @@ class LauncherViewModelTest {
 
         viewModel.createInstance(app)
 
-        verify { cloneCreateUseCase.create(app, null) }
+        verify { cloneCreateUseCase.prepareAttempt(app, null, null) }
+        verify { cloneCreateUseCase.create(app, attempt) }
         assertEquals(listOf(record), viewModel.uiState.value.instances)
         assertEquals(record.instanceId, viewModel.uiState.value.lastCreatedInstanceId)
         assertEquals(42L, viewModel.uiState.value.lastCreateLatencyMs)
@@ -86,7 +91,9 @@ class LauncherViewModelTest {
     @Test
     fun `createInstance shows friendly failure and cleanup detail`() = runTest {
         val app = testApp()
-        every { cloneCreateUseCase.create(app, "Work") } returns Result.failure(
+        val attempt = testAttempt(displayName = "Work")
+        every { cloneCreateUseCase.prepareAttempt(app, "Work", null) } returns attempt
+        every { cloneCreateUseCase.create(app, attempt) } returns Result.failure(
             CloneCreateFailureException(
                 failureCode = "origin_apk_missing",
                 userMessage = "找不到应用",
@@ -103,6 +110,95 @@ class LauncherViewModelTest {
         assertEquals("找不到应用", viewModel.uiState.value.error)
         assertEquals("目标应用可能已卸载\ncleanup=install_deleted", viewModel.uiState.value.errorDetail)
         assertNull(viewModel.uiState.value.creationStep)
+    }
+
+    @Test
+    fun `unknown create result survives ViewModel recreation and reuses pending attempt`() = runTest {
+        val app = testApp()
+        val savedStateHandle = SavedStateHandle()
+        val attempt = testAttempt()
+        val pendingArguments = mutableListOf<CloneCreateAttempt?>()
+        every { cloneCreateUseCase.prepareAttempt(app, null, any()) } answers {
+            val pending = arg<CloneCreateAttempt?>(2)
+            pendingArguments += pending
+            pending ?: attempt
+        }
+        every { cloneCreateUseCase.create(app, attempt) } returnsMany listOf(
+            Result.failure(
+                CloneCreateFailureException(
+                    failureCode = "create_failed",
+                    userMessage = "创建结果未知",
+                    technicalReason = "engine_authority_unavailable_or_unknown_result",
+                    cleanupStatus = "engine_owned",
+                    cause = IllegalStateException("unknown result"),
+                    shouldRetainCreationRequestId = true
+                )
+            ),
+            Result.success(
+                CloneCreateResult("instance-1", createLatencyMs = 42L, cleanupStatus = "engine_owned")
+            )
+        )
+
+        createViewModel(savedStateHandle).createInstance(app)
+        val restoredViewModel = createViewModel(savedStateHandle)
+        restoredViewModel.createInstance(app)
+
+        assertEquals(listOf(null, attempt), pendingArguments)
+        verify(exactly = 2) { cloneCreateUseCase.create(app, attempt) }
+        assertEquals("instance-1", restoredViewModel.uiState.value.lastCreatedInstanceId)
+    }
+
+    @Test
+    fun `successful create clears pending attempt before later recreation`() = runTest {
+        val app = testApp()
+        val savedStateHandle = SavedStateHandle()
+        val attempt = testAttempt()
+        val pendingArguments = mutableListOf<CloneCreateAttempt?>()
+        every { cloneCreateUseCase.prepareAttempt(app, null, any()) } answers {
+            val pending = arg<CloneCreateAttempt?>(2)
+            pendingArguments += pending
+            pending ?: attempt
+        }
+        every { cloneCreateUseCase.create(app, attempt) } returns Result.success(
+            CloneCreateResult("instance-1", createLatencyMs = 42L, cleanupStatus = "engine_owned")
+        )
+
+        createViewModel(savedStateHandle).createInstance(app)
+        createViewModel(savedStateHandle).createInstance(app)
+
+        assertEquals(listOf(null, null), pendingArguments)
+    }
+
+    @Test
+    fun `deterministic create failure clears pending attempt before retry`() = runTest {
+        val app = testApp()
+        val savedStateHandle = SavedStateHandle()
+        val attempt = testAttempt()
+        val pendingArguments = mutableListOf<CloneCreateAttempt?>()
+        every { cloneCreateUseCase.prepareAttempt(app, null, any()) } answers {
+            val pending = arg<CloneCreateAttempt?>(2)
+            pendingArguments += pending
+            pending ?: attempt
+        }
+        every { cloneCreateUseCase.create(app, attempt) } returnsMany listOf(
+            Result.failure(
+                CloneCreateFailureException(
+                    failureCode = "creation_request_id_conflict",
+                    userMessage = "创建冲突",
+                    technicalReason = "creation_request_id_conflict",
+                    cleanupStatus = "engine_owned",
+                    cause = IllegalArgumentException("conflict")
+                )
+            ),
+            Result.success(
+                CloneCreateResult("instance-1", createLatencyMs = 42L, cleanupStatus = "engine_owned")
+            )
+        )
+
+        createViewModel(savedStateHandle).createInstance(app)
+        createViewModel(savedStateHandle).createInstance(app)
+
+        assertEquals(listOf(null, null), pendingArguments)
     }
 
     @Test
@@ -281,8 +377,11 @@ class LauncherViewModelTest {
         assertNull(normalizeApkComponentName("com.example.app", " "))
     }
 
-    private fun createViewModel(): LauncherViewModel {
+    private fun createViewModel(
+        savedStateHandle: SavedStateHandle = SavedStateHandle()
+    ): LauncherViewModel {
         return LauncherViewModel(
+            savedStateHandle = savedStateHandle,
             instanceManager = instanceManager,
             cloneCreateUseCase = cloneCreateUseCase,
             installedAppRepository = installedAppRepository,
@@ -301,6 +400,15 @@ class LauncherViewModelTest {
         versionCode = 123L,
         apkPath = "C:/tmp/example.apk",
         instanceId = ""
+    )
+
+    private fun testAttempt(
+        creationRequestId: String = "create-request-1",
+        displayName: String = "Test App"
+    ): CloneCreateAttempt = CloneCreateAttempt(
+        creationRequestId = creationRequestId,
+        payloadFingerprint = "payload-fingerprint",
+        displayName = displayName
     )
 
     private fun testRecord(

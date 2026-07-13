@@ -121,24 +121,6 @@ object AppModule {
                 originApkPath,
                 manifestParser,
                 appContext.packageManager
-            )?.let { metadata ->
-                return@InstallMetadataResolver metadata
-            }
-            val packageInfo = appContext.packageManager.getInstalledPackageInfoWithComponents(packageName)
-            val signingIdentity = packageInfo.signingIdentity()
-            InstallMetadata(
-                permissions = packageInfo.requestedPermissions?.toList().orEmpty(),
-                activities = packageInfo.activities.toComponentInfos(),
-                services = packageInfo.services.toComponentInfos(),
-                receivers = packageInfo.receivers.toComponentInfos(),
-                providers = packageInfo.providers.toComponentInfos(),
-                applicationMetaData = packageInfo.applicationInfo?.metaData.toModelMetaData(),
-                signerSha256Digests = signingIdentity.digests,
-                hasMultipleSigners = signingIdentity.hasMultipleSigners,
-                splitApkPaths = packageInfo.applicationInfo?.splitSourceDirs?.filterNotBlank().orEmpty(),
-                splitPublicSourceDirs = packageInfo.applicationInfo?.splitPublicSourceDirs?.filterNotBlank().orEmpty(),
-                splitNames = packageInfo.applicationInfo?.splitNames?.filterNotBlank().orEmpty(),
-                isolatedSplits = packageInfo.applicationInfo?.safeRequestsIsolatedSplitLoading() ?: false
             )
         }
     }
@@ -148,15 +130,22 @@ object AppModule {
         originApkPath: String,
         manifestParser: ManifestParser,
         packageManager: PackageManager
-    ): InstallMetadata? {
-        val originApk = File(originApkPath).takeIf { it.isFile } ?: return null
-        return runCatching {
-            val manifest = manifestParser.parse(originApk)
-            val manifestPackageName = manifest.packageName.ifBlank { packageName }
-            if (manifestPackageName != packageName) return@runCatching null
-            val archiveInfo = packageManager.getArchivePackageInfoWithComponents(originApkPath)
-            val signingIdentity = archiveInfo?.signingIdentity() ?: PackageSigningIdentity.EMPTY
-            InstallMetadata(
+    ): InstallMetadata {
+        val originApk = File(originApkPath)
+        require(originApk.isFile) { "APK file not found: $originApkPath" }
+        val archiveInfo = requireNotNull(packageManager.getArchivePackageInfoWithComponents(originApkPath)) {
+            "APK package metadata unavailable: $originApkPath"
+        }
+        val signingIdentity = archiveInfo.signingIdentity()
+        val manifest = runCatching { manifestParser.parse(originApk) }.getOrNull()
+        val archivePackageName = requireMatchingApkPackageIdentity(
+            expectedPackageName = packageName,
+            archivePackageName = archiveInfo.packageName,
+            manifestPackageName = manifest?.packageName
+        )
+        if (manifest != null) {
+            val manifestPackageName = manifest.packageName.ifBlank { archivePackageName }
+            return InstallMetadata(
                 permissions = manifest.permissions,
                 activities = manifest.activities.toInstallComponentInfos(manifestPackageName),
                 services = manifest.services.toInstallComponentInfos(manifestPackageName),
@@ -181,25 +170,21 @@ object AppModule {
                 signerSha256Digests = signingIdentity.digests,
                 hasMultipleSigners = signingIdentity.hasMultipleSigners
             )
-        }.getOrNull()
-    }
-
-    private fun PackageManager.getInstalledPackageInfoWithComponents(packageName: String): PackageInfo {
-        val flags = PackageManager.GET_ACTIVITIES or
-            PackageManager.GET_SERVICES or
-            PackageManager.GET_RECEIVERS or
-            PackageManager.GET_PROVIDERS or
-            PackageManager.GET_URI_PERMISSION_PATTERNS or
-            PackageManager.GET_PERMISSIONS or
-            PackageManager.GET_META_DATA or
-            PackageManager.GET_SIGNATURES or
-            PackageManager.GET_SIGNING_CERTIFICATES
-        return if (Build.VERSION.SDK_INT >= 33) {
-            getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(flags.toLong()))
-        } else {
-            @Suppress("DEPRECATION")
-            getPackageInfo(packageName, flags)
         }
+        return InstallMetadata(
+            permissions = archiveInfo.requestedPermissions?.toList().orEmpty(),
+            activities = archiveInfo.activities.toComponentInfos(),
+            services = archiveInfo.services.toComponentInfos(),
+            receivers = archiveInfo.receivers.toComponentInfos(),
+            providers = archiveInfo.providers.toComponentInfos(),
+            applicationMetaData = archiveInfo.applicationInfo?.metaData.toModelMetaData(),
+            signerSha256Digests = signingIdentity.digests,
+            hasMultipleSigners = signingIdentity.hasMultipleSigners,
+            splitApkPaths = archiveInfo.applicationInfo?.splitSourceDirs?.filterNotBlank().orEmpty(),
+            splitPublicSourceDirs = archiveInfo.applicationInfo?.splitPublicSourceDirs?.filterNotBlank().orEmpty(),
+            splitNames = archiveInfo.applicationInfo?.splitNames?.filterNotBlank().orEmpty(),
+            isolatedSplits = archiveInfo.applicationInfo?.safeRequestsIsolatedSplitLoading() ?: false
+        )
     }
 
     private fun Array<out android.content.pm.ComponentInfo>?.toComponentInfos(): List<ComponentInfo> {
@@ -256,8 +241,9 @@ object AppModule {
                     metaData = component.metaData.toVirtualMetaDataMap(),
                     targetActivityName = normalizeManifestComponentName(packageName, component.targetActivityName)
                 )
-            }
-        }
+    }
+}
+
     }
 
     private fun normalizeManifestComponentName(packageName: String, name: String?): String? {
@@ -342,11 +328,7 @@ object AppModule {
     private data class PackageSigningIdentity(
         val digests: List<String>,
         val hasMultipleSigners: Boolean
-    ) {
-        companion object {
-            val EMPTY = PackageSigningIdentity(emptyList(), false)
-        }
-    }
+    )
 
     private fun ProviderInfo.providerPermission(): String? {
         val readPermission = readPermission?.takeIf { it.isNotBlank() }
@@ -354,4 +336,23 @@ object AppModule {
         return readPermission.takeIf { it != null && it == writePermission }
     }
 
+}
+
+internal fun requireMatchingApkPackageIdentity(
+    expectedPackageName: String,
+    archivePackageName: String?,
+    manifestPackageName: String?
+): String {
+    val archiveIdentity = requireNotNull(archivePackageName?.takeIf { it.isNotBlank() }) {
+        "APK package metadata has no package name"
+    }
+    require(archiveIdentity == expectedPackageName) {
+        "APK package mismatch: expected=$expectedPackageName, actual=$archiveIdentity"
+    }
+    manifestPackageName?.takeIf { it.isNotBlank() }?.let { manifestIdentity ->
+        require(manifestIdentity == expectedPackageName) {
+            "APK manifest package mismatch: expected=$expectedPackageName, actual=$manifestIdentity"
+        }
+    }
+    return archiveIdentity
 }

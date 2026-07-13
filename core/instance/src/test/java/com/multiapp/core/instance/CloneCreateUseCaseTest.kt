@@ -1,17 +1,21 @@
 package com.multiapp.core.instance
 
 import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EngineResult
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
-import com.multiapp.core.model.installer.ImportResult
-import com.multiapp.core.model.installer.VirtualInstallService
-import io.mockk.*
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.unmockkAll
+import io.mockk.verify
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -19,19 +23,19 @@ import org.junit.jupiter.api.Test
 class CloneCreateUseCaseTest {
 
     private lateinit var instanceManager: InstanceManager
-    private lateinit var installService: VirtualInstallService
     private lateinit var virtualizationEngine: VirtualizationEngine
-    private var now = 1000L
+    private var now = 1_000L
 
     @BeforeEach
     fun setUp() {
         instanceManager = mockk(relaxed = true)
-        installService = mockk(relaxed = true)
         virtualizationEngine = mockk()
         every { instanceManager.listInstances() } returns emptyList()
-        every { installService.hasInstallRecord(any()) } returns true
-        every { installService.ensureInstallRecord(any()) } returns Result.success(mockk<ImportResult>())
-        every { virtualizationEngine.deleteInstance(any()) } returns EngineResult.pass("deleteInstance")
+        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } returns EngineResult.pass(
+            operation = "createInstance",
+            instanceId = CREATED_INSTANCE_ID,
+            originPackageName = "com.example.app"
+        )
     }
 
     @AfterEach
@@ -40,151 +44,229 @@ class CloneCreateUseCaseTest {
     }
 
     @Test
-    fun `create assigns numbered display name for duplicate origin`() {
+    fun `create assigns numbered display name through engine request`() {
         val app = testApp()
-        val existing = testRecord("old", app.packageName, app.appName)
-        val created = testRecord("new", app.packageName, "${app.appName} 2")
-        every { instanceManager.listInstances() } returns listOf(existing)
-        every {
-            instanceManager.createInstance(app.packageName, "${app.appName} 2", CompatibilityMode.DEFAULT)
-        } returns Result.success(created)
+        every { instanceManager.listInstances() } returns listOf(testRecord("old", app.packageName, app.appName))
 
-        val result = useCase().create(app).getOrThrow()
+        val useCase = useCase()
+        val result = useCase.create(app, useCase.prepareAttempt(app)).getOrThrow()
 
-        assertEquals(created, result.instance)
+        assertEquals(CREATED_INSTANCE_ID, result.instanceId)
         verify {
-            instanceManager.createInstance(app.packageName, "${app.appName} 2", CompatibilityMode.DEFAULT)
+            virtualizationEngine.createInstance(
+                match<CreateInstanceRequest> {
+                    it.displayName == "${app.appName} 2" && it.originPackageName == app.packageName
+                }
+            )
+        }
+        verify(exactly = 0) { instanceManager.createInstance(any<InstanceManager.CreationRequest>()) }
+    }
+
+    @Test
+    fun `create trims custom display name and supplies stable request id`() {
+        val app = testApp()
+
+        val useCase = useCase()
+        val attempt = useCase.prepareAttempt(app, "  Work  ")
+
+        useCase.create(app, attempt).getOrThrow()
+
+        verify {
+            virtualizationEngine.createInstance(
+                match<CreateInstanceRequest> {
+                    it.creationRequestId == CREATION_REQUEST_ID && it.displayName == "Work"
+                }
+            )
         }
     }
 
     @Test
-    fun `create trims custom display name`() {
-        val app = testApp()
-        val created = testRecord("new", app.packageName, "Work")
-        every {
-            instanceManager.createInstance(app.packageName, "Work", CompatibilityMode.DEFAULT)
-        } returns Result.success(created)
+    fun `create carries package and split metadata to engine authority`() {
+        val app = testApp().copy(
+            requestedPermissions = listOf("android.permission.CAMERA"),
+            activities = listOf("com.example.app.MainActivity"),
+            services = listOf("com.example.app.SyncService"),
+            receivers = listOf("com.example.app.BootReceiver"),
+            providers = listOf("com.example.app.DataProvider"),
+            nativeAbis = listOf("arm64-v8a"),
+            splitApkPaths = listOf("/tmp/config.arm64.apk"),
+            splitPublicSourceDirs = listOf("/tmp/config.arm64.apk"),
+            splitNames = listOf("config.arm64"),
+            isolatedSplits = true,
+            applicationClassName = "com.example.app.App"
+        )
 
-        useCase().create(app, "  Work  ").getOrThrow()
+        val useCase = useCase()
+        useCase.create(app, useCase.prepareAttempt(app)).getOrThrow()
 
         verify {
-            instanceManager.createInstance(app.packageName, "Work", CompatibilityMode.DEFAULT)
+            virtualizationEngine.createInstance(
+                match<CreateInstanceRequest> { request ->
+                    request.install.originApkPath == app.apkPath &&
+                        request.install.requestedPermissions == app.requestedPermissions &&
+                        request.install.activityClassNames == app.activities &&
+                        request.install.serviceClassNames == app.services &&
+                        request.install.receiverClassNames == app.receivers &&
+                        request.install.providerClassNames == app.providers &&
+                        request.install.nativeAbis == app.nativeAbis &&
+                        request.install.splitApkPaths == app.splitApkPaths &&
+                        request.install.isolatedSplits
+                }
+            )
         }
     }
 
     @Test
-    fun `create rolls back new install record when instance creation fails`() {
-        val app = testApp()
-        every { installService.hasInstallRecord(app.packageName) } returns false
-        every {
-            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
-        } returns Result.failure(IllegalStateException("create failed"))
-        every { installService.deleteInstallRecord(app.packageName) } returns true
+    fun `create reports engine authority failure without local mutation fallback`() {
+        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } returns EngineResult.fail(
+            operation = "createInstance",
+            originPackageName = "com.example.app",
+            message = "engine authority unavailable"
+        )
 
-        val result = useCase().create(app)
+        val useCase = useCase()
+        val app = testApp()
+        val result = useCase.create(app, useCase.prepareAttempt(app))
 
         assertTrue(result.isFailure)
         val error = result.exceptionOrNull() as CloneCreateFailureException
         assertEquals("create_failed", error.failureCode)
-        assertEquals("install_deleted", error.cleanupStatus)
-        verify { installService.deleteInstallRecord(app.packageName) }
-    }
-
-    @Test
-    fun `create keeps existing install record on failure`() {
-        val app = testApp()
-        every { installService.hasInstallRecord(app.packageName) } returns true
-        every {
-            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
-        } returns Result.failure(IllegalStateException("create failed"))
-
-        val result = useCase().create(app)
-
-        assertTrue(result.isFailure)
-        val error = result.exceptionOrNull() as CloneCreateFailureException
-        assertEquals("not_required", error.cleanupStatus)
-        verify(exactly = 0) { installService.deleteInstallRecord(app.packageName) }
+        assertEquals("engine_owned", error.cleanupStatus)
+        verify(exactly = 0) { instanceManager.createInstance(any<InstanceManager.CreationRequest>()) }
+        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
     }
 
     @Test
     fun `create reports latency from clock`() {
-        val app = testApp()
-        val created = testRecord("new", app.packageName, app.appName)
-        every {
-            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
-        } answers {
-            now = 1075L
-            Result.success(created)
+        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } answers {
+            now = 1_075L
+            EngineResult.pass("createInstance", instanceId = CREATED_INSTANCE_ID)
         }
 
-        val result = useCase().create(app).getOrThrow()
+        val useCase = useCase()
+        val app = testApp()
+        val result = useCase.create(app, useCase.prepareAttempt(app)).getOrThrow()
 
         assertEquals(75L, result.createLatencyMs)
     }
 
     @Test
-    fun `rollback deletes a created instance through engine authority`() {
-        val app = testApp()
-        val created = testRecord("new", app.packageName, app.appName)
-        every {
-            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
-        } returns Result.success(created)
+    fun `post-commit clock failure does not delete engine-created instance`() {
         var clockCalls = 0
         val useCase = CloneCreateUseCase(
             instanceManager = instanceManager,
-            virtualInstallService = installService,
             virtualizationEngine = virtualizationEngine,
             clock = {
                 clockCalls += 1
                 if (clockCalls == 1) now else error("clock failed")
-            }
+            },
+            creationRequestIdFactory = { CREATION_REQUEST_ID }
         )
 
-        val result = useCase.create(app)
+        val app = testApp()
+        val result = useCase.create(app, useCase.prepareAttempt(app)).getOrThrow()
 
-        assertTrue(result.isFailure)
-        verify(exactly = 1) { virtualizationEngine.deleteInstance(created.instanceId) }
-        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
+        assertEquals(0L, result.createLatencyMs)
+        verify(exactly = 0) { virtualizationEngine.deleteInstance(any()) }
     }
 
     @Test
-    fun `rollback preserves new install record when engine cannot delete created instance`() {
+    fun `unknown engine result reuses creation request id for the same payload`() {
+        var factoryCalls = 0
+        val useCase = useCase {
+            factoryCalls += 1
+            "create-request-$factoryCalls"
+        }
+        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } returnsMany listOf(
+            EngineResult.fail(
+                operation = "createInstance",
+                message = "engine_authority_unavailable_or_unknown_result"
+            ),
+            EngineResult.pass(operation = "createInstance", instanceId = CREATED_INSTANCE_ID)
+        )
         val app = testApp()
-        val created = testRecord("new", app.packageName, app.appName)
-        every { installService.hasInstallRecord(app.packageName) } returns false
-        every {
-            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
-        } returns Result.success(created)
-        every { virtualizationEngine.deleteInstance(created.instanceId) } returns EngineResult.fail(
-            operation = "deleteInstance",
-            instanceId = created.instanceId,
-            message = "authority unavailable"
-        )
-        var clockCalls = 0
-        val useCase = CloneCreateUseCase(
-            instanceManager = instanceManager,
-            virtualInstallService = installService,
-            virtualizationEngine = virtualizationEngine,
-            clock = {
-                clockCalls += 1
-                if (clockCalls == 1) now else error("clock failed")
-            }
-        )
+        val firstAttempt = useCase.prepareAttempt(app, "Work")
 
-        val error = useCase.create(app).exceptionOrNull() as CloneCreateFailureException
+        val firstResult = useCase.create(app, firstAttempt)
+        val retryAttempt = useCase.prepareAttempt(app, " Work ", firstAttempt)
+        val retryResult = useCase.create(app, retryAttempt)
 
-        assertEquals("instance_delete_skipped,install_preserved", error.cleanupStatus)
-        verify(exactly = 0) { installService.deleteInstallRecord(app.packageName) }
+        assertTrue(firstResult.isFailure)
+        assertTrue(
+            (firstResult.exceptionOrNull() as CloneCreateFailureException)
+                .shouldRetainCreationRequestId
+        )
+        assertEquals(firstAttempt, retryAttempt)
+        assertEquals(1, factoryCalls)
+        assertEquals(CREATED_INSTANCE_ID, retryResult.getOrThrow().instanceId)
+        verify(exactly = 2) {
+            virtualizationEngine.createInstance(
+                match<CreateInstanceRequest> { it.creationRequestId == firstAttempt.creationRequestId }
+            )
+        }
     }
 
-    private fun useCase(): CloneCreateUseCase {
-        return CloneCreateUseCase(
-            instanceManager = instanceManager,
-            virtualInstallService = installService,
-            virtualizationEngine = virtualizationEngine,
-            clock = { now }
+    @Test
+    fun `deterministic engine conflict and request validation do not retain request id`() {
+        val useCase = useCase()
+        val app = testApp()
+        val conflictAttempt = useCase.prepareAttempt(app, "Work")
+        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } returns EngineResult.fail(
+            operation = "createInstance",
+            message = "creation_request_id_conflict"
         )
+
+        val conflict = useCase.create(app, conflictAttempt).exceptionOrNull() as CloneCreateFailureException
+        val invalidAttempt = CloneCreateAttempt(
+            creationRequestId = CREATION_REQUEST_ID,
+            payloadFingerprint = "invalid-display-test",
+            displayName = "x".repeat(257)
+        )
+        val validation = useCase.create(app, invalidAttempt).exceptionOrNull() as CloneCreateFailureException
+
+        assertFalse(conflict.shouldRetainCreationRequestId)
+        assertFalse(validation.shouldRetainCreationRequestId)
     }
+
+    @Test
+    fun `different package display version and split payloads do not reuse pending attempt`() {
+        var requestNumber = 0
+        val useCase = useCase { "create-request-${++requestNumber}" }
+        val app = testApp()
+        val pending = useCase.prepareAttempt(app)
+
+        val changedAttempts = listOf(
+            useCase.prepareAttempt(app.copy(packageName = "com.example.other"), pendingAttempt = pending),
+            useCase.prepareAttempt(app, displayName = "Work", pendingAttempt = pending),
+            useCase.prepareAttempt(
+                app.copy(versionCode = 2L, versionName = "2.0"),
+                pendingAttempt = pending
+            ),
+            useCase.prepareAttempt(
+                app.copy(
+                    splitApkPaths = listOf("/tmp/config.arm64.apk"),
+                    splitPublicSourceDirs = listOf("/tmp/config.arm64.apk"),
+                    splitNames = listOf("config.arm64")
+                ),
+                pendingAttempt = pending
+            )
+        )
+
+        changedAttempts.forEach { changed ->
+            assertNotEquals(pending.creationRequestId, changed.creationRequestId)
+            assertNotEquals(pending.payloadFingerprint, changed.payloadFingerprint)
+        }
+        assertEquals(5, requestNumber)
+    }
+
+    private fun useCase(
+        creationRequestIdFactory: () -> String = { CREATION_REQUEST_ID }
+    ): CloneCreateUseCase = CloneCreateUseCase(
+        instanceManager = instanceManager,
+        virtualizationEngine = virtualizationEngine,
+        clock = { now },
+        creationRequestIdFactory = creationRequestIdFactory
+    )
 
     private fun testApp(): VirtualApp = VirtualApp(
         packageName = "com.example.app",
@@ -207,8 +289,13 @@ class CloneCreateUseCaseTest {
         displayName = displayName,
         dataRoot = "/tmp/$instanceId",
         compatibilityMode = CompatibilityMode.DEFAULT,
-        createdAtMs = 1000L,
-        updatedAtMs = 1000L,
+        createdAtMs = 1_000L,
+        updatedAtMs = 1_000L,
         state = InstanceState.READY
     )
+
+    private companion object {
+        const val CREATION_REQUEST_ID = "create-request-1"
+        const val CREATED_INSTANCE_ID = "instance-new"
+    }
 }

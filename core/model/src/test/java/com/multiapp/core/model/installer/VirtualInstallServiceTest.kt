@@ -11,6 +11,8 @@ import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class VirtualInstallServiceTest {
@@ -316,6 +318,68 @@ class VirtualInstallServiceTest {
         assertTrue(result.isFailure)
         assertFalse(escapedArtifact.exists())
         assertTrue(artifactDir.listFiles()?.isEmpty() ?: true)
+    }
+
+    @Test
+    fun `deleteInstallRecord removes base and split artifacts after deleting the record`() {
+        val originApk = File(tempDir, "delete-origin.apk").apply { writeText("base") }
+        val splitApk = File(tempDir, "delete-split.apk").apply { writeText("split") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "delete-installs"))
+        val artifactDir = File(tempDir, "delete-artifacts")
+        val service = ProductionVirtualInstallService(installStore, artifactDir)
+        service.ensureInstallRecord(
+            VirtualApp(
+                packageName = "com.example.delete",
+                appName = "Delete",
+                versionName = "1.0",
+                versionCode = 1L,
+                apkPath = originApk.absolutePath,
+                instanceId = "",
+                minSdkVersion = 28,
+                targetSdkVersion = 35,
+                splitApkPaths = listOf(splitApk.absolutePath),
+                splitNames = listOf("config")
+            )
+        ).getOrThrow()
+        val record = installStore.load("com.example.delete")!!
+        val artifacts = record.codeSourceDirs.map(::File)
+        assertTrue(artifacts.all { it.isFile })
+
+        assertTrue(service.deleteInstallRecord("com.example.delete"))
+
+        assertNull(installStore.load("com.example.delete"))
+        assertTrue(artifacts.none { it.exists() })
+        assertTrue(artifactDir.listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun `deleteInstallRecord restores staged artifact when record deletion fails`() {
+        val originApk = File(tempDir, "restore-origin.apk").apply { writeText("base") }
+        val realStore = JsonInstallRecordStore(File(tempDir, "restore-installs"))
+        val failingDeleteStore = object : InstallRecordStore by realStore {
+            override fun delete(packageName: String): Boolean = false
+        }
+        val service = ProductionVirtualInstallService(
+            installRecordStore = failingDeleteStore,
+            artifactDir = File(tempDir, "restore-artifacts")
+        )
+        service.importFromMetadata(
+            packageName = "com.example.restore",
+            originApkPath = originApk.absolutePath,
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 35,
+            minSdk = 28,
+            packageLabel = "Restore"
+        ).getOrThrow()
+        val record = realStore.load("com.example.restore")!!
+        val artifact = File(record.originApkPath)
+
+        assertFalse(service.deleteInstallRecord("com.example.restore"))
+
+        assertNotNull(realStore.load("com.example.restore"))
+        assertTrue(artifact.isFile)
+        assertEquals("base", artifact.readText())
     }
 
     @Test

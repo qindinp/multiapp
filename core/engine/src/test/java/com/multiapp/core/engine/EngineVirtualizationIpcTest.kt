@@ -2,6 +2,8 @@ package com.multiapp.core.engine
 
 import android.os.Bundle
 import com.multiapp.core.model.engine.EngineEvidenceMode
+import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineEvidenceReport
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EnginePrewarmPolicy
@@ -13,6 +15,7 @@ import com.multiapp.core.model.engine.EngineTaskPolicy
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
+import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
@@ -50,6 +53,17 @@ class EngineVirtualizationIpcTest {
     }
 
     @Test
+    fun `create request preserves idempotency package and split metadata`() {
+        val bundles = MockBundleFactory()
+        val request = createRequest()
+
+        val decoded = request.toEngineIpcBundle(bundles::create).toCreateInstanceRequestOrNull()
+
+        assertEquals(request, decoded)
+        assertNull(bundles.create().toCreateInstanceRequestOrNull())
+    }
+
+    @Test
     fun `engine result round trip carries runtime identity without parceling package snapshot`() {
         val bundles = MockBundleFactory()
         val runtime = runtime()
@@ -77,6 +91,19 @@ class EngineVirtualizationIpcTest {
         assertEquals(EngineResultStatus.FAIL, result.status)
         assertEquals("engine_authority_unavailable_or_unknown_result", result.message)
         assertEquals(1, remote.launchCalls)
+    }
+
+    @Test
+    fun `remote create mutation with metadata is not retried when result is unknown`() {
+        val remote = RecordingRemote()
+        val engine = IpcVirtualizationEngineCore(remote) { null }
+
+        val result = engine.createInstance(createRequest())
+
+        assertEquals(EngineResultStatus.FAIL, result.status)
+        assertEquals("engine_authority_unavailable_or_unknown_result", result.message)
+        assertEquals(1, remote.createRequestCalls)
+        assertEquals(0, remote.legacyCreateCalls)
     }
 
     @Test
@@ -113,12 +140,22 @@ class EngineVirtualizationIpcTest {
 
     private class RecordingRemote : EngineVirtualizationRemote {
         var launchCalls: Int = 0
+        var createRequestCalls: Int = 0
+        var legacyCreateCalls: Int = 0
         var launchResult: EngineRemoteResult? = null
         var queryIdentity: EngineRuntimeIdentity? = null
 
         override fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult? = null
 
-        override fun createInstance(originPackageName: String): EngineRemoteResult? = null
+        override fun createInstance(originPackageName: String): EngineRemoteResult? {
+            legacyCreateCalls += 1
+            return null
+        }
+
+        override fun createInstance(request: CreateInstanceRequest): EngineRemoteResult? {
+            createRequestCalls += 1
+            return null
+        }
 
         override fun launchInstance(request: LaunchInstanceRequest): EngineRemoteResult? {
             launchCalls++
@@ -158,6 +195,13 @@ class EngineVirtualizationIpcTest {
                     values[firstArg()] = secondArg<Bundle?>()
                 }
                 every { bundle.getBundle(any()) } answers { values[firstArg()] as? Bundle }
+                every { bundle.putStringArrayList(any(), any()) } answers {
+                    values[firstArg()] = secondArg<ArrayList<String>?>()
+                }
+                every { bundle.getStringArrayList(any()) } answers {
+                    @Suppress("UNCHECKED_CAST")
+                    (values[firstArg()] as? ArrayList<String>)
+                }
                 every { bundle.containsKey(any()) } answers { values.containsKey(firstArg()) }
                 every { bundle.keySet() } answers { values.keys }
             }
@@ -191,6 +235,29 @@ class EngineVirtualizationIpcTest {
         processId = 4321,
         processName = "$HOST_PACKAGE:v2",
         state = VirtualRuntimeState.RUNNING
+    )
+
+    private fun createRequest() = CreateInstanceRequest(
+        creationRequestId = "create-request-1",
+        install = EnginePackageInstallRequest(
+            originPackageName = ORIGIN_PACKAGE,
+            originApkPath = "/data/app/test/base.apk",
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 35,
+            minSdk = 28,
+            applicationClassName = "com.test.App",
+            packageLabel = "Test",
+            requestedPermissions = listOf("android.permission.CAMERA"),
+            activityClassNames = listOf("com.test.MainActivity"),
+            nativeAbis = listOf("arm64-v8a"),
+            splitApkPaths = listOf("/data/app/test/config.apk"),
+            splitPublicSourceDirs = listOf("/data/app/test/config.apk"),
+            splitNames = listOf("config"),
+            isolatedSplits = true
+        ),
+        displayName = "Test Work",
+        compatibilityMode = CompatibilityMode.LEGACY
     )
 
     private fun evidence() = EngineEvidenceReport(

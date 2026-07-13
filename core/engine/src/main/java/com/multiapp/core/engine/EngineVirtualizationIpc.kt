@@ -3,6 +3,8 @@ package com.multiapp.core.engine
 import android.content.Context
 import android.os.Bundle
 import com.multiapp.core.model.engine.EngineEvidenceMode
+import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineEvidenceReport
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EnginePrewarmPolicy
@@ -15,6 +17,7 @@ import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
+import com.multiapp.core.model.instance.CompatibilityMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
@@ -87,6 +90,72 @@ internal fun Bundle.toLaunchInstanceRequestOrNull(): LaunchInstanceRequest? = ru
         taskPolicy = requiredEnum(KEY_TASK_POLICY),
         prewarmPolicy = requiredEnum(KEY_PREWARM_POLICY),
         evidenceMode = requiredEnum(KEY_EVIDENCE_MODE)
+    )
+}.getOrNull()
+
+internal fun CreateInstanceRequest.toEngineIpcBundle(
+    bundleFactory: () -> Bundle = ::Bundle
+): Bundle = bundleFactory().apply {
+    putString(KEY_CREATION_REQUEST_ID, creationRequestId)
+    putString(KEY_DISPLAY_NAME, displayName)
+    putString(KEY_COMPATIBILITY_MODE, compatibilityMode.name)
+    putBundle(KEY_INSTALL_REQUEST, install.toEngineIpcBundle(bundleFactory))
+}
+
+internal fun Bundle.toCreateInstanceRequestOrNull(): CreateInstanceRequest? = runCatching {
+    CreateInstanceRequest(
+        creationRequestId = requiredString(KEY_CREATION_REQUEST_ID),
+        install = getBundle(KEY_INSTALL_REQUEST)
+            ?.toEnginePackageInstallRequestOrNull()
+            ?: error("missing install request"),
+        displayName = requiredString(KEY_DISPLAY_NAME),
+        compatibilityMode = requiredEnum(KEY_COMPATIBILITY_MODE)
+    )
+}.getOrNull()
+
+private fun EnginePackageInstallRequest.toEngineIpcBundle(
+    bundleFactory: () -> Bundle
+): Bundle = bundleFactory().apply {
+    putString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME, originPackageName)
+    putString(KEY_ORIGIN_APK_PATH, originApkPath)
+    putLong(KEY_VERSION_CODE, versionCode)
+    putString(KEY_VERSION_NAME, versionName)
+    putInt(KEY_TARGET_SDK, targetSdk)
+    putInt(KEY_MIN_SDK, minSdk)
+    putString(KEY_APPLICATION_CLASS_NAME, applicationClassName)
+    putString(KEY_PACKAGE_LABEL, packageLabel)
+    putStringArrayList(KEY_REQUESTED_PERMISSIONS, ArrayList(requestedPermissions))
+    putStringArrayList(KEY_ACTIVITY_CLASS_NAMES, ArrayList(activityClassNames))
+    putStringArrayList(KEY_SERVICE_CLASS_NAMES, ArrayList(serviceClassNames))
+    putStringArrayList(KEY_RECEIVER_CLASS_NAMES, ArrayList(receiverClassNames))
+    putStringArrayList(KEY_PROVIDER_CLASS_NAMES, ArrayList(providerClassNames))
+    putStringArrayList(KEY_NATIVE_ABIS, ArrayList(nativeAbis))
+    putStringArrayList(KEY_SPLIT_APK_PATHS, ArrayList(splitApkPaths))
+    putStringArrayList(KEY_SPLIT_PUBLIC_SOURCE_DIRS, ArrayList(splitPublicSourceDirs))
+    putStringArrayList(KEY_SPLIT_NAMES, ArrayList(splitNames))
+    putBoolean(KEY_ISOLATED_SPLITS, isolatedSplits)
+}
+
+private fun Bundle.toEnginePackageInstallRequestOrNull(): EnginePackageInstallRequest? = runCatching {
+    EnginePackageInstallRequest(
+        originPackageName = requiredString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME),
+        originApkPath = requiredString(KEY_ORIGIN_APK_PATH),
+        versionCode = getLong(KEY_VERSION_CODE),
+        versionName = requiredString(KEY_VERSION_NAME),
+        targetSdk = getInt(KEY_TARGET_SDK),
+        minSdk = getInt(KEY_MIN_SDK),
+        applicationClassName = optionalNonBlankString(KEY_APPLICATION_CLASS_NAME),
+        packageLabel = requiredString(KEY_PACKAGE_LABEL),
+        requestedPermissions = stringList(KEY_REQUESTED_PERMISSIONS),
+        activityClassNames = stringList(KEY_ACTIVITY_CLASS_NAMES),
+        serviceClassNames = stringList(KEY_SERVICE_CLASS_NAMES),
+        receiverClassNames = stringList(KEY_RECEIVER_CLASS_NAMES),
+        providerClassNames = stringList(KEY_PROVIDER_CLASS_NAMES),
+        nativeAbis = stringList(KEY_NATIVE_ABIS),
+        splitApkPaths = stringList(KEY_SPLIT_APK_PATHS),
+        splitPublicSourceDirs = stringList(KEY_SPLIT_PUBLIC_SOURCE_DIRS),
+        splitNames = stringList(KEY_SPLIT_NAMES),
+        isolatedSplits = getBoolean(KEY_ISOLATED_SPLITS)
     )
 }.getOrNull()
 
@@ -302,12 +371,17 @@ private fun Bundle.requiredString(key: String): String =
 private fun Bundle.optionalNonBlankString(key: String): String? =
     getString(key)?.also { check(it.isNotBlank()) }
 
+private fun Bundle.stringList(key: String): List<String> =
+    getStringArrayList(key)?.toList() ?: emptyList()
+
 private inline fun <reified T : Enum<T>> Bundle.requiredEnum(key: String): T =
     enumValueOf(requiredString(key))
 
 internal interface EngineVirtualizationRemote {
     fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult?
     fun createInstance(originPackageName: String): EngineRemoteResult?
+    fun createInstance(request: CreateInstanceRequest): EngineRemoteResult? =
+        createInstance(request.originPackageName)
     fun launchInstance(request: LaunchInstanceRequest): EngineRemoteResult?
     fun stopInstance(instanceId: String): EngineRemoteResult?
     fun deleteInstance(instanceId: String): EngineRemoteResult?
@@ -321,6 +395,9 @@ private object BinderEngineVirtualizationRemote : EngineVirtualizationRemote {
 
     override fun createInstance(originPackageName: String): EngineRemoteResult? =
         EngineRuntimeIpcClients.engineCreateInstance(originPackageName)
+
+    override fun createInstance(request: CreateInstanceRequest): EngineRemoteResult? =
+        EngineRuntimeIpcClients.engineCreateInstance(request)
 
     override fun launchInstance(request: LaunchInstanceRequest): EngineRemoteResult? =
         EngineRuntimeIpcClients.engineLaunchInstance(request)
@@ -362,6 +439,9 @@ class IpcVirtualizationEngine @Inject constructor(
     override fun createInstance(originPackageName: String): EngineResult =
         core.createInstance(originPackageName)
 
+    override fun createInstance(request: CreateInstanceRequest): EngineResult =
+        core.createInstance(request)
+
     override fun launchInstance(request: LaunchInstanceRequest): EngineResult = core.launchInstance(request)
 
     override fun stopInstance(instanceId: String): EngineResult = core.stopInstance(instanceId)
@@ -392,6 +472,14 @@ internal class IpcVirtualizationEngineCore(
             instanceId = null,
             originPackageName = originPackageName,
             remoteResult = remote.createInstance(originPackageName)
+        )
+
+    override fun createInstance(request: CreateInstanceRequest): EngineResult =
+        complete(
+            operation = "createInstance",
+            instanceId = null,
+            originPackageName = request.originPackageName,
+            remoteResult = remote.createInstance(request)
         )
 
     override fun launchInstance(request: LaunchInstanceRequest): EngineResult =
@@ -461,3 +549,24 @@ private const val KEY_PREWARM_POLICY = "enginePrewarmPolicy"
 private const val KEY_EVIDENCE_MODE = "engineEvidenceMode"
 private const val KEY_HOST_PACKAGE_NAME = "hostPackageName"
 private const val KEY_DATA_ROOT = "dataRoot"
+private const val KEY_CREATION_REQUEST_ID = "creationRequestId"
+private const val KEY_DISPLAY_NAME = "displayName"
+private const val KEY_COMPATIBILITY_MODE = "compatibilityMode"
+private const val KEY_INSTALL_REQUEST = "installRequest"
+private const val KEY_ORIGIN_APK_PATH = "originApkPath"
+private const val KEY_VERSION_CODE = "versionCode"
+private const val KEY_VERSION_NAME = "versionName"
+private const val KEY_TARGET_SDK = "targetSdk"
+private const val KEY_MIN_SDK = "minSdk"
+private const val KEY_APPLICATION_CLASS_NAME = "applicationClassName"
+private const val KEY_PACKAGE_LABEL = "packageLabel"
+private const val KEY_REQUESTED_PERMISSIONS = "requestedPermissions"
+private const val KEY_ACTIVITY_CLASS_NAMES = "activityClassNames"
+private const val KEY_SERVICE_CLASS_NAMES = "serviceClassNames"
+private const val KEY_RECEIVER_CLASS_NAMES = "receiverClassNames"
+private const val KEY_PROVIDER_CLASS_NAMES = "providerClassNames"
+private const val KEY_NATIVE_ABIS = "nativeAbis"
+private const val KEY_SPLIT_APK_PATHS = "splitApkPaths"
+private const val KEY_SPLIT_PUBLIC_SOURCE_DIRS = "splitPublicSourceDirs"
+private const val KEY_SPLIT_NAMES = "splitNames"
+private const val KEY_ISOLATED_SPLITS = "isolatedSplits"

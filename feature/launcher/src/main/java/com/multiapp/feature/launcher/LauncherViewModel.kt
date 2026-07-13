@@ -1,5 +1,6 @@
 package com.multiapp.feature.launcher
 
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.content.Context
@@ -7,6 +8,7 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import com.multiapp.core.instance.CloneCreateAttempt
 import com.multiapp.core.instance.CloneCreateFailureException
 import com.multiapp.core.instance.CloneCreateUseCase
 import com.multiapp.core.instance.InstalledAppRepository
@@ -49,6 +51,9 @@ internal fun normalizeApkComponentName(packageName: String, name: String?): Stri
     }
 }
 
+private const val PENDING_CREATE_ATTEMPT_KEY = "launcher.pending_create_attempt"
+private const val PENDING_CREATE_ATTEMPT_FIELD_COUNT = 3
+
 data class LauncherUiState(
     val instances: List<VirtualInstanceRecord> = emptyList(),
     val isLoading: Boolean = false,
@@ -65,6 +70,7 @@ data class LauncherUiState(
 
 @HiltViewModel
 class LauncherViewModel @Inject constructor(
+    private val savedStateHandle: SavedStateHandle,
     private val instanceManager: InstanceManager,
     private val cloneCreateUseCase: CloneCreateUseCase,
     private val installedAppRepository: InstalledAppRepository,
@@ -145,9 +151,17 @@ class LauncherViewModel @Inject constructor(
             lastCreateLatencyMs = null
         )
         viewModelScope.launch(launcherIoDispatcher) {
+            var createAttempt: CloneCreateAttempt? = null
             try {
                 _uiState.update { it.copy(creationStep = "复制 APK 并导入元数据…") }
-                val createResult = cloneCreateUseCase.create(app, displayName).getOrThrow()
+                createAttempt = cloneCreateUseCase.prepareAttempt(
+                    app = app,
+                    displayName = displayName,
+                    pendingAttempt = pendingCreateAttempt()
+                )
+                savePendingCreateAttempt(createAttempt)
+                val createResult = cloneCreateUseCase.create(app, createAttempt).getOrThrow()
+                clearPendingCreateAttempt(createAttempt)
 
                 _uiState.update { it.copy(creationStep = "刷新分身列表…") }
                 val records = instanceManager.listInstances()
@@ -156,18 +170,51 @@ class LauncherViewModel @Inject constructor(
                         instances = records,
                         isLoading = false,
                         creationStep = null,
-                        lastCreatedInstanceId = createResult.instance.instanceId,
+                        lastCreatedInstanceId = createResult.instanceId,
                         lastCreateLatencyMs = createResult.createLatencyMs
                     )
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
+                if (e !is CloneCreateFailureException || !e.shouldRetainCreationRequestId) {
+                    createAttempt?.let(::clearPendingCreateAttempt)
+                }
                 Timber.e(e, "Failed to create instance")
                 val (friendly, detail) = e.toUserError()
                 _uiState.update {
                     it.copy(creationStep = null, error = friendly, errorDetail = detail)
                 }
             }
+        }
+    }
+
+    private fun pendingCreateAttempt(): CloneCreateAttempt? {
+        val values = savedStateHandle.get<ArrayList<String>>(PENDING_CREATE_ATTEMPT_KEY)
+            ?: return null
+        return runCatching {
+            require(values.size == PENDING_CREATE_ATTEMPT_FIELD_COUNT)
+            CloneCreateAttempt(
+                creationRequestId = values[0],
+                payloadFingerprint = values[1],
+                displayName = values[2]
+            )
+        }.getOrElse {
+            savedStateHandle.remove<ArrayList<String>>(PENDING_CREATE_ATTEMPT_KEY)
+            null
+        }
+    }
+
+    private fun savePendingCreateAttempt(attempt: CloneCreateAttempt) {
+        savedStateHandle[PENDING_CREATE_ATTEMPT_KEY] = arrayListOf(
+            attempt.creationRequestId,
+            attempt.payloadFingerprint,
+            attempt.displayName
+        )
+    }
+
+    private fun clearPendingCreateAttempt(attempt: CloneCreateAttempt) {
+        if (pendingCreateAttempt()?.creationRequestId == attempt.creationRequestId) {
+            savedStateHandle.remove<ArrayList<String>>(PENDING_CREATE_ATTEMPT_KEY)
         }
     }
 

@@ -1,121 +1,131 @@
 package com.multiapp.core.instance
 
 import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.VirtualizationEngine
-import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
-import com.multiapp.core.model.installer.VirtualInstallService
+import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 import java.util.concurrent.CancellationException
+import java.util.UUID
 import javax.inject.Inject
 
 data class CloneCreateResult(
-    val instance: VirtualInstanceRecord,
+    val instanceId: String,
     val createLatencyMs: Long,
     val cleanupStatus: String
 )
+
+data class CloneCreateAttempt(
+    val creationRequestId: String,
+    val payloadFingerprint: String,
+    val displayName: String
+) {
+    init {
+        require(creationRequestId.isNotBlank()) { "creationRequestId must not be blank" }
+        require(payloadFingerprint.isNotBlank()) { "payloadFingerprint must not be blank" }
+        require(displayName.isNotBlank() && displayName == displayName.trim()) {
+            "displayName must be non-blank and trimmed"
+        }
+    }
+}
 
 class CloneCreateFailureException(
     val failureCode: String,
     val userMessage: String,
     val technicalReason: String?,
     val cleanupStatus: String,
-    cause: Throwable
+    cause: Throwable,
+    val shouldRetainCreationRequestId: Boolean = false
 ) : RuntimeException(technicalReason ?: userMessage, cause)
 
 class CloneCreateUseCase internal constructor(
     private val instanceManager: InstanceManager,
-    private val virtualInstallService: VirtualInstallService,
     private val virtualizationEngine: VirtualizationEngine,
-    private val clock: () -> Long
+    private val clock: () -> Long,
+    private val creationRequestIdFactory: () -> String
 ) {
 
     @Inject
     constructor(
         instanceManager: InstanceManager,
-        virtualInstallService: VirtualInstallService,
         virtualizationEngine: VirtualizationEngine
     ) : this(
         instanceManager = instanceManager,
-        virtualInstallService = virtualInstallService,
         virtualizationEngine = virtualizationEngine,
-        clock = System::currentTimeMillis
+        clock = System::currentTimeMillis,
+        creationRequestIdFactory = { UUID.randomUUID().toString() }
     )
 
     fun suggestedDisplayName(app: VirtualApp): String {
         return nextDisplayName(app, instanceManager.listInstances())
     }
 
-    fun create(app: VirtualApp, displayName: String? = null): Result<CloneCreateResult> {
+    fun prepareAttempt(
+        app: VirtualApp,
+        displayName: String? = null,
+        pendingAttempt: CloneCreateAttempt? = null
+    ): CloneCreateAttempt {
+        val normalizedDisplayName = displayName.normalizedDisplayName()
+        val payloadFingerprint = app.createPayloadFingerprint(normalizedDisplayName)
+        return pendingAttempt
+            ?.takeIf { it.payloadFingerprint == payloadFingerprint }
+            ?: CloneCreateAttempt(
+                creationRequestId = creationRequestIdFactory(),
+                payloadFingerprint = payloadFingerprint,
+                displayName = normalizedDisplayName ?: suggestedDisplayName(app)
+            )
+    }
+
+    fun create(app: VirtualApp, attempt: CloneCreateAttempt): Result<CloneCreateResult> {
         val startedAt = clock()
-        val hadInstallRecord = virtualInstallService.hasInstallRecord(app.packageName)
-        var createdInstanceId: String? = null
+        var shouldRetainCreationRequestId = false
 
         return try {
-            val instanceName = displayName
-                ?.trim()
+            val request = CreateInstanceRequest(
+                creationRequestId = attempt.creationRequestId,
+                install = app.toEngineInstallRequest(),
+                displayName = attempt.displayName
+            )
+            shouldRetainCreationRequestId = true
+            val engineResult = virtualizationEngine.createInstance(
+                request
+            )
+            if (!engineResult.success) {
+                shouldRetainCreationRequestId =
+                    engineResult.message == ENGINE_AUTHORITY_UNKNOWN_RESULT
+                throw IllegalStateException(engineResult.message ?: "engine createInstance failed")
+            }
+            val instanceId = engineResult.instanceId
                 ?.takeIf { it.isNotBlank() }
-                ?: suggestedDisplayName(app)
-
-            virtualInstallService.ensureInstallRecord(app).getOrThrow()
-            val created = instanceManager.createInstance(
-                originPackageName = app.packageName,
-                displayName = instanceName,
-                compatibilityMode = CompatibilityMode.DEFAULT
-            ).getOrThrow()
-            createdInstanceId = created.instanceId
+                ?: throw IllegalStateException("engine createInstance returned no instanceId")
+            shouldRetainCreationRequestId = false
 
             Result.success(
                 CloneCreateResult(
-                    instance = created,
-                    createLatencyMs = clock() - startedAt,
-                    cleanupStatus = "not_required"
+                    instanceId = instanceId,
+                    createLatencyMs = runCatching { clock() - startedAt }.getOrDefault(0L),
+                    cleanupStatus = "engine_owned"
                 )
             )
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            val cleanupStatus = rollback(app.packageName, hadInstallRecord, createdInstanceId)
             val (failureCode, userMessage, technicalReason) = e.toCreateFailure()
             Result.failure(
                 CloneCreateFailureException(
                     failureCode = failureCode,
                     userMessage = userMessage,
                     technicalReason = technicalReason,
-                    cleanupStatus = cleanupStatus,
-                    cause = e
+                    cleanupStatus = "engine_owned",
+                    cause = e,
+                    shouldRetainCreationRequestId = shouldRetainCreationRequestId
                 )
             )
         }
-    }
-
-    private fun rollback(
-        packageName: String,
-        hadInstallRecord: Boolean,
-        createdInstanceId: String?
-    ): String {
-        val cleanup = mutableListOf<String>()
-        var instanceDeleted = createdInstanceId == null
-        createdInstanceId?.let { instanceId ->
-            instanceDeleted = runCatching {
-                virtualizationEngine.deleteInstance(instanceId).success
-            }.getOrDefault(false)
-            cleanup += if (instanceDeleted) {
-                "instance_deleted"
-            } else {
-                "instance_delete_skipped"
-            }
-        }
-        if (!hadInstallRecord && instanceDeleted) {
-            cleanup += if (runCatching { virtualInstallService.deleteInstallRecord(packageName) }.getOrDefault(false)) {
-                "install_deleted"
-            } else {
-                "install_delete_skipped"
-            }
-        } else if (!hadInstallRecord) {
-            cleanup += "install_preserved"
-        }
-        return cleanup.ifEmpty { listOf("not_required") }.joinToString(",")
     }
 
     private fun nextDisplayName(app: VirtualApp, instances: List<VirtualInstanceRecord>): String {
@@ -149,3 +159,74 @@ class CloneCreateUseCase internal constructor(
         }
     }
 }
+
+private fun String?.normalizedDisplayName(): String? =
+    this?.trim()?.takeIf { it.isNotBlank() }
+
+private fun VirtualApp.createPayloadFingerprint(requestedDisplayName: String?): String {
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.addValue("clone-create-payload-v1")
+    digest.addValue(packageName)
+    digest.addValue(apkPath)
+    digest.addValue(versionCode.toString())
+    digest.addValue(versionName)
+    digest.addValue(targetSdkVersion.toString())
+    digest.addValue(minSdkVersion.toString())
+    digest.addValue(applicationClassName)
+    digest.addValue(appName.ifBlank { packageName.substringAfterLast('.') })
+    digest.addValues(requestedPermissions)
+    digest.addValues(activities)
+    digest.addValues(services)
+    digest.addValues(receivers)
+    digest.addValues(providers)
+    digest.addValues(nativeAbis)
+    digest.addValues(splitApkPaths)
+    digest.addValues(splitPublicSourceDirs)
+    digest.addValues(splitNames)
+    digest.addValue(isolatedSplits.toString())
+    digest.addValue(requestedDisplayName)
+    return digest.digest().joinToString(separator = "") { byte ->
+        (byte.toInt() and 0xff).toString(16).padStart(2, '0')
+    }
+}
+
+private fun MessageDigest.addValues(values: List<String>) {
+    addValue(values.size.toString())
+    values.forEach(::addValue)
+}
+
+private fun MessageDigest.addValue(value: String?) {
+    if (value == null) {
+        update(0)
+        return
+    }
+    update(1)
+    val bytes = value.toByteArray(StandardCharsets.UTF_8)
+    update(ByteBuffer.allocate(Int.SIZE_BYTES).putInt(bytes.size).array())
+    update(bytes)
+}
+
+private fun VirtualApp.toEngineInstallRequest(): EnginePackageInstallRequest =
+    EnginePackageInstallRequest(
+        originPackageName = packageName,
+        originApkPath = apkPath,
+        versionCode = versionCode,
+        versionName = versionName,
+        targetSdk = targetSdkVersion,
+        minSdk = minSdkVersion,
+        applicationClassName = applicationClassName,
+        packageLabel = appName.ifBlank { packageName.substringAfterLast('.') },
+        requestedPermissions = requestedPermissions,
+        activityClassNames = activities,
+        serviceClassNames = services,
+        receiverClassNames = receivers,
+        providerClassNames = providers,
+        nativeAbis = nativeAbis,
+        splitApkPaths = splitApkPaths,
+        splitPublicSourceDirs = splitPublicSourceDirs,
+        splitNames = splitNames,
+        isolatedSplits = isolatedSplits
+    )
+
+private const val ENGINE_AUTHORITY_UNKNOWN_RESULT =
+    "engine_authority_unavailable_or_unknown_result"

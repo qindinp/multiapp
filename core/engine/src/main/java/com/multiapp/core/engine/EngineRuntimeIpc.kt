@@ -302,6 +302,14 @@ class EngineRuntimeBinderEndpoint(
         engine.createInstance(originPackageName).toEngineIpcBundle()
     }
 
+    override fun engineCreateInstanceWithMetadata(request: Bundle): Bundle = authorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@authorizedBundle engineOperationUnavailableBundle("createInstance")
+        val decoded = request.toCreateInstanceRequestOrNull()
+            ?: return@authorizedBundle engineInvalidRequestBundle("createInstance")
+        engine.createInstance(decoded).toEngineIpcBundle()
+    }
+
     override fun engineLaunchInstance(request: Bundle): Bundle = authorizedBundle {
         val engine = virtualizationEngine
             ?: return@authorizedBundle engineOperationUnavailableBundle("launchInstance")
@@ -1279,6 +1287,11 @@ object EngineRuntimeIpcClients {
 
     internal fun engineCreateInstance(originPackageName: String): EngineRemoteResult? =
         invokeEngineResult { service -> service.engineCreateInstance(originPackageName) }
+
+    internal fun engineCreateInstance(
+        request: com.multiapp.core.model.engine.CreateInstanceRequest
+    ): EngineRemoteResult? =
+        invokeEngineResult { service -> service.engineCreateInstanceWithMetadata(request.toEngineIpcBundle()) }
 
     internal fun engineLaunchInstance(
         request: com.multiapp.core.model.engine.LaunchInstanceRequest

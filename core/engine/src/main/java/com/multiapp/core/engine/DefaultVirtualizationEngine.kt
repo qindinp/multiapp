@@ -1,6 +1,9 @@
 package com.multiapp.core.engine
 
 import com.multiapp.core.loader.ProxyActivitySlots
+import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineEvidenceReport
 import com.multiapp.core.model.engine.EngineOperationEvidence
@@ -21,6 +24,7 @@ import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.toLegacyMetaDataMap
 import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -61,6 +65,7 @@ internal class DefaultVirtualizationEngineCore(
     private val runtimeEpochLock = Any()
     private val allocatedRuntimeEpochs = mutableMapOf<String, Long>()
     private val instanceOperationLocks = Array(INSTANCE_OPERATION_LOCK_COUNT) { Any() }
+    private val createOperationLock = Any()
 
     override fun installOrRefreshPackage(originPackageName: String): EngineResult {
         if (originPackageName.isBlank()) {
@@ -86,30 +91,251 @@ internal class DefaultVirtualizationEngineCore(
     }
 
     override fun createInstance(originPackageName: String): EngineResult {
-        if (!virtualInstallService.hasInstallRecord(originPackageName)) {
-            return EngineResult.fail(
+        return EngineResult.unsupported(
+            operation = OP_CREATE,
+            originPackageName = originPackageName,
+            message = "metadata_and_creation_request_id_required"
+        )
+    }
+
+    override fun createInstance(request: CreateInstanceRequest): EngineResult =
+        synchronized(createOperationLock) {
+            createInstanceLocked(request)
+        }
+
+    private fun createInstanceLocked(request: CreateInstanceRequest): EngineResult {
+        val requestFingerprint = request.creationFingerprint()
+        instanceManager.getInstanceByCreationRequestId(request.creationRequestId)?.let { existing ->
+            if (
+                existing.originPackageName != request.originPackageName ||
+                existing.displayName != request.displayName ||
+                existing.compatibilityMode != request.compatibilityMode ||
+                existing.creationRequestFingerprint != requestFingerprint
+            ) {
+                return EngineResult.fail(
+                    operation = OP_CREATE,
+                    instanceId = existing.instanceId,
+                    originPackageName = request.originPackageName,
+                    message = "creation_request_id_conflict"
+                )
+            }
+            if (virtualInstallService.getInstallRecord(request.originPackageName) == null) {
+                return EngineResult.fail(
+                    operation = OP_CREATE,
+                    instanceId = existing.instanceId,
+                    originPackageName = request.originPackageName,
+                    message = "creation_request_committed_but_install_record_missing"
+                )
+            }
+            return EngineResult.pass(
                 operation = OP_CREATE,
-                originPackageName = originPackageName,
-                message = "InstallRecord not found for $originPackageName"
+                instanceId = existing.instanceId,
+                originPackageName = request.originPackageName,
+                message = "creation request already committed"
             )
         }
-        return instanceManager.createInstance(originPackageName, originPackageName).fold(
-            onSuccess = { instance ->
-                EngineResult.pass(
+
+        val existingInstallRecord = virtualInstallService.getInstallRecord(request.originPackageName)
+        val hadInstallRecord = existingInstallRecord != null
+        if (existingInstallRecord != null) {
+            existingInstallRecord.generationMismatch(request.install)?.let { mismatch ->
+                return EngineResult.fail(
                     operation = OP_CREATE,
-                    instanceId = instance.instanceId,
-                    originPackageName = originPackageName,
-                    message = "instance created"
+                    originPackageName = request.originPackageName,
+                    message = "package_generation_mismatch_refresh_required:$mismatch"
                 )
+            }
+        } else {
+            val importResult = virtualInstallService.ensureInstallRecord(request.install.toVirtualApp())
+            if (importResult.isFailure) {
+                val cleanup = rollbackNewInstallRecord(request.originPackageName, hadInstallRecord)
+                return EngineResult.fail(
+                    operation = OP_CREATE,
+                    originPackageName = request.originPackageName,
+                    message = buildString {
+                        append(importResult.exceptionOrNull()?.message ?: "package import failed")
+                        if (cleanup != null) append(":$cleanup")
+                    }
+                )
+            }
+            val importedRecord = virtualInstallService.getInstallRecord(request.originPackageName)
+            val importedMismatch = if (importedRecord == null) {
+                "install_record_missing_after_import"
+            } else {
+                importedRecord.generationMismatch(request.install)
+            }
+            if (importedMismatch != null) {
+                val cleanup = rollbackNewInstallRecord(request.originPackageName, hadInstallRecord)
+                return EngineResult.fail(
+                    operation = OP_CREATE,
+                    originPackageName = request.originPackageName,
+                    message = buildString {
+                        append("package_import_verification_failed:$importedMismatch")
+                        if (cleanup != null) append(":$cleanup")
+                    }
+                )
+            }
+        }
+
+        return instanceManager.createInstance(
+            InstanceManager.CreationRequest(
+                originPackageName = request.originPackageName,
+                displayName = request.displayName,
+                compatibilityMode = request.compatibilityMode,
+                creationRequestId = request.creationRequestId,
+                creationRequestFingerprint = requestFingerprint
+            )
+        ).fold(
+            onSuccess = { instance ->
+                if (
+                    instance.creationRequestId != request.creationRequestId ||
+                    instance.creationRequestFingerprint != requestFingerprint
+                ) {
+                    val removed = instanceManager.deleteInstance(instance.instanceId)
+                    val installCleanup = rollbackNewInstallRecord(request.originPackageName, hadInstallRecord)
+                    EngineResult.fail(
+                        operation = OP_CREATE,
+                        instanceId = instance.instanceId,
+                        originPackageName = request.originPackageName,
+                        message = "instance_manager_dropped_creation_request_identity:" +
+                            "recordRemoved=$removed,installCleanup=${installCleanup ?: "not_required"}"
+                    )
+                } else {
+                    EngineResult.pass(
+                        operation = OP_CREATE,
+                        instanceId = instance.instanceId,
+                        originPackageName = request.originPackageName,
+                        message = "package imported and instance created by engine authority"
+                    )
+                }
             },
             onFailure = { error ->
+                val cleanup = rollbackNewInstallRecord(request.originPackageName, hadInstallRecord)
                 EngineResult.fail(
                     operation = OP_CREATE,
-                    originPackageName = originPackageName,
-                    message = error.message ?: "createInstance failed"
+                    originPackageName = request.originPackageName,
+                    message = buildString {
+                        append(error.message ?: "createInstance failed")
+                        if (cleanup != null) append(":$cleanup")
+                    }
                 )
             }
         )
+    }
+
+    private fun rollbackNewInstallRecord(originPackageName: String, hadInstallRecord: Boolean): String? {
+        if (hadInstallRecord) return null
+        if (instanceManager.getInstanceByOrigin(originPackageName).isNotEmpty()) {
+            return "install_record_preserved_for_sibling_instance"
+        }
+        if (!virtualInstallService.hasInstallRecord(originPackageName)) return "install_record_not_created"
+        return if (virtualInstallService.deleteInstallRecord(originPackageName)) {
+            "new_install_record_rolled_back"
+        } else {
+            "new_install_record_rollback_failed"
+        }
+    }
+
+    private fun InstallRecord.generationMismatch(request: EnginePackageInstallRequest): String? {
+        if (packageName != request.originPackageName) return "package_name"
+        if (versionCode != request.versionCode) return "version_code"
+        if (versionName != request.versionName) return "version_name"
+        if (targetSdk != request.targetSdk) return "target_sdk"
+        if (minSdk != request.minSdk) return "min_sdk"
+        if (applicationClassName != request.applicationClassName) return "application_class"
+        if (splitApkPaths.size != request.splitApkPaths.size) return "split_count"
+        if (splitNames != request.resolvedSplitNames()) return "split_names"
+        if (isolatedSplits != request.isolatedSplits) return "isolated_splits"
+        val baseDigest = sha256OrNull(request.originApkPath) ?: return "source_apk_unreadable"
+        if (!originApkSha256.equals(baseDigest, ignoreCase = true)) return "base_apk_digest"
+        val splitDigests = request.splitApkPaths.map { path ->
+            sha256OrNull(path) ?: return "split_apk_unreadable"
+        }
+        if (splitApkSha256s.map(String::lowercase) != splitDigests.map(String::lowercase)) {
+            return "split_apk_digest"
+        }
+        return null
+    }
+
+    private fun EnginePackageInstallRequest.resolvedSplitNames(): List<String> =
+        if (splitApkPaths.isEmpty()) {
+            emptyList()
+        } else {
+            splitApkPaths.mapIndexed { index, path ->
+                splitNames.getOrNull(index)
+                    ?.takeIf { it.isNotBlank() }
+                    ?: File(path).nameWithoutExtension.ifBlank { "split$index" }
+            }
+        }
+
+    private fun sha256OrNull(path: String): String? {
+        val file = runCatching { File(path).canonicalFile }.getOrNull() ?: return null
+        if (!file.isFile) return null
+        return runCatching {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(DEFAULT_HASH_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    if (read > 0) digest.update(buffer, 0, read)
+                }
+            }
+            digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }.getOrNull()
+    }
+
+    private fun CreateInstanceRequest.creationFingerprint(): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+
+        fun putInt(value: Int) {
+            digest.update(
+                byteArrayOf(
+                    (value ushr 24).toByte(),
+                    (value ushr 16).toByte(),
+                    (value ushr 8).toByte(),
+                    value.toByte()
+                )
+            )
+        }
+
+        fun putString(value: String?) {
+            if (value == null) {
+                putInt(-1)
+                return
+            }
+            val bytes = value.toByteArray(Charsets.UTF_8)
+            putInt(bytes.size)
+            digest.update(bytes)
+        }
+
+        fun putList(values: List<String>) {
+            putInt(values.size)
+            values.forEach(::putString)
+        }
+
+        putString(CREATE_FINGERPRINT_VERSION)
+        putString(install.originPackageName)
+        putString(install.originApkPath)
+        putString(install.versionCode.toString())
+        putString(install.versionName)
+        putString(install.targetSdk.toString())
+        putString(install.minSdk.toString())
+        putString(install.applicationClassName)
+        putString(install.packageLabel)
+        putList(install.requestedPermissions)
+        putList(install.activityClassNames)
+        putList(install.serviceClassNames)
+        putList(install.receiverClassNames)
+        putList(install.providerClassNames)
+        putList(install.nativeAbis)
+        putList(install.splitApkPaths)
+        putList(install.splitPublicSourceDirs)
+        putList(install.splitNames)
+        putString(install.isolatedSplits.toString())
+        putString(displayName)
+        putString(compatibilityMode.name)
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 
     override fun launchInstance(request: LaunchInstanceRequest): EngineResult =
@@ -781,6 +1007,8 @@ internal class DefaultVirtualizationEngineCore(
 
     companion object {
         private const val INSTANCE_OPERATION_LOCK_COUNT = 32
+        private const val DEFAULT_HASH_BUFFER_SIZE = 8_192
+        private const val CREATE_FINGERPRINT_VERSION = "multiapp-create-v1"
         private const val OP_INSTALL = "installOrRefreshPackage"
         private const val OP_CREATE = "createInstance"
         private const val OP_LAUNCH = "launchInstance"
@@ -788,6 +1016,29 @@ internal class DefaultVirtualizationEngineCore(
         private const val OP_DELETE = "deleteInstance"
     }
 }
+
+private fun EnginePackageInstallRequest.toVirtualApp(): VirtualApp = VirtualApp(
+    packageName = originPackageName,
+    appName = packageLabel,
+    versionName = versionName,
+    versionCode = versionCode,
+    apkPath = originApkPath,
+    instanceId = "",
+    activities = activityClassNames,
+    services = serviceClassNames,
+    providers = providerClassNames,
+    receivers = receiverClassNames,
+    minSdkVersion = minSdk,
+    targetSdkVersion = targetSdk,
+    splitApkPaths = splitApkPaths,
+    splitPublicSourceDirs = splitPublicSourceDirs,
+    splitNames = splitNames,
+    hasSplitApks = splitApkPaths.isNotEmpty(),
+    isolatedSplits = isolatedSplits,
+    applicationClassName = applicationClassName,
+    requestedPermissions = requestedPermissions,
+    nativeAbis = nativeAbis
+)
 
 data class EngineLaunchSpec(
     val instanceId: String,

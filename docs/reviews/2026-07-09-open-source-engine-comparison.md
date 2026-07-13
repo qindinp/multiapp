@@ -221,3 +221,58 @@ Current mapping:
 - Creation and proxy Activity slot allocation still have non-engine writers.
   Dedicated `:engine` migration remains blocked until those paths and direct
   owner-file reads are removed.
+
+## Authoritative Create Comparison - 2026-07-13
+
+Pinned source review:
+
+- VirtualApp `7d739c85`,
+  [`VAppManagerService.installPackage/installPackageAsUser`](https://github.com/asLody/VirtualApp/blob/7d739c85ffc4b2303a4c711b6f9472431089a42e/VirtualApp/lib/src/main/java/com/lody/virtual/server/pm/VAppManagerService.java#L142-L281):
+  package import is serialized in the virtual package server; adding another
+  virtual user changes per-user installed state instead of copying the package
+  artifact again.
+- BlackBox `ffe950f7`,
+  [`BPackageManagerService.installPackageAsUser`](https://github.com/FBlackBox/BlackBox/blob/ffe950f7d15dae671cd8e95b58c83b35aab8f141/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/BPackageManagerService.java#L523-L726):
+  install runs under `mInstallLock`, creates/validates the user, delegates file
+  work to the package installer, and updates package/user state only through
+  the central package service.
+- DroidPlugin `c6ebf652`,
+  [`IPluginManagerImpl.installPackage`](https://github.com/DroidPluginTeam/DroidPlugin/blob/c6ebf652e0f73aa0e5746766e117e51efaf41dbd/project/Libraries/DroidPlugin/src/main/java/com/morgoo/droidplugin/pm/IPluginManagerImpl.java#L819-L994):
+  centralizes plugin installation and replacement but has no VirtualApp-style
+  per-user instance/dataRoot contract. It remains useful for package install
+  ordering, not as the MultiApp instance model.
+
+MultiApp decisions:
+
+1. Keep package artifact generation separate from instance state. Matching
+   sibling creation adds an instance reference/dataRoot and never rebuilds
+   shared code.
+2. Make the engine Binder endpoint the only production create writer. Client
+   Binder failure cannot fall back to `InstanceManager` or installer calls.
+3. Improve on the references with a durable client operation identity:
+   `creationRequestId + full payload fingerprint`. An unknown Binder result is
+   retried as the same operation, not as a second instance.
+4. Bind declared package identity to the actual APK archive/manifest before
+   import. Do not accept metadata from one installed package for another APK.
+5. Use content-addressed base/split targets and same-directory staging. Stable
+   split indexes prevent sanitized-name collisions; committed bytes are
+   re-hashed before the record is accepted.
+6. Preserve the prior package generation on caught update failures and preserve
+   shared artifacts for sibling instances. Package upgrade remains a separate
+   staging/commit operation, not an incidental side effect of create.
+7. Do not overstate exception-safe staging as crash-atomic. Abandoned staging
+   and orphan content-addressed files still need startup reconciliation before
+   dedicated `:engine` migration can be called durable.
+
+Current mapping:
+
+- `CreateInstanceRequest` and the metadata AIDL endpoint implement the central
+  create command; `CloneCreateUseCase` and Launcher only prepare/persist the
+  client operation identity.
+- `DefaultVirtualizationEngineCore` validates request replay, package
+  generation, sibling reuse, first-import rollback, and instance persistence.
+- `InstalledPackageImporter` provides content-addressed staged artifacts and
+  collision-safe split names; `AppModule` provides archive/manifest identity
+  validation and `ProductionVirtualInstallService` propagates resolver failure.
+- Proxy Activity slot assignment is the next single-writer gap. Until it moves
+  behind `VirtualActivityService`, commercial status remains `BLOCK`.

@@ -6,6 +6,7 @@ import android.os.IBinder;
 interface IEngineRuntimeService {
     Bundle engineInstallOrRefreshPackage(String originPackageName);
     Bundle engineCreateInstance(String originPackageName);
+    Bundle engineCreateInstanceWithMetadata(in Bundle request);
     Bundle engineLaunchInstance(in Bundle request);
     Bundle engineStopInstance(String instanceId);
     Bundle engineDeleteInstance(String instanceId);

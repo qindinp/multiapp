@@ -43,6 +43,62 @@ class InstanceManagerTest {
     }
 
     @Test
+    fun `createInstance returns the committed record for the same creation request id`() {
+        val request = InstanceManager.CreationRequest(
+            originPackageName = "com.example.app",
+            displayName = "Example",
+            creationRequestId = "request-1",
+            creationRequestFingerprint = "a".repeat(64)
+        )
+
+        val first = manager.createInstance(request).getOrThrow()
+        val second = manager.createInstance(request).getOrThrow()
+
+        assertEquals(first.instanceId, second.instanceId)
+        assertEquals("request-1", second.creationRequestId)
+        assertEquals("a".repeat(64), second.creationRequestFingerprint)
+        assertEquals(1, manager.listInstances().size)
+    }
+
+    @Test
+    fun `createInstance rejects request id reuse with different payload`() {
+        val first = InstanceManager.CreationRequest(
+            originPackageName = "com.example.app",
+            displayName = "Example",
+            creationRequestId = "request-1",
+            creationRequestFingerprint = "a".repeat(64)
+        )
+        manager.createInstance(first).getOrThrow()
+
+        val conflict = manager.createInstance(first.copy(creationRequestFingerprint = "b".repeat(64)))
+
+        assertTrue(conflict.isFailure)
+        assertEquals(1, manager.listInstances().size)
+    }
+
+    @Test
+    fun `creation fingerprint requires request id and lowercase sha256`() {
+        val withoutRequestId = runCatching {
+            InstanceManager.CreationRequest(
+                originPackageName = "com.example.app",
+                displayName = "Example",
+                creationRequestFingerprint = "a".repeat(64)
+            )
+        }
+        val invalidDigest = runCatching {
+            InstanceManager.CreationRequest(
+                originPackageName = "com.example.app",
+                displayName = "Example",
+                creationRequestId = "request-1",
+                creationRequestFingerprint = "A".repeat(64)
+            )
+        }
+
+        assertTrue(withoutRequestId.isFailure)
+        assertTrue(invalidDigest.isFailure)
+    }
+
+    @Test
     fun `createInstance creates dataRoot directories`() {
         val result = manager.createInstance("com.example.app", "Example")
         assertTrue(result.isSuccess)
@@ -199,6 +255,48 @@ class InstanceManagerTest {
         assertFalse(failingManager.deleteInstance(created.instanceId))
         assertNotNull(failingManager.getInstance(created.instanceId))
         assertTrue(File(created.dataRoot).exists())
+    }
+
+    @Test
+    fun `deleteInstance rejects a persisted dataRoot outside the instance root`() {
+        val outsideRoot = File(tempDir, "outside").apply { mkdirs() }
+        val marker = File(outsideRoot, "keep.txt").apply { writeText("keep") }
+        val record = VirtualInstanceRecord(
+            instanceId = "forged-instance",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.forged",
+            displayName = "Forged",
+            dataRoot = outsideRoot.absolutePath,
+            compatibilityMode = CompatibilityMode.DEFAULT,
+            createdAtMs = currentTimeMs,
+            updatedAtMs = currentTimeMs
+        )
+        store.save(record).getOrThrow()
+
+        assertFalse(manager.deleteInstance(record.instanceId))
+        assertNotNull(manager.getInstance(record.instanceId))
+        assertTrue(marker.isFile)
+    }
+
+    @Test
+    fun `deleteInstance restores staged dataRoot when record deletion fails`() {
+        val dataRootBase = File(tempDir, "record_delete_failure")
+        val backingStore = JsonInstanceRecordStore(File(tempDir, "record_delete_failure_records"))
+        val failingStore = object : InstanceRecordStore by backingStore {
+            override fun delete(instanceId: String): Boolean = false
+        }
+        val failingManager = DefaultInstanceManager(
+            store = failingStore,
+            dataRootBase = dataRootBase,
+            clock = { currentTimeMs }
+        )
+        val created = failingManager.createInstance("com.example.app", "Example").getOrThrow()
+        val marker = File(created.dataRoot, "keep.txt").apply { writeText("keep") }
+
+        assertFalse(failingManager.deleteInstance(created.instanceId))
+        assertNotNull(failingManager.getInstance(created.instanceId))
+        assertTrue(marker.isFile)
+        assertTrue(dataRootBase.listFiles().orEmpty().none { it.name.startsWith(".${created.instanceId}.delete-") })
     }
 
     @Test

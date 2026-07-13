@@ -13,6 +13,36 @@ package com.multiapp.core.model.instance
  */
 interface InstanceManager {
 
+    data class CreationRequest(
+        val originPackageName: String,
+        val displayName: String,
+        val compatibilityMode: CompatibilityMode = CompatibilityMode.DEFAULT,
+        val creationRequestId: String? = null,
+        val creationRequestFingerprint: String? = null
+    ) {
+        init {
+            require(originPackageName.isNotBlank()) { "originPackageName must not be blank" }
+            require(displayName.isNotBlank()) { "displayName must not be blank" }
+            require(creationRequestId == null || creationRequestId.isNotBlank()) {
+                "creationRequestId must not be blank"
+            }
+            require(creationRequestFingerprint == null || creationRequestId != null) {
+                "creationRequestFingerprint requires creationRequestId"
+            }
+            require(
+                creationRequestFingerprint == null ||
+                    creationRequestFingerprint.length == SHA_256_HEX_LENGTH &&
+                    creationRequestFingerprint.all { it in '0'..'9' || it in 'a'..'f' }
+            ) {
+                "creationRequestFingerprint must be a lowercase SHA-256 digest"
+            }
+        }
+
+        private companion object {
+            const val SHA_256_HEX_LENGTH = 64
+        }
+    }
+
     /**
      * Create a new virtual instance for the given origin app.
      *
@@ -26,6 +56,13 @@ interface InstanceManager {
         displayName: String,
         compatibilityMode: CompatibilityMode = CompatibilityMode.DEFAULT
     ): Result<VirtualInstanceRecord>
+
+    fun createInstance(request: CreationRequest): Result<VirtualInstanceRecord> =
+        createInstance(
+            originPackageName = request.originPackageName,
+            displayName = request.displayName,
+            compatibilityMode = request.compatibilityMode
+        )
 
     /**
      * Get an instance by its unique ID.
@@ -43,6 +80,9 @@ interface InstanceManager {
      * List all known instances.
      */
     fun listInstances(): List<VirtualInstanceRecord>
+
+    fun getInstanceByCreationRequestId(creationRequestId: String): VirtualInstanceRecord? =
+        listInstances().firstOrNull { it.creationRequestId == creationRequestId }
 
     /**
      * Delete an instance and clean up its data root.

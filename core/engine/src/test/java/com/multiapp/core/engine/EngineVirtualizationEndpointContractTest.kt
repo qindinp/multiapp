@@ -2,6 +2,8 @@ package com.multiapp.core.engine
 
 import android.os.Bundle
 import com.multiapp.core.model.engine.EngineEvidenceMode
+import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineEvidenceReport
 import com.multiapp.core.model.engine.EnginePrewarmPolicy
 import com.multiapp.core.model.engine.EngineProfile
@@ -12,6 +14,7 @@ import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
+import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
@@ -74,6 +77,39 @@ class EngineVirtualizationEndpointContractTest {
 
         assertEquals(expected, result?.result)
         verify(exactly = 1) { engine.createInstance(ORIGIN_PACKAGE) }
+    }
+
+    @Test
+    fun `metadata create endpoint decodes the idempotent request`() {
+        val engine = mockk<VirtualizationEngine>()
+        val request = createRequest()
+        val expected = EngineResult.pass(
+            operation = "createInstance",
+            instanceId = INSTANCE_ID,
+            originPackageName = ORIGIN_PACKAGE,
+            message = "instance created"
+        )
+        every { engine.createInstance(request) } returns expected
+
+        val result = endpoint(engine).engineCreateInstanceWithMetadata(
+            request.toEngineIpcBundle(bundles::create)
+        ).toEngineRemoteResultOrNull()
+
+        assertEquals(expected, result?.result)
+        verify(exactly = 1) { engine.createInstance(request) }
+        verify(exactly = 0) { engine.createInstance(ORIGIN_PACKAGE) }
+    }
+
+    @Test
+    fun `metadata create endpoint rejects malformed request without invoking engine`() {
+        val engine = mockk<VirtualizationEngine>(relaxed = true)
+
+        val result = endpoint(engine).engineCreateInstanceWithMetadata(bundles.create())
+            .toEngineRemoteResultOrNull()
+
+        assertEquals(EngineResultStatus.FAIL, result?.result?.status)
+        assertEquals("invalid_engine_ipc_request", result?.result?.message)
+        verify(exactly = 0) { engine.createInstance(any<CreateInstanceRequest>()) }
     }
 
     @Test
@@ -307,6 +343,25 @@ class EngineVirtualizationEndpointContractTest {
         evidenceMode = EngineEvidenceMode.FULL
     )
 
+    private fun createRequest() = CreateInstanceRequest(
+        creationRequestId = "create-request-1",
+        install = EnginePackageInstallRequest(
+            originPackageName = ORIGIN_PACKAGE,
+            originApkPath = "/data/app/test/base.apk",
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 35,
+            minSdk = 28,
+            packageLabel = "Test",
+            requestedPermissions = listOf("android.permission.CAMERA"),
+            splitApkPaths = listOf("/data/app/test/config.apk"),
+            splitPublicSourceDirs = listOf("/data/app/test/config.apk"),
+            splitNames = listOf("config")
+        ),
+        displayName = "Test Work",
+        compatibilityMode = CompatibilityMode.LEGACY
+    )
+
     private fun runtime() = VirtualInstanceRuntime(
         instanceId = INSTANCE_ID,
         hostPackageName = HOST_PACKAGE,
@@ -378,6 +433,13 @@ class EngineVirtualizationEndpointContractTest {
             every { anyConstructed<Bundle>().getBundle(any()) } answers {
                 valuesFor(self as Bundle)[firstArg()] as? Bundle
             }
+            every { anyConstructed<Bundle>().putStringArrayList(any(), any()) } answers {
+                valuesFor(self as Bundle)[firstArg()] = secondArg<ArrayList<String>?>()
+            }
+            every { anyConstructed<Bundle>().getStringArrayList(any()) } answers {
+                @Suppress("UNCHECKED_CAST")
+                valuesFor(self as Bundle)[firstArg()] as? ArrayList<String>
+            }
             every { anyConstructed<Bundle>().containsKey(any()) } answers {
                 valuesFor(self as Bundle).containsKey(firstArg())
             }
@@ -417,6 +479,13 @@ class EngineVirtualizationEndpointContractTest {
             }
             every { bundle.getBundle(any()) } answers {
                 valuesFor(bundle)[firstArg()] as? Bundle
+            }
+            every { bundle.putStringArrayList(any(), any()) } answers {
+                valuesFor(bundle)[firstArg()] = secondArg<ArrayList<String>?>()
+            }
+            every { bundle.getStringArrayList(any()) } answers {
+                @Suppress("UNCHECKED_CAST")
+                valuesFor(bundle)[firstArg()] as? ArrayList<String>
             }
             every { bundle.containsKey(any()) } answers {
                 valuesFor(bundle).containsKey(firstArg())

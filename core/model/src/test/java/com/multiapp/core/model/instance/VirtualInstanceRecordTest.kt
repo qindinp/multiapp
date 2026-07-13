@@ -27,7 +27,7 @@ class VirtualInstanceRecordTest {
     fun `default values are applied correctly`() {
         val record = makeRecord()
 
-        assertEquals(1, record.schemaVersion)
+        assertEquals(2, record.schemaVersion)
         assertEquals(IconPolicy.DEFAULT, record.iconPolicy)
         assertEquals("strict", record.protectedBaselinePolicy)
         assertEquals(null, record.lastLaunchAtMs)

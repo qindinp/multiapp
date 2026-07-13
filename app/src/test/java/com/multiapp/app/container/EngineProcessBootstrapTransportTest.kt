@@ -11,6 +11,8 @@ import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.util.concurrent.Executors
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import io.mockk.every
@@ -88,7 +90,13 @@ class EngineProcessBootstrapTransportTest {
 
     @Test
     fun `timed out binder call keeps slot tombstone until transport actually exits`() {
-        val executor = Executors.newSingleThreadExecutor()
+        val executor = ThreadPoolExecutor(
+            1,
+            1,
+            0L,
+            TimeUnit.MILLISECONDS,
+            LinkedBlockingQueue()
+        ).apply { prestartCoreThread() }
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
         val exited = CountDownLatch(1)

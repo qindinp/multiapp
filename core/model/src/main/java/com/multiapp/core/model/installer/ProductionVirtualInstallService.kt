@@ -4,6 +4,7 @@ import com.multiapp.core.model.VirtualApp
 import java.io.File
 import java.security.MessageDigest
 import java.util.concurrent.CancellationException
+import java.util.UUID
 
 /**
  * Production implementation of [VirtualInstallService].
@@ -147,9 +148,7 @@ class ProductionVirtualInstallService(
     }
 
     private fun resolveInstallMetadata(packageName: String, originApkPath: String): InstallMetadata {
-        return runCatching {
-            metadataResolver?.resolve(packageName, originApkPath)
-        }.getOrNull() ?: InstallMetadata()
+        return metadataResolver?.resolve(packageName, originApkPath) ?: InstallMetadata()
     }
 
     private fun VirtualApp.toInstallMetadata(): InstallMetadata {
@@ -285,7 +284,37 @@ class ProductionVirtualInstallService(
 
     override fun deleteInstallRecord(packageName: String): Boolean {
         requireSafeInstallPackageName(packageName)
-        return installRecordStore.delete(packageName)
+        val record = installRecordStore.load(packageName) ?: return false
+        val artifactRoot = runCatching { artifactDir.canonicalFile }.getOrNull() ?: return false
+        val artifacts = record.codeSourceDirs
+            .mapNotNull { path -> runCatching { File(path).canonicalFile }.getOrNull() }
+            .distinctBy { it.absolutePath }
+        if (artifacts.any { file -> file.parentFile != artifactRoot }) return false
+
+        val staged = mutableListOf<Pair<File, File>>()
+        for (artifact in artifacts) {
+            if (!artifact.exists()) continue
+            val tombstone = File(
+                artifactRoot,
+                ".${artifact.name}.delete-${UUID.randomUUID()}"
+            )
+            if (!artifact.renameTo(tombstone)) {
+                restoreStagedArtifacts(staged)
+                return false
+            }
+            staged += artifact to tombstone
+        }
+
+        if (!installRecordStore.delete(packageName)) {
+            restoreStagedArtifacts(staged)
+            return false
+        }
+
+        staged.forEach { (_, tombstone) ->
+            tombstone.setWritable(true, false)
+            tombstone.delete()
+        }
+        return true
     }
 
     override fun hasInstallRecord(packageName: String): Boolean {
@@ -297,6 +326,14 @@ class ProductionVirtualInstallService(
         require(packageName.isNotBlank()) { "packageName must not be blank" }
         require(!packageName.contains("..") && !packageName.contains("/") && !packageName.contains("\\")) {
             "Invalid packageName: $packageName"
+        }
+    }
+
+    private fun restoreStagedArtifacts(staged: List<Pair<File, File>>) {
+        staged.asReversed().forEach { (artifact, tombstone) ->
+            if (tombstone.exists() && !artifact.exists()) {
+                tombstone.renameTo(artifact)
+            }
         }
     }
 
