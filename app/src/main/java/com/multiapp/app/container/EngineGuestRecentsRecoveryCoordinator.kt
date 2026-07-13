@@ -18,6 +18,12 @@ import com.multiapp.core.engine.EngineRuntimeIpcClients
 import com.multiapp.core.engine.EngineRuntimeIpcSnapshot
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.model.engine.VirtualRuntimeState
+import java.util.concurrent.Executors
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 internal interface EngineGuestRecentsRecoveryTransport {
     fun queryRuntime(instanceId: String): EngineRuntimeIpcSnapshot?
@@ -27,6 +33,10 @@ internal interface EngineGuestRecentsRecoveryTransport {
     ): EngineProcessClientAttachResult?
 
     fun markProcessPrewarmed(identity: EngineProcessClientIdentity): EngineRuntimeForegroundAck?
+    fun abandonProcessClient(
+        identity: EngineProcessClientIdentity,
+        reason: String
+    ): EngineRuntimeForegroundAck?
     fun issueRestoreCapability(
         identity: EngineProcessClientIdentity,
         restoreActivityId: String
@@ -41,9 +51,21 @@ internal class EngineGuestRecentsRecoveryCoordinator(
         EngineGuestForegroundAcknowledger.global,
     private val processIdProvider: () -> Int = Process::myPid,
     private val processNameProvider: () -> String = Application::getProcessName,
-    private val processToken: IBinder = Binder()
+    private val processToken: IBinder = Binder(),
+    private val recoveryTimeoutMs: Long = DEFAULT_RECOVERY_TIMEOUT_MS,
+    private val abandonAuthorityTimeoutMs: Long = DEFAULT_ABANDON_AUTHORITY_TIMEOUT_MS,
+    private val watchdogScheduler: ScheduledExecutorService = WATCHDOG_EXECUTOR,
+    private val abandonExecutor: ExecutorService = ABANDON_EXECUTOR,
+    private val processTerminator: (Int) -> Unit = Process::killProcess
 ) {
     private val hostContext = context.applicationContext ?: context
+
+    init {
+        require(recoveryTimeoutMs > 0L) { "recoveryTimeoutMs must be positive" }
+        require(abandonAuthorityTimeoutMs > 0L) {
+            "abandonAuthorityTimeoutMs must be positive"
+        }
+    }
 
     fun install() {
         EngineGuestActivityLaunchBridge.installRecovery(
@@ -55,6 +77,9 @@ internal class EngineGuestRecentsRecoveryCoordinator(
     internal fun recover(request: EngineGuestActivityRecoveryRequest): EngineGuestActivityRecoveryResult {
         val processId = processIdProvider()
         if (processId <= 0) return rejected("recovery_process_id_invalid")
+        if (EngineProcessBootstrapIpc.processSlotIndex(request.processSlot) == null) {
+            return rejected("recovery_process_slot_unsupported")
+        }
         val processName = runCatching(processNameProvider).getOrNull()
         if (processName != request.processSlot) {
             return rejected("recovery_process_slot_mismatch")
@@ -68,6 +93,22 @@ internal class EngineGuestRecentsRecoveryCoordinator(
         val identity = resolveLiveIdentity(snapshot, processId)
             ?: return rejected(lastIdentityFailureReason)
 
+        val watchdog = armWatchdog(identity)
+            ?: return rejected("recovery_watchdog_unavailable")
+        val result = runCatching { recoverBoundRuntime(request, identity) }.getOrElse { error ->
+            rejected("recovery_unhandled_failure:${error.javaClass.simpleName}")
+        }
+        return if (watchdog.completeBeforeTimeout()) {
+            result
+        } else {
+            rejected("recovery_bind_timeout")
+        }
+    }
+
+    private fun recoverBoundRuntime(
+        request: EngineGuestActivityRecoveryRequest,
+        identity: EngineProcessClientIdentity
+    ): EngineGuestActivityRecoveryResult {
         val runtimeEngine = runCatching { runtimeEngineFactory(hostContext) }.getOrElse { error ->
             return rejected("recovery_runtime_engine_unavailable:${error.javaClass.simpleName}")
         }
@@ -128,6 +169,38 @@ internal class EngineGuestRecentsRecoveryCoordinator(
             identity = launchIdentity,
             reason = "recents_runtime_rebound_and_capability_refreshed"
         )
+    }
+
+    private fun armWatchdog(identity: EngineProcessClientIdentity): RecoveryWatchdog? {
+        val state = AtomicReference(RecoveryWatchdogState.PENDING)
+        val future = runCatching {
+            watchdogScheduler.schedule(
+                {
+                    if (!state.compareAndSet(
+                            RecoveryWatchdogState.PENDING,
+                            RecoveryWatchdogState.TIMED_OUT
+                        )
+                    ) {
+                        return@schedule
+                    }
+                    val abandon = runCatching {
+                        abandonExecutor.submit {
+                            transport.abandonProcessClient(identity, "recents_bind_timeout")
+                        }
+                    }.getOrNull()
+                    if (abandon != null) {
+                        runCatching {
+                            abandon.get(abandonAuthorityTimeoutMs, TimeUnit.MILLISECONDS)
+                        }
+                        abandon.cancel(true)
+                    }
+                    runCatching { processTerminator(identity.processId) }
+                },
+                recoveryTimeoutMs,
+                TimeUnit.MILLISECONDS
+            )
+        }.getOrNull() ?: return null
+        return RecoveryWatchdog(future, state)
     }
 
     private var lastIdentityFailureReason: String = "recovery_runtime_identity_invalid"
@@ -205,6 +278,12 @@ internal class EngineGuestRecentsRecoveryCoordinator(
             identity: EngineProcessClientIdentity
         ): EngineRuntimeForegroundAck? = EngineRuntimeIpcClients.markProcessPrewarmed(identity)
 
+        override fun abandonProcessClient(
+            identity: EngineProcessClientIdentity,
+            reason: String
+        ): EngineRuntimeForegroundAck? =
+            EngineRuntimeIpcClients.abandonProcessClient(identity, reason)
+
         override fun issueRestoreCapability(
             identity: EngineProcessClientIdentity,
             restoreActivityId: String
@@ -213,6 +292,9 @@ internal class EngineGuestRecentsRecoveryCoordinator(
     }
 
     companion object {
+        const val DEFAULT_RECOVERY_TIMEOUT_MS = 45_000L
+        private const val DEFAULT_ABANDON_AUTHORITY_TIMEOUT_MS = 500L
+
         private val PREWARMED_STATES = setOf(
             VirtualRuntimeState.PREWARMED.name,
             VirtualRuntimeState.RUNNING.name
@@ -220,6 +302,13 @@ internal class EngineGuestRecentsRecoveryCoordinator(
 
         @Volatile
         private var installed: EngineGuestRecentsRecoveryCoordinator? = null
+
+        private val WATCHDOG_EXECUTOR = Executors.newSingleThreadScheduledExecutor { runnable ->
+            Thread(runnable, "multiapp-recents-watchdog").apply { isDaemon = true }
+        }
+        private val ABANDON_EXECUTOR = Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "multiapp-recents-abandon").apply { isDaemon = true }
+        }
 
         fun install(context: Context) {
             if (installed != null) return
@@ -231,5 +320,27 @@ internal class EngineGuestRecentsRecoveryCoordinator(
                 }
             }
         }
+    }
+
+    private data class RecoveryWatchdog(
+        val future: ScheduledFuture<*>,
+        val state: AtomicReference<RecoveryWatchdogState>
+    ) {
+        fun completeBeforeTimeout(): Boolean {
+            if (state.compareAndSet(
+                    RecoveryWatchdogState.PENDING,
+                    RecoveryWatchdogState.COMPLETED
+                )
+            ) {
+                future.cancel(false)
+            }
+            return state.get() == RecoveryWatchdogState.COMPLETED
+        }
+    }
+
+    private enum class RecoveryWatchdogState {
+        PENDING,
+        COMPLETED,
+        TIMED_OUT
     }
 }

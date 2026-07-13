@@ -3988,3 +3988,60 @@ Remaining gate:
   runtime permissions, custom-process components, full Service/Broadcast
   semantics, native linker/load, and the commercial compatibility matrix remain
   open. The commercial decision remains **BLOCK**.
+
+## Implementation Update - 2026-07-13 Recents Recovery Watchdog and Guest Recycle
+
+This batch bounds a non-returning guest Application during same-message recents
+recovery and gives the engine an explicit generation-scoped abandon operation.
+It closes the local watchdog/recycle implementation item from the preceding
+update; it does not prove an Android ANR-free device path.
+
+Implemented:
+
+- `EngineGuestRecentsRecoveryCoordinator` arms a 45-second watchdog before
+  `HostedRuntimeEngine.bindApplication()` and cancels it after the recovery
+  path completes.
+- Watchdog completion uses one atomic `PENDING/COMPLETED/TIMED_OUT` state. A
+  timeout and normal completion cannot both win, so a timed-out recovery cannot
+  return a recovered capability while the process is being recycled.
+- The recycle path accepts only manifest-backed guest process slots recognized
+  as `:v0..:v7`. The default host process and a mismatched Android process name
+  are rejected before any termination callback can run.
+- Added `IEngineRuntimeService.abandonProcessClient(...)`. The engine accepts
+  only the exact live PID/processSlot/runtimeEpoch/engineSession generation,
+  marks it `DEAD`, removes its death registration, and revokes launch
+  capabilities for that generation. Repeated abandon of the same DEAD
+  generation is idempotent.
+- The abandon Binder call runs on a daemon cached executor and is awaited for
+  at most 500 ms. A blocked engine Binder cannot prevent termination of the
+  exact guest PID; Binder death remains the authority cleanup fallback when the
+  abandon call does not complete.
+- Tests cover normal completion, timeout abandon, exact guest PID termination,
+  default-host rejection, process-slot mismatch, and a blocked abandon Binder.
+
+Verification:
+
+- Focused engine/app tests passed in 2m09s.
+- Final full local gate passed in 2m34s; 515 Gradle tasks were executed, loaded from
+  cache, or reused.
+- Aggregated reports contain 1,949 tests, 0 failures, 0 errors, and 12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 101,610,089 bytes.
+- APK SHA-256:
+  `83E2D0A512B16EAB7B18397122F267431C4F614CDC925B4B351ABBDAE51CB323`.
+- `git diff --check` passed; existing LF/CRLF conversion warnings remain.
+
+Remaining gate:
+
+- The 45-second watchdog bounds an indefinite stall and recycles the slot, but
+  it is not an Android input-ANR deadline. Device evidence must determine the
+  safe prewarm/launch policy; a heavy guest may still trigger an OEM/system ANR
+  before this safety timeout.
+- API 28-36/HyperOS evidence must prove process death, system-recents launch,
+  timeout recycle, a later clean generation, and no stale capability replay.
+- Engine authority still shares the default app process. Dedicated engine
+  server isolation, per-guest-process records, runtime permissions,
+  custom-process components, complete Service/Broadcast semantics, native
+  linker/load, and the commercial compatibility matrix remain open.
+- This is generic recovery infrastructure, not compatibility proof for GKD,
+  AstroBox, QQ, WeChat, or QQ Reader. The commercial decision remains
+  **BLOCK**.

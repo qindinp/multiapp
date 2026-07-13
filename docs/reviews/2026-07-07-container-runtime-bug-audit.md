@@ -2506,3 +2506,48 @@ the Android launch message is superseded in the current tree.
   remain incomplete.
 - This does not prove GKD, AstroBox, QQ, WeChat, or QQ Reader compatibility.
   Review decision remains **BLOCK**.
+
+## Review Update - 2026-07-13 Recents Watchdog and Generation Recycle
+
+The prior finding that owner-thread Application reconstruction had no
+independent watchdog is superseded in the current tree.
+
+### Finding mitigated locally
+
+- A 45-second watchdog now owns the recovery race through one atomic
+  `PENDING/COMPLETED/TIMED_OUT` state. Timeout and normal completion cannot
+  both succeed.
+- Timeout calls the engine's new `abandonProcessClient` control-plane method
+  for the exact PID/processSlot/runtimeEpoch/engineSession generation. Accepted
+  abandon marks the runtime `DEAD`, removes the death registration, and revokes
+  launch capabilities for that generation.
+- The Binder abandon call cannot indefinitely block recycling: it runs outside
+  the ActivityThread owner thread, is awaited for at most 500 ms, and exact
+  guest-PID termination proceeds regardless. A cached daemon executor prevents
+  one stuck abandon transaction from starving later recycle attempts.
+- Only recognized guest slots `:v0..:v7` can enter the termination path. The
+  default host process, wrong process name, wrong PID, stale generation, and
+  wrong slot fail closed.
+- Unit tests cover exact-PID termination, host-process rejection, a blocking
+  abandon transport, idempotent DEAD abandon, and capability revocation.
+
+### Verification
+
+- Final full local gate passed in 2m34s: 515 Gradle tasks, 1,949 tests, 0 failures,
+  0 errors, and 12 skipped.
+- Debug APK SHA-256:
+  `83E2D0A512B16EAB7B18397122F267431C4F614CDC925B4B351ABBDAE51CB323`.
+
+### Still BLOCK
+
+- This is a safety/recycle timeout, not proof that the synchronous owner-thread
+  bind completes before Android or an OEM reports an ANR. Real device evidence
+  must determine whether prewarming must move earlier or recovery policy must
+  be further staged.
+- No artifact yet proves timeout -> DEAD -> process death -> successor epoch ->
+  PREWARMED -> RUNNING against system recents on API 28-36/HyperOS.
+- Dedicated engine-server isolation, one-instance/multiple-process records,
+  runtime permissions, custom-process Provider/Service, full Service/Broadcast
+  semantics, native linker/load, and the compatibility matrix remain open.
+- GKD, AstroBox, QQ, WeChat, and QQ Reader remain unproven. Review decision
+  remains **BLOCK**.

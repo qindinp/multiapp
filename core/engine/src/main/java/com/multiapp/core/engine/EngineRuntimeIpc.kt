@@ -147,6 +147,7 @@ object EngineRuntimeIpcContract {
     const val KEY_RESTORE_ACTIVITY_ID = "restoreActivityId"
     const val KEY_RESTORE_CAPABILITY_STATUS = "restoreCapabilityStatus"
     const val KEY_PERSISTED_SYSTEM_ACTIVITY_TOKEN_REUSED = "persistedSystemActivityTokenReused"
+    const val KEY_REVOKED_CAPABILITY_COUNT = "revokedCapabilityCount"
     const val KEY_LAUNCH_CAPABILITY_TOKEN = "launchCapabilityToken"
     const val KEY_ACTIVITY_STATE = "activityState"
     const val KEY_ACTIVITY = "activity"
@@ -360,6 +361,33 @@ class EngineRuntimeBinderEndpoint(
             identity = identity,
             callingPid = callerPid,
             callingProcessName = callingProcessName(callerPid)
+        ).toIpcBundle(instanceId)
+    }
+
+    override fun abandonProcessClient(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        processId: Int,
+        reason: String
+    ): Bundle = authorizedBundle {
+        val identity = processIdentityOrNull(
+            instanceId,
+            runtimeEpoch,
+            engineSessionId,
+            processSlot,
+            processId
+        ) ?: return@authorizedBundle invalidProcessAbandonBundle(
+            instanceId,
+            "invalid_process_identity"
+        )
+        val callerPid = callingPid()
+        processControlPlane.abandon(
+            identity = identity,
+            callingPid = callerPid,
+            callingProcessName = callingProcessName(callerPid),
+            reason = reason
         ).toIpcBundle(instanceId)
     }
 
@@ -1011,6 +1039,29 @@ class EngineRuntimeBinderEndpoint(
         putString(EngineRuntimeIpcContract.KEY_REASON, reason)
     }
 
+    private fun invalidProcessAbandonBundle(instanceId: String, reason: String): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT, false)
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+        putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
+    private fun EngineProcessAbandonResult.toIpcBundle(instanceId: String): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, runtimeState != null)
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, accepted)
+        putBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT, idempotent)
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+        putString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE, runtimeState?.name)
+        putInt(EngineRuntimeIpcContract.KEY_REVOKED_CAPABILITY_COUNT, revokedCapabilityCount)
+        putString(
+            EngineRuntimeIpcContract.KEY_STATUS,
+            if (accepted) EngineResultStatus.PASS.name else EngineResultStatus.FAIL.name
+        )
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
     private fun EngineProcessClientAttachResult.toIpcBundle(): Bundle = Bundle().apply {
         putBoolean(EngineRuntimeIpcContract.KEY_FOUND, runtimeState != null)
         putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, accepted)
@@ -1132,6 +1183,24 @@ object EngineRuntimeIpcClients {
                 identity.engineSessionId,
                 identity.processSlot,
                 identity.processId
+            )
+        }.getOrNull() ?: return null
+        return response.toForegroundAck()
+    }
+
+    fun abandonProcessClient(
+        identity: EngineProcessClientIdentity,
+        reason: String
+    ): EngineRuntimeForegroundAck? {
+        if (reason.isBlank()) return null
+        val response = runCatching {
+            activeService()?.abandonProcessClient(
+                identity.instanceId,
+                identity.runtimeEpoch,
+                identity.engineSessionId,
+                identity.processSlot,
+                identity.processId,
+                reason
             )
         }.getOrNull() ?: return null
         return response.toForegroundAck()

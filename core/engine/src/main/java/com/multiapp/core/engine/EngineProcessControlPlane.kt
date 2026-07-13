@@ -69,6 +69,14 @@ data class EngineProcessPrewarmResult(
     val reason: String
 )
 
+data class EngineProcessAbandonResult(
+    val accepted: Boolean,
+    val idempotent: Boolean,
+    val runtimeState: VirtualRuntimeState?,
+    val revokedCapabilityCount: Int,
+    val reason: String
+)
+
 /**
  * Owns the ephemeral guest-process authority. Durable runtime state is only an
  * identity expectation; it never proves that a guest process is alive.
@@ -267,6 +275,59 @@ class EngineProcessControlPlane(
         )
     }
 
+    fun abandon(
+        identity: EngineProcessClientIdentity,
+        callingPid: Int,
+        callingProcessName: String? = identity.processSlot,
+        reason: String
+    ): EngineProcessAbandonResult {
+        if (reason.isBlank()) return abandonRejected(null, "abandon_reason_blank")
+        if (callingPid <= 0 || callingPid != identity.processId) {
+            return abandonRejected(null, "calling_pid_mismatch")
+        }
+        if (callingProcessName != identity.processSlot) {
+            return abandonRejected(null, "calling_process_slot_mismatch")
+        }
+        val authority = authorize(identity.instanceId, callingPid)
+        if (!authority.allowed || authority.identity != identity) {
+            val current = runtimeRegistry.get(identity.instanceId)
+            return if (
+                current?.state == VirtualRuntimeState.DEAD &&
+                current.runtimeEpoch == identity.runtimeEpoch &&
+                current.engineSessionId == identity.engineSessionId &&
+                current.processSlot == identity.processSlot
+            ) {
+                EngineProcessAbandonResult(
+                    accepted = true,
+                    idempotent = true,
+                    runtimeState = current.state,
+                    revokedCapabilityCount = 0,
+                    reason = "runtime_already_dead"
+                )
+            } else {
+                abandonRejected(current?.state, authority.reason)
+            }
+        }
+        val markedDead = runtimeRegistry.markDeadIfCurrent(identity)
+        val current = runtimeRegistry.get(identity.instanceId)
+        if (!markedDead && current?.state != VirtualRuntimeState.DEAD) {
+            return abandonRejected(current?.state, "runtime_changed_during_abandon")
+        }
+        deathRegistry.remove(identity.instanceId, identity.runtimeEpoch, identity.engineSessionId)
+        val revokedCapabilities = activityLaunchCapabilities.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
+        return EngineProcessAbandonResult(
+            accepted = true,
+            idempotent = !markedDead,
+            runtimeState = VirtualRuntimeState.DEAD,
+            revokedCapabilityCount = revokedCapabilities,
+            reason = reason
+        )
+    }
+
     fun remove(instanceId: String, runtimeEpoch: Long, engineSessionId: String): Boolean =
         deathRegistry.remove(instanceId, runtimeEpoch, engineSessionId)
 
@@ -451,6 +512,17 @@ class EngineProcessControlPlane(
         accepted = false,
         idempotent = false,
         runtimeState = state,
+        reason = reason
+    )
+
+    private fun abandonRejected(
+        state: VirtualRuntimeState?,
+        reason: String
+    ) = EngineProcessAbandonResult(
+        accepted = false,
+        idempotent = false,
+        runtimeState = state,
+        revokedCapabilityCount = 0,
         reason = reason
     )
 

@@ -120,3 +120,34 @@ device evidence must still prove actual process death, system recents relaunch,
 Application reconstruction, no black screen, and final RUNNING acknowledgement.
 An owner-thread bootstrap watchdog/recycle path is also still required so a
 guest Application that never returns cannot hold the launch callback forever.
+
+## Recents Stall Recycle Comparison - 2026-07-13
+
+The pinned VirtualApp and BlackBox launch callbacks establish the required
+ordering around process restart, Application bind, and launch-record patching,
+but their message-requeue pattern is not itself a durable timeout authority.
+DroidPlugin's preload path likewise does not provide a generation-scoped
+virtual-process abandon protocol.
+
+MultiApp decision:
+
+- Keep the open-source ordering and the same-message fail-closed recovery
+  decision already documented above.
+- Add an engine-owned abandon operation instead of treating `killProcess()` as
+  runtime truth. The server first validates the live Binder generation, marks
+  it DEAD, and revokes that generation's Activity capabilities.
+- Treat PID termination as process-slot recycling, not arbitrary host process
+  termination. Only recognized `:v0..:v7` guest processes are eligible, and the
+  exact calling PID/process name must match the engine record.
+- Use one atomic watchdog winner so timeout cannot race a successful capability
+  return. Keep Binder abandon bounded and out of the watchdog thread's final
+  kill dependency; Binder death supplies cleanup if authority IPC is stalled.
+- Do not claim that a 45-second safety watchdog solves Android ANR behavior.
+  VirtualApp/BlackBox-style ordering still requires device measurements to
+  decide whether heavy Application work must be prewarmed earlier or split
+  into another staged launch protocol.
+
+This closes the local watchdog/recycle code slice. It does not change the
+commercial `BLOCK`: process-death recents and timeout recycling still need API
+28-36/HyperOS evidence, and the engine authority must still move to a dedicated
+virtual-system-server process.

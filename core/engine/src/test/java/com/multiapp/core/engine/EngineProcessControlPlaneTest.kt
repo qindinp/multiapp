@@ -112,6 +112,56 @@ class EngineProcessControlPlaneTest {
     }
 
     @Test
+    fun `live client abandonment marks exact generation dead and revokes capabilities`() {
+        val registry = EngineRuntimeRegistry()
+        registry.register(runtime())
+        val capabilities = EngineActivityLaunchCapabilityRegistry(tokenFactory = { "abandon-capability" })
+        val controlPlane = EngineProcessControlPlane(
+            runtimeRegistry = registry,
+            activityLaunchCapabilities = capabilities
+        )
+        val token = liveToken()
+        val identity = identity()
+        assertTrue(controlPlane.attachClient(identity, token.binder, PROCESS_ID).accepted)
+        val capability = capabilities.issue(
+            runtime = requireNotNull(registry.get(INSTANCE_ID)),
+            processId = PROCESS_ID,
+            proxyActivityClassName = PROXY_ACTIVITY,
+            guestActivityClassName = GUEST_ACTIVITY
+        )
+
+        val abandoned = controlPlane.abandon(
+            identity = identity,
+            callingPid = PROCESS_ID,
+            callingProcessName = PROCESS_SLOT,
+            reason = "recents_bind_timeout"
+        )
+        val repeated = controlPlane.abandon(
+            identity = identity,
+            callingPid = PROCESS_ID,
+            callingProcessName = PROCESS_SLOT,
+            reason = "recents_bind_timeout"
+        )
+        val wrongSlot = controlPlane.abandon(
+            identity = identity.copy(processSlot = "com.multiapp.app:v3"),
+            callingPid = PROCESS_ID,
+            callingProcessName = "com.multiapp.app:v3",
+            reason = "recents_bind_timeout"
+        )
+
+        assertTrue(abandoned.accepted)
+        assertFalse(abandoned.idempotent)
+        assertEquals(VirtualRuntimeState.DEAD, abandoned.runtimeState)
+        assertEquals(1, abandoned.revokedCapabilityCount)
+        assertEquals(VirtualRuntimeState.DEAD, registry.get(INSTANCE_ID)?.state)
+        assertFalse(controlPlane.authorize(INSTANCE_ID, PROCESS_ID).allowed)
+        assertFalse(capabilities.authorize(capability, PROCESS_ID).accepted)
+        assertTrue(repeated.accepted)
+        assertTrue(repeated.idempotent)
+        assertFalse(wrongSlot.accepted)
+    }
+
+    @Test
     fun `binder death revokes authority and only marks exact pid generation dead`() {
         val registry = EngineRuntimeRegistry()
         registry.register(runtime())

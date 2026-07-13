@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.IBinder
 import com.multiapp.core.engine.EngineActivityLaunchIdentity
 import com.multiapp.core.engine.EngineGuestActivityRecoveryRequest
+import com.multiapp.core.engine.EngineGuestActivityRecoveryResult
 import com.multiapp.core.engine.EngineHostedBootstrapResult
 import com.multiapp.core.engine.EngineProcessAttachOperation
 import com.multiapp.core.engine.EngineProcessClientAttachResult
@@ -23,6 +24,10 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class EngineGuestRecentsRecoveryCoordinatorTest {
     @Test
@@ -92,6 +97,158 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
         verify(exactly = 0) { runtimeEngine.bindApplication(any(), any(), any()) }
     }
 
+    @Test
+    fun `default host process cannot enter guest recycle path`() {
+        val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
+        val transport = RecordingRecoveryTransport()
+        val runtimeEngine = mockk<HostedRuntimeEngine>(relaxed = true)
+        val terminatedProcessIds = mutableListOf<Int>()
+        val coordinator = EngineGuestRecentsRecoveryCoordinator(
+            context = context,
+            transport = transport,
+            runtimeEngineFactory = { runtimeEngine },
+            processIdProvider = { PROCESS_ID },
+            processNameProvider = { HOST_PROCESS },
+            processToken = mockk<IBinder>(relaxed = true),
+            processTerminator = terminatedProcessIds::add
+        )
+
+        val result = coordinator.recover(request().copy(processSlot = HOST_PROCESS))
+
+        assertFalse(result.recovered)
+        assertEquals("recovery_process_slot_unsupported", result.reason)
+        assertTrue(transport.operations.isEmpty())
+        assertTrue(terminatedProcessIds.isEmpty())
+        verify(exactly = 0) { runtimeEngine.bindApplication(any(), any(), any()) }
+    }
+
+    @Test
+    fun `bind timeout abandons generation and terminates only the guest process`() {
+        val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
+        val application = mockk<Application>(relaxed = true)
+        val guestClassLoader = ClassLoader.getSystemClassLoader()
+        val bootstrap = mockk<EngineHostedBootstrapResult> {
+            every { success } returns true
+            every { instanceId } returns INSTANCE_ID
+            every { processSlot } returns PROCESS_SLOT
+            every { guestApplication } returns application
+            every { this@mockk.guestClassLoader } returns guestClassLoader
+        }
+        val bindEntered = CountDownLatch(1)
+        val releaseBind = CountDownLatch(1)
+        val processTerminated = CountDownLatch(1)
+        val runtimeEngine = mockk<HostedRuntimeEngine> {
+            every { reusableResult(INSTANCE_ID, false, PROCESS_SLOT) } returns null
+            every { bindApplication(INSTANCE_ID, false, PROCESS_SLOT) } answers {
+                bindEntered.countDown()
+                releaseBind.await(10, TimeUnit.SECONDS)
+                HostedRuntimeBindOutcome(bootstrap, ranBootstrapOnThisThread = true)
+            }
+        }
+        val transport = RecordingRecoveryTransport()
+        val watchdogScheduler = Executors.newSingleThreadScheduledExecutor()
+        val recoveryExecutor = Executors.newSingleThreadExecutor()
+        try {
+            val coordinator = EngineGuestRecentsRecoveryCoordinator(
+                context = context,
+                transport = transport,
+                runtimeEngineFactory = { runtimeEngine },
+                foregroundAcknowledger = mockk(relaxed = true),
+                processIdProvider = { PROCESS_ID },
+                processNameProvider = { PROCESS_SLOT },
+                processToken = mockk(relaxed = true),
+                recoveryTimeoutMs = 20L,
+                watchdogScheduler = watchdogScheduler,
+                processTerminator = { processId ->
+                    assertEquals(PROCESS_ID, processId)
+                    processTerminated.countDown()
+                }
+            )
+
+            val future = recoveryExecutor.submit<EngineGuestActivityRecoveryResult> {
+                coordinator.recover(request())
+            }
+            assertTrue(bindEntered.await(5, TimeUnit.SECONDS))
+            assertTrue(processTerminated.await(5, TimeUnit.SECONDS))
+            releaseBind.countDown()
+            val result = future.get(5, TimeUnit.SECONDS)
+
+            assertFalse(result.recovered)
+            assertEquals("recovery_bind_timeout", result.reason)
+            assertTrue(transport.operations.contains("abandon"))
+        } finally {
+            releaseBind.countDown()
+            recoveryExecutor.shutdownNow()
+            watchdogScheduler.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `blocked abandon authority cannot prevent guest process termination`() {
+        val context = mockk<Context>(relaxed = true)
+        every { context.applicationContext } returns context
+        val bindEntered = CountDownLatch(1)
+        val releaseBind = CountDownLatch(1)
+        val abandonEntered = CountDownLatch(1)
+        val releaseAbandon = CountDownLatch(1)
+        val processTerminated = CountDownLatch(1)
+        val runtimeEngine = mockk<HostedRuntimeEngine> {
+            every { reusableResult(INSTANCE_ID, false, PROCESS_SLOT) } returns null
+            every { bindApplication(INSTANCE_ID, false, PROCESS_SLOT) } answers {
+                bindEntered.countDown()
+                releaseBind.await(10, TimeUnit.SECONDS)
+                throw IllegalStateException("bind released after watchdog")
+            }
+        }
+        val transport = RecordingRecoveryTransport {
+            abandonEntered.countDown()
+            releaseAbandon.await(10, TimeUnit.SECONDS)
+        }
+        val watchdogScheduler = Executors.newSingleThreadScheduledExecutor()
+        val abandonExecutor = Executors.newCachedThreadPool()
+        val recoveryExecutor = Executors.newSingleThreadExecutor()
+        try {
+            val coordinator = EngineGuestRecentsRecoveryCoordinator(
+                context = context,
+                transport = transport,
+                runtimeEngineFactory = { runtimeEngine },
+                foregroundAcknowledger = mockk(relaxed = true),
+                processIdProvider = { PROCESS_ID },
+                processNameProvider = { PROCESS_SLOT },
+                processToken = mockk(relaxed = true),
+                recoveryTimeoutMs = 20L,
+                abandonAuthorityTimeoutMs = 20L,
+                watchdogScheduler = watchdogScheduler,
+                abandonExecutor = abandonExecutor,
+                processTerminator = { processId ->
+                    assertEquals(PROCESS_ID, processId)
+                    processTerminated.countDown()
+                }
+            )
+
+            val future = recoveryExecutor.submit<EngineGuestActivityRecoveryResult> {
+                coordinator.recover(request())
+            }
+            assertTrue(bindEntered.await(5, TimeUnit.SECONDS))
+            assertTrue(abandonEntered.await(5, TimeUnit.SECONDS))
+            assertTrue(processTerminated.await(5, TimeUnit.SECONDS))
+            releaseBind.countDown()
+            val result = future.get(5, TimeUnit.SECONDS)
+
+            assertFalse(result.recovered)
+            assertEquals("recovery_bind_timeout", result.reason)
+            assertTrue(transport.operations.contains("abandon"))
+        } finally {
+            releaseBind.countDown()
+            releaseAbandon.countDown()
+            recoveryExecutor.shutdownNow()
+            abandonExecutor.shutdownNow()
+            watchdogScheduler.shutdownNow()
+        }
+    }
+
     private fun request() = EngineGuestActivityRecoveryRequest(
         instanceId = INSTANCE_ID,
         previousRuntimeEpoch = OLD_EPOCH,
@@ -102,8 +259,10 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
         restoreActivityId = RESTORE_ACTIVITY_ID
     )
 
-    private class RecordingRecoveryTransport : EngineGuestRecentsRecoveryTransport {
-        val operations = mutableListOf<String>()
+    private class RecordingRecoveryTransport(
+        private val onAbandon: () -> Unit = {}
+    ) : EngineGuestRecentsRecoveryTransport {
+        val operations = Collections.synchronizedList(mutableListOf<String>())
 
         override fun queryRuntime(instanceId: String): EngineRuntimeIpcSnapshot {
             operations += "query"
@@ -154,6 +313,20 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
             )
         }
 
+        override fun abandonProcessClient(
+            identity: EngineProcessClientIdentity,
+            reason: String
+        ): EngineRuntimeForegroundAck {
+            operations += "abandon"
+            onAbandon()
+            return EngineRuntimeForegroundAck(
+                accepted = true,
+                idempotent = false,
+                state = VirtualRuntimeState.DEAD.name,
+                reason = reason
+            )
+        }
+
         override fun issueRestoreCapability(
             identity: EngineProcessClientIdentity,
             restoreActivityId: String
@@ -182,6 +355,7 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
     private companion object {
         const val INSTANCE_ID = "instance-recents"
         const val PROCESS_ID = 4_321
+        const val HOST_PROCESS = "com.multiapp.app"
         const val PROCESS_SLOT = "com.multiapp.app:v2"
         const val PROXY_ACTIVITY = "com.multiapp.app.container.ProxyActivity2"
         const val GUEST_ACTIVITY = "com.test.app.MainActivity"
