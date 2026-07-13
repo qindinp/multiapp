@@ -18,7 +18,7 @@ class MultiAppApplication : Application() {
         }
 
         if (!EngineRuntimeInstallers.installSystemServerClient(this)) {
-            Timber.w("Engine system-server Binder unavailable; durable state fallback active")
+            Timber.e("Engine system-server Binder unavailable; live runtime authority is fail-closed")
         }
 
         EngineRuntimeInstallers.installInstrumentation(this)

@@ -16,11 +16,13 @@ import com.multiapp.core.engine.EngineProcessBootstrapRequest
 import com.multiapp.core.engine.EngineProcessBootstrapResult
 import com.multiapp.core.engine.EngineProcessBootstrapState
 import com.multiapp.core.engine.EngineProcessBootstrapper
+import com.multiapp.core.engine.EngineProcessClientIdentity
 import com.multiapp.core.engine.EngineRuntimeAuthorityValidator
 import com.multiapp.core.engine.EngineRuntimeIpcClients
 import com.multiapp.core.engine.EngineRuntimeInstallers
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineResultStatus
+import com.multiapp.core.model.engine.VirtualRuntimeState
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
@@ -432,7 +434,11 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
             )
         EngineRuntimeIpcClients.install(hostContext)
         val authoritySnapshot = EngineRuntimeIpcClients.queryRuntime(envelope.instanceId)
-        val authority = EngineRuntimeAuthorityValidator.validate(authoritySnapshot, envelope.processSlot)
+        val authority = EngineRuntimeAuthorityValidator.validate(
+            snapshot = authoritySnapshot,
+            expectedProcessSlot = envelope.processSlot,
+            requireLiveAuthority = false
+        )
         if (authoritySnapshot == null || !authority.allowed ||
             authoritySnapshot?.runtimeEpoch != envelope.runtimeEpoch ||
             authoritySnapshot?.engineSessionId != envelope.engineSessionId ||
@@ -488,8 +494,9 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                     .get(envelope.instanceId)
                 val postBootstrapAuthority = EngineRuntimeIpcClients.queryRuntime(envelope.instanceId)
                 val postBootstrapDecision = EngineRuntimeAuthorityValidator.validate(
-                    postBootstrapAuthority,
-                    envelope.processSlot
+                    snapshot = postBootstrapAuthority,
+                    expectedProcessSlot = envelope.processSlot,
+                    requireLiveAuthority = false
                 )
                 if (
                     postBootstrapRuntime == null || postBootstrapAuthority == null ||
@@ -518,6 +525,25 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                         EngineProcessBootstrapState.FAILED,
                         "READY bootstrap did not expose guest ClassLoader"
                     )
+                val processIdentity = EngineProcessClientIdentity(
+                    instanceId = envelope.instanceId,
+                    runtimeEpoch = envelope.runtimeEpoch,
+                    engineSessionId = envelope.engineSessionId,
+                    processSlot = envelope.processSlot,
+                    processId = Process.myPid()
+                )
+                val clientAttach = EngineRuntimeIpcClients.attachClient(processIdentity, processToken)
+                if (
+                    clientAttach == null || !clientAttach.accepted || !clientAttach.liveAuthority ||
+                    clientAttach.identity != processIdentity ||
+                    clientAttach.runtimeState != VirtualRuntimeState.CREATED
+                ) {
+                    return@runCatching failed(
+                        envelope,
+                        EngineProcessBootstrapState.FAILED,
+                        "engine process client attach failed:${clientAttach?.reason ?: "ipc_unavailable"}"
+                    )
+                }
                 val ackRegistered = EngineGuestForegroundAcknowledger.global.register(
                     guestApplication = guestApplication,
                     guestClassLoader = guestClassLoader,
@@ -538,7 +564,12 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                 } else {
                     readiness.copy(
                         evidence = readiness.evidence +
-                            ("guestForegroundAckRegistered" to "true")
+                            mapOf(
+                                "guestForegroundAckRegistered" to "true",
+                                "engineProcessClientAttached" to "true",
+                                "engineProcessClientAttachIdempotent" to clientAttach.idempotent.toString(),
+                                "engineProcessClientAuthority" to "BINDER_LIVE"
+                            )
                     )
                 }
             }

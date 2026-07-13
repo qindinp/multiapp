@@ -54,7 +54,7 @@ class FakeTestApplicationWithOnCreate : Application() {
     }
 
     override fun onCreate() {
-        // Do NOT call super.onCreate() â€?Android stub would throw on JVM
+        // Do NOT call super.onCreate() ï¿½?Android stub would throw on JVM
         onCreateCalled = true
     }
 
@@ -138,6 +138,7 @@ class HostedRuntimeBootstrapTest {
         tempDir: File,
         hostContext: Context? = null,
         applicationClassNameResolver: (ClassLoader, String?) -> String? = { _, _ -> null },
+        guestApplicationCreator: GuestApplicationCreator = LoadedApkGuestApplicationCreator(),
         packageManagerProxyInstaller: VirtualPackageManagerGlobalInstallAction = successfulPackageManagerProxyInstaller()
     ): Triple<HostedRuntimeBootstrap, File, FakeInstanceManager> {
         val apkFile = File(tempDir, "example.apk")
@@ -152,6 +153,7 @@ class HostedRuntimeBootstrapTest {
             ),
             hostContext = hostContext,
             applicationClassNameResolver = applicationClassNameResolver,
+            guestApplicationCreator = guestApplicationCreator,
             packageManagerProxyInstaller = packageManagerProxyInstaller,
             runtimeUidProvider = { 42420 }
         )
@@ -967,7 +969,8 @@ class HostedRuntimeBootstrapTest {
             hostContext = mockContext,
             applicationClassNameResolver = { _, _ ->
                 "com.multiapp.core.loader.FakeTestApplicationWithOnCreate"
-            }
+            },
+            guestApplicationCreator = ReflectiveGuestApplicationCreator()
         )
 
         val result = bootstrap.run("inst-001")
@@ -994,7 +997,8 @@ class HostedRuntimeBootstrapTest {
             hostContext = mockContext,
             applicationClassNameResolver = { _, _ ->
                 "com.multiapp.core.loader.FakeTestApplicationWithOnCreate"
-            }
+            },
+            guestApplicationCreator = ReflectiveGuestApplicationCreator()
         )
 
         val preparation = bootstrap.prepare("inst-001")
@@ -1040,6 +1044,7 @@ class HostedRuntimeBootstrapTest {
             applicationClassNameResolver = { _, _ ->
                 "com.multiapp.core.loader.FakeTestApplicationWithOnCreate"
             },
+            guestApplicationCreator = ReflectiveGuestApplicationCreator(),
             runtimeUidProvider = { 42420 }
         )
 

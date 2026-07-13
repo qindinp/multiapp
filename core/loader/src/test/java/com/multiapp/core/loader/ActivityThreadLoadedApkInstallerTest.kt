@@ -8,6 +8,8 @@ import java.io.File
 import java.lang.ref.WeakReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -79,13 +81,22 @@ class ActivityThreadLoadedApkInstallerTest {
         val application = mockk<Application>(relaxed = true)
 
         val bindResult = ActivityThreadLoadedApkInstaller.bindApplication(
+            activityThread = activityThread,
             installResult = installResult,
             state = state,
             application = application
         )
 
-        assertTrue("mApplication" in bindResult.patchedFields)
+        assertTrue(bindResult.successful)
+        assertTrue("mApplication" in bindResult.loadedApkPatchResult.patchedFields)
         assertSame(application, loadedApk.application())
+        assertSame(loadedApk, activityThread.boundLoadedApk())
+        assertSame(appInfo, activityThread.boundApplicationInfo())
+        assertSame(application, activityThread.initialApplication())
+        assertTrue(activityThread.allApplications().any { it === application })
+        assertTrue("mBoundApplication.info" in bindResult.activityThreadPatchedFields)
+        assertTrue("mBoundApplication.appInfo" in bindResult.activityThreadPatchedFields)
+        assertTrue("mInitialApplication" in bindResult.activityThreadPatchedFields)
     }
 
     @Test
@@ -205,7 +216,7 @@ class ActivityThreadLoadedApkInstallerTest {
             packageAliases = listOf("com.test.minimal", "com.multiapp.instance.abc")
         )
         val application = mockk<Application>(relaxed = true)
-        ActivityThreadLoadedApkInstaller.bindApplication(installed, state, application)
+        ActivityThreadLoadedApkInstaller.bindApplication(activityThread, installed, state, application)
 
         val reused = ActivityThreadLoadedApkInstaller.findInstalledGuest(
             activityThread = activityThread,
@@ -246,6 +257,133 @@ class ActivityThreadLoadedApkInstallerTest {
     }
 
     @Test
+    fun `bind failure rolls back aliases loaded apk and ActivityThread identity`() {
+        val activityThread = FakeActivityThread()
+        val loadedApk = FakeLoadedApk()
+        val appInfo = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            sourceDir = "/data/app/minimal.apk"
+            publicSourceDir = sourceDir
+            dataDir = "/data/user/0/com.multiapp.app/files/instances/inst-001"
+            nativeLibraryDir = "$dataDir/lib"
+        }
+        val state = LoadedApkRuntimeState(
+            packageName = appInfo.packageName,
+            applicationInfo = appInfo,
+            resources = mockk(relaxed = true),
+            classLoader = ClassLoader.getSystemClassLoader()
+        )
+        val installed = ActivityThreadLoadedApkInstaller.install(
+            activityThread = activityThread,
+            loadedApk = loadedApk,
+            state = state,
+            packageAliases = listOf(appInfo.packageName, "com.multiapp.instance.abc")
+        )
+        val hostInitialApplication = activityThread.initialApplication()
+        val incompatibleBoundApplication = FakeAppBindDataWithWrongAppInfoType(
+            info = Any(),
+            appInfo = "com.multiapp.app"
+        )
+        val hostBoundLoadedApk = incompatibleBoundApplication.info
+        activityThread.replaceBoundApplication(incompatibleBoundApplication)
+        val application = mockk<Application>(relaxed = true)
+
+        val result = ActivityThreadLoadedApkInstaller.bindApplication(
+            activityThread = activityThread,
+            installResult = installed,
+            state = state,
+            application = application
+        )
+
+        assertFalse(result.successful)
+        assertTrue(result.failureReasons.single().contains("appInfo"))
+        assertTrue(result.rollbackResult?.success == true)
+        assertNull(activityThread.loadedApkFrom("mPackages", appInfo.packageName))
+        assertNull(activityThread.loadedApkFrom("mResourcePackages", "com.multiapp.instance.abc"))
+        assertNull(loadedApk.applicationInfo())
+        assertNull(loadedApk.application())
+        assertSame(hostInitialApplication, activityThread.initialApplication())
+        assertFalse(activityThread.allApplications().any { it === application })
+        assertSame(hostBoundLoadedApk, incompatibleBoundApplication.info)
+        assertEquals("com.multiapp.app", incompatibleBoundApplication.appInfo)
+    }
+
+    @Test
+    fun `install rejects missing required LoadedApk lib field and restores aliases`() {
+        val activityThread = FakeActivityThread()
+        val loadedApk = FakeLoadedApkWithoutLibDir()
+        val appInfo = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            sourceDir = "/data/app/minimal.apk"
+            publicSourceDir = sourceDir
+            nativeLibraryDir = "/data/instances/inst-001/lib"
+        }
+
+        val result = ActivityThreadLoadedApkInstaller.install(
+            activityThread = activityThread,
+            loadedApk = loadedApk,
+            state = LoadedApkRuntimeState(
+                packageName = appInfo.packageName,
+                applicationInfo = appInfo,
+                resources = mockk(relaxed = true),
+                classLoader = ClassLoader.getSystemClassLoader()
+            ),
+            packageAliases = listOf(appInfo.packageName)
+        )
+
+        assertTrue(result.skipped)
+        assertTrue(result.skippedReason.orEmpty().contains("mLibDir:FIELD_NOT_FOUND"))
+        assertTrue(result.rollbackResult?.success == true)
+        assertNull(activityThread.loadedApkFrom("mPackages", appInfo.packageName))
+        assertNull(activityThread.loadedApkFrom("mResourcePackages", appInfo.packageName))
+    }
+
+    @Test
+    fun `successful binding rollback is idempotent and restores host ActivityThread`() {
+        val activityThread = FakeActivityThread()
+        val hostApplication = activityThread.initialApplication()
+        val hostLoadedApk = activityThread.boundLoadedApk()
+        val hostAppInfo = activityThread.boundApplicationInfo()
+        val loadedApk = FakeLoadedApk()
+        val appInfo = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            sourceDir = "/data/app/minimal.apk"
+            publicSourceDir = sourceDir
+            nativeLibraryDir = "/data/instances/inst-001/lib"
+        }
+        val state = LoadedApkRuntimeState(
+            packageName = appInfo.packageName,
+            applicationInfo = appInfo,
+            resources = mockk(relaxed = true),
+            classLoader = ClassLoader.getSystemClassLoader()
+        )
+        val installed = ActivityThreadLoadedApkInstaller.install(
+            activityThread,
+            loadedApk,
+            state,
+            listOf(appInfo.packageName)
+        )
+        val application = mockk<Application>(relaxed = true)
+        val bound = ActivityThreadLoadedApkInstaller.bindApplication(
+            activityThread,
+            installed,
+            state,
+            application
+        )
+
+        val first = requireNotNull(bound.rollbackHandle).rollback()
+        val second = bound.rollbackHandle.rollback()
+
+        assertTrue(first.success)
+        assertSame(first, second)
+        assertSame(hostApplication, activityThread.initialApplication())
+        assertSame(hostLoadedApk, activityThread.boundLoadedApk())
+        assertSame(hostAppInfo, activityThread.boundApplicationInfo())
+        assertNull(loadedApk.application())
+        assertNull(activityThread.loadedApkFrom("mPackages", appInfo.packageName))
+    }
+
+    @Test
     fun `skipped install result records explicit fallback failure reason`() {
         val result = ActivityThreadLoadedApkInstaller.skippedInstallResult(
             targetClassName = "",
@@ -267,6 +405,12 @@ class ActivityThreadLoadedApkInstallerTest {
     private class FakeActivityThread {
         private val mPackages = linkedMapOf<Any?, Any?>()
         private val mResourcePackages = linkedMapOf<Any?, Any?>()
+        private var mBoundApplication: Any = FakeAppBindData(
+            info = Any(),
+            appInfo = ApplicationInfo().apply { packageName = "com.multiapp.app" }
+        )
+        private var mInitialApplication: Application = mockk(relaxed = true)
+        private val mAllApplications = mutableListOf(mInitialApplication)
         var createCount: Int = 0
             private set
 
@@ -283,6 +427,18 @@ class ActivityThreadLoadedApkInstallerTest {
                 else -> error("unknown field: $fieldName")
             }
             return (map[packageName] as? WeakReference<*>)?.get()
+        }
+
+        fun boundLoadedApk(): Any? = (mBoundApplication as? FakeAppBindData)?.info
+
+        fun boundApplicationInfo(): ApplicationInfo? = (mBoundApplication as? FakeAppBindData)?.appInfo
+
+        fun initialApplication(): Application = mInitialApplication
+
+        fun allApplications(): List<Application> = mAllApplications.toList()
+
+        fun replaceBoundApplication(value: Any) {
+            mBoundApplication = value
         }
     }
 
@@ -323,4 +479,24 @@ class ActivityThreadLoadedApkInstallerTest {
             return this
         }
     }
+
+    @Suppress("unused")
+    private class FakeLoadedApkWithoutLibDir {
+        private var mApplicationInfo: ApplicationInfo? = null
+        private var mApplication: Application? = null
+        private var mResources: Resources? = null
+        private var mClassLoader: ClassLoader? = null
+        private var mBaseClassLoader: ClassLoader? = null
+        private var mPackageName: String? = null
+    }
+
+    private data class FakeAppBindData(
+        var info: Any?,
+        var appInfo: ApplicationInfo?
+    )
+
+    private data class FakeAppBindDataWithWrongAppInfoType(
+        var info: Any?,
+        var appInfo: String?
+    )
 }

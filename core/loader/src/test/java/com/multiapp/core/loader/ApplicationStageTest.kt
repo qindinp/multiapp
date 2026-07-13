@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -114,6 +115,7 @@ class ApplicationStageTest {
         val stage = ApplicationStage(
             hostContext = hostContext,
             applicationClassNameResolver = { _, _ -> TestApplicationWithOnCreate::class.java.name },
+            guestApplicationCreator = ReflectiveGuestApplicationCreator(),
             clock = fixedClock(400L, 419L)
         )
 
@@ -146,6 +148,7 @@ class ApplicationStageTest {
         val stage = ApplicationStage(
             hostContext = hostContext,
             applicationClassNameResolver = { _, _ -> TestApplicationWithOnCreate::class.java.name },
+            guestApplicationCreator = ReflectiveGuestApplicationCreator(),
             runtimePublisher = { instanceId, result ->
                 publishedInstanceId = instanceId
                 publishedResult = result
@@ -251,6 +254,7 @@ class ApplicationStageTest {
         val stage = ApplicationStage(
             hostContext = hostContext,
             applicationClassNameResolver = { _, _ -> ProviderDispatchApplication::class.java.name },
+            guestApplicationCreator = ReflectiveGuestApplicationCreator(),
             runtimePublisher = processRuntime::rememberApplication,
             clock = fixedClock(600L, 633L)
         )
@@ -361,6 +365,10 @@ class ApplicationStageTest {
                 assertSame(loadedApk, actualLoadedApk)
                 assertNull(instrumentation)
                 application
+            },
+            applicationBinder = { _, _, _, actualApplication ->
+                assertSame(application, actualApplication)
+                successfulApplicationBindResult()
             }
         )
         val config = VirtualContextConfig(
@@ -396,7 +404,124 @@ class ApplicationStageTest {
         assertEquals("LOADED_APK_MAKE_APPLICATION", evidence["applicationCreator"])
         assertEquals("PASS", evidence["loadedApkApplicationCreatorStatus"])
         assertEquals("GUEST_SANDBOX", evidence["loadedApkApplicationCreatorSource"])
+        assertEquals("PASS", evidence["activityThreadApplicationBindingStatus"])
         assertEquals("true", evidence["loadedApkApplicationOnCreateDeferred"])
+    }
+
+    @Test
+    fun `loadedApk creator uses framework default Application without manifest class`() {
+        val snapshot = packageSnapshot()
+        val loadedApk = Any()
+        var capturedState: LoadedApkRuntimeState? = null
+        val defaultApplication = Application()
+        val creator = LoadedApkGuestApplicationCreator(
+            activityThreadProvider = { Any() },
+            resourceBundleProvider = { _, _ ->
+                VirtualResourceBundle(
+                    applicationInfo = ApplicationInfo(),
+                    resources = mockk(relaxed = true),
+                    source = ResourceSource.HOST_FALLBACK
+                )
+            },
+            loadedApkInstaller = { _, state, aliases ->
+                capturedState = state
+                ActivityThreadLoadedApkInstallResult(
+                    targetClassName = "FakeLoadedApk",
+                    aliases = aliases.toList(),
+                    patchResult = LoadedApkPatchResult(
+                        targetClassName = "FakeLoadedApk",
+                        patchedFields = listOf("mApplicationInfo", "mResources", "mClassLoader", "mLibDir"),
+                        skippedFields = emptyList()
+                    ),
+                    installedAliasesByField = mapOf("mPackages" to aliases.toList()),
+                    source = LoadedApkInstallSource.GUEST_SANDBOX,
+                    loadedApk = loadedApk
+                )
+            },
+            makeApplicationInvoker = { _, _ -> defaultApplication },
+            applicationBinder = { _, _, _, application ->
+                assertSame(defaultApplication, application)
+                successfulApplicationBindResult()
+            }
+        )
+
+        val result = creator.create(
+            guestCreateRequest(
+                snapshot = snapshot,
+                applicationClassName = Application::class.java.name,
+                applicationClassSource = "DEFAULT_APPLICATION"
+            )
+        )
+
+        assertSame(defaultApplication, result.application)
+        assertNull(capturedState?.applicationInfo?.className)
+        assertNull(capturedState?.applicationInfo?.name)
+        val evidence = result.evidence.associate { it.key to it.value }
+        assertEquals("PASS", evidence["loadedApkApplicationCreatorStatus"])
+        assertEquals("DEFAULT_APPLICATION", evidence["applicationRequestedClassSource"])
+    }
+
+    @Test
+    fun `loadedApk creator fails closed without reflective fallback`() {
+        val progressStatuses = mutableListOf<String>()
+        val creator = LoadedApkGuestApplicationCreator(
+            activityThreadProvider = { throw NoSuchMethodException("ActivityThread unavailable") }
+        )
+
+        val error = assertFailsWith<LoadedApkApplicationCreationException> {
+            creator.create(
+                guestCreateRequest(
+                    snapshot = packageSnapshot(),
+                    applicationClassName = TestApplication::class.java.name,
+                    applicationClassSource = "MANIFEST",
+                    progress = { status, _, _ -> progressStatuses += status }
+                )
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("ActivityThread unavailable"))
+        assertTrue("LOADED_APK_CREATE_FAILED" in progressStatuses)
+        assertFalse(progressStatuses.any { it.contains("FALLBACK") })
+    }
+
+    @Test
+    fun `application onCreate failure rolls back LoadedApk ActivityThread binding`() {
+        var rollbackCalls = 0
+        val rollbackHandle = ActivityThreadLoadedApkRollbackHandle {
+            rollbackCalls += 1
+            ActivityThreadLoadedApkRollbackResult(
+                success = true,
+                restoredFields = listOf("mInitialApplication", "LoadedApk.mApplication"),
+                failureReasons = emptyList()
+            )
+        }
+        val stage = ApplicationStage(
+            hostContext = mockk(relaxed = true),
+            applicationClassNameResolver = { _, _ -> TestApplication::class.java.name },
+            guestApplicationCreator = GuestApplicationCreator {
+                GuestApplicationCreateResult(
+                    application = TestApplication(),
+                    attachedContextPackageName = "com.example.app",
+                    evidence = listOf(
+                        BootstrapEvidence("loadedApkApplicationCreatorStatus", "PASS"),
+                        BootstrapEvidence("activityThreadApplicationBindingStatus", "PASS")
+                    ),
+                    rollbackHandle = rollbackHandle
+                )
+            },
+            applicationOnCreateInvoker = { throw IllegalStateException("onCreate failed") },
+            clock = fixedClock(800L, 811L)
+        )
+
+        val output = stage.execute(stageInput())
+
+        assertEquals(BootstrapStatus.FAILED, output.result.status)
+        assertNull(output.context.guestApplication)
+        assertEquals(1, rollbackCalls)
+        assertEquals("Guest LoadedApk/ActivityThread binding rolled back", output.result.rollbackNote)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("PASS", evidence["applicationRuntimeRollbackStatus"])
+        assertEquals("false", evidence["reflectiveApplicationFallbackEnabled"])
     }
 
     private fun stageInput(packageSnapshot: VirtualPackageSnapshot = packageSnapshot()) = BootstrapStageInput(
@@ -407,6 +532,60 @@ class ApplicationStageTest {
         processSlot = "com.multiapp.app:v2",
         packageSnapshot = packageSnapshot,
         guestClassLoader = ClassLoader.getSystemClassLoader()
+    )
+
+    private fun guestCreateRequest(
+        snapshot: VirtualPackageSnapshot,
+        applicationClassName: String,
+        applicationClassSource: String,
+        progress: (String, String, Map<String, String>) -> Unit = { _, _, _ -> }
+    ) = GuestApplicationCreateRequest(
+        applicationClassName = applicationClassName,
+        applicationClassSource = applicationClassSource,
+        hostContext = mockk(relaxed = true),
+        virtualContextConfig = VirtualContextConfig(
+            instanceId = snapshot.instanceId,
+            originPackageName = snapshot.originPackageName,
+            virtualPackageName = snapshot.virtualPackageName,
+            dataDir = snapshot.dataDir,
+            sourceDir = snapshot.sourceDir,
+            nativeLibraryDir = "/data/instances/inst-001/lib",
+            classLoader = ClassLoader.getSystemClassLoader(),
+            packageSnapshot = snapshot,
+            processSlot = "com.multiapp.app:v2"
+        ),
+        guestClassLoader = ClassLoader.getSystemClassLoader(),
+        progress = progress
+    )
+
+    private fun successfulApplicationBindResult() = ActivityThreadApplicationBindResult(
+        status = ActivityThreadApplicationBindStatus.PASS,
+        targetClassName = "FakeLoadedApk",
+        loadedApkPatchResult = LoadedApkPatchResult(
+            targetClassName = "FakeLoadedApk",
+            patchedFields = listOf(
+                "mApplication",
+                "mApplicationInfo",
+                "mResources",
+                "mClassLoader",
+                "mLibDir"
+            ),
+            skippedFields = emptyList()
+        ),
+        activityThreadPatchedFields = listOf(
+            "mBoundApplication.info",
+            "mBoundApplication.appInfo",
+            "mInitialApplication"
+        ),
+        activityThreadSkippedFields = emptyList(),
+        failureReasons = emptyList(),
+        rollbackHandle = ActivityThreadLoadedApkRollbackHandle {
+            ActivityThreadLoadedApkRollbackResult(
+                success = true,
+                restoredFields = emptyList(),
+                failureReasons = emptyList()
+            )
+        }
     )
 
     private fun instanceRecord() = VirtualInstanceRecord(

@@ -579,30 +579,38 @@ internal class DefaultVirtualizationEngineCore(
         bootstrap: EngineProcessBootstrapResult
     ): Boolean {
         val token = bootstrap.clientToken
-        if (token == null) {
+        val processId = bootstrap.processId
+        if (token == null || processId == null || bootstrap.processName != runtime.processSlot) {
             systemServer.runtimeService.registerOperationEvidence(
                 runtime.instanceId,
                 EngineOperationEvidence(
                     component = "runtime",
                     operation = "process-token",
-                    verdict = EngineResultStatus.PARTIAL,
-                    entries = mapOf("reason" to "bootstrap_response_has_no_live_client_token")
+                    verdict = EngineResultStatus.FAIL,
+                    entries = mapOf(
+                        "clientTokenPresent" to (token != null).toString(),
+                        "processIdPresent" to (processId != null).toString(),
+                        "processNameMatchesSlot" to
+                            (bootstrap.processName == runtime.processSlot).toString(),
+                        "reason" to "bootstrap_response_has_no_complete_live_client_authority"
+                    )
                 )
             )
-            return true
+            return false
         }
-        val linked = processDeathRegistry.register(
+        val identity = EngineProcessClientIdentity(
             instanceId = runtime.instanceId,
             runtimeEpoch = runtime.runtimeEpoch,
             engineSessionId = runtime.engineSessionId,
+            processSlot = runtime.processSlot,
+            processId = processId
+        )
+        val linked = processDeathRegistry.register(
+            identity = identity,
             token = token
         ) {
             if (
-                runtimeRegistry.markDeadIfCurrent(
-                    instanceId = runtime.instanceId,
-                    runtimeEpoch = runtime.runtimeEpoch,
-                    engineSessionId = runtime.engineSessionId
-                )
+                runtimeRegistry.markDeadIfCurrent(identity)
             ) {
                 activityLaunchCapabilities.revokeGeneration(
                     instanceId = runtime.instanceId,
@@ -623,7 +631,7 @@ internal class DefaultVirtualizationEngineCore(
                     )
                 )
             }
-        }
+        }.accepted
         systemServer.runtimeService.registerOperationEvidence(
             runtime.instanceId,
             EngineOperationEvidence(
@@ -649,7 +657,7 @@ internal class DefaultVirtualizationEngineCore(
             current.processSlot == runtime.processSlot &&
             current.processId == bootstrap.processId &&
             current.state in setOf(VirtualRuntimeState.PREWARMED, VirtualRuntimeState.RUNNING) &&
-            (bootstrap.clientToken?.isBinderAlive != false)
+            bootstrap.clientToken?.isBinderAlive == true
     }
 
     private fun nextRuntimeEpoch(instanceId: String): Long = synchronized(runtimeEpochLock) {

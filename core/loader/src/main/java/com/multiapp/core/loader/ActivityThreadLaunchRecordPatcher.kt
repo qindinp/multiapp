@@ -59,7 +59,9 @@ object ActivityThreadLaunchRecordPatcher {
             instanceId = callbackResults.firstNotNullOfOrNull { it.instanceId },
             guestActivityClassName = callbackResults.firstNotNullOfOrNull { it.guestActivityClassName },
             token = callbackResults.firstNotNullOfOrNull { it.token },
-            loadedApkSource = callbackResults.firstNotNullOfOrNull { it.loadedApkSource }
+            loadedApkSource = callbackResults.firstNotNullOfOrNull { it.loadedApkSource },
+            launchAuthorityStatus = callbackResults.firstNotNullOfOrNull { it.launchAuthorityStatus },
+            launchAuthorityReason = callbackResults.firstNotNullOfOrNull { it.launchAuthorityReason }
         ).also { writeEvidence(it) }
     }
 
@@ -78,17 +80,57 @@ object ActivityThreadLaunchRecordPatcher {
                 skippedReason = "NOT_MULTIAPP_PROXY_LAUNCH"
             )
 
+        val proxyActivityClassName = resolveProxyActivityClassName(record, proxyIntent)
+            ?: return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = "ENGINE_PROXY_ACTIVITY_CLASS_MISSING",
+                launchAuthorityStatus = "FAIL",
+                launchAuthorityReason = "proxy_activity_class_missing"
+            )
+        if (!proxyActivityClassName.contains(".container.ProxyActivity")) {
+            return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = "ENGINE_PROXY_ACTIVITY_CLASS_INVALID",
+                launchAuthorityStatus = "FAIL",
+                launchAuthorityReason = "proxy_activity_class_invalid"
+            )
+        }
+        val launchIdentity = proxyIntent.toVirtualActivityLaunchIdentity(proxyActivityClassName)
+            ?: return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = "ENGINE_LAUNCH_IDENTITY_MISSING",
+                launchAuthorityStatus = "FAIL",
+                launchAuthorityReason = "activity_launch_identity_missing"
+            )
+        val launchAuthorization = VirtualActivityLaunchAuthority.authorize(launchIdentity)
+        if (!launchAuthorization.accepted) {
+            return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = "ENGINE_LAUNCH_REJECTED:${launchAuthorization.reason}",
+                launchAuthorityStatus = "FAIL",
+                launchAuthorityReason = launchAuthorization.reason
+            )
+        }
+
         val snapshot = VirtualPackageRegistry.global.getByInstanceId(spec.instanceId)
             ?: return skippedPrelaunchPatch(
                 record = record,
                 spec = spec,
-                reason = "PACKAGE_SNAPSHOT_MISSING"
+                reason = "PACKAGE_SNAPSHOT_MISSING",
+                launchAuthorityStatus = "PASS",
+                launchAuthorityReason = launchAuthorization.reason
             )
         if (snapshot.sourceDir.isBlank()) {
             return skippedPrelaunchPatch(
                 record = record,
                 spec = spec,
-                reason = "PACKAGE_SNAPSHOT_SOURCE_DIR_MISSING"
+                reason = "PACKAGE_SNAPSHOT_SOURCE_DIR_MISSING",
+                launchAuthorityStatus = "PASS",
+                launchAuthorityReason = launchAuthorization.reason
             )
         }
         val runtimeResult = processRuntime.get(spec.instanceId)?.result
@@ -96,14 +138,18 @@ object ActivityThreadLaunchRecordPatcher {
             ?: return skippedPrelaunchPatch(
                 record = record,
                 spec = spec,
-                reason = "GUEST_CLASS_LOADER_MISSING"
+                reason = "GUEST_CLASS_LOADER_MISSING",
+                launchAuthorityStatus = "PASS",
+                launchAuthorityReason = launchAuthorization.reason
             )
         val state = buildRuntimeState(spec, proxyIntent, snapshot, classLoader, runtimeResult)
         if (state.loadedApk == null) {
             return skippedPrelaunchPatch(
                 record = record,
                 spec = spec,
-                reason = state.loadedApkSkippedReason ?: "LOADED_APK_PRELAUNCH_UNAVAILABLE"
+                reason = state.loadedApkSkippedReason ?: "LOADED_APK_PRELAUNCH_UNAVAILABLE",
+                launchAuthorityStatus = "PASS",
+                launchAuthorityReason = launchAuthorization.reason
             )
         }
         val patch = ActivityClientRecordBridge.patch(
@@ -123,7 +169,9 @@ object ActivityThreadLaunchRecordPatcher {
             instanceId = spec.instanceId,
             guestActivityClassName = spec.guestActivityClassName,
             token = spec.token,
-            loadedApkSource = state.loadedApkSource
+            loadedApkSource = state.loadedApkSource,
+            launchAuthorityStatus = "PASS",
+            launchAuthorityReason = launchAuthorization.reason
         )
         safeLogInfo(
             "Prepatched launch record: target=${result.targetClassName}, instance=${spec.instanceId}, " +
@@ -207,7 +255,9 @@ object ActivityThreadLaunchRecordPatcher {
     private fun skippedPrelaunchPatch(
         record: Any,
         spec: LaunchSpec,
-        reason: String
+        reason: String,
+        launchAuthorityStatus: String? = null,
+        launchAuthorityReason: String? = null
     ): ActivityThreadLaunchRecordPatchResult {
         val result = ActivityThreadLaunchRecordPatchResult(
             targetClassName = record.javaClass.name,
@@ -215,13 +265,26 @@ object ActivityThreadLaunchRecordPatcher {
             skippedReason = reason,
             instanceId = spec.instanceId,
             guestActivityClassName = spec.guestActivityClassName,
-            token = spec.token
+            token = spec.token,
+            launchAuthorityStatus = launchAuthorityStatus,
+            launchAuthorityReason = launchAuthorityReason
         )
         safeLogWarning(
             "Skipped prelaunch guest record patch: instance=${spec.instanceId}, " +
                 "guest=${spec.guestActivityClassName}, reason=$reason"
         )
         return result.also { writeEvidence(it) }
+    }
+
+    private fun resolveProxyActivityClassName(record: Any, proxyIntent: Intent): String? {
+        val recordActivityInfo = readFirstField(
+            record,
+            listOf("activityInfo", "mActivityInfo", "info", "mInfo")
+        ) as? ActivityInfo
+        return recordActivityInfo?.name?.takeIf { it.isNotBlank() }
+            ?: proxyIntent.component?.className?.takeIf { it.isNotBlank() }
+            ?: proxyIntent.getStringExtra(VirtualActivityManager.EXTRA_ENGINE_PROXY_ACTIVITY_CLASS_NAME)
+                ?.takeIf { it.isNotBlank() }
     }
 
     private fun buildGuestIntent(spec: LaunchSpec, proxyIntent: Intent): Intent {
@@ -380,6 +443,8 @@ object ActivityThreadLaunchRecordPatcher {
                     "skippedFields=${result.skippedFields.joinToString(",")}",
                     "skippedReason=${result.skippedReason.orEmpty()}",
                     "loadedApkSource=${result.loadedApkSource.orEmpty()}",
+                    "launchAuthorityStatus=${result.launchAuthorityStatus.orEmpty()}",
+                    "launchAuthorityReason=${result.launchAuthorityReason.orEmpty()}",
                     "patchedRecordCount=${result.patchedRecordCount}"
                 ).joinToString("\n")
             )
@@ -391,7 +456,11 @@ object ActivityThreadLaunchRecordPatcher {
             result.patchedFields.any { it == "activityInfo" || it == "mActivityInfo" || it == "info" || it == "mInfo" }
         val loadedApkReady = !result.loadedApkSource.isNullOrBlank() ||
             result.patchedFields.any { it == "packageInfo" || it == "mPackageInfo" || it == "loadedApk" || it == "mLoadedApk" }
-        return if (patchedLaunchIdentity && loadedApkReady) "PASS" else "PARTIAL"
+        return if (patchedLaunchIdentity && loadedApkReady && result.launchAuthorityStatus == "PASS") {
+            "PASS"
+        } else {
+            "PARTIAL"
+        }
     }
 
     private data class LaunchSpec(
@@ -446,5 +515,7 @@ data class ActivityThreadLaunchRecordPatchResult(
     val instanceId: String? = null,
     val guestActivityClassName: String? = null,
     val token: String? = null,
-    val loadedApkSource: String? = null
+    val loadedApkSource: String? = null,
+    val launchAuthorityStatus: String? = null,
+    val launchAuthorityReason: String? = null
 )

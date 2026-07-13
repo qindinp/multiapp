@@ -17,6 +17,19 @@ data class EngineRuntimeForegroundAckResult(
     val reason: String
 )
 
+data class EngineRuntimeProcessBindingResult(
+    val accepted: Boolean,
+    val idempotent: Boolean,
+    val state: VirtualRuntimeState?,
+    val reason: String
+)
+
+data class EngineRuntimeRestartGenerationResult(
+    val accepted: Boolean,
+    val runtime: VirtualInstanceRuntime?,
+    val reason: String
+)
+
 class EngineRuntimeRegistry(
     private var stateStore: EngineRuntimeStateStore = InMemoryEngineRuntimeStateStore()
 ) {
@@ -161,6 +174,147 @@ class EngineRuntimeRegistry(
                 state = VirtualRuntimeState.DEAD
             )
         } != null
+    }
+
+    @Synchronized
+    fun markDeadIfCurrent(identity: EngineProcessClientIdentity): Boolean {
+        return updateIfCurrent(
+            instanceId = identity.instanceId,
+            runtimeEpoch = identity.runtimeEpoch,
+            engineSessionId = identity.engineSessionId
+        ) { runtime ->
+            if (
+                runtime.processSlot != identity.processSlot ||
+                runtime.processName != identity.processSlot ||
+                runtime.processId != identity.processId ||
+                runtime.state == VirtualRuntimeState.DEAD
+            ) {
+                return@updateIfCurrent null
+            }
+            runtime.copy(
+                processId = null,
+                processName = null,
+                state = VirtualRuntimeState.DEAD
+            )
+        } != null
+    }
+
+    @Synchronized
+    fun bindProcessClientIfCurrent(
+        identity: EngineProcessClientIdentity
+    ): EngineRuntimeProcessBindingResult {
+        val runtime = stateStore.get(identity.instanceId)?.toRuntime()
+            ?: return EngineRuntimeProcessBindingResult(
+                accepted = false,
+                idempotent = false,
+                state = null,
+                reason = "runtime_not_found"
+            )
+        if (
+            runtime.runtimeEpoch != identity.runtimeEpoch ||
+            runtime.engineSessionId != identity.engineSessionId
+        ) {
+            cacheRuntime(runtime, source = "durable-refresh")
+            return processBindingRejected(runtime, "runtime_generation_mismatch")
+        }
+        if (runtime.processSlot != identity.processSlot) {
+            return processBindingRejected(runtime, "process_slot_mismatch")
+        }
+        if (runtime.state != VirtualRuntimeState.CREATED) {
+            return processBindingRejected(runtime, "runtime_not_attachable:${runtime.state.name}")
+        }
+        if (runtime.processId != null && runtime.processId != identity.processId) {
+            return processBindingRejected(runtime, "process_id_mismatch")
+        }
+        if (runtime.processName != null && runtime.processName != identity.processSlot) {
+            return processBindingRejected(runtime, "process_name_mismatch")
+        }
+        if (runtime.processId == identity.processId && runtime.processName == identity.processSlot) {
+            return EngineRuntimeProcessBindingResult(
+                accepted = true,
+                idempotent = true,
+                state = runtime.state,
+                reason = "process_already_bound"
+            )
+        }
+        val updated = runtime.copy(
+            processId = identity.processId,
+            processName = identity.processSlot
+        )
+        if (
+            !stateStore.compareAndSet(
+                expected = EngineRuntimeStateRecord.from(runtime),
+                updated = EngineRuntimeStateRecord.from(updated)
+            )
+        ) {
+            get(identity.instanceId)
+            return EngineRuntimeProcessBindingResult(
+                accepted = false,
+                idempotent = false,
+                state = get(identity.instanceId)?.state,
+                reason = "runtime_changed_during_process_attach"
+            )
+        }
+        cacheRuntime(updated, source = "live-client-attach")
+        return EngineRuntimeProcessBindingResult(
+            accepted = true,
+            idempotent = false,
+            state = updated.state,
+            reason = "process_bound_to_live_client"
+        )
+    }
+
+    @Synchronized
+    fun restartDeadProcessIfCurrent(
+        expectedInstanceId: String,
+        expectedRuntimeEpoch: Long,
+        expectedEngineSessionId: String,
+        expectedProcessSlot: String,
+        successorEngineSessionId: String,
+        successorEvidenceSessionId: String
+    ): EngineRuntimeRestartGenerationResult {
+        require(successorEngineSessionId.isNotBlank()) { "successorEngineSessionId must not be blank" }
+        require(successorEvidenceSessionId.isNotBlank()) { "successorEvidenceSessionId must not be blank" }
+        val currentRecord = stateStore.get(expectedInstanceId)
+            ?: return restartGenerationRejected("runtime_not_found")
+        val current = currentRecord.toRuntime()
+        if (
+            current.runtimeEpoch != expectedRuntimeEpoch ||
+            current.engineSessionId != expectedEngineSessionId
+        ) {
+            cacheRuntime(current, source = "durable-refresh")
+            return restartGenerationRejected("runtime_generation_mismatch", current)
+        }
+        if (current.processSlot != expectedProcessSlot) {
+            return restartGenerationRejected("process_slot_mismatch", current)
+        }
+        if (current.state != VirtualRuntimeState.DEAD) {
+            return restartGenerationRejected("runtime_not_restartable:${current.state.name}", current)
+        }
+        if (current.runtimeEpoch == Long.MAX_VALUE) {
+            return restartGenerationRejected("runtime_epoch_exhausted", current)
+        }
+        if (successorEngineSessionId == current.engineSessionId) {
+            return restartGenerationRejected("successor_engine_session_reused", current)
+        }
+        val successor = current.copy(
+            evidenceSessionId = successorEvidenceSessionId,
+            runtimeEpoch = current.runtimeEpoch + 1L,
+            engineSessionId = successorEngineSessionId,
+            processId = null,
+            processName = null,
+            state = VirtualRuntimeState.CREATED
+        )
+        if (!stateStore.compareAndSet(currentRecord, EngineRuntimeStateRecord.from(successor))) {
+            get(expectedInstanceId)
+            return restartGenerationRejected("runtime_changed_during_restart", get(expectedInstanceId))
+        }
+        cacheRuntime(successor, source = "process-restart-generation")
+        return EngineRuntimeRestartGenerationResult(
+            accepted = true,
+            runtime = successor,
+            reason = "restart_generation_allocated"
+        )
     }
 
     @Synchronized
@@ -340,6 +494,25 @@ class EngineRuntimeRegistry(
         accepted = false,
         idempotent = false,
         state = runtime.state,
+        reason = reason
+    )
+
+    private fun processBindingRejected(
+        runtime: VirtualInstanceRuntime,
+        reason: String
+    ): EngineRuntimeProcessBindingResult = EngineRuntimeProcessBindingResult(
+        accepted = false,
+        idempotent = false,
+        state = runtime.state,
+        reason = reason
+    )
+
+    private fun restartGenerationRejected(
+        reason: String,
+        runtime: VirtualInstanceRuntime? = null
+    ) = EngineRuntimeRestartGenerationResult(
+        accepted = false,
+        runtime = runtime,
         reason = reason
     )
 

@@ -2,6 +2,12 @@ package com.multiapp.core.engine
 
 import android.os.IBinder
 
+data class EngineProcessDeathRegistrationResult(
+    val accepted: Boolean,
+    val idempotent: Boolean,
+    val reason: String
+)
+
 class EngineProcessDeathRegistry {
     private val states = linkedMapOf<String, InstanceState>()
 
@@ -11,28 +17,60 @@ class EngineProcessDeathRegistry {
         engineSessionId: String,
         token: IBinder,
         onDeath: () -> Unit
-    ): Boolean {
-        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
-        require(runtimeEpoch > 0L) { "runtimeEpoch must be positive" }
-        require(engineSessionId.isNotBlank()) { "engineSessionId must not be blank" }
-        lateinit var replacement: Registration
-        val recipient = IBinder.DeathRecipient { handleDeath(instanceId, replacement) }
-        replacement = Registration(runtimeEpoch, engineSessionId, token, recipient, onDeath)
-        val reserved = synchronized(this) {
-            val state = states.getOrPut(instanceId, ::InstanceState)
-            val superseded = state.generation?.supersedes(replacement) == true ||
-                sequenceOf(state.active).plus(state.pending.asSequence())
-                .filterNotNull()
-                .any { it.supersedes(replacement) }
-            if (superseded) {
-                cleanupStateLocked(instanceId, state)
-                false
-            } else {
-                state.pending += replacement
-                true
+    ): Boolean = register(
+        identity = EngineProcessClientIdentity(
+            instanceId = instanceId,
+            runtimeEpoch = runtimeEpoch,
+            engineSessionId = engineSessionId,
+            processSlot = LEGACY_PROCESS_SLOT,
+            processId = LEGACY_PROCESS_ID
+        ),
+        token = token,
+        onDeath = onDeath
+    ).accepted
+
+    fun register(
+        identity: EngineProcessClientIdentity,
+        token: IBinder,
+        onDeath: () -> Unit
+    ): EngineProcessDeathRegistrationResult {
+        val existing = synchronized(this) {
+            states[identity.instanceId]?.active?.takeIf { active ->
+                active.identity == identity && active.token === token && !active.cancelled
             }
         }
-        if (!reserved) return false
+        if (existing != null) {
+            if (tokenAlive(existing)) {
+                return EngineProcessDeathRegistrationResult(true, true, "client_already_attached")
+            }
+            handleDeath(identity.instanceId, existing)
+        }
+
+        lateinit var replacement: Registration
+        val recipient = IBinder.DeathRecipient { handleDeath(identity.instanceId, replacement) }
+        replacement = Registration(identity, token, recipient, onDeath)
+        val reservation = synchronized(this) {
+            val state = states.getOrPut(identity.instanceId, ::InstanceState)
+            when {
+                state.generation?.rejects(identity) == true -> {
+                    cleanupStateLocked(identity.instanceId, state)
+                    Reservation(false, "stale_or_replayed_generation")
+                }
+                sequenceOf(state.active).plus(state.pending.asSequence())
+                    .filterNotNull()
+                    .any { it.rejects(identity) } -> {
+                    cleanupStateLocked(identity.instanceId, state)
+                    Reservation(false, "stale_or_conflicting_generation")
+                }
+                else -> {
+                    state.pending += replacement
+                    Reservation(true, "registration_reserved")
+                }
+            }
+        }
+        if (!reservation.accepted) {
+            return EngineProcessDeathRegistrationResult(false, false, reservation.reason)
+        }
 
         val linked = runCatching {
             token.linkToDeath(recipient, 0)
@@ -40,45 +78,105 @@ class EngineProcessDeathRegistry {
         }.getOrDefault(false)
         if (!linked) {
             synchronized(this) {
-                states[instanceId]?.let { state ->
+                states[identity.instanceId]?.let { state ->
                     state.pending.remove(replacement)
                     replacement.deactivateLocked()
-                    cleanupStateLocked(instanceId, state)
+                    cleanupStateLocked(identity.instanceId, state)
                 }
             }
             unlink(replacement)
-            return false
+            return EngineProcessDeathRegistrationResult(false, false, "client_token_not_alive")
         }
 
         var previous: Registration? = null
         val installed = synchronized(this) {
-            val state = states[instanceId]
+            val state = states[identity.instanceId]
             if (state == null || !state.pending.remove(replacement)) {
                 replacement.deactivateLocked()
                 false
-            } else if (replacement.dead || replacement.cancelled || state.active?.supersedes(replacement) == true) {
+            } else if (
+                replacement.dead || replacement.cancelled ||
+                state.generation?.rejects(identity) == true ||
+                state.active?.rejects(identity) == true
+            ) {
                 replacement.deactivateLocked()
-                cleanupStateLocked(instanceId, state)
+                cleanupStateLocked(identity.instanceId, state)
                 false
             } else {
                 previous = state.active
                 previous?.deactivateLocked()
                 state.active = replacement
-                state.generation = Generation(replacement.runtimeEpoch, replacement.engineSessionId)
+                state.generation = Generation(identity)
                 true
             }
         }
         if (!installed) {
             unlink(replacement)
-            return false
+            return EngineProcessDeathRegistrationResult(false, false, "generation_changed_during_attach")
         }
         previous?.let(::unlink)
-        return true
+        return EngineProcessDeathRegistrationResult(true, false, "client_token_linked")
+    }
+
+    fun isAuthoritative(
+        identity: EngineProcessClientIdentity,
+        token: IBinder? = null
+    ): Boolean {
+        val registration = synchronized(this) {
+            states[identity.instanceId]?.active?.takeIf { active ->
+                active.identity == identity && !active.cancelled &&
+                    (token == null || active.token === token)
+            }
+        } ?: return false
+        if (!tokenAlive(registration)) {
+            handleDeath(identity.instanceId, registration)
+            return false
+        }
+        return synchronized(this) {
+            states[identity.instanceId]?.active === registration && !registration.cancelled
+        }
     }
 
     fun remove(instanceId: String, runtimeEpoch: Long, engineSessionId: String): Boolean {
         val removed = removeLocked(instanceId) { registration ->
-            registration.runtimeEpoch == runtimeEpoch && registration.engineSessionId == engineSessionId
+            registration.identity.runtimeEpoch == runtimeEpoch &&
+                registration.identity.engineSessionId == engineSessionId
+        }
+        removed.forEach(::unlink)
+        return removed.isNotEmpty()
+    }
+
+    fun remove(identity: EngineProcessClientIdentity, token: IBinder): Boolean {
+        val removed = removeLocked(identity.instanceId) { registration ->
+            registration.identity == identity && registration.token === token
+        }
+        removed.forEach(::unlink)
+        return removed.isNotEmpty()
+    }
+
+    fun rollback(identity: EngineProcessClientIdentity, token: IBinder): Boolean {
+        val removed = synchronized(this) {
+            val state = states[identity.instanceId] ?: return@synchronized emptyList()
+            val removed = buildList {
+                state.active
+                    ?.takeIf { it.identity == identity && it.token === token }
+                    ?.let { registration ->
+                        state.active = null
+                        add(registration)
+                    }
+                val pending = state.pending.filter { it.identity == identity && it.token === token }
+                state.pending.removeAll(pending.toSet())
+                addAll(pending)
+            }
+            removed.forEach(Registration::deactivateLocked)
+            if (
+                state.active == null && state.pending.isEmpty() &&
+                state.generation?.identity == identity
+            ) {
+                state.generation = null
+            }
+            cleanupStateLocked(identity.instanceId, state)
+            removed
         }
         removed.forEach(::unlink)
         return removed.isNotEmpty()
@@ -137,6 +235,9 @@ class EngineProcessDeathRegistry {
         }
     }
 
+    private fun tokenAlive(registration: Registration): Boolean =
+        runCatching { registration.token.isBinderAlive }.getOrDefault(false)
+
     private fun unlink(registration: Registration) {
         runCatching { registration.token.unlinkToDeath(registration.recipient, 0) }
     }
@@ -148,17 +249,14 @@ class EngineProcessDeathRegistry {
     }
 
     private data class Generation(
-        val runtimeEpoch: Long,
-        val engineSessionId: String
+        val identity: EngineProcessClientIdentity
     ) {
-        fun supersedes(other: Registration): Boolean =
-            runtimeEpoch > other.runtimeEpoch ||
-                (runtimeEpoch == other.runtimeEpoch && engineSessionId != other.engineSessionId)
+        fun rejects(candidate: EngineProcessClientIdentity): Boolean =
+            candidate.runtimeEpoch <= identity.runtimeEpoch
     }
 
     private class Registration(
-        val runtimeEpoch: Long,
-        val engineSessionId: String,
+        val identity: EngineProcessClientIdentity,
         val token: IBinder,
         val recipient: IBinder.DeathRecipient,
         var onDeath: (() -> Unit)?
@@ -166,13 +264,22 @@ class EngineProcessDeathRegistry {
         var dead: Boolean = false
         var cancelled: Boolean = false
 
-        fun supersedes(other: Registration): Boolean =
-            runtimeEpoch > other.runtimeEpoch ||
-                (runtimeEpoch == other.runtimeEpoch && engineSessionId != other.engineSessionId)
+        fun rejects(candidate: EngineProcessClientIdentity): Boolean =
+            candidate.runtimeEpoch <= identity.runtimeEpoch
 
         fun deactivateLocked() {
             cancelled = true
             onDeath = null
         }
+    }
+
+    private data class Reservation(
+        val accepted: Boolean,
+        val reason: String
+    )
+
+    private companion object {
+        const val LEGACY_PROCESS_SLOT = "legacy"
+        const val LEGACY_PROCESS_ID = 1
     }
 }

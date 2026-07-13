@@ -52,11 +52,31 @@ class EngineRuntimeAuthorityValidatorTest {
         assertTrue(decision.authorityAvailable)
     }
 
+    @Test
+    fun `bootstrap may inspect generation before attach but runtime operations require live authority`() {
+        val snapshot = snapshot(
+            runtimeState = "CREATED",
+            reason = "runtime_process_not_bound",
+            liveAuthority = false
+        )
+
+        val runtimeOperation = EngineRuntimeAuthorityValidator.validate(snapshot)
+        val bootstrapInspection = EngineRuntimeAuthorityValidator.validate(
+            snapshot = snapshot,
+            requireLiveAuthority = false
+        )
+
+        assertFalse(runtimeOperation.allowed)
+        assertEquals("runtime_process_not_bound", runtimeOperation.reason)
+        assertTrue(bootstrapInspection.allowed)
+    }
+
     private fun snapshot(
         found: Boolean = true,
         processSlot: String? = "com.multiapp.app:v0",
         runtimeState: String? = "RUNNING",
-        reason: String? = null
+        reason: String? = null,
+        liveAuthority: Boolean = true
     ) = EngineRuntimeIpcSnapshot(
         found = found,
         instanceId = "instance-1",
@@ -68,6 +88,7 @@ class EngineRuntimeAuthorityValidatorTest {
         runtimeState = runtimeState,
         processId = 1234,
         processName = processSlot,
-        reason = reason
+        reason = reason,
+        liveAuthority = liveAuthority
     )
 }

@@ -130,7 +130,16 @@ class EngineProcessBootstrapTransportTest {
 
             release.countDown()
             assertTrue(exited.await(1, TimeUnit.SECONDS))
-            val recovered = bootstrapper.bootstrap(request(runtimeEpoch = 44L))
+            val recoveryDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+            var recovered = bootstrapper.bootstrap(request(runtimeEpoch = 44L))
+            while (
+                recovered.state == EngineProcessBootstrapState.STALE &&
+                recovered.evidence["bootstrapInFlightTombstone"] == "true" &&
+                System.nanoTime() < recoveryDeadline
+            ) {
+                Thread.yield()
+                recovered = bootstrapper.bootstrap(request(runtimeEpoch = 44L))
+            }
             assertEquals(EngineProcessBootstrapState.READY, recovered.state)
             assertEquals(2, calls.get())
         } finally {

@@ -14,6 +14,24 @@ import java.io.File
  */
 object LoadedApkBridge {
 
+    private val SNAPSHOT_FIELDS = listOf(
+        "mApplicationInfo",
+        "mApplication",
+        "mResources",
+        "mClassLoader",
+        "mBaseClassLoader",
+        "mPackageName",
+        "mAppDir",
+        "mResDir",
+        "mSplitAppDirs",
+        "mSplitResDirs",
+        "mLibDir",
+        "mDataDir",
+        "mDataDirFile",
+        "mCredentialProtectedDataDirFile",
+        "mDeviceProtectedDataDirFile"
+    )
+
     fun inspect(target: Any): LoadedApkInspection {
         val appInfo = readField(target, "mApplicationInfo") as? ApplicationInfo
         val packageName = readField(target, "mPackageName") as? String
@@ -32,6 +50,71 @@ object LoadedApkBridge {
 
     fun classLoader(target: Any): ClassLoader? =
         readField(target, "mClassLoader") as? ClassLoader
+
+    internal fun snapshot(target: Any): LoadedApkStateSnapshot {
+        val values = linkedMapOf<String, Any?>()
+        val skipped = mutableListOf<String>()
+        SNAPSHOT_FIELDS.forEach { fieldName ->
+            val field = findFieldInHierarchy(target.javaClass, fieldName)
+            if (field == null) {
+                skipped += "$fieldName:FIELD_NOT_FOUND"
+            } else {
+                runCatching { field.get(target) }
+                    .onSuccess { values[fieldName] = it }
+                    .onFailure { skipped += "$fieldName:READ_FAILED:${it.javaClass.simpleName}" }
+            }
+        }
+        return LoadedApkStateSnapshot(
+            targetClassName = target.javaClass.name,
+            values = values,
+            skippedFieldReasons = skipped
+        )
+    }
+
+    internal fun restore(target: Any, snapshot: LoadedApkStateSnapshot): LoadedApkPatchResult {
+        val restored = mutableListOf<String>()
+        val skipped = mutableListOf<LoadedApkSkippedField>()
+        snapshot.values.forEach { (fieldName, value) ->
+            val field = findFieldInHierarchy(target.javaClass, fieldName)
+            if (field == null) {
+                skipped += LoadedApkSkippedField(fieldName, "FIELD_NOT_FOUND_DURING_RESTORE")
+            } else {
+                setField(target, field, fieldName, value, restored, skipped)
+            }
+        }
+        return LoadedApkPatchResult(
+            targetClassName = target.javaClass.name,
+            patchedFields = restored,
+            skippedFields = skipped.map { it.fieldName },
+            skippedFieldReasons = skipped.map { it.reasonEntry }
+        )
+    }
+
+    internal fun verify(
+        target: Any,
+        state: LoadedApkRuntimeState,
+        requireApplication: Boolean
+    ): LoadedApkConsistencyResult {
+        val failures = mutableListOf<String>()
+        verifyReferenceField(target, "mApplicationInfo", state.applicationInfo, failures)
+        verifyReferenceField(target, "mResources", state.resources, failures)
+        verifyReferenceField(target, "mClassLoader", state.classLoader, failures)
+        verifyValueField(target, "mLibDir", state.applicationInfo.nativeLibraryDir, failures)
+        verifyValueField(target, "mPackageName", state.packageName, failures)
+        if (requireApplication) {
+            val application = state.application
+            if (application == null) {
+                failures += "mApplication:EXPECTED_APPLICATION_MISSING"
+            } else {
+                verifyReferenceField(target, "mApplication", application, failures)
+            }
+        }
+        return LoadedApkConsistencyResult(
+            targetClassName = target.javaClass.name,
+            consistent = failures.isEmpty(),
+            failureReasons = failures
+        )
+    }
 
     fun patch(target: Any, state: LoadedApkRuntimeState): LoadedApkPatchResult {
         val patched = mutableListOf<String>()
@@ -144,6 +227,44 @@ object LoadedApkBridge {
     private fun readStringField(target: Any, fieldName: String): String? =
         readField(target, fieldName) as? String
 
+    private fun verifyReferenceField(
+        target: Any,
+        fieldName: String,
+        expected: Any,
+        failures: MutableList<String>
+    ) {
+        val read = readFieldResult(target, fieldName)
+        when {
+            !read.found -> failures += "$fieldName:FIELD_NOT_FOUND"
+            read.error != null -> failures += "$fieldName:READ_FAILED:${read.error.javaClass.simpleName}"
+            read.value !== expected -> failures += "$fieldName:REFERENCE_MISMATCH"
+        }
+    }
+
+    private fun verifyValueField(
+        target: Any,
+        fieldName: String,
+        expected: Any?,
+        failures: MutableList<String>
+    ) {
+        val read = readFieldResult(target, fieldName)
+        when {
+            !read.found -> failures += "$fieldName:FIELD_NOT_FOUND"
+            read.error != null -> failures += "$fieldName:READ_FAILED:${read.error.javaClass.simpleName}"
+            read.value != expected -> failures += "$fieldName:VALUE_MISMATCH"
+        }
+    }
+
+    private fun readFieldResult(target: Any, fieldName: String): LoadedApkFieldRead {
+        val field = findFieldInHierarchy(target.javaClass, fieldName)
+            ?: return LoadedApkFieldRead(found = false)
+        return runCatching { field.get(target) }
+            .fold(
+                onSuccess = { LoadedApkFieldRead(found = true, value = it) },
+                onFailure = { LoadedApkFieldRead(found = true, error = it) }
+            )
+    }
+
     private fun findFieldInHierarchy(type: Class<*>, name: String): java.lang.reflect.Field? {
         var current: Class<*>? = type
         while (current != null) {
@@ -155,6 +276,24 @@ object LoadedApkBridge {
         return null
     }
 }
+
+internal data class LoadedApkStateSnapshot(
+    val targetClassName: String,
+    val values: Map<String, Any?>,
+    val skippedFieldReasons: List<String>
+)
+
+private data class LoadedApkFieldRead(
+    val found: Boolean,
+    val value: Any? = null,
+    val error: Throwable? = null
+)
+
+internal data class LoadedApkConsistencyResult(
+    val targetClassName: String,
+    val consistent: Boolean,
+    val failureReasons: List<String>
+)
 
 data class LoadedApkInspection(
     val targetClassName: String,

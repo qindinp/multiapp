@@ -513,6 +513,44 @@ class VirtualProcessRuntimeTest {
     }
 
     @Test
+    fun `final Application stage requires LoadedApk PASS before runtime becomes READY`() {
+        val runtime = VirtualProcessRuntime(clock = { 1000L })
+
+        runtime.bindApplication("inst-001") {
+            hostedResult(
+                instanceId = "inst-001",
+                success = true,
+                guestClassLoader = ClassLoader.getSystemClassLoader(),
+                stageResults = listOf(applicationStageResult(creatorStatus = null))
+            )
+        }
+        assertEquals(VirtualProcessRuntimeState.FAILED, runtime.state("inst-001"))
+        assertNull(runtime.get("inst-001"))
+
+        runtime.bindApplication("inst-001") {
+            hostedResult(
+                instanceId = "inst-001",
+                success = true,
+                guestClassLoader = ClassLoader.getSystemClassLoader(),
+                stageResults = listOf(applicationStageResult(creatorStatus = "FALLBACK"))
+            )
+        }
+        assertEquals(VirtualProcessRuntimeState.FAILED, runtime.state("inst-001"))
+        assertNull(runtime.get("inst-001"))
+
+        val ready = runtime.bindApplication("inst-001") {
+            hostedResult(
+                instanceId = "inst-001",
+                success = true,
+                guestClassLoader = ClassLoader.getSystemClassLoader(),
+                stageResults = listOf(applicationStageResult(creatorStatus = "PASS"))
+            )
+        }
+        assertSame(ready, runtime.get("inst-001")?.result)
+        assertEquals(VirtualProcessRuntimeState.READY, runtime.state("inst-001"))
+    }
+
+    @Test
     fun `bindApplication executes bootstrap outside runtime monitor`() {
         val runtime = VirtualProcessRuntime(clock = { 1000L })
         var bootstrapHeldRuntimeLock = true
@@ -549,6 +587,7 @@ class VirtualProcessRuntimeTest {
         success: Boolean,
         guestClassLoader: ClassLoader?,
         processSlot: String? = null,
+        stageResults: List<BootstrapResult> = emptyList(),
         guestApplication: Application? = if (success && guestClassLoader != null) {
             mockk<Application>(relaxed = true)
         } else {
@@ -567,11 +606,19 @@ class VirtualProcessRuntimeTest {
         installRecord = null,
         packageSnapshot = null,
         launcherActivityClassName = "com.example.app.MainActivity",
-        stageResults = emptyList(),
-        summary = emptyList<BootstrapResult>().toSummary(),
+        stageResults = stageResults,
+        summary = stageResults.toSummary(),
         success = success,
         diagnostics = null
     )
+
+    private fun applicationStageResult(creatorStatus: String?): BootstrapResult =
+        BootstrapResult.success(
+            stage = RuntimeStage.APPLICATION,
+            evidence = creatorStatus?.let {
+                listOf(BootstrapEvidence("loadedApkApplicationCreatorStatus", it))
+            }.orEmpty()
+        )
 
     private fun bindingFingerprint() = HostedRuntimeBindingFingerprint(
         instanceId = "inst-001",

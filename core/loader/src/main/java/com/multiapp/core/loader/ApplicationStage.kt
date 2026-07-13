@@ -61,6 +61,7 @@ class ApplicationStage(
         }
 
         var applicationThread: ApplicationThreadEvidence? = null
+        var creationForRollback: GuestApplicationCreateResult? = null
         var runtimePublishedBeforeOnCreate = false
         var providerPreinstallEvidence = emptyList<BootstrapEvidence>()
         fun progress(status: String, detail: String, extra: Map<String, String> = emptyMap()) {
@@ -116,6 +117,7 @@ class ApplicationStage(
                         progress = { status, detail, extra -> progress(status, detail, extra) }
                     )
                 )
+                creationForRollback = creation
                 progress(
                     "APPLICATION_ATTACHED",
                     "guest Application attachBaseContext returned",
@@ -177,11 +179,44 @@ class ApplicationStage(
                 )
             },
             onFailure = { error ->
+                val rollbackResult = creationForRollback?.rollbackHandle?.rollback()
+                    ?: (error as? LoadedApkApplicationCreationException)?.rollbackResult
+                val creationEvidence = creationForRollback?.evidence.orEmpty()
+                val creatorAttemptStatus = creationEvidence.lastOrNull {
+                    it.key == "loadedApkApplicationCreatorStatus"
+                }?.value
+                val failureEvidence = creationEvidence.filterNot {
+                    it.key == "loadedApkApplicationCreatorStatus"
+                } + listOfNotNull(
+                    creatorAttemptStatus?.let {
+                        BootstrapEvidence("loadedApkApplicationCreatorAttemptStatus", it)
+                    },
+                    BootstrapEvidence("loadedApkApplicationCreatorStatus", "FAIL"),
+                    BootstrapEvidence("reflectiveApplicationFallbackEnabled", "false"),
+                    rollbackResult?.let {
+                        BootstrapEvidence(
+                            "applicationRuntimeRollbackStatus",
+                            if (it.success) "PASS" else "PARTIAL"
+                        )
+                    },
+                    rollbackResult?.let {
+                        BootstrapEvidence("applicationRuntimeRollbackFields", it.restoredFields.joinToString(","))
+                    },
+                    rollbackResult?.let {
+                        BootstrapEvidence("applicationRuntimeRollbackFailures", it.failureReasons.joinToString(","))
+                    }
+                )
                 nonTerminalFailure(
                     input = input,
                     startMs = startMs,
                     message = "Guest Application creation failed: ${error.message}",
-                    error = error
+                    error = error,
+                    evidence = failureEvidence,
+                    rollbackNote = rollbackResult?.let {
+                        if (it.success) "Guest LoadedApk/ActivityThread binding rolled back" else {
+                            "Guest runtime rollback incomplete: ${it.failureReasons.joinToString(",")}"
+                        }
+                    }
                 )
             }
         )
@@ -212,13 +247,17 @@ class ApplicationStage(
         input: BootstrapStageInput,
         startMs: Long,
         message: String,
-        error: Throwable? = null
+        error: Throwable? = null,
+        evidence: List<BootstrapEvidence> = emptyList(),
+        rollbackNote: String? = null
     ): BootstrapStageOutput = BootstrapStageOutput(
         context = input,
         result = BootstrapResult.failed(
             stage = RuntimeStage.APPLICATION,
             message = message,
             error = error,
+            evidence = evidence,
+            rollbackNote = rollbackNote,
             durationMs = clock() - startMs
         ),
         terminalFailure = false
@@ -267,7 +306,6 @@ class ApplicationStage(
 }
 
 class LoadedApkGuestApplicationCreator(
-    private val fallback: GuestApplicationCreator = ReflectiveGuestApplicationCreator(),
     private val activityThreadProvider: () -> Any = { ActivityThreadCompat.currentActivityThread() },
     private val loadedApkInstaller: (
         activityThread: Any,
@@ -283,27 +321,42 @@ class LoadedApkGuestApplicationCreator(
     private val resourceBundleProvider: (Context, VirtualContextConfig) -> VirtualResourceBundle =
         { context, config -> VirtualResourcesManager(context).create(config) },
     private val makeApplicationInvoker: (Any, android.app.Instrumentation?) -> Application =
-        { loadedApk, instrumentation -> invokeMakeApplication(loadedApk, instrumentation) }
+        { loadedApk, instrumentation -> invokeMakeApplication(loadedApk, instrumentation) },
+    private val applicationBinder: (
+        activityThread: Any,
+        installResult: ActivityThreadLoadedApkInstallResult,
+        state: LoadedApkRuntimeState,
+        application: Application
+    ) -> ActivityThreadApplicationBindResult = { activityThread, installResult, state, application ->
+        ActivityThreadLoadedApkInstaller.bindApplication(
+            activityThread = activityThread,
+            installResult = installResult,
+            state = state,
+            application = application
+        )
+    }
 ) : GuestApplicationCreator {
     override fun create(request: GuestApplicationCreateRequest): GuestApplicationCreateResult {
-        val loadedApkAttempt = runCatching { createWithLoadedApk(request) }
-        return loadedApkAttempt.getOrElse { error ->
+        return runCatching { createWithLoadedApk(request) }.getOrElse { error ->
+            val creationError = error as? LoadedApkApplicationCreationException
+                ?: LoadedApkApplicationCreationException(
+                    message = "LoadedApk Application creation failed: ${error.message ?: error.javaClass.name}",
+                    cause = error
+                )
             request.progress(
-                "LOADED_APK_CREATE_FALLBACK",
-                "LoadedApk makeApplication failed; falling back to reflective attach",
+                "LOADED_APK_CREATE_FAILED",
+                "LoadedApk makeApplication failed; reflective fallback is disabled",
                 mapOf(
-                    "loadedApkCreateErrorClass" to error.javaClass.name,
-                    "loadedApkCreateErrorMessage" to error.message.orEmpty()
+                    "loadedApkApplicationCreatorStatus" to "FAIL",
+                    "reflectiveApplicationFallbackEnabled" to "false",
+                    "loadedApkCreateErrorClass" to creationError.javaClass.name,
+                    "loadedApkCreateErrorMessage" to creationError.message.orEmpty(),
+                    "loadedApkRollbackStatus" to creationError.rollbackResult?.let {
+                        if (it.success) "PASS" else "PARTIAL"
+                    }.orEmpty()
                 )
             )
-            val fallbackResult = fallback.create(request)
-            fallbackResult.copy(
-                evidence = fallbackResult.evidence + listOf(
-                    BootstrapEvidence("loadedApkApplicationCreatorStatus", "FALLBACK"),
-                    BootstrapEvidence("loadedApkApplicationCreatorFallbackReason", error.message ?: error.javaClass.name),
-                    BootstrapEvidence("loadedApkApplicationCreatorErrorClass", error.javaClass.name)
-                )
-            )
+            throw creationError
         }
     }
 
@@ -327,8 +380,9 @@ class LoadedApkGuestApplicationCreator(
         val aliases = listOf(snapshot.originPackageName, snapshot.virtualPackageName)
         val installResult = loadedApkInstaller(activityThread, state, aliases)
         val loadedApk = installResult.loadedApk
-            ?: throw IllegalStateException(
-                "LoadedApk unavailable: ${installResult.skippedReason ?: "UNKNOWN"}"
+            ?: throw LoadedApkApplicationCreationException(
+                message = "LoadedApk unavailable: ${installResult.skippedReason ?: "UNKNOWN"}",
+                rollbackResult = installResult.rollbackResult
             )
         request.progress(
             "LOADED_APK_CREATE_FINISHED",
@@ -343,17 +397,53 @@ class LoadedApkGuestApplicationCreator(
             "calling LoadedApk.makeApplication without Application.onCreate",
             mapOf("instrumentationArgument" to "null")
         )
-        val application = makeApplicationInvoker(loadedApk, null)
+        val application = runCatching { makeApplicationInvoker(loadedApk, null) }
+            .getOrElse { error ->
+                throw LoadedApkApplicationCreationException(
+                    message = "LoadedApk.makeApplication failed: ${error.message ?: error.javaClass.name}",
+                    cause = error,
+                    rollbackResult = installResult.rollbackHandle?.rollback()
+                )
+            }
         request.progress(
             "MAKE_APPLICATION_FINISHED",
             "LoadedApk.makeApplication returned",
             mapOf("actualClass" to application.javaClass.name)
         )
-        val bindResult = ActivityThreadLoadedApkInstaller.bindApplication(
-            installResult = installResult,
-            state = state,
-            application = application
-        )
+        val bindResult = runCatching {
+            applicationBinder(activityThread, installResult, state, application)
+        }.getOrElse { error ->
+            throw LoadedApkApplicationCreationException(
+                message = "ActivityThread Application binding failed: ${error.message ?: error.javaClass.name}",
+                cause = error,
+                rollbackResult = ActivityThreadLoadedApkInstaller.rollbackUnboundApplication(
+                    activityThread = activityThread,
+                    installResult = installResult,
+                    application = application
+                )
+            )
+        }
+        if (!bindResult.successful) {
+            throw LoadedApkApplicationCreationException(
+                message = "ActivityThread Application binding failed: ${bindResult.failureReasons.joinToString("|")}",
+                rollbackResult = bindResult.rollbackResult
+                    ?: ActivityThreadLoadedApkInstaller.rollbackUnboundApplication(
+                        activityThread = activityThread,
+                        installResult = installResult,
+                        application = application
+                )
+            )
+        }
+        if (bindResult.rollbackHandle == null) {
+            throw LoadedApkApplicationCreationException(
+                message = "ActivityThread Application binding failed: ROLLBACK_HANDLE_MISSING",
+                rollbackResult = ActivityThreadLoadedApkInstaller.rollbackUnboundApplication(
+                    activityThread = activityThread,
+                    installResult = installResult,
+                    application = application
+                )
+            )
+        }
         val contextPackageName = runCatching { application.packageName }.getOrNull()
         return GuestApplicationCreateResult(
             application = application,
@@ -367,10 +457,16 @@ class LoadedApkGuestApplicationCreator(
                 BootstrapEvidence("loadedApkApplicationCreatorPatchedFields", installResult.patchResult.patchedFields.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationCreatorSkippedFields", installResult.patchResult.skippedFieldReasons.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationCreatorInstalledAliasCount", installResult.installedAliasCount.toString()),
-                BootstrapEvidence("loadedApkApplicationCreatorBindPatchedFields", bindResult.patchedFields.joinToString(",")),
-                BootstrapEvidence("loadedApkApplicationCreatorBindSkippedFields", bindResult.skippedFieldReasons.joinToString(",")),
+                BootstrapEvidence(
+                    "loadedApkApplicationCreatorBindPatchedFields",
+                    bindResult.loadedApkPatchResult.patchedFields.joinToString(",")
+                ),
+                BootstrapEvidence("loadedApkApplicationCreatorBindSkippedFields", bindResult.activityThreadSkippedFields.joinToString(",")),
+                BootstrapEvidence("activityThreadApplicationBindingStatus", bindResult.status.name),
+                BootstrapEvidence("activityThreadApplicationBindingPatchedFields", bindResult.activityThreadPatchedFields.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationOnCreateDeferred", "true")
-            )
+            ),
+            rollbackHandle = bindResult.rollbackHandle
         )
     }
 
@@ -420,8 +516,15 @@ data class GuestApplicationCreateRequest(
 data class GuestApplicationCreateResult(
     val application: Application,
     val attachedContextPackageName: String?,
-    val evidence: List<BootstrapEvidence> = emptyList()
+    val evidence: List<BootstrapEvidence> = emptyList(),
+    val rollbackHandle: ActivityThreadLoadedApkRollbackHandle? = null
 )
+
+class LoadedApkApplicationCreationException(
+    message: String,
+    cause: Throwable? = null,
+    val rollbackResult: ActivityThreadLoadedApkRollbackResult? = null
+) : IllegalStateException(message, cause)
 
 class ReflectiveGuestApplicationCreator : GuestApplicationCreator {
     override fun create(request: GuestApplicationCreateRequest): GuestApplicationCreateResult {

@@ -498,7 +498,19 @@ data class VirtualProcessRuntimeRecord(
 )
 
 private fun HostedBootstrapResult.isReusableRuntime(): Boolean =
-    success && guestClassLoader != null && guestApplication != null
+    success &&
+        guestClassLoader != null &&
+        guestApplication != null &&
+        hasReadyLoadedApkApplication()
+
+private fun HostedBootstrapResult.hasReadyLoadedApkApplication(): Boolean {
+    val applicationStage = stageResults.lastOrNull { it.stage == RuntimeStage.APPLICATION }
+        ?: return true // Provisional and synthetic results do not carry final stage evidence.
+    if (applicationStage.status != BootstrapStatus.SUCCESS) return false
+    return applicationStage.evidence.lastOrNull {
+        it.key == "loadedApkApplicationCreatorStatus"
+    }?.value == "PASS"
+}
 
 internal fun HostedBootstrapResult.hasSameRuntimeIdentity(other: HostedBootstrapResult): Boolean =
     instanceId == other.instanceId &&

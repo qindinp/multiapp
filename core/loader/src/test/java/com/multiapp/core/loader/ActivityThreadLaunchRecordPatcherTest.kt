@@ -10,6 +10,7 @@ import io.mockk.unmockkObject
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertSame
@@ -17,12 +18,23 @@ import kotlin.test.assertTrue
 
 class ActivityThreadLaunchRecordPatcherTest {
 
+    @BeforeTest
+    fun setUp() {
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                VirtualActivityLaunchAuthorityResult(true, "test_authorized")
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+    }
+
     @AfterTest
     fun tearDown() {
         VirtualActivityIntentStore.clearAll()
         VirtualActivityIntentStore.resetIntentCopierForTest()
         VirtualPackageRegistry.global.clear()
         VirtualProcessRuntime.global.clearAll()
+        VirtualActivityLaunchAuthority.clearForTests()
         unmockkObject(ActivityThreadCompat)
     }
 
@@ -115,10 +127,98 @@ class ActivityThreadLaunchRecordPatcherTest {
     fun `launchRecordVerdict passes only when launch identity and LoadedApk evidence are present`() {
         val result = ActivityThreadLaunchRecordPatchResult(
             patchedFields = listOf("mIntent", "mInfo"),
-            loadedApkSource = "GUEST_SANDBOX"
+            loadedApkSource = "GUEST_SANDBOX",
+            launchAuthorityStatus = "PASS"
         )
 
         assertEquals("PASS", ActivityThreadLaunchRecordPatcher.launchRecordVerdict(result))
+    }
+
+    @Test
+    fun `prepatch keeps proxy record when engine launch identity is missing`() {
+        val proxyIntent = proxyIntent(token = "token-missing-capability", includeCapability = false)
+        val proxyInfo = ActivityInfo().apply {
+            packageName = "com.multiapp.app"
+            name = "com.multiapp.app.container.ProxyActivity0"
+        }
+        val proxyLoadedApk = Any()
+        val record = FakeActivityClientRecord().apply {
+            intent = proxyIntent
+            activityInfo = proxyInfo
+            packageInfo = proxyLoadedApk
+        }
+
+        val result = ActivityThreadLaunchRecordPatcher.patchLaunchRecord(record)
+
+        assertEquals("ENGINE_LAUNCH_IDENTITY_MISSING", result.skippedReason)
+        assertEquals("FAIL", result.launchAuthorityStatus)
+        assertTrue(result.patchedFields.isEmpty())
+        assertSame(proxyIntent, record.intent)
+        assertSame(proxyInfo, record.activityInfo)
+        assertSame(proxyLoadedApk, record.packageInfo)
+        assertEquals("com.multiapp.app.container.ProxyActivity0", record.activityInfo?.name)
+    }
+
+    @Test
+    fun `rejected capability cannot prepatch guest class and bypass newActivity authority`() {
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                VirtualActivityLaunchAuthorityResult(false, "stale_generation")
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+        val proxyIntent = proxyIntent(token = "token-rejected")
+        val proxyInfo = ActivityInfo().apply {
+            packageName = "com.multiapp.app"
+            name = "com.multiapp.app.container.ProxyActivity1"
+        }
+        val proxyLoadedApk = Any()
+        val record = FakeActivityClientRecord().apply {
+            intent = proxyIntent
+            activityInfo = proxyInfo
+            packageInfo = proxyLoadedApk
+        }
+
+        val result = ActivityThreadLaunchRecordPatcher.patchLaunchRecord(record)
+
+        assertEquals("ENGINE_LAUNCH_REJECTED:stale_generation", result.skippedReason)
+        assertEquals("FAIL", result.launchAuthorityStatus)
+        assertTrue(result.patchedFields.isEmpty())
+        assertSame(proxyIntent, record.intent)
+        assertSame(proxyInfo, record.activityInfo)
+        assertSame(proxyLoadedApk, record.packageInfo)
+        assertEquals("com.multiapp.app.container.ProxyActivity1", record.activityInfo?.name)
+    }
+
+    @Test
+    fun `initial launch authority can be authorized repeatedly before record patch`() {
+        var authorizationCalls = 0
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                authorizationCalls += 1
+                VirtualActivityLaunchAuthorityResult(true, "idempotent_authorized")
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+        val proxyIntent = proxyIntent(token = "token-repeat")
+        val record = FakeActivityClientRecord().apply {
+            intent = proxyIntent
+            activityInfo = ActivityInfo().apply {
+                packageName = "com.multiapp.app"
+                name = "com.multiapp.app.container.ProxyActivity2"
+            }
+        }
+
+        val first = ActivityThreadLaunchRecordPatcher.patchLaunchRecord(record)
+        val second = ActivityThreadLaunchRecordPatcher.patchLaunchRecord(record)
+
+        assertEquals(2, authorizationCalls)
+        assertEquals("PACKAGE_SNAPSHOT_MISSING", first.skippedReason)
+        assertEquals("PACKAGE_SNAPSHOT_MISSING", second.skippedReason)
+        assertEquals("PASS", first.launchAuthorityStatus)
+        assertEquals("PASS", second.launchAuthorityStatus)
+        assertTrue(first.patchedFields.isEmpty())
+        assertTrue(second.patchedFields.isEmpty())
     }
 
     @Test
@@ -158,7 +258,7 @@ class ActivityThreadLaunchRecordPatcherTest {
         method.invoke(ActivityThreadLaunchRecordPatcher, result)
     }
 
-    private fun proxyIntent(token: String): Intent =
+    private fun proxyIntent(token: String, includeCapability: Boolean = true): Intent =
         mockk(relaxed = true) {
             every { getStringExtra(VirtualActivityManager.EXTRA_VIRTUAL_ACTIVITY_TOKEN) } returns token
             every { getStringExtra(VirtualActivityManager.EXTRA_INSTANCE_ID) } returns "inst-001"
@@ -167,6 +267,11 @@ class ActivityThreadLaunchRecordPatcherTest {
             every { getStringExtra(VirtualActivityManager.EXTRA_HOST_PACKAGE_NAME) } returns "com.multiapp.app"
             every { getStringExtra(VirtualActivityManager.EXTRA_GUEST_ACTIVITY_LAUNCH_MODE) } returns null
             every { getStringExtra(VirtualActivityManager.EXTRA_GUEST_TASK_AFFINITY) } returns null
+            every { getStringExtra(VirtualActivityManager.EXTRA_ENGINE_LAUNCH_CAPABILITY) } returns
+                if (includeCapability) "capability-$token" else null
+            every { getLongExtra(VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH, 0L) } returns 7L
+            every { getStringExtra(VirtualActivityManager.EXTRA_ENGINE_SESSION_ID) } returns "session-001"
+            every { getStringExtra(VirtualActivityManager.EXTRA_ENGINE_PROCESS_SLOT) } returns "com.multiapp.app:v0"
         }
 
     @Suppress("unused")

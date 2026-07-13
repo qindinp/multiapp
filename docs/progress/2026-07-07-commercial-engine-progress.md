@@ -3847,3 +3847,81 @@ Remaining gate:
 - This batch is generic launch/runtime infrastructure. It is not compatibility
   proof for GKD, AstroBox, QQ, WeChat, or QQ Reader. The commercial decision
   remains **BLOCK**.
+
+## Implementation Update - 2026-07-13 Client Reattach and LoadedApk Equivalence
+
+This batch implements the server-owned half of the process-death recovery
+protocol and tightens the framework Application binding. The design continues
+to follow the common VirtualApp `7d739c85`, BlackBox `ffe950f7`, and
+DroidPlugin `c6ebf652` rule: the central manager owns process generations and
+launch authorization, while the client performs the local LoadedApk bind. It
+does not copy BlackBox's server-record Binder-in-Intent design or
+DroidPlugin's short-delay launch-message retry.
+
+Implemented:
+
+- Added `EngineProcessControlPlane` and AIDL operations for `attachClient`,
+  `processRestarted`, and `issueRecentsRestoreCapability`.
+- Initial bootstrap now attaches its live Binder token to the engine authority
+  before returning READY. A durable runtime snapshot alone is never accepted
+  as live process authority.
+- A restart is admitted only from the exact authoritative `DEAD` generation.
+  The server atomically allocates `runtimeEpoch + 1`, new engine/evidence
+  sessions, the new PID, and the existing process slot. Replay of the old
+  generation and a second restart both fail closed.
+- Binder caller PID must match the declared PID and `/proc/<pid>/cmdline` must
+  match the assigned process slot. Same-UID processes cannot claim another
+  slot.
+- The recents control plane selects a persisted virtual Activity record and
+  issues a fresh launch capability for the new generation. Persisted Android
+  system Activity tokens are explicitly not reused.
+- ActivityThread launch-record patching now validates the current engine
+  capability before replacing the proxy record with guest identity. A
+  prepatched guest record can no longer bypass Instrumentation preflight.
+- LoadedApk binding now keeps `mApplication`, `mApplicationInfo`, `mResources`,
+  `mClassLoader`, and `mLibDir` consistent and also binds
+  `mBoundApplication.info/appInfo`, `mInitialApplication`, and
+  `mAllApplications`.
+- LoadedApk aliases and ActivityThread/Application mutations carry rollback
+  handles until Application startup succeeds. Failed creation restores the
+  previous framework state.
+- Default `android.app.Application` uses the same
+  `LoadedApk.makeApplication()` path. The production reflective Application
+  fallback is disabled and cannot satisfy READY.
+- The bootstrap timeout tombstone test now waits for the Future cleanup
+  boundary instead of racing the transport-exit signal; runtime behavior
+  remains fail-closed.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:common:testDebugUnitTest :core:model:testDebugUnitTest :core:instance:testDebugUnitTest :core:manifest:testDebugUnitTest :core:identity:testDebugUnitTest :core:loader:testDebugUnitTest :core:hook:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 --build-cache "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- `BUILD SUCCESSFUL` in 5m21s; 515 Gradle tasks executed, cached, or reused.
+- Aggregated reports contain 1,941 tests, 0 failures, 0 errors, and 12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,687,189 bytes.
+- APK SHA-256:
+  `CF039FA8F068B07697723D931C317BC4B09A9AF9101E7864F655762F4D0F80BA`.
+- `git diff --check` passed; only existing LF/CRLF conversion warnings remain.
+
+Remaining gate:
+
+- The ActivityThread launch callback does not yet execute the complete recents
+  recovery sequence: detect stale/missing capability, call
+  `processRestarted`, locally bind Application, mark PREWARMED, select the
+  persisted record, obtain a fresh capability, and rewrite the same launch
+  message.
+- The engine Binder authority still lives in the default app process rather
+  than a dedicated virtual-system-server process.
+- OEM `mBoundApplication` layouts, `AppBindData.processName/providers`, one
+  instance with multiple guest `processName` records, and VMRuntime package/
+  data-dir identity remain open.
+- Runtime permissions, custom-process components, complete Service/Broadcast
+  semantics, native linker/load, and the API 28-36/HyperOS device matrix are
+  still incomplete.
+- No device artifact proves the new reattach generation and LoadedApk rollback
+  behavior. GKD, AstroBox, QQ, WeChat, and QQ Reader remain unproven. The
+  commercial decision remains **BLOCK**.

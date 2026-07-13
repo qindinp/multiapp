@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import android.os.Binder
 import android.os.Bundle
+import android.os.IBinder
 import com.multiapp.core.engine.ipc.IEngineRuntimeService
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineResultStatus
@@ -15,6 +16,7 @@ import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualTaskRecord
+import java.io.File
 
 object EngineRuntimeIpcContract {
     const val AUTHORITY_SUFFIX = ".multiapp.engine.server"
@@ -34,6 +36,9 @@ object EngineRuntimeIpcContract {
     const val KEY_RUNTIME_STATE = "runtimeState"
     const val KEY_PROCESS_ID = "processId"
     const val KEY_PROCESS_NAME = "processName"
+    const val KEY_LIVE_AUTHORITY = "liveAuthority"
+    const val KEY_CLIENT_TOKEN_ALIVE = "clientTokenAlive"
+    const val KEY_ATTACH_OPERATION = "attachOperation"
     const val KEY_SAME_PROCESS = "sameProcess"
     const val KEY_COMPONENT = "component"
     const val KEY_OPERATION = "operation"
@@ -139,6 +144,10 @@ object EngineRuntimeIpcContract {
     const val KEY_FAILURE_COUNT = "failureCount"
     const val KEY_TOKEN = "token"
     const val KEY_ACTIVITY_ID = "activityId"
+    const val KEY_RESTORE_ACTIVITY_ID = "restoreActivityId"
+    const val KEY_RESTORE_CAPABILITY_STATUS = "restoreCapabilityStatus"
+    const val KEY_PERSISTED_SYSTEM_ACTIVITY_TOKEN_REUSED = "persistedSystemActivityTokenReused"
+    const val KEY_LAUNCH_CAPABILITY_TOKEN = "launchCapabilityToken"
     const val KEY_ACTIVITY_STATE = "activityState"
     const val KEY_ACTIVITY = "activity"
     const val KEY_ACTIVITY_RESULT = "activityResult"
@@ -182,7 +191,8 @@ data class EngineRuntimeIpcSnapshot(
     val runtimeState: String?,
     val processId: Int?,
     val processName: String?,
-    val reason: String?
+    val reason: String?,
+    val liveAuthority: Boolean = true
 )
 
 data class EngineRuntimeForegroundAck(
@@ -201,7 +211,8 @@ data class EngineRuntimeAuthorityDecision(
 object EngineRuntimeAuthorityValidator {
     fun validate(
         snapshot: EngineRuntimeIpcSnapshot?,
-        expectedProcessSlot: String? = null
+        expectedProcessSlot: String? = null,
+        requireLiveAuthority: Boolean = true
     ): EngineRuntimeAuthorityDecision = when {
         snapshot == null -> EngineRuntimeAuthorityDecision(
             allowed = false,
@@ -212,6 +223,11 @@ object EngineRuntimeAuthorityValidator {
             allowed = false,
             authorityAvailable = true,
             reason = snapshot.reason ?: "runtime_not_found"
+        )
+        requireLiveAuthority && !snapshot.liveAuthority -> EngineRuntimeAuthorityDecision(
+            allowed = false,
+            authorityAvailable = true,
+            reason = snapshot.reason ?: "live_runtime_authority_missing"
         )
         snapshot.runtimeEpoch <= 0L -> EngineRuntimeAuthorityDecision(
             allowed = false,
@@ -250,14 +266,112 @@ class EngineRuntimeBinderEndpoint(
     private val appOpsService: VirtualAppOpsService = DefaultVirtualSystemServer(registry).appOpsService,
     private val serviceService: VirtualServiceService = DefaultVirtualSystemServer(registry).serviceService,
     private val broadcastService: VirtualBroadcastService = DefaultVirtualSystemServer(registry).broadcastService,
+    private val processControlPlane: EngineProcessControlPlane = EngineProcessControlPlane(
+        runtimeRegistry = registry,
+        activityLaunchCapabilities = activityLaunchCapabilities
+    ),
+    private val recentsRestoreCapabilityIssuer: EngineRecentsRestoreCapabilityIssuer =
+        EngineRecentsRestoreCapabilityIssuer(
+            runtimeRegistry = registry,
+            processControlPlane = processControlPlane,
+            activityLaunchCapabilities = activityLaunchCapabilities,
+            taskStateProvider = activityService::queryTaskState
+        ),
     private val callingUid: () -> Int = Binder::getCallingUid,
-    private val callingPid: () -> Int = Binder::getCallingPid
+    private val callingPid: () -> Int = Binder::getCallingPid,
+    private val callingProcessName: (Int) -> String? = ::readAndroidProcessName
 ) : IEngineRuntimeService.Stub() {
+
+    override fun attachClient(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        processId: Int,
+        clientToken: IBinder
+    ): Bundle = authorizedBundle {
+        val identity = processIdentityOrNull(
+            instanceId,
+            runtimeEpoch,
+            engineSessionId,
+            processSlot,
+            processId
+        ) ?: return@authorizedBundle invalidProcessAttachBundle(
+            EngineProcessAttachOperation.ATTACH_CLIENT,
+            instanceId,
+            "invalid_process_identity"
+        )
+        val callerPid = callingPid()
+        processControlPlane.attachClient(
+            identity = identity,
+            clientToken = clientToken,
+            callingPid = callerPid,
+            callingProcessName = callingProcessName(callerPid)
+        ).toIpcBundle()
+    }
+
+    override fun processRestarted(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        processId: Int,
+        clientToken: IBinder
+    ): Bundle = authorizedBundle {
+        val identity = processIdentityOrNull(
+            instanceId,
+            runtimeEpoch,
+            engineSessionId,
+            processSlot,
+            processId
+        ) ?: return@authorizedBundle invalidProcessAttachBundle(
+            EngineProcessAttachOperation.PROCESS_RESTARTED,
+            instanceId,
+            "invalid_process_identity"
+        )
+        val callerPid = callingPid()
+        processControlPlane.processRestarted(
+            identity = identity,
+            clientToken = clientToken,
+            callingPid = callerPid,
+            callingProcessName = callingProcessName(callerPid)
+        ).toIpcBundle()
+    }
+
+    override fun issueRecentsRestoreCapability(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        processId: Int,
+        restoreActivityId: String
+    ): Bundle = authorizedBundle {
+        val identity = processIdentityOrNull(
+            instanceId,
+            runtimeEpoch,
+            engineSessionId,
+            processSlot,
+            processId
+        ) ?: return@authorizedBundle invalidRestoreCapabilityBundle("invalid_process_identity")
+        val callerPid = callingPid()
+        if (callingProcessName(callerPid) != processSlot) {
+            return@authorizedBundle invalidRestoreCapabilityBundle("calling_process_slot_mismatch")
+        }
+        recentsRestoreCapabilityIssuer.issue(
+            identity = identity,
+            restoreActivityId = restoreActivityId,
+            callingPid = callerPid
+        ).toIpcBundle()
+    }
 
     override fun queryRuntime(instanceId: String): Bundle = authorizedBundle {
         val runtime = instanceId.takeIf { it.isNotBlank() }?.let(registry::get)
             ?: return@authorizedBundle missingRuntimeBundle(instanceId)
-        runtime.toIpcBundle()
+        val authority = processControlPlane.authorize(instanceId, callingPid())
+        runtime.toIpcBundle(
+            liveAuthority = authority.allowed,
+            reason = authority.reason
+        )
     }
 
     override fun authorizeActivityLaunch(
@@ -286,7 +400,9 @@ class EngineRuntimeBinderEndpoint(
         }
         val callerPid = callingPid()
         val runtime = registry.get(instanceId)
+        val liveAuthority = processControlPlane.authorize(instanceId, callerPid)
         val runtimeAccepted = runtime != null &&
+            liveAuthority.allowed &&
             runtime.runtimeEpoch == runtimeEpoch &&
             runtime.engineSessionId == engineSessionId &&
             runtime.processSlot == processSlot &&
@@ -333,6 +449,10 @@ class EngineRuntimeBinderEndpoint(
             return@authorizedBundle invalidRequestBundle(instanceId, "invalid_activity_resume_ack")
         }
         val callerPid = callingPid()
+        val liveAuthority = processControlPlane.authorize(instanceId, callerPid)
+        if (!liveAuthority.allowed) {
+            return@authorizedBundle invalidRequestBundle(instanceId, liveAuthority.reason)
+        }
         val capability = activityLaunchCapabilities.validateResume(
             capabilityToken = capabilityToken,
             instanceId = instanceId,
@@ -400,23 +520,23 @@ class EngineRuntimeBinderEndpoint(
         }
     }
 
-    override fun planActivity(instanceId: String, request: Bundle): Bundle = authorizedBundle {
+    override fun planActivity(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decodedRequest = request.toActivityPlanRequestOrNull()
-            ?: return@authorizedBundle invalidRequestBundle(instanceId, "invalid_activity_plan_request")
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_activity_plan_request")
         activityService.planActivity(instanceId, decodedRequest).toIpcBundle()
     }
 
     override fun recordActivityDispatch(instanceId: String, result: Bundle): Boolean {
-        if (!isAuthorized()) return false
+        if (!isRuntimeAuthorized(instanceId)) return false
         val decodedResult = result.toActivityDispatchResultOrNull() ?: return false
         if (decodedResult.instanceId != instanceId) return false
         return activityService.recordActivityDispatch(instanceId, decodedResult)
     }
 
     override fun mutateActivity(instanceId: String, operation: String, request: Bundle): Bundle =
-        authorizedBundle {
+        runtimeAuthorizedBundle(instanceId) {
             val decodedRequest = request.toActivityMutationRequestOrNull(operation)
-                ?: return@authorizedBundle invalidRequestBundle(
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                     instanceId,
                     "invalid_activity_mutation_request:$operation"
                 )
@@ -424,7 +544,7 @@ class EngineRuntimeBinderEndpoint(
                 EngineActivityIpcOperation.MARK_STATE -> activityService.markActivityState(
                     instanceId = instanceId,
                     token = decodedRequest.token,
-                    state = decodedRequest.state ?: return@authorizedBundle invalidRequestBundle(
+                    state = decodedRequest.state ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                         instanceId,
                         "missing_activity_state"
                     )
@@ -457,7 +577,7 @@ class EngineRuntimeBinderEndpoint(
                         frameworkDispatchAttempted = decodedRequest.frameworkDispatchAttempted,
                         frameworkDispatchInvoked = decodedRequest.frameworkDispatchInvoked
                     )
-                else -> return@authorizedBundle invalidRequestBundle(
+                else -> return@runtimeAuthorizedBundle invalidRequestBundle(
                     instanceId,
                     "unsupported_activity_mutation:$operation"
                 )
@@ -466,15 +586,15 @@ class EngineRuntimeBinderEndpoint(
         }
 
     override fun consumeActivity(instanceId: String, operation: String, request: Bundle): Bundle =
-        authorizedBundle {
+        runtimeAuthorizedBundle(instanceId) {
             val decodedOperation = EngineActivityIpcOperation.fromWireName(operation)
-                ?: return@authorizedBundle invalidRequestBundle(
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                     instanceId,
                     "invalid_activity_consume_operation:$operation"
                 )
             val token = request.getString(EngineRuntimeIpcContract.KEY_TOKEN)
                 ?.takeIf { it.isNotBlank() }
-                ?: return@authorizedBundle invalidRequestBundle(
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                     instanceId,
                     "invalid_activity_consume_token"
                 )
@@ -503,7 +623,7 @@ class EngineRuntimeBinderEndpoint(
             }
         }
 
-    override fun queryActivityTaskState(instanceId: String): Bundle = authorizedBundle {
+    override fun queryActivityTaskState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
         activityService.queryTaskState(instanceId).toIpcBundle()
     }
 
@@ -511,10 +631,10 @@ class EngineRuntimeBinderEndpoint(
         instanceId: String,
         reason: String,
         snapshot: Bundle
-    ): Bundle = authorizedBundle {
+    ): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decoded = snapshot.toActivityTaskStateOrNull()
             ?.takeIf { it.instanceId == instanceId && reason.isNotBlank() }
-            ?: return@authorizedBundle invalidRequestBundle(
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                 instanceId,
                 "invalid_activity_task_sync_request"
             )
@@ -525,9 +645,9 @@ class EngineRuntimeBinderEndpoint(
         ).toIpcBundle()
     }
 
-    override fun planProvider(instanceId: String, request: Bundle): Bundle = authorizedBundle {
+    override fun planProvider(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decodedRequest = request.toProviderPlanRequestOrNull()
-            ?: return@authorizedBundle invalidRequestBundle(instanceId, "invalid_provider_plan_request")
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_provider_plan_request")
         providerService.planProvider(
             instanceId,
             decodedRequest.copy(
@@ -539,9 +659,9 @@ class EngineRuntimeBinderEndpoint(
     }
 
     override fun resolveProviderAuthority(callerInstanceId: String, request: Bundle): Bundle =
-        authorizedBundle {
+        runtimeAuthorizedBundle(callerInstanceId) {
             val decodedRequest = request.toProviderAuthorityResolveRequestOrNull()
-                ?: return@authorizedBundle invalidRequestBundle(
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                     callerInstanceId,
                     "invalid_provider_authority_resolve_request"
                 )
@@ -549,20 +669,20 @@ class EngineRuntimeBinderEndpoint(
         }
 
     override fun recordProviderDispatch(instanceId: String, result: Bundle): Boolean {
-        if (!isAuthorized()) return false
+        if (!isRuntimeAuthorized(instanceId)) return false
         val decodedResult = result.toProviderOperationResultOrNull() ?: return false
         if (decodedResult.instanceId != instanceId) return false
         return providerService.recordProviderDispatch(instanceId, decodedResult)
     }
 
-    override fun queryProviderRuntimeState(instanceId: String): Bundle = authorizedBundle {
+    override fun queryProviderRuntimeState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
         providerService.queryProviderRuntimeState(instanceId).toIpcBundle()
     }
 
     override fun grantProviderUriPermission(ownerInstanceId: String, request: Bundle): Bundle =
-        authorizedBundle {
+        runtimeAuthorizedBundle(ownerInstanceId) {
             val decodedRequest = request.toProviderUriGrantRequestOrNull()
-                ?: return@authorizedBundle invalidRequestBundle(
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                     ownerInstanceId,
                     "invalid_provider_uri_grant_request"
                 )
@@ -573,9 +693,9 @@ class EngineRuntimeBinderEndpoint(
         }
 
     override fun revokeProviderUriPermission(ownerInstanceId: String, request: Bundle): Bundle =
-        authorizedBundle {
+        runtimeAuthorizedBundle(ownerInstanceId) {
             val decodedRequest = request.toProviderUriGrantRequestOrNull()
-                ?: return@authorizedBundle invalidRequestBundle(
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                     ownerInstanceId,
                     "invalid_provider_uri_revoke_request"
                 )
@@ -586,9 +706,9 @@ class EngineRuntimeBinderEndpoint(
         }
 
     override fun checkProviderUriPermission(targetInstanceId: String, request: Bundle): Bundle =
-        authorizedBundle {
+        runtimeAuthorizedBundle(targetInstanceId) {
             val decodedRequest = request.toProviderUriGrantRequestOrNull()
-                ?: return@authorizedBundle invalidRequestBundle(
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                     targetInstanceId,
                     "invalid_provider_uri_check_request"
                 )
@@ -601,9 +721,9 @@ class EngineRuntimeBinderEndpoint(
     override fun takePersistableProviderUriPermission(
         targetInstanceId: String,
         request: Bundle
-    ): Bundle = authorizedBundle {
+    ): Bundle = runtimeAuthorizedBundle(targetInstanceId) {
         val decodedRequest = request.toProviderUriGrantRequestOrNull()
-            ?: return@authorizedBundle invalidRequestBundle(
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                 targetInstanceId,
                 "invalid_provider_persistable_uri_take_request"
             )
@@ -616,9 +736,9 @@ class EngineRuntimeBinderEndpoint(
     override fun releasePersistableProviderUriPermission(
         targetInstanceId: String,
         request: Bundle
-    ): Bundle = authorizedBundle {
+    ): Bundle = runtimeAuthorizedBundle(targetInstanceId) {
         val decodedRequest = request.toProviderUriGrantRequestOrNull()
-            ?: return@authorizedBundle invalidRequestBundle(
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(
                 targetInstanceId,
                 "invalid_provider_persistable_uri_release_request"
             )
@@ -628,20 +748,21 @@ class EngineRuntimeBinderEndpoint(
         ).toIpcBundle()
     }
 
-    override fun checkPermission(instanceId: String, permissionName: String): Bundle = authorizedBundle {
+    override fun checkPermission(instanceId: String, permissionName: String): Bundle =
+        runtimeAuthorizedBundle(instanceId) {
         if (permissionName.isBlank()) {
-            return@authorizedBundle invalidRequestBundle(instanceId, "invalid_permission_check_request")
+            return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_permission_check_request")
         }
         permissionService.checkPermission(instanceId, permissionName).toIpcBundle()
     }
 
-    override fun queryPermissionRuntimeState(instanceId: String): Bundle = authorizedBundle {
+    override fun queryPermissionRuntimeState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
         permissionService.queryRuntimeState(instanceId).toIpcBundle()
     }
 
-    override fun queryAppOp(instanceId: String, request: Bundle): Bundle = authorizedBundle {
+    override fun queryAppOp(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decodedRequest = request.toAppOpsQueryRequestOrNull()
-            ?: return@authorizedBundle invalidRequestBundle(instanceId, "invalid_app_ops_query_request")
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_app_ops_query_request")
         appOpsService.queryMode(
             instanceId,
             decodedRequest.copy(
@@ -651,42 +772,42 @@ class EngineRuntimeBinderEndpoint(
         ).toIpcBundle()
     }
 
-    override fun planService(instanceId: String, request: Bundle): Bundle = authorizedBundle {
+    override fun planService(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decodedRequest = request.toServicePlanRequestOrNull()
-            ?: return@authorizedBundle invalidRequestBundle(instanceId, "invalid_service_plan_request")
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_service_plan_request")
         serviceService.planService(instanceId, decodedRequest).toIpcBundle()
     }
 
     override fun recordServiceDispatch(instanceId: String, result: Bundle): Boolean {
-        if (!isAuthorized()) return false
+        if (!isRuntimeAuthorized(instanceId)) return false
         val decodedResult = result.toServiceOperationResultOrNull() ?: return false
         if (decodedResult.instanceId != instanceId) return false
         return serviceService.recordServiceDispatch(instanceId, decodedResult)
     }
 
-    override fun queryServiceRuntimeState(instanceId: String): Bundle = authorizedBundle {
+    override fun queryServiceRuntimeState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
         serviceService.queryServiceRuntimeState(instanceId).toIpcBundle()
     }
 
-    override fun planBroadcast(instanceId: String, request: Bundle): Bundle = authorizedBundle {
+    override fun planBroadcast(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decodedRequest = request.toBroadcastPlanRequestOrNull()
-            ?: return@authorizedBundle invalidRequestBundle(instanceId, "invalid_broadcast_plan_request")
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_broadcast_plan_request")
         broadcastService.planBroadcast(instanceId, decodedRequest).toIpcBundle()
     }
 
     override fun recordBroadcastDispatch(instanceId: String, result: Bundle): Boolean {
-        if (!isAuthorized()) return false
+        if (!isRuntimeAuthorized(instanceId)) return false
         val decodedResult = result.toBroadcastOperationResultOrNull() ?: return false
         if (decodedResult.instanceId != instanceId) return false
         return broadcastService.recordBroadcastDispatch(instanceId, decodedResult)
     }
 
-    override fun queryBroadcastRuntimeState(instanceId: String): Bundle = authorizedBundle {
+    override fun queryBroadcastRuntimeState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
         broadcastService.queryBroadcastRuntimeState(instanceId).toIpcBundle()
     }
 
     override fun recordOperationEvidence(instanceId: String, evidence: Bundle): Boolean {
-        if (!isAuthorized()) return false
+        if (!isRuntimeAuthorized(instanceId)) return false
         val component = evidence.getString(EngineRuntimeIpcContract.KEY_COMPONENT)?.takeIf { it.isNotBlank() }
             ?: return false
         val operation = evidence.getString(EngineRuntimeIpcContract.KEY_OPERATION)?.takeIf { it.isNotBlank() }
@@ -717,7 +838,24 @@ class EngineRuntimeBinderEndpoint(
             putString(EngineRuntimeIpcContract.KEY_REASON, "caller_uid_mismatch")
         }
 
+    private fun runtimeAuthorizedBundle(instanceId: String, block: () -> Bundle): Bundle {
+        if (!isAuthorized()) {
+            return Bundle().apply {
+                putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
+                putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+                putString(EngineRuntimeIpcContract.KEY_REASON, "caller_uid_mismatch")
+            }
+        }
+        val authority = processControlPlane.authorize(instanceId, callingPid())
+        return if (authority.allowed) block() else {
+            missingLiveAuthorityBundle(instanceId, authority.reason)
+        }
+    }
+
     private fun isAuthorized(): Boolean = callingUid() == hostUid
+
+    private fun isRuntimeAuthorized(instanceId: String): Boolean =
+        isAuthorized() && processControlPlane.authorize(instanceId, callingPid()).allowed
 
     private fun VirtualProviderUriGrantRequest.withAuthoritativeCaller(): VirtualProviderUriGrantRequest = copy(
         callingUid = callingUid(),
@@ -746,8 +884,129 @@ class EngineRuntimeBinderEndpoint(
         putString(EngineRuntimeIpcContract.KEY_REASON, result.reason)
     }
 
-    private fun VirtualInstanceRuntime.toIpcBundle(): Bundle = Bundle().apply {
+    private fun processIdentityOrNull(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        processId: Int
+    ): EngineProcessClientIdentity? = runCatching {
+        EngineProcessClientIdentity(
+            instanceId = instanceId,
+            runtimeEpoch = runtimeEpoch,
+            engineSessionId = engineSessionId,
+            processSlot = processSlot,
+            processId = processId
+        )
+    }.getOrNull()
+
+    private fun invalidProcessAttachBundle(
+        operation: EngineProcessAttachOperation,
+        instanceId: String,
+        reason: String
+    ): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY, false)
+        putString(EngineRuntimeIpcContract.KEY_ATTACH_OPERATION, operation.name)
+        putString(
+            EngineRuntimeIpcContract.KEY_RESTORE_CAPABILITY_STATUS,
+            if (operation == EngineProcessAttachOperation.PROCESS_RESTARTED) {
+                EngineRecentsRestoreCapabilityStatus.REJECTED.name
+            } else {
+                EngineRecentsRestoreCapabilityStatus.NOT_REQUESTED.name
+            }
+        )
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+        putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
+    private fun EngineRecentsRestoreCapabilityResult.toIpcBundle(): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, accepted)
+        putBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY, accepted)
+        putString(EngineRuntimeIpcContract.KEY_RESTORE_CAPABILITY_STATUS, status.name)
+        putString(EngineRuntimeIpcContract.KEY_RESTORE_ACTIVITY_ID, restoreActivityId)
+        putBoolean(
+            EngineRuntimeIpcContract.KEY_PERSISTED_SYSTEM_ACTIVITY_TOKEN_REUSED,
+            reusedPersistedSystemActivityToken
+        )
+        identity?.let {
+            putString(EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN, it.capabilityToken)
+            putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, it.instanceId)
+            putLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH, it.runtimeEpoch)
+            putString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID, it.engineSessionId)
+            putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, it.processSlot)
+            putString(
+                EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME,
+                it.proxyActivityClassName
+            )
+            putString(
+                EngineRuntimeIpcContract.KEY_GUEST_ACTIVITY_CLASS_NAME,
+                it.guestActivityClassName
+            )
+        }
+        putString(
+            EngineRuntimeIpcContract.KEY_STATUS,
+            if (accepted) EngineResultStatus.PASS.name else EngineResultStatus.FAIL.name
+        )
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
+    private fun invalidRestoreCapabilityBundle(reason: String): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY, false)
+        putString(
+            EngineRuntimeIpcContract.KEY_RESTORE_CAPABILITY_STATUS,
+            EngineRecentsRestoreCapabilityStatus.REJECTED.name
+        )
+        putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
+    private fun EngineProcessClientAttachResult.toIpcBundle(): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, runtimeState != null)
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, accepted)
+        putBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT, idempotent)
+        putBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY, liveAuthority)
+        putBoolean(
+            EngineRuntimeIpcContract.KEY_CLIENT_TOKEN_ALIVE,
+            accepted && liveAuthority
+        )
+        putString(EngineRuntimeIpcContract.KEY_ATTACH_OPERATION, operation.name)
+        putString(
+            EngineRuntimeIpcContract.KEY_RESTORE_CAPABILITY_STATUS,
+            restoreCapabilityStatus.name
+        )
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, identity?.instanceId)
+        identity?.let {
+            putLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH, it.runtimeEpoch)
+            putString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID, it.engineSessionId)
+            putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, it.processSlot)
+            putInt(EngineRuntimeIpcContract.KEY_PROCESS_ID, it.processId)
+        }
+        putString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE, runtimeState?.name)
+        putString(
+            EngineRuntimeIpcContract.KEY_STATUS,
+            if (accepted) EngineResultStatus.PASS.name else EngineResultStatus.FAIL.name
+        )
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
+    private fun missingLiveAuthorityBundle(instanceId: String, reason: String): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY, false)
+        putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
+    private fun VirtualInstanceRuntime.toIpcBundle(
+        liveAuthority: Boolean,
+        reason: String? = null
+    ): Bundle = Bundle().apply {
         putBoolean(EngineRuntimeIpcContract.KEY_FOUND, true)
+        putBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY, liveAuthority)
         putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.PASS.name)
         putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
         putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, processSlot)
@@ -758,6 +1017,7 @@ class EngineRuntimeBinderEndpoint(
         putString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE, state.name)
         processId?.let { putInt(EngineRuntimeIpcContract.KEY_PROCESS_ID, it) }
         putString(EngineRuntimeIpcContract.KEY_PROCESS_NAME, processName)
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
     }
 }
 
@@ -799,6 +1059,55 @@ object EngineRuntimeIpcClients {
 
     fun isConnected(): Boolean = activeService() != null
 
+    fun attachClient(
+        identity: EngineProcessClientIdentity,
+        clientToken: IBinder
+    ): EngineProcessClientAttachResult? = registerProcessClient(
+        operation = EngineProcessAttachOperation.ATTACH_CLIENT,
+        identity = identity,
+        clientToken = clientToken
+    )
+
+    fun processRestarted(
+        identity: EngineProcessClientIdentity,
+        clientToken: IBinder
+    ): EngineProcessClientAttachResult? = registerProcessClient(
+        operation = EngineProcessAttachOperation.PROCESS_RESTARTED,
+        identity = identity,
+        clientToken = clientToken
+    )
+
+    fun issueRecentsRestoreCapability(
+        identity: EngineProcessClientIdentity,
+        restoreActivityId: String
+    ): EngineRecentsRestoreCapabilityResult? {
+        val response = runCatching {
+            activeService()?.issueRecentsRestoreCapability(
+                identity.instanceId,
+                identity.runtimeEpoch,
+                identity.engineSessionId,
+                identity.processSlot,
+                identity.processId,
+                restoreActivityId
+            )
+        }.getOrNull() ?: return null
+        val launchIdentity = response.toActivityLaunchIdentityOrNull()
+        return EngineRecentsRestoreCapabilityResult(
+            accepted = response.getBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED),
+            status = response.getString(EngineRuntimeIpcContract.KEY_RESTORE_CAPABILITY_STATUS)
+                ?.let {
+                    runCatching { enumValueOf<EngineRecentsRestoreCapabilityStatus>(it) }.getOrNull()
+                }
+                ?: EngineRecentsRestoreCapabilityStatus.REJECTED,
+            identity = launchIdentity,
+            restoreActivityId = response.getString(EngineRuntimeIpcContract.KEY_RESTORE_ACTIVITY_ID),
+            reusedPersistedSystemActivityToken = response.getBoolean(
+                EngineRuntimeIpcContract.KEY_PERSISTED_SYSTEM_ACTIVITY_TOKEN_REUSED
+            ),
+            reason = response.getString(EngineRuntimeIpcContract.KEY_REASON).orEmpty()
+        )
+    }
+
     fun queryRuntime(instanceId: String): EngineRuntimeIpcSnapshot? {
         val response = runCatching { activeService()?.queryRuntime(instanceId) }.getOrNull() ?: return null
         return EngineRuntimeIpcSnapshot(
@@ -816,7 +1125,8 @@ object EngineRuntimeIpcClients {
                 null
             },
             processName = response.getString(EngineRuntimeIpcContract.KEY_PROCESS_NAME),
-            reason = response.getString(EngineRuntimeIpcContract.KEY_REASON)
+            reason = response.getString(EngineRuntimeIpcContract.KEY_REASON),
+            liveAuthority = response.getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY)
         )
     }
 
@@ -1102,6 +1412,51 @@ object EngineRuntimeIpcClients {
 
     fun evidenceSink(): EngineOperationEvidenceSink = IpcEngineOperationEvidenceSink(::activeService)
 
+    private fun registerProcessClient(
+        operation: EngineProcessAttachOperation,
+        identity: EngineProcessClientIdentity,
+        clientToken: IBinder
+    ): EngineProcessClientAttachResult? {
+        val active = activeService() ?: return null
+        val response = runCatching {
+            when (operation) {
+                EngineProcessAttachOperation.ATTACH_CLIENT -> active.attachClient(
+                    identity.instanceId,
+                    identity.runtimeEpoch,
+                    identity.engineSessionId,
+                    identity.processSlot,
+                    identity.processId,
+                    clientToken
+                )
+                EngineProcessAttachOperation.PROCESS_RESTARTED -> active.processRestarted(
+                    identity.instanceId,
+                    identity.runtimeEpoch,
+                    identity.engineSessionId,
+                    identity.processSlot,
+                    identity.processId,
+                    clientToken
+                )
+            }
+        }.getOrNull() ?: return null
+        return EngineProcessClientAttachResult(
+            accepted = response.getBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED),
+            idempotent = response.getBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT),
+            liveAuthority = response.getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY),
+            operation = response.getString(EngineRuntimeIpcContract.KEY_ATTACH_OPERATION)
+                ?.let { runCatching { enumValueOf<EngineProcessAttachOperation>(it) }.getOrNull() }
+                ?: operation,
+            identity = response.toProcessClientIdentityOrNull(),
+            runtimeState = response.getString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE)
+                ?.let { runCatching { enumValueOf<VirtualRuntimeState>(it) }.getOrNull() },
+            reason = response.getString(EngineRuntimeIpcContract.KEY_REASON).orEmpty(),
+            restoreCapabilityStatus = response.getString(
+                EngineRuntimeIpcContract.KEY_RESTORE_CAPABILITY_STATUS
+            )?.let {
+                runCatching { enumValueOf<EngineRecentsRestoreCapabilityStatus>(it) }.getOrNull()
+            } ?: EngineRecentsRestoreCapabilityStatus.NOT_REQUESTED
+        )
+    }
+
     private fun activeService(): IEngineRuntimeService? {
         val current = service
         if (current != null && current.asBinder().isBinderAlive) return current
@@ -1132,6 +1487,32 @@ object EngineRuntimeIpcClients {
         return connected
     }
 }
+
+private fun Bundle.toProcessClientIdentityOrNull(): EngineProcessClientIdentity? = runCatching {
+    EngineProcessClientIdentity(
+        instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+        runtimeEpoch = getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH),
+        engineSessionId = getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID).orEmpty(),
+        processSlot = getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT).orEmpty(),
+        processId = getInt(EngineRuntimeIpcContract.KEY_PROCESS_ID)
+    )
+}.getOrNull()
+
+private fun Bundle.toActivityLaunchIdentityOrNull(): EngineActivityLaunchIdentity? = runCatching {
+    EngineActivityLaunchIdentity(
+        capabilityToken = getString(EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN).orEmpty(),
+        instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+        runtimeEpoch = getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH),
+        engineSessionId = getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID).orEmpty(),
+        processSlot = getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT).orEmpty(),
+        proxyActivityClassName = getString(
+            EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME
+        ).orEmpty(),
+        guestActivityClassName = getString(
+            EngineRuntimeIpcContract.KEY_GUEST_ACTIVITY_CLASS_NAME
+        ).orEmpty()
+    )
+}.getOrNull()
 
 class IpcEngineOperationEvidenceSink(
     private val serviceProvider: () -> IEngineRuntimeService?
@@ -2449,4 +2830,15 @@ private fun Map<String, String>.toStringBundle(): Bundle = Bundle().apply {
 private fun Bundle?.toStringMap(): Map<String, String> {
     if (this == null) return emptyMap()
     return keySet().associateWith { key -> getString(key).orEmpty() }
+}
+
+private fun readAndroidProcessName(processId: Int): String? {
+    if (processId <= 0) return null
+    return runCatching {
+        File("/proc/$processId/cmdline")
+            .readBytes()
+            .toString(Charsets.UTF_8)
+            .substringBefore('\u0000')
+            .takeIf { it.isNotBlank() }
+    }.getOrNull()
 }

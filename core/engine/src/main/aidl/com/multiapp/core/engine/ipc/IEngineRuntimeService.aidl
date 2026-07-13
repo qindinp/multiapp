@@ -1,8 +1,12 @@
 package com.multiapp.core.engine.ipc;
 
 import android.os.Bundle;
+import android.os.IBinder;
 
 interface IEngineRuntimeService {
+    Bundle attachClient(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, IBinder clientToken);
+    Bundle processRestarted(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, IBinder clientToken);
+    Bundle issueRecentsRestoreCapability(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, String restoreActivityId);
     Bundle queryRuntime(String instanceId);
     Bundle authorizeActivityLaunch(String capabilityToken, String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String proxyActivityClassName, String guestActivityClassName);
     Bundle acknowledgeActivityResumed(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String capabilityToken);

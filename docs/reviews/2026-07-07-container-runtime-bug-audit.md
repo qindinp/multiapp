@@ -2412,3 +2412,50 @@ components do not invent a second local recovery truth.
   semantics, native linker/load, and the commercial device matrix remain open.
 - GKD, AstroBox, QQ, WeChat, and QQ Reader remain unproven. Review decision
   remains **BLOCK**.
+
+## Review Update - 2026-07-13 Client Reattach and Framework Application Binding
+
+The previously missing formal client reattach protocol is partially
+superseded in the current tree. Source comparison remains pinned to VirtualApp
+`7d739c85`, BlackBox `ffe950f7`, and DroidPlugin `c6ebf652`.
+
+### Findings closed in the current tree
+
+- Engine AIDL now exposes `attachClient`, `processRestarted`, and a separate
+  recents restore-capability operation. Live authority requires an exact
+  generation plus Binder token; persisted state is only a recovery input.
+- DEAD-runtime restart atomically allocates a new epoch and sessions. Pending
+  death registrations serialize concurrent restart attempts, and stale or
+  repeated generations are rejected.
+- Caller PID and `/proc/<pid>/cmdline` are checked against processSlot before
+  process authority is granted.
+- Recents restoration issues a fresh capability from a persisted virtual
+  Activity record and never reuses a persisted Android system Activity token.
+- Guest launch-record patching cannot occur before capability authorization,
+  guest ClassLoader readiness, and guest LoadedApk readiness.
+- LoadedApk/Application installation now includes ActivityThread bound/initial
+  Application references and rollback. Reflective production fallback is
+  removed; default Application classes also require the framework
+  `makeApplication` path.
+
+### Verification
+
+- Full local gate passed in 5m21s: 515 Gradle tasks, 1,941 tests, 0 failures,
+  0 errors, and 12 skipped.
+- Debug APK SHA-256:
+  `CF039FA8F068B07697723D931C317BC4B09A9AF9101E7864F655762F4D0F80BA`.
+- `git diff --check` passed apart from existing line-ending warnings.
+
+### Still BLOCK
+
+- This is the server/control-plane half of recents recovery. The Android
+  ActivityThread launch-message callback does not yet perform restart,
+  bindApplication, PREWARMED publication, fresh capability issuance, and
+  same-message guest patching as one transaction.
+- The engine authority is not yet isolated in a dedicated server process, and
+  per-guest-`processName` runtime records remain incomplete.
+- OEM ActivityThread/AppBindData layouts, custom-process Provider/Service,
+  runtime permissions, complete Service/Broadcast semantics, native linker/
+  load, and device process-death evidence remain open.
+- This local gate is not compatibility proof for GKD, AstroBox, QQ, WeChat, or
+  QQ Reader. Review decision remains **BLOCK**.

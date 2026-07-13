@@ -1,6 +1,7 @@
 package com.multiapp.core.engine
 
 import android.content.pm.PackageManager
+import android.os.IBinder
 import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.model.InstallArtifactManifest
 import com.multiapp.core.model.VirtualApp
@@ -30,6 +31,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import io.mockk.every
+import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -53,6 +56,7 @@ class DefaultVirtualizationEngineTest {
             instanceManager = instances,
             virtualInstallService = installs,
             activityLauncher = EngineActivityLauncher { launches += it },
+            processBootstrapper = readyBootstrapper(),
             runtimeRegistry = registry,
             evidenceSessionFactory = { "evidence-1" }
         )
@@ -118,7 +122,7 @@ class DefaultVirtualizationEngineTest {
                     }
                     2 -> secondBootstrapEntered.countDown()
                 }
-                EngineProcessBootstrapResult.immediateReady(request)
+                readyBootstrap(request)
             },
             runtimeEpochFactory = { 1L }
         )
@@ -161,7 +165,7 @@ class DefaultVirtualizationEngineTest {
             processBootstrapper = EngineProcessBootstrapper { request ->
                 bootstrapEntered.countDown()
                 check(releaseBootstrap.await(5, TimeUnit.SECONDS))
-                EngineProcessBootstrapResult.immediateReady(request)
+                readyBootstrap(request)
             }
         )
         val executor = Executors.newFixedThreadPool(2)
@@ -268,6 +272,7 @@ class DefaultVirtualizationEngineTest {
                 )
             ),
             activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper(),
             evidenceSessionFactory = { "evidence-splits" }
         )
 
@@ -307,6 +312,7 @@ class DefaultVirtualizationEngineTest {
                 )
             ),
             activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper(),
             evidenceSessionFactory = { "evidence-provider-permissions" }
         )
 
@@ -341,6 +347,7 @@ class DefaultVirtualizationEngineTest {
                 )
             ),
             activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper(),
             runtimeRegistry = registry,
             permissionGrantSeeder = SourcePackagePermissionGrantSeeder { permissionName, _ ->
                 if (permissionName == "android.permission.CAMERA") {
@@ -415,6 +422,7 @@ class DefaultVirtualizationEngineTest {
             instanceManager = FakeInstanceManager(instance),
             virtualInstallService = FakeVirtualInstallService(installRecord),
             activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper(),
             evidenceSessionFactory = { "evidence-package-identity" }
         )
 
@@ -452,6 +460,7 @@ class DefaultVirtualizationEngineTest {
                 )
             ),
             activityLauncher = EngineActivityLauncher { launches += it },
+            processBootstrapper = readyBootstrapper(),
             evidenceSessionFactory = { "evidence-single-top" }
         )
 
@@ -480,6 +489,7 @@ class DefaultVirtualizationEngineTest {
             instanceManager = FakeInstanceManager(instance),
             virtualInstallService = FakeVirtualInstallService(installRecord()),
             activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper(),
             runtimeRegistry = registry,
             evidenceSessionFactory = { "evidence-1" },
             systemServerFactory = { runtimeRegistry ->
@@ -570,7 +580,7 @@ class DefaultVirtualizationEngineTest {
                 "provider:route-token:PASS",
                 "provider:runtime-state:PARTIAL",
                 "runtime:process-bootstrap:PASS",
-                "runtime:process-token:PARTIAL",
+                "runtime:process-token:PASS",
                 "service:runtime-state:PARTIAL"
             ),
             flattenedEvidence.map { evidence -> "${evidence.component}:${evidence.operation}:${evidence.verdict}" }
@@ -628,6 +638,7 @@ class DefaultVirtualizationEngineTest {
             instanceManager = FakeInstanceManager(instance),
             virtualInstallService = FakeVirtualInstallService(installRecord()),
             activityLauncher = EngineActivityLauncher { launches += it },
+            processBootstrapper = readyBootstrapper(),
             profilePolicy = CompatibilityProfilePolicy(
                 allowList = setOf(
                     EngineProfileAllowKey(
@@ -667,6 +678,7 @@ class DefaultVirtualizationEngineTest {
             instanceManager = instances,
             virtualInstallService = FakeVirtualInstallService(installRecord()),
             activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper(),
             slotStore = slotStore,
             evidenceSessionFactory = { "evidence" }
         )
@@ -709,6 +721,7 @@ class DefaultVirtualizationEngineTest {
             instanceManager = instances,
             virtualInstallService = FakeVirtualInstallService(installRecord()),
             activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper(),
             slotStore = FileBackedEngineRuntimeSlotStore(slotFile),
             runtimeRegistry = EngineRuntimeRegistry(),
             evidenceSessionFactory = { "evidence" }
@@ -753,6 +766,17 @@ class DefaultVirtualizationEngineTest {
         compatibilityMode = CompatibilityMode.DEFAULT,
         createdAtMs = 1L,
         updatedAtMs = 1L
+    )
+
+    private fun readyBootstrapper(): EngineProcessBootstrapper =
+        EngineProcessBootstrapper(::readyBootstrap)
+
+    private fun readyBootstrap(
+        request: EngineProcessBootstrapRequest
+    ): EngineProcessBootstrapResult = EngineProcessBootstrapResult.immediateReady(request).copy(
+        clientToken = mockk<IBinder>(relaxed = true) {
+            every { isBinderAlive } returns true
+        }
     )
 
     private fun installRecord(
