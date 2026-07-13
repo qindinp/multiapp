@@ -3,6 +3,7 @@ package com.multiapp.app
 import android.app.Application
 import com.multiapp.app.container.ContainerAmsApiEvidenceRecorder
 import com.multiapp.app.container.ContainerBroadcastEvidenceRecorder
+import com.multiapp.app.container.EngineGuestRecentsRecoveryCoordinator
 import com.multiapp.core.engine.EngineRuntimeInstallers
 import dagger.hilt.android.HiltAndroidApp
 import timber.log.Timber
@@ -20,6 +21,8 @@ class MultiAppApplication : Application() {
         if (!EngineRuntimeInstallers.installSystemServerClient(this)) {
             Timber.e("Engine system-server Binder unavailable; live runtime authority is fail-closed")
         }
+
+        EngineGuestRecentsRecoveryCoordinator.install(this)
 
         EngineRuntimeInstallers.installInstrumentation(this)
             .onFailure { Timber.e(it, "VirtualInstrumentation install failed") }

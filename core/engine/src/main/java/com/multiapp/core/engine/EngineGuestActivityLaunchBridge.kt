@@ -5,6 +5,10 @@ import android.content.Intent
 import com.multiapp.core.loader.VirtualActivityLaunchAuthority
 import com.multiapp.core.loader.VirtualActivityLaunchAuthorityResult
 import com.multiapp.core.loader.VirtualActivityLaunchIdentity
+import com.multiapp.core.loader.VirtualActivityLaunchRecovery
+import com.multiapp.core.loader.VirtualActivityLaunchRecoveryHandler
+import com.multiapp.core.loader.VirtualActivityLaunchRecoveryRequest
+import com.multiapp.core.loader.VirtualActivityLaunchRecoveryResult
 import com.multiapp.core.loader.VirtualActivityLaunchValidator
 import com.multiapp.core.loader.VirtualActivityManager
 import com.multiapp.core.loader.VirtualActivityResumeObserver
@@ -17,7 +21,41 @@ fun interface EngineGuestActivityResumeObserver {
     fun onActivityResumeCompleted(activity: Activity, identity: EngineActivityLaunchIdentity)
 }
 
+data class EngineGuestActivityRecoveryRequest(
+    val instanceId: String,
+    val previousRuntimeEpoch: Long,
+    val previousEngineSessionId: String?,
+    val processSlot: String,
+    val proxyActivityClassName: String,
+    val guestActivityClassName: String,
+    val restoreActivityId: String
+)
+
+data class EngineGuestActivityRecoveryResult(
+    val recovered: Boolean,
+    val identity: EngineActivityLaunchIdentity?,
+    val reason: String
+)
+
+fun interface EngineGuestActivityRecoveryHandler {
+    fun recover(request: EngineGuestActivityRecoveryRequest): EngineGuestActivityRecoveryResult
+}
+
 object EngineGuestActivityLaunchBridge {
+    fun installRecovery(handler: EngineGuestActivityRecoveryHandler) {
+        VirtualActivityLaunchRecovery.install(
+            VirtualActivityLaunchRecoveryHandler { request ->
+                handler.recover(request.toEngineRequest()).let { result ->
+                    VirtualActivityLaunchRecoveryResult(
+                        recovered = result.recovered,
+                        identity = result.identity?.toLoaderIdentity(),
+                        reason = result.reason
+                    )
+                }
+            }
+        )
+    }
+
     fun install(
         validator: EngineGuestActivityLaunchValidator,
         resumeObserver: EngineGuestActivityResumeObserver
@@ -52,6 +90,16 @@ object EngineGuestActivityLaunchBridge {
         )
     }
 }
+
+private fun VirtualActivityLaunchRecoveryRequest.toEngineRequest() = EngineGuestActivityRecoveryRequest(
+    instanceId = instanceId,
+    previousRuntimeEpoch = previousRuntimeEpoch,
+    previousEngineSessionId = previousEngineSessionId,
+    processSlot = processSlot,
+    proxyActivityClassName = proxyActivityClassName,
+    guestActivityClassName = guestActivityClassName,
+    restoreActivityId = restoreActivityId
+)
 
 private fun VirtualActivityLaunchIdentity.toEngineIdentity() = EngineActivityLaunchIdentity(
     capabilityToken = capabilityToken,

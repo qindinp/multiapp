@@ -85,6 +85,33 @@ class EngineProcessControlPlaneTest {
     }
 
     @Test
+    fun `live client promotes created runtime to prewarmed exactly once`() {
+        val registry = EngineRuntimeRegistry()
+        registry.register(runtime())
+        val controlPlane = EngineProcessControlPlane(registry)
+        val token = liveToken()
+        val identity = identity()
+        assertTrue(controlPlane.attachClient(identity, token.binder, PROCESS_ID).accepted)
+
+        val promoted = controlPlane.markPrewarmed(identity, PROCESS_ID, PROCESS_SLOT)
+        val repeated = controlPlane.markPrewarmed(identity, PROCESS_ID, PROCESS_SLOT)
+        val wrongProcess = controlPlane.markPrewarmed(
+            identity,
+            PROCESS_ID,
+            "$HOST_PACKAGE:v7"
+        )
+
+        assertTrue(promoted.accepted)
+        assertFalse(promoted.idempotent)
+        assertEquals(VirtualRuntimeState.PREWARMED, promoted.runtimeState)
+        assertTrue(repeated.accepted)
+        assertTrue(repeated.idempotent)
+        assertEquals(VirtualRuntimeState.PREWARMED, registry.get(INSTANCE_ID)?.state)
+        assertFalse(wrongProcess.accepted)
+        assertEquals("calling_process_slot_mismatch", wrongProcess.reason)
+    }
+
+    @Test
     fun `binder death revokes authority and only marks exact pid generation dead`() {
         val registry = EngineRuntimeRegistry()
         registry.register(runtime())

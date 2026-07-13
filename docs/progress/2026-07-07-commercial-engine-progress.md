@@ -3925,3 +3925,66 @@ Remaining gate:
 - No device artifact proves the new reattach generation and LoadedApk rollback
   behavior. GKD, AstroBox, QQ, WeChat, and QQ Reader remain unproven. The
   commercial decision remains **BLOCK**.
+
+## Implementation Update - 2026-07-13 Same-Message Recents Recovery
+
+This batch connects the process reattach control plane to the Android
+ActivityThread launch callback. It was checked against VirtualApp
+`7d739c85` `HCallbackStub`, BlackBox `ffe950f7` `HCallbackProxy`, and
+DroidPlugin `c6ebf652` `PluginProcessManager`.
+
+Implemented:
+
+- Added a loader-owned `VirtualActivityLaunchRecovery` seam and an
+  engine-owned `EngineGuestActivityLaunchBridge` adapter. App code installs an
+  engine recovery handler without importing loader primitives.
+- `EngineGuestRecentsRecoveryCoordinator` is installed before
+  `VirtualInstrumentation` in `MultiAppApplication.onCreate()`, so a cold
+  `LAUNCH_ACTIVITY`/`EXECUTE_TRANSACTION` can recover before Android creates
+  the proxy Activity.
+- A stale recents launch now executes one synchronous sequence on the current
+  launch message:
+  1. query the authoritative runtime generation;
+  2. restart only an authoritative DEAD generation and bind the new PID/token;
+  3. rebuild LoadedApk/Application through `HostedRuntimeEngine`;
+  4. promote the live runtime from CREATED to PREWARMED over engine AIDL;
+  5. register foreground RUNNING acknowledgement;
+  6. select the persisted virtual Activity record and issue a fresh capability;
+  7. write the new generation/capability into the same proxy Intent and run the
+     normal launch-record authorization/LoadedApk patch.
+- The implementation deliberately does not copy VirtualApp/BlackBox message
+  requeue behavior. A failed stage leaves the proxy record unchanged instead
+  of replaying an old capability.
+- The persisted proxy Intent is not the package/component authority. The
+  engine record supplies the restored proxy/guest class, and the package
+  snapshot must match the Intent origin package before guest patching.
+- `EngineProcessControlPlane.markPrewarmed()` requires the exact live Binder
+  generation, caller PID, `/proc` process name, and processSlot. Repeated
+  PREWARMED/RUNNING promotion is idempotent.
+- Launch-record evidence now includes `launchRecoveryStatus` and
+  `launchRecoveryReason`.
+
+Verification:
+
+- Full local gate passed in 3m19s; 515 Gradle tasks executed, cached, or reused.
+- Aggregated reports contain 1,945 tests, 0 failures, 0 errors, and 12 skipped.
+- Engine/loader/app report 247/695/120 tests respectively, all with 0 failures.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,713,821 bytes.
+- APK SHA-256:
+  `C6FFD5B24159DE85AA4A558F06736D0FE762235A2DA02375593495E0BC6F15EE`.
+- Full output is retained in `.tmp/recents-full-gate-20260713.log`.
+
+Remaining gate:
+
+- Device evidence must prove actual process death followed by a system-recents
+  launch on API 28-36/HyperOS, including DEAD -> CREATED -> PREWARMED ->
+  RUNNING, no proxy black screen, and no stale capability replay.
+- The synchronous owner-thread `bindApplication` path still needs a watchdog/
+  process-slot recycle policy. A guest Application that never returns can
+  otherwise hold the ActivityThread launch callback.
+- OEM `ClientTransaction`/`LaunchActivityItem` variants and Android 12+
+  launching-record layouts remain device-only risks.
+- Dedicated engine-server process isolation, per-guest-process records,
+  runtime permissions, custom-process components, full Service/Broadcast
+  semantics, native linker/load, and the commercial compatibility matrix remain
+  open. The commercial decision remains **BLOCK**.

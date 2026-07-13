@@ -338,6 +338,31 @@ class EngineRuntimeBinderEndpoint(
         ).toIpcBundle()
     }
 
+    override fun markProcessPrewarmed(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        processId: Int
+    ): Bundle = authorizedBundle {
+        val identity = processIdentityOrNull(
+            instanceId,
+            runtimeEpoch,
+            engineSessionId,
+            processSlot,
+            processId
+        ) ?: return@authorizedBundle invalidProcessPrewarmBundle(
+            instanceId,
+            "invalid_process_identity"
+        )
+        val callerPid = callingPid()
+        processControlPlane.markPrewarmed(
+            identity = identity,
+            callingPid = callerPid,
+            callingProcessName = callingProcessName(callerPid)
+        ).toIpcBundle(instanceId)
+    }
+
     override fun issueRecentsRestoreCapability(
         instanceId: String,
         runtimeEpoch: Long,
@@ -964,6 +989,28 @@ class EngineRuntimeBinderEndpoint(
         putString(EngineRuntimeIpcContract.KEY_REASON, reason)
     }
 
+    private fun invalidProcessPrewarmBundle(instanceId: String, reason: String): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT, false)
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+        putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
+    private fun EngineProcessPrewarmResult.toIpcBundle(instanceId: String): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, runtimeState != null)
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, accepted)
+        putBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT, idempotent)
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+        putString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE, runtimeState?.name)
+        putString(
+            EngineRuntimeIpcContract.KEY_STATUS,
+            if (accepted) EngineResultStatus.PASS.name else EngineResultStatus.FAIL.name
+        )
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
     private fun EngineProcessClientAttachResult.toIpcBundle(): Bundle = Bundle().apply {
         putBoolean(EngineRuntimeIpcContract.KEY_FOUND, runtimeState != null)
         putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, accepted)
@@ -1077,6 +1124,19 @@ object EngineRuntimeIpcClients {
         clientToken = clientToken
     )
 
+    fun markProcessPrewarmed(identity: EngineProcessClientIdentity): EngineRuntimeForegroundAck? {
+        val response = runCatching {
+            activeService()?.markProcessPrewarmed(
+                identity.instanceId,
+                identity.runtimeEpoch,
+                identity.engineSessionId,
+                identity.processSlot,
+                identity.processId
+            )
+        }.getOrNull() ?: return null
+        return response.toForegroundAck()
+    }
+
     fun issueRecentsRestoreCapability(
         identity: EngineProcessClientIdentity,
         restoreActivityId: String
@@ -1165,12 +1225,7 @@ object EngineRuntimeIpcClients {
                 capabilityToken
             )
         }.getOrNull() ?: return null
-        return EngineRuntimeForegroundAck(
-            accepted = response.getBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED),
-            idempotent = response.getBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT),
-            state = response.getString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE),
-            reason = response.getString(EngineRuntimeIpcContract.KEY_REASON).orEmpty()
-        )
+        return response.toForegroundAck()
     }
 
     fun planActivity(
@@ -1487,6 +1542,13 @@ object EngineRuntimeIpcClients {
         return connected
     }
 }
+
+private fun Bundle.toForegroundAck() = EngineRuntimeForegroundAck(
+    accepted = getBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED),
+    idempotent = getBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT),
+    state = getString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE),
+    reason = getString(EngineRuntimeIpcContract.KEY_REASON).orEmpty()
+)
 
 private fun Bundle.toProcessClientIdentityOrNull(): EngineProcessClientIdentity? = runCatching {
     EngineProcessClientIdentity(

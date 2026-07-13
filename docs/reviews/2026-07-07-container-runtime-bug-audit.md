@@ -2459,3 +2459,50 @@ superseded in the current tree. Source comparison remains pinned to VirtualApp
   load, and device process-death evidence remain open.
 - This local gate is not compatibility proof for GKD, AstroBox, QQ, WeChat, or
   QQ Reader. Review decision remains **BLOCK**.
+
+## Review Update - 2026-07-13 ActivityThread Recents Recovery Wiring
+
+The earlier statement that the client reattach protocol was not connected to
+the Android launch message is superseded in the current tree.
+
+### Findings closed in the current tree
+
+- The ActivityThread callback can recover a stale/missing launch capability
+  before guest record patching. Recovery is synchronous and modifies the same
+  `ActivityClientRecord`/`LaunchActivityItem`; it does not enqueue a copied old
+  message as VirtualApp/BlackBox do.
+- Recovery obtains the current DEAD generation from engine IPC, attaches the
+  new process Binder token, binds guest LoadedApk/Application locally, promotes
+  PREWARMED through a live-authority AIDL operation, registers resume ACK, and
+  requests a fresh capability from the persisted virtual Activity record.
+- The returned engine record controls restored proxy/guest identity. A forged
+  origin package or process slot leaves the proxy launch untouched.
+- PREWARMED promotion is PID/processName/processSlot/generation-gated and
+  idempotent. No durable snapshot can promote itself without live Binder
+  authority.
+- Focused tests cover same-message capability replacement, ordered
+  query/restart/bind/prewarm/capability execution, wrong-process rejection, and
+  repeated PREWARMED promotion.
+
+### Verification
+
+- Full local gate passed in 3m19s: 515 Gradle tasks, 1,945 tests, 0 failures,
+  0 errors, and 12 skipped.
+- Debug APK SHA-256:
+  `C6FFD5B24159DE85AA4A558F06736D0FE762235A2DA02375593495E0BC6F15EE`.
+- Open-source mapping is documented in
+  `docs/reviews/2026-07-09-open-source-engine-comparison.md`.
+
+### Still BLOCK
+
+- There is no device artifact proving this path against real Android recents,
+  process death, OEM transaction layouts, or final RUNNING acknowledgement.
+- Owner-thread Application reconstruction has no independent timeout watchdog;
+  a non-returning guest attach/onCreate can still stall launch until the system
+  kills the process.
+- Engine authority still shares the default app process. Per-guest-process
+  records, runtime permissions, custom-process components, complete Service/
+  Broadcast semantics, native linker/load, and the API 28-36/HyperOS matrix
+  remain incomplete.
+- This does not prove GKD, AstroBox, QQ, WeChat, or QQ Reader compatibility.
+  Review decision remains **BLOCK**.

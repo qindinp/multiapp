@@ -6,6 +6,7 @@ import android.os.IBinder;
 interface IEngineRuntimeService {
     Bundle attachClient(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, IBinder clientToken);
     Bundle processRestarted(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, IBinder clientToken);
+    Bundle markProcessPrewarmed(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId);
     Bundle issueRecentsRestoreCapability(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, String restoreActivityId);
     Bundle queryRuntime(String instanceId);
     Bundle authorizeActivityLaunch(String capabilityToken, String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String proxyActivityClassName, String guestActivityClassName);

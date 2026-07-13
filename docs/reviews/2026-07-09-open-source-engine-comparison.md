@@ -64,3 +64,59 @@ centralizing runtime/package facts in `:core:engine`. The project remains
 `BLOCK` for commercial readiness until the engine owns PMS/AMS/Provider/
 Service/Broadcast/Storage/Native behavior end to end and device evidence proves
 real launches across the compatibility matrix.
+
+## Process-Death Recents Comparison - 2026-07-13
+
+Pinned source review:
+
+- VirtualApp `7d739c85`,
+  `VirtualApp/lib/src/main/java/com/lody/virtual/client/hook/proxies/am/HCallbackStub.java`:
+  a cold launch first calls `VActivityManager.processRestarted()`, then
+  `VClientImpl.bindApplication()`, and only after binding replaces the
+  `ActivityClientRecord` intent/info. Its implementation requeues the same
+  message at the front of `ActivityThread.H` between stages.
+- BlackBox `ffe950f7`,
+  `Bcore/src/main/java/top/niunaijun/blackbox/fake/service/HCallbackProxy.java`:
+  both pre-P `LAUNCH_ACTIVITY` and P+ `EXECUTE_TRANSACTION` paths recover the
+  process and bind Application before replacing `LaunchActivityItem` fields.
+  It also requeues the message while recovery is incomplete.
+- DroidPlugin `c6ebf652`,
+  `project/Libraries/DroidPlugin/src/main/java/com/morgoo/droidplugin/core/PluginProcessManager.java`:
+  provides useful LoadedApk/Application preload and ActivityThread package-map
+  techniques, but does not provide the same durable virtual process-generation
+  authority. It is not sufficient as the recents recovery control plane.
+
+MultiApp decision:
+
+- Keep the common ordering: central process restart authority, local
+  LoadedApk/Application bind, PREWARMED publication, fresh Activity capability,
+  then guest launch-record patch.
+- Do not copy VirtualApp/BlackBox message requeue behavior. MultiApp performs a
+  synchronous recovery inside the current ActivityThread callback and
+  patches the same launch item only after all stages pass. This avoids replaying
+  an old capability or racing another callback invocation.
+- The old proxy Intent contributes only `instanceId`, process slot, and the
+  persisted virtual Activity id. Engine runtime state and the persisted virtual
+  Activity record determine the new generation, proxy class, and guest class.
+  A fresh capability is always issued; Android system Activity tokens are not
+  persisted or reused.
+- Recovery remains fail-closed. Missing Binder authority, process-name
+  mismatch, failed `bindApplication`, PREWARMED rejection, missing task record,
+  or capability mismatch leaves the proxy record untouched.
+
+Current implementation mapping:
+
+- `VirtualActivityLaunchRecovery`: loader-owned synchronous pre-attach seam.
+- `EngineGuestActivityLaunchBridge`: engine-to-loader recovery adapter.
+- `EngineGuestRecentsRecoveryCoordinator`: app-side Android process carrier
+  that invokes only engine APIs and `HostedRuntimeEngine`.
+- `EngineProcessControlPlane.markPrewarmed`: live Binder/PID/processSlot-gated
+  CREATED-to-PREWARMED transition.
+- `ActivityThreadLaunchRecordPatcher`: writes the fresh identity into the same
+  launch Intent and then performs normal capability/LoadedApk validation.
+
+This closes the local code path, not the commercial gate. API 28-36 and HyperOS
+device evidence must still prove actual process death, system recents relaunch,
+Application reconstruction, no black screen, and final RUNNING acknowledgement.
+An owner-thread bootstrap watchdog/recycle path is also still required so a
+guest Application that never returns cannot hold the launch callback forever.

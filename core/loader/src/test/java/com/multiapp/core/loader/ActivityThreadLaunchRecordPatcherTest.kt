@@ -35,6 +35,7 @@ class ActivityThreadLaunchRecordPatcherTest {
         VirtualPackageRegistry.global.clear()
         VirtualProcessRuntime.global.clearAll()
         VirtualActivityLaunchAuthority.clearForTests()
+        VirtualActivityLaunchRecovery.clearForTests()
         unmockkObject(ActivityThreadCompat)
     }
 
@@ -222,6 +223,75 @@ class ActivityThreadLaunchRecordPatcherTest {
     }
 
     @Test
+    fun `stale recents launch recovers fresh capability before patching the same record`() {
+        val extras = mutableMapOf<String, Any?>(
+            VirtualActivityManager.EXTRA_VIRTUAL_ACTIVITY_TOKEN to "activity-root",
+            VirtualActivityManager.EXTRA_INSTANCE_ID to "inst-001",
+            VirtualActivityManager.EXTRA_ORIGIN_PACKAGE_NAME to "com.test.minimal",
+            VirtualActivityManager.EXTRA_GUEST_ACTIVITY_CLASS_NAME to "com.test.minimal.OldActivity",
+            VirtualActivityManager.EXTRA_HOST_PACKAGE_NAME to "com.multiapp.app",
+            VirtualActivityManager.EXTRA_ENGINE_LAUNCH_CAPABILITY to "stale-capability",
+            VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH to 7L,
+            VirtualActivityManager.EXTRA_ENGINE_SESSION_ID to "stale-session",
+            VirtualActivityManager.EXTRA_ENGINE_PROCESS_SLOT to "com.multiapp.app:v0"
+        )
+        val proxyIntent = mutableProxyIntent(extras)
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator { identity ->
+                VirtualActivityLaunchAuthorityResult(
+                    accepted = identity.capabilityToken == "fresh-capability",
+                    reason = if (identity.capabilityToken == "fresh-capability") {
+                        "fresh_capability_authorized"
+                    } else {
+                        "stale_generation"
+                    }
+                )
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+        VirtualActivityLaunchRecovery.install(
+            VirtualActivityLaunchRecoveryHandler { request ->
+                assertEquals("activity-root", request.restoreActivityId)
+                assertEquals(7L, request.previousRuntimeEpoch)
+                VirtualActivityLaunchRecoveryResult(
+                    recovered = true,
+                    identity = VirtualActivityLaunchIdentity(
+                        capabilityToken = "fresh-capability",
+                        instanceId = request.instanceId,
+                        runtimeEpoch = 8L,
+                        engineSessionId = "fresh-session",
+                        processSlot = request.processSlot,
+                        proxyActivityClassName = request.proxyActivityClassName,
+                        guestActivityClassName = "com.test.minimal.RestoredActivity"
+                    ),
+                    reason = "test_recents_recovered"
+                )
+            }
+        )
+        val record = FakeActivityClientRecord().apply {
+            intent = proxyIntent
+            activityInfo = ActivityInfo().apply {
+                packageName = "com.multiapp.app"
+                name = "com.multiapp.app.container.ProxyActivity0"
+            }
+        }
+
+        val result = ActivityThreadLaunchRecordPatcher.patchLaunchRecord(record)
+
+        assertEquals("PACKAGE_SNAPSHOT_MISSING", result.skippedReason)
+        assertEquals("PASS", result.launchAuthorityStatus)
+        assertEquals("PASS", result.launchRecoveryStatus)
+        assertEquals("test_recents_recovered", result.launchRecoveryReason)
+        assertEquals(8L, extras[VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH])
+        assertEquals("fresh-session", extras[VirtualActivityManager.EXTRA_ENGINE_SESSION_ID])
+        assertEquals("fresh-capability", extras[VirtualActivityManager.EXTRA_ENGINE_LAUNCH_CAPABILITY])
+        assertEquals(
+            "com.test.minimal.RestoredActivity",
+            extras[VirtualActivityManager.EXTRA_GUEST_ACTIVITY_CLASS_NAME]
+        )
+    }
+
+    @Test
     fun `launch record evidence redacts activity token`(@TempDir filesDir: File) {
         val rawToken = "raw-activity-token-super-secret"
         val hostApplication = mockk<Application>(relaxed = true) {
@@ -273,6 +343,25 @@ class ActivityThreadLaunchRecordPatcherTest {
             every { getStringExtra(VirtualActivityManager.EXTRA_ENGINE_SESSION_ID) } returns "session-001"
             every { getStringExtra(VirtualActivityManager.EXTRA_ENGINE_PROCESS_SLOT) } returns "com.multiapp.app:v0"
         }
+
+    private fun mutableProxyIntent(extras: MutableMap<String, Any?>): Intent {
+        lateinit var intent: Intent
+        intent = mockk(relaxed = true) {
+            every { getStringExtra(any()) } answers { extras[firstArg<String>()] as? String }
+            every { getLongExtra(any(), any()) } answers {
+                (extras[firstArg<String>()] as? Long) ?: secondArg<Long>()
+            }
+            every { putExtra(any(), any<String>()) } answers {
+                extras[firstArg()] = secondArg<String>()
+                intent
+            }
+            every { putExtra(any(), any<Long>()) } answers {
+                extras[firstArg()] = secondArg<Long>()
+                intent
+            }
+        }
+        return intent
+    }
 
     @Suppress("unused")
     private class FakeActivityClientRecord {

@@ -62,6 +62,13 @@ data class EngineProcessAuthorityDecision(
     val reason: String
 )
 
+data class EngineProcessPrewarmResult(
+    val accepted: Boolean,
+    val idempotent: Boolean,
+    val runtimeState: VirtualRuntimeState?,
+    val reason: String
+)
+
 /**
  * Owns the ephemeral guest-process authority. Durable runtime state is only an
  * identity expectation; it never proves that a guest process is alive.
@@ -196,6 +203,68 @@ class EngineProcessControlPlane(
             return EngineProcessAuthorityDecision(false, identity, "live_client_authority_missing")
         }
         return EngineProcessAuthorityDecision(true, identity, "live_client_authority_confirmed")
+    }
+
+    fun markPrewarmed(
+        identity: EngineProcessClientIdentity,
+        callingPid: Int,
+        callingProcessName: String? = identity.processSlot
+    ): EngineProcessPrewarmResult {
+        if (callingPid <= 0 || callingPid != identity.processId) {
+            return prewarmRejected(null, "calling_pid_mismatch")
+        }
+        if (callingProcessName != identity.processSlot) {
+            return prewarmRejected(null, "calling_process_slot_mismatch")
+        }
+        val authority = authorize(identity.instanceId, callingPid)
+        if (!authority.allowed || authority.identity != identity) {
+            return prewarmRejected(
+                runtimeRegistry.get(identity.instanceId)?.state,
+                authority.reason
+            )
+        }
+        val current = runtimeRegistry.get(identity.instanceId)
+            ?: return prewarmRejected(null, "runtime_not_found")
+        if (current.state == VirtualRuntimeState.PREWARMED || current.state == VirtualRuntimeState.RUNNING) {
+            return EngineProcessPrewarmResult(
+                accepted = true,
+                idempotent = true,
+                runtimeState = current.state,
+                reason = "runtime_already_${current.state.name.lowercase()}"
+            )
+        }
+        if (current.state != VirtualRuntimeState.CREATED) {
+            return prewarmRejected(current.state, "runtime_not_prewarmable:${current.state.name}")
+        }
+        val updated = runtimeRegistry.markPrewarmedIfCurrent(
+            instanceId = identity.instanceId,
+            runtimeEpoch = identity.runtimeEpoch,
+            engineSessionId = identity.engineSessionId,
+            processId = identity.processId,
+            processName = identity.processSlot
+        ) ?: return prewarmRejected(
+            runtimeRegistry.get(identity.instanceId)?.state,
+            "runtime_changed_during_prewarm"
+        )
+        runtimeRegistry.registerOperationEvidence(
+            identity.instanceId,
+            EngineOperationEvidence(
+                component = "runtime",
+                operation = "process-prewarmed",
+                verdict = EngineResultStatus.PASS,
+                entries = identity.toEvidenceEntries() + mapOf(
+                    "accepted" to "true",
+                    "idempotent" to "false",
+                    "reason" to "guest_application_bound_and_runtime_prewarmed"
+                )
+            )
+        )
+        return EngineProcessPrewarmResult(
+            accepted = true,
+            idempotent = false,
+            runtimeState = updated.state,
+            reason = "guest_application_bound_and_runtime_prewarmed"
+        )
     }
 
     fun remove(instanceId: String, runtimeEpoch: Long, engineSessionId: String): Boolean =
@@ -373,6 +442,16 @@ class EngineProcessControlPlane(
         "engineSessionId" to engineSessionId,
         "processSlot" to processSlot,
         "processId" to processId.toString()
+    )
+
+    private fun prewarmRejected(
+        state: VirtualRuntimeState?,
+        reason: String
+    ) = EngineProcessPrewarmResult(
+        accepted = false,
+        idempotent = false,
+        runtimeState = state,
+        reason = reason
     )
 
     private companion object {

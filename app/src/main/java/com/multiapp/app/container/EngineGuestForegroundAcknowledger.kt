@@ -91,6 +91,14 @@ internal class EngineGuestForegroundAcknowledger(
     @Synchronized
     internal fun registrationCount(): Int = if (registration == null) 0 else 1
 
+    @Synchronized
+    internal fun unregister(request: EngineGuestForegroundAckRequest): Boolean {
+        val current = registration ?: return false
+        if (current.request != request.copy(capabilityToken = null)) return false
+        registration = null
+        return true
+    }
+
     private fun installLoaderAuthority() {
         EngineGuestActivityLaunchBridge.install(
             validator = EngineGuestActivityLaunchValidator { identity ->
