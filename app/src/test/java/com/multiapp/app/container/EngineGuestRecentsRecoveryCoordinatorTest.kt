@@ -27,6 +27,9 @@ import org.junit.jupiter.api.Test
 import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 
 class EngineGuestRecentsRecoveryCoordinatorTest {
@@ -148,7 +151,8 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
             }
         }
         val transport = RecordingRecoveryTransport()
-        val watchdogScheduler = Executors.newSingleThreadScheduledExecutor()
+        val watchdogScheduler = prestartedWatchdogScheduler()
+        val abandonExecutor = prestartedAbandonExecutor()
         val recoveryExecutor = Executors.newSingleThreadExecutor()
         try {
             val coordinator = EngineGuestRecentsRecoveryCoordinator(
@@ -160,7 +164,9 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
                 processNameProvider = { PROCESS_SLOT },
                 processToken = mockk(relaxed = true),
                 recoveryTimeoutMs = 20L,
+                abandonAuthorityTimeoutMs = 1_000L,
                 watchdogScheduler = watchdogScheduler,
+                abandonExecutor = abandonExecutor,
                 processTerminator = { processId ->
                     assertEquals(PROCESS_ID, processId)
                     processTerminated.countDown()
@@ -181,6 +187,7 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
         } finally {
             releaseBind.countDown()
             recoveryExecutor.shutdownNow()
+            abandonExecutor.shutdownNow()
             watchdogScheduler.shutdownNow()
         }
     }
@@ -206,8 +213,8 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
             abandonEntered.countDown()
             releaseAbandon.await(10, TimeUnit.SECONDS)
         }
-        val watchdogScheduler = Executors.newSingleThreadScheduledExecutor()
-        val abandonExecutor = Executors.newCachedThreadPool()
+        val watchdogScheduler = prestartedWatchdogScheduler()
+        val abandonExecutor = prestartedAbandonExecutor()
         val recoveryExecutor = Executors.newSingleThreadExecutor()
         try {
             val coordinator = EngineGuestRecentsRecoveryCoordinator(
@@ -219,7 +226,7 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
                 processNameProvider = { PROCESS_SLOT },
                 processToken = mockk(relaxed = true),
                 recoveryTimeoutMs = 20L,
-                abandonAuthorityTimeoutMs = 20L,
+                abandonAuthorityTimeoutMs = 100L,
                 watchdogScheduler = watchdogScheduler,
                 abandonExecutor = abandonExecutor,
                 processTerminator = { processId ->
@@ -258,6 +265,20 @@ class EngineGuestRecentsRecoveryCoordinatorTest {
         guestActivityClassName = GUEST_ACTIVITY,
         restoreActivityId = RESTORE_ACTIVITY_ID
     )
+
+    private fun prestartedWatchdogScheduler() = ScheduledThreadPoolExecutor(1).apply {
+        prestartCoreThread()
+    }
+
+    private fun prestartedAbandonExecutor() = ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue()
+    ).apply {
+        prestartCoreThread()
+    }
 
     private class RecordingRecoveryTransport(
         private val onAbandon: () -> Unit = {}

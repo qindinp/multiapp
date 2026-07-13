@@ -2551,3 +2551,61 @@ independent watchdog is superseded in the current tree.
   semantics, native linker/load, and the compatibility matrix remain open.
 - GKD, AstroBox, QQ, WeChat, and QQ Reader remain unproven. Review decision
   remains **BLOCK**.
+
+## Review Update - 2026-07-13 Central Owner Preparation
+
+The owner graph and high-level engine facade have been reviewed against the
+fixed VirtualApp, BlackBox, and DroidPlugin references. The safe migration
+order is now enforced locally: first make capability generation, process death,
+component services, and the public engine API share one owner; then remove
+client-side authority; only then move the Binder Provider to a dedicated
+process.
+
+### Findings closed in the current tree
+
+- `EngineServerRuntime` owns one registry/system-server/capability/death/
+  control-plane/engine graph. `DefaultVirtualizationEngine` and
+  `EngineBinderProvider` consume that graph instead of constructing competing
+  copies.
+- The six public `VirtualizationEngine` operations are available through AIDL
+  and a strict `IpcVirtualizationEngine` facade. Production app DI no longer
+  binds the local engine implementation.
+- Mutation calls do not retry an unknown Binder result. Runtime-bearing replies
+  are accepted only when their generation identity matches the read-only
+  persisted snapshot.
+- Binder reconnect state is generation-bound. Old or synchronous death
+  callbacks cannot clear or publish a different live connection, and concurrent
+  reconnect callers share one linked Binder.
+- Contract tests cover all six endpoints, malformed requests, unavailable
+  owner, missing runtime, wrong UID, complete evidence, owner identity, and app
+  DI boundaries.
+
+### Verification
+
+- Full local gate passed in 3m03s: 515 Gradle tasks, 1,970 tests, 0 failures,
+  0 errors, and 12 skipped.
+- Debug APK SHA-256:
+  `2379DA191DEED50D19DEDACE2131B194BC7BD146DA214C2741A931FDD9863F11`.
+- Oracle JDK 17 `Future.cancel` and `ThreadPoolExecutor.prestartCoreThread`
+  semantics were used to remove a test-only executor-start race without
+  changing production watchdog deadlines.
+
+### Still BLOCK
+
+- The Provider intentionally remains in the host main process. This batch is a
+  prerequisite for dedicated `:engine` isolation, not that migration itself.
+- `EngineRuntimeInstallers.fileBackedSystemServer()` and several component,
+  ContentResolver, URI-grant, permission, AppOps, and evidence paths can still
+  create local mutable authority. Binder failure can therefore still become
+  split-brain instead of a fail-closed result.
+- UI/use-case instance create/delete and proxy-slot mutation are not yet owned
+  by the engine server. Shared files and process-local synchronization do not
+  provide single-writer semantics.
+- `VirtualProcessRuntime.global` and `VirtualActivityRecordManager.global` may
+  remain process-local mirrors, but they must not be used as a replacement
+  system-service authority.
+- Required next gate: remove mutable local fallback, add authoritative
+  read/command APIs, enforce one writer, add process-role startup, then migrate
+  the Provider to `:engine` in one change with server-death and device tests.
+- No current device artifact proves the new owner/IPC path. Review decision
+  remains **BLOCK**.

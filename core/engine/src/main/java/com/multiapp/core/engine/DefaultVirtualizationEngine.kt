@@ -1,6 +1,5 @@
 package com.multiapp.core.engine
 
-import android.content.Context
 import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineEvidenceReport
@@ -21,7 +20,6 @@ import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.toLegacyMetaDataMap
-import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.util.UUID
 import javax.inject.Inject
@@ -29,33 +27,10 @@ import javax.inject.Singleton
 
 @Singleton
 class DefaultVirtualizationEngine @Inject constructor(
-    @ApplicationContext context: Context,
-    instanceManager: InstanceManager,
-    virtualInstallService: VirtualInstallService,
-    activityLauncher: EngineActivityLauncher,
-    processBootstrapper: EngineProcessBootstrapper,
-    slotStore: EngineRuntimeSlotStore,
-    hookRuntime: DefaultEngineHookRuntime
-) : VirtualizationEngine by DefaultVirtualizationEngineCore(
-    hostPackageName = context.packageName,
-    instanceManager = instanceManager,
-    virtualInstallService = virtualInstallService,
-    activityLauncher = activityLauncher,
-    processBootstrapper = processBootstrapper,
-    slotStore = slotStore,
-    runtimeRegistry = EngineRuntimeRegistry.global.attachStateStore(
-        FileBackedEngineRuntimeStateStore(File(context.filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME))
-    ),
-    activityLaunchCapabilities = EngineActivityLaunchCapabilityRegistry.global,
-    processDeathRegistry = EngineProcessDeathRegistry(),
-    profilePolicy = CompatibilityProfilePolicy(),
-    hookRuntime = hookRuntime,
-    permissionGrantSeeder = SourcePackagePermissionGrantSeeder(context.packageManager),
-    evidenceSessionFactory = { UUID.randomUUID().toString() },
-    systemServerFactory = {
-        EngineRuntimeInstallers.fileBackedSystemServer(context).server
-    }
-) {
+    engineServerRuntime: EngineServerRuntime
+) : VirtualizationEngine by engineServerRuntime.virtualizationEngine {
+    internal val delegatedEngine: VirtualizationEngine = engineServerRuntime.virtualizationEngine
+
     companion object {
         internal const val ENGINE_RUNTIME_STATE_FILE = EngineRuntimeStateFiles.DEFAULT_FILE_NAME
     }
@@ -68,10 +43,10 @@ internal class DefaultVirtualizationEngineCore(
     private val activityLauncher: EngineActivityLauncher,
     private val processBootstrapper: EngineProcessBootstrapper = EngineProcessBootstrapper.IMMEDIATE,
     private val slotStore: EngineRuntimeSlotStore = InMemoryEngineRuntimeSlotStore(),
-    private val runtimeRegistry: EngineRuntimeRegistry = EngineRuntimeRegistry(),
-    private val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
+    internal val runtimeRegistry: EngineRuntimeRegistry = EngineRuntimeRegistry(),
+    internal val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
         EngineActivityLaunchCapabilityRegistry(),
-    private val processDeathRegistry: EngineProcessDeathRegistry = EngineProcessDeathRegistry(),
+    internal val processDeathRegistry: EngineProcessDeathRegistry = EngineProcessDeathRegistry(),
     private val profilePolicy: CompatibilityProfilePolicy = CompatibilityProfilePolicy(),
     private val hookRuntime: EngineHookRuntime = EngineHookRuntime.NO_OP,
     private val permissionGrantSeeder: EnginePermissionGrantSeeder = EnginePermissionGrantSeeder.NO_OP,
@@ -81,7 +56,7 @@ internal class DefaultVirtualizationEngineCore(
         DefaultVirtualSystemServer(registry)
     }
 ) : VirtualizationEngine {
-    private val systemServer: VirtualSystemServer = systemServerFactory(runtimeRegistry)
+    internal val systemServer: VirtualSystemServer = systemServerFactory(runtimeRegistry)
     private val runtimeEpochLock = Any()
     private val allocatedRuntimeEpochs = mutableMapOf<String, Long>()
     private val instanceOperationLocks = Array(INSTANCE_OPERATION_LOCK_COUNT) { Any() }

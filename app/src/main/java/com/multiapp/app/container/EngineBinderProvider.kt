@@ -7,24 +7,34 @@ import android.net.Uri
 import android.os.Bundle
 import com.multiapp.core.engine.EngineRuntimeBinderEndpoint
 import com.multiapp.core.engine.EngineRuntimeIpcContract
-import com.multiapp.core.engine.EngineRuntimeInstallers
+import com.multiapp.core.engine.EngineServerRuntime
+import dagger.hilt.EntryPoint
+import dagger.hilt.InstallIn
+import dagger.hilt.android.EntryPointAccessors
+import dagger.hilt.components.SingletonComponent
 
 class EngineBinderProvider : ContentProvider() {
     private lateinit var endpoint: EngineRuntimeBinderEndpoint
 
     override fun onCreate(): Boolean {
         val hostContext = context?.applicationContext ?: context ?: return false
-        val handle = EngineRuntimeInstallers.fileBackedSystemServer(hostContext)
-        handle.registry.invalidateEphemeralProcessStates("engine_server_process_started")
+        val owner = EntryPointAccessors.fromApplication(
+            hostContext,
+            EngineServerRuntimeEntryPoint::class.java
+        ).engineServerRuntime()
+        owner.runtimeRegistry.invalidateEphemeralProcessStates("engine_server_process_started")
         endpoint = EngineRuntimeBinderEndpoint(
-            registry = handle.registry,
+            registry = owner.runtimeRegistry,
             hostUid = hostContext.applicationInfo.uid,
-            activityService = handle.server.activityService,
-            providerService = handle.server.providerService,
-            permissionService = handle.server.permissionService,
-            appOpsService = handle.server.appOpsService,
-            serviceService = handle.server.serviceService,
-            broadcastService = handle.server.broadcastService
+            activityLaunchCapabilities = owner.activityLaunchCapabilities,
+            activityService = owner.systemServer.activityService,
+            providerService = owner.systemServer.providerService,
+            permissionService = owner.systemServer.permissionService,
+            appOpsService = owner.systemServer.appOpsService,
+            serviceService = owner.systemServer.serviceService,
+            broadcastService = owner.systemServer.broadcastService,
+            virtualizationEngine = owner.virtualizationEngine,
+            processControlPlane = owner.processControlPlane
         )
         return true
     }
@@ -58,4 +68,10 @@ class EngineBinderProvider : ContentProvider() {
         selection: String?,
         selectionArgs: Array<out String>?
     ): Int = 0
+}
+
+@EntryPoint
+@InstallIn(SingletonComponent::class)
+internal interface EngineServerRuntimeEntryPoint {
+    fun engineServerRuntime(): EngineServerRuntime
 }

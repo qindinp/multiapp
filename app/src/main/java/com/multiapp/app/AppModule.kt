@@ -12,12 +12,12 @@ import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.app.container.ContentProviderEngineProcessBootstrapper
 import com.multiapp.app.container.EngineReadyActivityLauncher
 import com.multiapp.core.engine.DefaultHostedRuntimeEngine
-import com.multiapp.core.engine.DefaultVirtualizationEngine
 import com.multiapp.core.engine.EngineActivityLauncher
 import com.multiapp.core.engine.EngineProcessBootstrapper
 import com.multiapp.core.engine.EngineRuntimeSlotStore
 import com.multiapp.core.engine.FileBackedEngineRuntimeSlotStore
 import com.multiapp.core.engine.HostedRuntimeEngine
+import com.multiapp.core.engine.IpcVirtualizationEngine
 import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.manifest.toVirtualMetaDataMap
 import com.multiapp.core.model.engine.VirtualizationEngine
@@ -50,7 +50,7 @@ object AppModule {
 
     @Provides
     @Singleton
-    fun provideVirtualizationEngine(engine: DefaultVirtualizationEngine): VirtualizationEngine = engine
+    fun provideVirtualizationEngine(engine: IpcVirtualizationEngine): VirtualizationEngine = engine
 
     @Provides
     @Singleton

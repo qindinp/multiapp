@@ -10,6 +10,7 @@ import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
@@ -177,6 +178,11 @@ object EngineRuntimeIpcContract {
     const val KEY_TOP_ACTIVITY_CLASS_NAME = "topActivityClassName"
     const val KEY_TOP_ACTIVITY_STATE = "topActivityState"
     const val KEY_ACTIVITIES = "activities"
+    const val KEY_ENGINE_RUNTIME = "engineRuntime"
+    const val KEY_ENGINE_EVIDENCE = "engineEvidence"
+    const val KEY_ENGINE_PROFILE = "engineProfile"
+    const val KEY_ENGINE_SUBSYSTEM_VERDICTS = "engineSubsystemVerdicts"
+    const val KEY_ENGINE_OPERATION_EVIDENCE = "engineOperationEvidence"
 
     fun authority(hostPackageName: String): String = hostPackageName + AUTHORITY_SUFFIX
 }
@@ -267,6 +273,7 @@ class EngineRuntimeBinderEndpoint(
     private val appOpsService: VirtualAppOpsService = DefaultVirtualSystemServer(registry).appOpsService,
     private val serviceService: VirtualServiceService = DefaultVirtualSystemServer(registry).serviceService,
     private val broadcastService: VirtualBroadcastService = DefaultVirtualSystemServer(registry).broadcastService,
+    private val virtualizationEngine: VirtualizationEngine? = null,
     private val processControlPlane: EngineProcessControlPlane = EngineProcessControlPlane(
         runtimeRegistry = registry,
         activityLaunchCapabilities = activityLaunchCapabilities
@@ -282,6 +289,45 @@ class EngineRuntimeBinderEndpoint(
     private val callingPid: () -> Int = Binder::getCallingPid,
     private val callingProcessName: (Int) -> String? = ::readAndroidProcessName
 ) : IEngineRuntimeService.Stub() {
+
+    override fun engineInstallOrRefreshPackage(originPackageName: String): Bundle = authorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@authorizedBundle engineOperationUnavailableBundle("installOrRefreshPackage")
+        engine.installOrRefreshPackage(originPackageName).toEngineIpcBundle()
+    }
+
+    override fun engineCreateInstance(originPackageName: String): Bundle = authorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@authorizedBundle engineOperationUnavailableBundle("createInstance")
+        engine.createInstance(originPackageName).toEngineIpcBundle()
+    }
+
+    override fun engineLaunchInstance(request: Bundle): Bundle = authorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@authorizedBundle engineOperationUnavailableBundle("launchInstance")
+        val decoded = request.toLaunchInstanceRequestOrNull()
+            ?: return@authorizedBundle engineInvalidRequestBundle("launchInstance")
+        engine.launchInstance(decoded).toEngineIpcBundle()
+    }
+
+    override fun engineStopInstance(instanceId: String): Bundle = authorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@authorizedBundle engineOperationUnavailableBundle("stopInstance")
+        engine.stopInstance(instanceId).toEngineIpcBundle()
+    }
+
+    override fun engineQueryRuntimeState(instanceId: String): Bundle = authorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@authorizedBundle engineOperationUnavailableBundle("queryRuntimeState")
+        engine.queryRuntimeState(instanceId)?.toEngineRuntimeIdentityBundle()
+            ?: engineMissingRuntimeBundle(instanceId)
+    }
+
+    override fun engineExportEvidence(instanceId: String): Bundle = authorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@authorizedBundle engineOperationUnavailableBundle("exportEvidence")
+        engine.exportEvidence(instanceId).toEngineEvidenceBundle()
+    }
 
     override fun attachClient(
         instanceId: String,
@@ -1139,15 +1185,80 @@ class EngineRuntimeIpcClient(
     }
 }
 
+internal class EngineRuntimeServiceConnection(
+    private val connector: () -> IEngineRuntimeService?
+) {
+    private data class LinkedService(
+        val generation: Long,
+        val service: IEngineRuntimeService,
+        val binder: IBinder,
+        val deathRecipient: IBinder.DeathRecipient
+    )
+
+    @Volatile
+    private var current: LinkedService? = null
+    private var nextGeneration: Long = 0L
+
+    fun active(): IEngineRuntimeService? {
+        val snapshot = current
+        if (snapshot != null && snapshot.binder.isBinderAlive) return snapshot.service
+        return reconnect()
+    }
+
+    @Synchronized
+    fun reconnect(): IEngineRuntimeService? {
+        val snapshot = current
+        if (snapshot != null && snapshot.binder.isBinderAlive) return snapshot.service
+
+        current = null
+        snapshot?.let(::unlink)
+
+        val connected = connector() ?: return null
+        val binder = connected.asBinder()
+        val generation = ++nextGeneration
+        val recipient = IBinder.DeathRecipient {
+            clearIfCurrent(generation, binder)
+        }
+        val candidate = LinkedService(
+            generation = generation,
+            service = connected,
+            binder = binder,
+            deathRecipient = recipient
+        )
+
+        // Publish before linkToDeath so a synchronous death callback can revoke
+        // exactly this generation instead of leaving a dead candidate cached.
+        current = candidate
+        val linked = runCatching {
+            binder.linkToDeath(recipient, 0)
+            true
+        }.getOrDefault(false)
+        if (!linked || !binder.isBinderAlive || current !== candidate) {
+            if (current === candidate) current = null
+            if (linked) unlink(candidate)
+            return null
+        }
+        return connected
+    }
+
+    @Synchronized
+    private fun clearIfCurrent(generation: Long, binder: IBinder) {
+        val snapshot = current ?: return
+        if (snapshot.generation == generation && snapshot.binder === binder) {
+            current = null
+        }
+    }
+
+    private fun unlink(linked: LinkedService) {
+        runCatching { linked.binder.unlinkToDeath(linked.deathRecipient, 0) }
+    }
+}
+
 object EngineRuntimeIpcClients {
     @Volatile
-    private var service: IEngineRuntimeService? = null
-    @Volatile
     private var applicationContext: Context? = null
-    private val deathRecipient = android.os.IBinder.DeathRecipient {
-        synchronized(this) {
-            service = null
-        }
+    private val connection = EngineRuntimeServiceConnection {
+        applicationContext?.let { EngineRuntimeIpcClient(it).connect() }
     }
 
     fun install(context: Context): Boolean {
@@ -1156,6 +1267,34 @@ object EngineRuntimeIpcClients {
     }
 
     fun isConnected(): Boolean = activeService() != null
+
+    internal fun engineInstallOrRefreshPackage(originPackageName: String): EngineRemoteResult? =
+        invokeEngineResult { service -> service.engineInstallOrRefreshPackage(originPackageName) }
+
+    internal fun engineCreateInstance(originPackageName: String): EngineRemoteResult? =
+        invokeEngineResult { service -> service.engineCreateInstance(originPackageName) }
+
+    internal fun engineLaunchInstance(
+        request: com.multiapp.core.model.engine.LaunchInstanceRequest
+    ): EngineRemoteResult? =
+        invokeEngineResult { service -> service.engineLaunchInstance(request.toEngineIpcBundle()) }
+
+    internal fun engineStopInstance(instanceId: String): EngineRemoteResult? =
+        invokeEngineResult { service -> service.engineStopInstance(instanceId) }
+
+    internal fun engineQueryRuntimeState(instanceId: String): EngineRuntimeIdentity? {
+        val active = activeService() ?: return null
+        val response = runCatching { active.engineQueryRuntimeState(instanceId) }.getOrNull() ?: return null
+        return response.toEngineRuntimeIdentityOrNull()
+    }
+
+    internal fun engineExportEvidence(
+        instanceId: String
+    ): com.multiapp.core.model.engine.EngineEvidenceReport? {
+        val active = activeService() ?: return null
+        val response = runCatching { active.engineExportEvidence(instanceId) }.getOrNull() ?: return null
+        return response.toEngineEvidenceOrNull()
+    }
 
     fun attachClient(
         identity: EngineProcessClientIdentity,
@@ -1582,33 +1721,19 @@ object EngineRuntimeIpcClients {
     }
 
     private fun activeService(): IEngineRuntimeService? {
-        val current = service
-        if (current != null && current.asBinder().isBinderAlive) return current
-        return reconnect()
+        return connection.active()
     }
 
-    @Synchronized
+    private fun invokeEngineResult(
+        operation: (IEngineRuntimeService) -> Bundle
+    ): EngineRemoteResult? {
+        val active = activeService() ?: return null
+        val response = runCatching { operation(active) }.getOrNull() ?: return null
+        return response.toEngineRemoteResultOrNull()
+    }
+
     private fun reconnect(): IEngineRuntimeService? {
-        val current = service
-        if (current != null && current.asBinder().isBinderAlive) return current
-        current?.asBinder()?.let { binder ->
-            runCatching { binder.unlinkToDeath(deathRecipient, 0) }
-        }
-        val context = applicationContext ?: return null
-        val connected = EngineRuntimeIpcClient(context).connect() ?: run {
-            service = null
-            return null
-        }
-        val linked = runCatching {
-            connected.asBinder().linkToDeath(deathRecipient, 0)
-            true
-        }.getOrDefault(false)
-        if (!linked || !connected.asBinder().isBinderAlive) {
-            service = null
-            return null
-        }
-        service = connected
-        return connected
+        return connection.reconnect()
     }
 }
 

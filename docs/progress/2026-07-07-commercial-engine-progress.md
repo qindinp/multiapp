@@ -4045,3 +4045,71 @@ Remaining gate:
 - This is generic recovery infrastructure, not compatibility proof for GKD,
   AstroBox, QQ, WeChat, or QQ Reader. The commercial decision remains
   **BLOCK**.
+
+## Implementation Update - 2026-07-13 Central Engine Ownership and High-Level IPC
+
+This batch creates one in-process server graph before the engine authority is
+moved to a dedicated process. The ordering was rechecked against VirtualApp
+`7d739c85`, BlackBox `ffe950f7`, and DroidPlugin `c6ebf652`: the server must
+own the mutable service graph and capability registries before clients are
+forced onto remote facades. Moving the Provider first would split launch
+capability generation from authorization.
+
+Implemented:
+
+- Added singleton `EngineServerRuntime`, which owns one
+  `EngineRuntimeRegistry`, `VirtualSystemServer`, launch-capability registry,
+  process-death registry, process control plane, and
+  `DefaultVirtualizationEngineCore` graph.
+- `DefaultVirtualizationEngine` now delegates to that owner instead of
+  constructing another runtime graph.
+- `IEngineRuntimeService` now exposes all six public `VirtualizationEngine`
+  operations: install/refresh, create, launch, stop, query, and evidence
+  export. The endpoint uses strict Bundle codecs and fails closed for malformed
+  launch requests, missing runtimes, unavailable owners, and caller UID
+  mismatches.
+- Added `IpcVirtualizationEngine`; the production `AppModule` binding now
+  exposes only this IPC facade. Mutations are not retried when the Binder result
+  is unknown. Returned runtime identity must match the read-only durable
+  snapshot before a complete runtime is returned to the caller.
+- `EngineBinderProvider` obtains the singleton owner through a Hilt entry point
+  and builds its endpoint entirely from that owner. The Provider deliberately
+  remains in the host main process for this preparation batch.
+- `EngineRuntimeServiceConnection` now creates a separate generation-bound
+  death recipient for each Binder. A delayed callback from an old Binder cannot
+  clear a newer connection, synchronous death is not published as live, and
+  concurrent callers establish one connection.
+- Endpoint, IPC codec, owner identity, reconnect race, and app DI/source
+  boundary tests were added. Watchdog tests use prestarted executors so the
+  test's 20 ms recovery deadline does not cancel an abandon task before its
+  worker thread starts; production timeout policy is unchanged.
+
+Verification:
+
+- Final full local gate passed in 3m03s with 515 Gradle tasks executed or
+  reused.
+- Aggregated reports contain 1,970 tests, 0 failures, 0 errors, and 12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 101,612,541 bytes.
+- APK SHA-256:
+  `2379DA191DEED50D19DEDACE2131B194BC7BD146DA214C2741A931FDD9863F11`.
+- `git diff --check` passed; existing LF/CRLF conversion warnings remain.
+
+Remaining gate:
+
+- This is one owner graph, not yet one application-wide authority. Client and
+  guest paths can still construct file-backed `DefaultVirtualSystemServer`
+  instances, and `IpcBackedVirtual*Service` implementations still perform
+  mutable local fallback after Binder failure.
+- Instance create/delete paths still bypass the engine in UI/use-case code.
+  Delete can remove data before runtime, capability, death registration,
+  subsystem state, and slot ownership are released.
+- Proxy Activity slot storage still has multiple process writers. A process
+  lock or atomic file replacement alone would not establish server ownership.
+- The next P0 batch must make non-server mutations fail closed, add the missing
+  authoritative read/command APIs, and enforce a single writer for instance,
+  slot, runtime, task, Provider, Service, Broadcast, permission, AppOps, and URI
+  grant state. Only then may the Provider move atomically to `:engine` with
+  Application process-role routing.
+- No device artifact proves this owner/IPC batch. Commercial status remains
+  **BLOCK**; it is not compatibility proof for GKD, AstroBox, QQ, WeChat, or
+  QQ Reader.
