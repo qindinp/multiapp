@@ -172,9 +172,10 @@ data class EngineRuntimeStateRecord(
 
 interface EngineRuntimeStateStore {
     fun put(record: EngineRuntimeStateRecord)
+    fun compareAndSet(expected: EngineRuntimeStateRecord, updated: EngineRuntimeStateRecord): Boolean
     fun putIfNewer(record: EngineRuntimeStateRecord): EngineRuntimeStateRecord {
         val current = get(record.instanceId)
-        if (current != null && current.runtimeEpoch > record.runtimeEpoch) return current
+        if (current != null && current.rejectsIdentityReplacement(record)) return current
         put(record)
         return record
     }
@@ -202,9 +203,20 @@ class InMemoryEngineRuntimeStateStore : EngineRuntimeStateStore {
     }
 
     @Synchronized
+    override fun compareAndSet(
+        expected: EngineRuntimeStateRecord,
+        updated: EngineRuntimeStateRecord
+    ): Boolean {
+        require(expected.instanceId == updated.instanceId) { "runtime CAS changed instanceId" }
+        if (records[expected.instanceId] != expected) return false
+        records[updated.instanceId] = updated
+        return true
+    }
+
+    @Synchronized
     override fun putIfNewer(record: EngineRuntimeStateRecord): EngineRuntimeStateRecord {
         val current = records[record.instanceId]
-        if (current != null && current.runtimeEpoch > record.runtimeEpoch) return current
+        if (current != null && current.rejectsIdentityReplacement(record)) return current
         records[record.instanceId] = record
         return record
     }
@@ -242,10 +254,22 @@ class FileBackedEngineRuntimeStateStore(
         store(current.values.toList())
     }
 
+    override fun compareAndSet(
+        expected: EngineRuntimeStateRecord,
+        updated: EngineRuntimeStateRecord
+    ): Boolean = withFileLock {
+        require(expected.instanceId == updated.instanceId) { "runtime CAS changed instanceId" }
+        val current = load().associateBy { it.instanceId }.toMutableMap()
+        if (current[expected.instanceId] != expected) return@withFileLock false
+        current[updated.instanceId] = updated
+        store(current.values.toList())
+        true
+    }
+
     override fun putIfNewer(record: EngineRuntimeStateRecord): EngineRuntimeStateRecord = withFileLock {
         val current = load().associateBy { it.instanceId }.toMutableMap()
         val existing = current[record.instanceId]
-        if (existing != null && existing.runtimeEpoch > record.runtimeEpoch) {
+        if (existing != null && existing.rejectsIdentityReplacement(record)) {
             return@withFileLock existing
         }
         current[record.instanceId] = record
@@ -773,6 +797,11 @@ class FileBackedEngineRuntimeStateStore(
         private const val LIST_SEPARATOR = ","
     }
 }
+
+private fun EngineRuntimeStateRecord.rejectsIdentityReplacement(
+    candidate: EngineRuntimeStateRecord
+): Boolean = runtimeEpoch > candidate.runtimeEpoch ||
+    (runtimeEpoch == candidate.runtimeEpoch && engineSessionId != candidate.engineSessionId)
 
 private data class RuntimeStateFileFingerprint(
     val exists: Boolean,

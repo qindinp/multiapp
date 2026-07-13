@@ -7,7 +7,9 @@ import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.VirtualPackageRecord
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineOperationEvidence
+import com.multiapp.core.model.engine.EnginePrewarmPolicy
 import com.multiapp.core.model.engine.EngineProfile
+import com.multiapp.core.model.engine.EngineResult
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.LaunchInstanceRequest
@@ -24,6 +26,10 @@ import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualTaskRecord
 import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -57,19 +63,23 @@ class DefaultVirtualizationEngineTest {
         assertEquals(instance.instanceId, result.runtime?.instanceId)
         assertEquals("evidence-1", result.runtime?.evidenceSessionId)
         assertEquals("engine-evidence-1", result.runtime?.engineSessionId)
-        assertEquals(VirtualRuntimeState.CREATED, result.runtime?.state)
+        assertEquals(VirtualRuntimeState.PREWARMED, result.runtime?.state)
         assertEquals(result.runtime?.processSlot, result.runtime?.processName)
         assertNotNull(result.runtime?.runtimeEpoch)
         assertEquals(1, launches.size)
         assertEquals(instance.instanceId, launches.single().instanceId)
         assertEquals(EngineProfile.BASELINE, launches.single().profile)
         assertEquals(EngineEvidenceMode.DEFAULT, launches.single().evidenceMode)
+        assertEquals("com.test.app.MainActivity", launches.single().guestActivityClassName)
+        assertEquals(result.runtime?.runtimeEpoch, launches.single().runtimeEpoch)
+        assertEquals(result.runtime?.engineSessionId, launches.single().engineSessionId)
+        assertEquals(EngineProcessBootstrapState.READY, launches.single().bootstrapState)
         assertTrue(launches.single().providerRoutingEnabled)
         assertFalse(launches.single().legacyProviderHookEnabled)
         assertEquals(0, installs.metadataImportCalls)
         assertNotNull(registry.get(instance.instanceId))
         assertEquals("engine-evidence-1", registry.evidence(instance.instanceId).entries["engineSessionId"])
-        assertEquals("CREATED", registry.evidence(instance.instanceId).entries["runtimeState"])
+        assertEquals("PREWARMED", registry.evidence(instance.instanceId).entries["runtimeState"])
         assertEquals("PASS", registry.evidence(instance.instanceId).entries["virtualSystemServerStatus"])
         assertEquals(
             "BASELINE",
@@ -86,6 +96,155 @@ class DefaultVirtualizationEngineTest {
                 .entries["lsplantEnabled"]
         )
         assertEquals(1, instances.launchUpdates)
+    }
+
+    @Test
+    fun `same instance launches cannot overlap runtime generations`() {
+        val instance = instance()
+        val firstBootstrapEntered = CountDownLatch(1)
+        val secondBootstrapEntered = CountDownLatch(1)
+        val releaseFirstBootstrap = CountDownLatch(1)
+        val bootstrapCalls = AtomicInteger()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = EngineProcessBootstrapper { request ->
+                when (bootstrapCalls.incrementAndGet()) {
+                    1 -> {
+                        firstBootstrapEntered.countDown()
+                        check(releaseFirstBootstrap.await(5, TimeUnit.SECONDS))
+                    }
+                    2 -> secondBootstrapEntered.countDown()
+                }
+                EngineProcessBootstrapResult.immediateReady(request)
+            },
+            runtimeEpochFactory = { 1L }
+        )
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val first = executor.submit<EngineResult> {
+                engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+            }
+            assertTrue(firstBootstrapEntered.await(5, TimeUnit.SECONDS))
+            val second = executor.submit<EngineResult> {
+                engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+            }
+
+            assertFalse(secondBootstrapEntered.await(200, TimeUnit.MILLISECONDS))
+            releaseFirstBootstrap.countDown()
+
+            val firstResult = first.get(5, TimeUnit.SECONDS)
+            val secondResult = second.get(5, TimeUnit.SECONDS)
+            assertEquals(EngineResultStatus.PASS, firstResult.status)
+            assertEquals(EngineResultStatus.PASS, secondResult.status)
+            assertTrue(secondBootstrapEntered.await(5, TimeUnit.SECONDS))
+            assertTrue(assertNotNull(secondResult.runtime).runtimeEpoch > assertNotNull(firstResult.runtime).runtimeEpoch)
+        } finally {
+            releaseFirstBootstrap.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `stop waits for same instance launch to finish`() {
+        val instance = instance()
+        val bootstrapEntered = CountDownLatch(1)
+        val releaseBootstrap = CountDownLatch(1)
+        val stopAttempted = CountDownLatch(1)
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = EngineProcessBootstrapper { request ->
+                bootstrapEntered.countDown()
+                check(releaseBootstrap.await(5, TimeUnit.SECONDS))
+                EngineProcessBootstrapResult.immediateReady(request)
+            }
+        )
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val launch = executor.submit<EngineResult> {
+                engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+            }
+            assertTrue(bootstrapEntered.await(5, TimeUnit.SECONDS))
+            val stop = executor.submit<EngineResult> {
+                stopAttempted.countDown()
+                engine.stopInstance(instance.instanceId)
+            }
+            assertTrue(stopAttempted.await(5, TimeUnit.SECONDS))
+            Thread.sleep(100)
+            assertFalse(stop.isDone)
+
+            releaseBootstrap.countDown()
+
+            assertEquals(EngineResultStatus.PASS, launch.get(5, TimeUnit.SECONDS).status)
+            assertEquals(EngineResultStatus.PASS, stop.get(5, TimeUnit.SECONDS).status)
+            assertNull(engine.queryRuntimeState(instance.instanceId))
+        } finally {
+            releaseBootstrap.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `launch blocks foreground proxy when process bootstrap fails`() {
+        val instance = instance()
+        val launches = mutableListOf<EngineLaunchSpec>()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { launches += it },
+            processBootstrapper = EngineProcessBootstrapper { request ->
+                EngineProcessBootstrapResult(
+                    state = EngineProcessBootstrapState.FAILED,
+                    verdict = EngineResultStatus.FAIL,
+                    instanceId = request.runtime.instanceId,
+                    runtimeEpoch = request.runtime.runtimeEpoch,
+                    engineSessionId = request.runtime.engineSessionId,
+                    processName = request.runtime.processSlot,
+                    message = "guest Application did not become ready"
+                )
+            }
+        )
+
+        val result = engine.launchInstance(LaunchInstanceRequest(instanceId = instance.instanceId))
+
+        assertEquals(EngineResultStatus.FAIL, result.status)
+        assertTrue(launches.isEmpty())
+        assertEquals(VirtualRuntimeState.CREATED, engine.queryRuntimeState(instance.instanceId)?.state)
+        assertEquals(
+            EngineResultStatus.FAIL,
+            engine.exportEvidence(instance.instanceId)
+                .operationEntries("runtime", "process-bootstrap")
+                .single()
+                .verdict
+        )
+    }
+
+    @Test
+    fun `launch rejects a disabled process bootstrap policy`() {
+        val instance = instance()
+        val launches = mutableListOf<EngineLaunchSpec>()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { launches += it }
+        )
+
+        val result = engine.launchInstance(
+            LaunchInstanceRequest(
+                instanceId = instance.instanceId,
+                prewarmPolicy = EnginePrewarmPolicy.DISABLED
+            )
+        )
+
+        assertEquals(EngineResultStatus.UNSUPPORTED, result.status)
+        assertTrue(launches.isEmpty())
     }
 
     @Test
@@ -410,6 +569,8 @@ class DefaultVirtualizationEngineTest {
                 "permission:seed:PASS",
                 "provider:route-token:PASS",
                 "provider:runtime-state:PARTIAL",
+                "runtime:process-bootstrap:PASS",
+                "runtime:process-token:PARTIAL",
                 "service:runtime-state:PARTIAL"
             ),
             flattenedEvidence.map { evidence -> "${evidence.component}:${evidence.operation}:${evidence.verdict}" }

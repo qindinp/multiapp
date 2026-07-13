@@ -1,7 +1,6 @@
 package com.multiapp.app
 
 import android.content.Context
-import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
@@ -9,17 +8,18 @@ import android.content.pm.ProviderInfo
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.PatternMatcher
-import com.multiapp.app.container.ContainerActivity
 import com.multiapp.app.container.ContainerRuntimePaths
+import com.multiapp.app.container.ContentProviderEngineProcessBootstrapper
+import com.multiapp.app.container.EngineReadyActivityLauncher
 import com.multiapp.core.engine.DefaultHostedRuntimeEngine
 import com.multiapp.core.engine.DefaultVirtualizationEngine
 import com.multiapp.core.engine.EngineActivityLauncher
+import com.multiapp.core.engine.EngineProcessBootstrapper
 import com.multiapp.core.engine.EngineRuntimeSlotStore
 import com.multiapp.core.engine.FileBackedEngineRuntimeSlotStore
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.manifest.toVirtualMetaDataMap
-import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.InstanceManager
@@ -59,39 +59,18 @@ object AppModule {
     @Provides
     @Singleton
     fun provideEngineActivityLauncher(@ApplicationContext context: Context): EngineActivityLauncher {
-        val appContext = context.applicationContext ?: context
-        return EngineActivityLauncher { spec ->
-            val intent = ContainerActivity.createIntent(
-                context = appContext,
-                instanceId = spec.instanceId,
-                providerHookEnabled = spec.legacyProviderHookEnabled
-            ).apply {
-                processSlotContainerActivityClassName(appContext.packageName, spec.processSlot)?.let { className ->
-                    setClassName(appContext.packageName, className)
-                }
-                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROFILE, spec.profile.name)
-                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_EVIDENCE_MODE, spec.evidenceMode.name)
-                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROCESS_SLOT, spec.processSlot)
-                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_PROXY_SLOT, spec.proxySlot)
-                putExtra(EngineLaunchIntentContract.EXTRA_ENGINE_EVIDENCE_SESSION_ID, spec.evidenceSessionId)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            appContext.startActivity(intent)
-        }
+        return EngineReadyActivityLauncher(context)
     }
+
+    @Provides
+    @Singleton
+    fun provideEngineProcessBootstrapper(@ApplicationContext context: Context): EngineProcessBootstrapper =
+        ContentProviderEngineProcessBootstrapper(context)
 
     @Provides
     @Singleton
     fun provideEngineRuntimeSlotStore(@ApplicationContext context: Context): EngineRuntimeSlotStore {
         return FileBackedEngineRuntimeSlotStore(ContainerRuntimePaths.engineRuntimeSlotsFile(context))
-    }
-
-    private fun processSlotContainerActivityClassName(hostPackageName: String, processSlot: String): String? {
-        val index = processSlot.substringAfterLast(":v", missingDelimiterValue = "")
-            .toIntOrNull()
-            ?.takeIf { it in 0 until PROCESS_SLOT_COUNT }
-            ?: return null
-        return "$hostPackageName.container.ContainerActivityV$index"
     }
 
     @Provides
@@ -375,5 +354,4 @@ object AppModule {
         return readPermission.takeIf { it != null && it == writePermission }
     }
 
-    private const val PROCESS_SLOT_COUNT = 8
 }

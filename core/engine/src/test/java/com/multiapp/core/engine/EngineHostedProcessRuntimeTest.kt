@@ -1,9 +1,11 @@
 package com.multiapp.core.engine
 
+import android.app.Application
 import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.VirtualProcessRuntime
 import com.multiapp.core.loader.toSummary
+import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -67,7 +69,7 @@ class EngineHostedProcessRuntimeTest {
             originApkPath = "/tmp/base.apk",
             dataRoot = "/tmp/$instanceId",
             guestClassLoader = ClassLoader.getSystemClassLoader(),
-            guestApplication = null,
+            guestApplication = mockk<Application>(relaxed = true),
             installRecord = null,
             packageSnapshot = null,
             launcherActivityClassName = "com.example.app.MainActivity",

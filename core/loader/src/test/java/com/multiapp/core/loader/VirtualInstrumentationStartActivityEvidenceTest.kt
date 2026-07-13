@@ -20,17 +20,31 @@ import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkObject
 import io.mockk.unmockkStatic
+import io.mockk.verify
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class VirtualInstrumentationStartActivityEvidenceTest {
+
+    @BeforeTest
+    fun setUp() {
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                VirtualActivityLaunchAuthorityResult(true, "test_authorized")
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+    }
 
     @AfterTest
     fun tearDown() {
@@ -39,8 +53,81 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         VirtualActivityRecordManager.global.clearAll()
         VirtualProcessRuntime.global.clearAll()
         VirtualPackageRegistry.global.clear()
+        VirtualActivityLaunchAuthority.clearForTests()
         unmockkObject(ActivityThreadCompat)
         unmockkStatic(Log::class)
+    }
+
+    @Test
+    fun `hosted runtime cache requires the current ClassLoader and Application identity`() {
+        val snapshot = snapshotForInstance(
+            instanceId = "inst-001",
+            virtualPackageName = "com.multiapp.instance.minimal"
+        )
+        val guestApplication = mockk<Application>(relaxed = true)
+        val current = hostedBootstrapResult(snapshot).copy(
+            guestClassLoader = javaClass.classLoader,
+            guestApplication = guestApplication
+        )
+
+        assertTrue(VirtualInstrumentation.canReuseHostedRuntimeCache(current.copy(), current))
+        assertFalse(
+            VirtualInstrumentation.canReuseHostedRuntimeCache(
+                current.copy(guestApplication = mockk<Application>(relaxed = true)),
+                current
+            )
+        )
+        assertFalse(
+            VirtualInstrumentation.canReuseHostedRuntimeCache(
+                current.copy(guestClassLoader = object : ClassLoader(current.guestClassLoader) {}),
+                current
+            )
+        )
+        assertFalse(VirtualInstrumentation.canReuseHostedRuntimeCache(current, null))
+    }
+
+    @Test
+    fun `callActivityOnResume delegates guest onResume before returning to lifecycle ACK`() {
+        val events = mutableListOf<String>()
+        mockkStatic(Log::class)
+        every { Log.w(any(), any<String>(), any()) } returns 0
+        val base = mockk<Instrumentation>(relaxed = true)
+        val activity = mockk<Activity>(relaxed = true) {
+            every { intent } returns proxyIntentForRecordRecovery()
+        }
+        every { base.callActivityOnResume(activity) } answers { events += "base" }
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                VirtualActivityLaunchAuthorityResult(true, "test_authorized")
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> events += "observer" }
+        )
+
+        VirtualInstrumentation(base).callActivityOnResume(activity)
+
+        verify(exactly = 1) { base.callActivityOnResume(activity) }
+        assertEquals(listOf("base", "observer"), events)
+    }
+
+    @Test
+    fun `callActivityOnResume does not ACK when guest onResume throws`() {
+        var observerCalls = 0
+        val base = mockk<Instrumentation>(relaxed = true)
+        val activity = mockk<Activity>(relaxed = true) {
+            every { intent } returns proxyIntentForRecordRecovery()
+        }
+        every { base.callActivityOnResume(activity) } throws IllegalStateException("guest resume failed")
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                VirtualActivityLaunchAuthorityResult(true, "test_authorized")
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> observerCalls++ }
+        )
+
+        assertFailsWith<IllegalStateException> {
+            VirtualInstrumentation(base).callActivityOnResume(activity)
+        }
+        assertEquals(0, observerCalls)
     }
 
     @Test
@@ -750,7 +837,51 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     }
 
     @Test
-    fun `activity record recovery skips incomplete proxy metadata`() {
+    fun `activity record recovery rejects bare extras without engine launch identity`() {
+        val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
+        val recordManager = VirtualActivityRecordManager()
+
+        val result = instrumentation.restoreActivityRecordFromProxyIntentIfMissing(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntentForRecordRecovery(includeEngineIdentity = false),
+            guestIntent = guestIntentForRecovery(),
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            activityRecordManager = recordManager
+        )
+
+        assertTrue(result.isRejected)
+        assertEquals("ENGINE_LAUNCH_IDENTITY_MISSING", result.skippedReason)
+        assertNull(recordManager.resolve("token-001"))
+    }
+
+    @Test
+    fun `activity record recovery fails closed when engine rejects capability`() {
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                VirtualActivityLaunchAuthorityResult(false, "stale_generation")
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+        val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
+        val recordManager = VirtualActivityRecordManager()
+
+        val result = instrumentation.restoreActivityRecordFromProxyIntentIfMissing(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntentForRecordRecovery(),
+            guestIntent = guestIntentForRecovery(),
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            activityRecordManager = recordManager
+        )
+
+        assertTrue(result.isRejected)
+        assertEquals("ENGINE_LAUNCH_REJECTED:stale_generation", result.skippedReason)
+        assertNull(recordManager.resolve("token-001"))
+    }
+
+    @Test
+    fun `activity record recovery rejects incomplete proxy metadata`() {
         val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
         val recordManager = VirtualActivityRecordManager()
         val guestIntent = guestIntentForRecovery(token = null)
@@ -774,6 +905,8 @@ class VirtualInstrumentationStartActivityEvidenceTest {
 
         assertEquals("TOKEN_MISSING", missingToken.skippedReason)
         assertEquals("ORIGIN_PACKAGE_MISSING", missingOrigin.skippedReason)
+        assertTrue(missingToken.isRejected)
+        assertTrue(missingOrigin.isRejected)
         assertNull(recordManager.resolve("token-001"))
         assertEquals(0, recordManager.list().size)
     }
@@ -856,12 +989,25 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         originPackageName: String? = "com.test.minimal",
         launchMode: String? = "singleTask",
         taskAffinity: String? = "com.test.minimal:inst-001",
-        originalGuestIntent: Intent? = sourceIntentForRecovery()
+        originalGuestIntent: Intent? = sourceIntentForRecovery(),
+        includeEngineIdentity: Boolean = true
     ): Intent = mockk(relaxed = true) {
         every { getStringExtra("multiapp.virtualActivityToken") } returns token
+        every { getStringExtra("multiapp.instanceId") } returns "inst-001"
         every { getStringExtra("multiapp.originPackageName") } returns originPackageName
+        every { getStringExtra("multiapp.guestActivityClassName") } returns "com.test.minimal.MainActivity"
         every { getStringExtra("multiapp.guestActivityLaunchMode") } returns launchMode
         every { getStringExtra("multiapp.guestTaskAffinity") } returns taskAffinity
+        every { getStringExtra("multiapp.engine.sessionId") } returns
+            if (includeEngineIdentity) "engine-session-42" else null
+        every { getStringExtra("multiapp.engine.processSlot") } returns
+            if (includeEngineIdentity) "com.multiapp.app:v0" else null
+        every { getStringExtra("multiapp.engine.proxyActivityClassName") } returns
+            if (includeEngineIdentity) "com.multiapp.app.container.ProxyActivity0" else null
+        every { getStringExtra("multiapp.engine.launchCapability") } returns
+            if (includeEngineIdentity) "capability-42" else null
+        every { getLongExtra("multiapp.engine.runtimeEpoch", any()) } returns
+            if (includeEngineIdentity) 42L else 0L
         every { getParcelableExtra<Intent>("multiapp.originalGuestIntent") } returns originalGuestIntent
         every { flags } returns 0
         every { action } returns null
@@ -913,7 +1059,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             originApkPath = snapshot.sourceDir,
             dataRoot = snapshot.dataDir,
             guestClassLoader = javaClass.classLoader,
-            guestApplication = null,
+            guestApplication = mockk<Application>(relaxed = true),
             packageSnapshot = snapshot,
             launcherActivityClassName = snapshot.launcherActivityName,
             stageResults = listOf(stageResult),
@@ -937,6 +1083,10 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         cacheField.isAccessible = true
         val cache = cacheField.get(instrumentation) as MutableMap<String, Any>
         cache[instanceId] = runtime
+        val processRuntimeField = VirtualInstrumentation::class.java.getDeclaredField("processRuntime")
+        processRuntimeField.isAccessible = true
+        val processRuntime = processRuntimeField.get(instrumentation) as VirtualProcessRuntime
+        processRuntime.rememberApplication(instanceId, result)
     }
 
     private fun snapshotForInstance(

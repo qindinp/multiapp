@@ -4,12 +4,11 @@ import android.app.ActivityManager
 import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.engine.EngineActivityTaskController
 import com.multiapp.core.engine.EngineActivityTaskControllers
+import com.multiapp.core.engine.EngineGuestActivityLaunchBridge
 import com.multiapp.core.engine.EngineProxyActivityObserveRequest
 import com.multiapp.core.engine.EngineProxyActivityRecords
 import com.multiapp.core.model.virtual.VirtualActivityState
@@ -19,9 +18,7 @@ abstract class ProxyActivityBase : Activity() {
     companion object {
         private const val TAG = "ProxyActivity"
         private const val FALLBACK_ACTION_FINISH_UNSUBSTITUTED = "finishUnsubstitutedProxy"
-        private const val FALLBACK_ACTION_PREWARM_RELAUNCH = "prewarmAndRelaunchProxy"
         private const val EXTRA_PROXY_RECOVERY_ATTEMPT = "multiapp.proxyRecoveryAttempt"
-        private const val MAX_PROXY_RECOVERY_ATTEMPTS = 1
 
         const val EXTRA_VIRTUAL_ACTIVITY_TOKEN = "multiapp.virtualActivityToken"
         const val EXTRA_INSTANCE_ID = "multiapp.instanceId"
@@ -72,6 +69,19 @@ abstract class ProxyActivityBase : Activity() {
         val tokenForEvidence = EvidenceSanitizer.redactTokenForEvidence(token)
         val guestActivity = proxyIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME).orEmpty()
         val originPackage = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME).orEmpty()
+        val launchAuthorization = EngineGuestActivityLaunchBridge.authorizeProxyIntent(
+            proxyIntent = proxyIntent,
+            proxyActivityClassName = javaClass.name
+        )
+        if (!launchAuthorization.accepted) {
+            Log.e(
+                TAG,
+                "Unsubstituted proxy launch rejected: proxy=${javaClass.name}, " +
+                    "instanceId=${instanceId.orEmpty()}, reason=${launchAuthorization.reason}"
+            )
+            finish()
+            return
+        }
         if (!instanceId.isNullOrBlank()) {
             restoreActivityTaskState(instanceId, lifecycleEvent)
         }
@@ -93,16 +103,7 @@ abstract class ProxyActivityBase : Activity() {
             return
         }
 
-        val fallbackAction = if (canRecoverUnsubstitutedProxy(
-                recoveryAttempt = recoveryAttempt,
-                guestActivity = guestActivity,
-                originPackage = originPackage
-            )
-        ) {
-            FALLBACK_ACTION_PREWARM_RELAUNCH
-        } else {
-            FALLBACK_ACTION_FINISH_UNSUBSTITUTED
-        }
+        val fallbackAction = FALLBACK_ACTION_FINISH_UNSUBSTITUTED
 
         Log.i(
             TAG,
@@ -139,85 +140,13 @@ abstract class ProxyActivityBase : Activity() {
             )
         )
         persistActivityTaskState(instanceId, lifecycleEvent)
-        if (fallbackAction == FALLBACK_ACTION_PREWARM_RELAUNCH) {
-            prewarmAndRelaunchUnsubstitutedProxy(
-                instanceId = instanceId,
-                proxyIntent = proxyIntent,
-                recoveryAttempt = recoveryAttempt,
-                token = token,
-                guestActivity = guestActivity,
-                lifecycleEvent = lifecycleEvent
-            )
-        } else {
-            finishUnsubstitutedProxy(
-                instanceId = instanceId,
-                token = token,
-                guestActivity = guestActivity,
-                lifecycleEvent = lifecycleEvent,
-                recoveryAttempt = recoveryAttempt
-            )
-        }
-    }
-
-    private fun canRecoverUnsubstitutedProxy(
-        recoveryAttempt: Int,
-        guestActivity: String,
-        originPackage: String
-    ): Boolean =
-        recoveryAttempt < MAX_PROXY_RECOVERY_ATTEMPTS &&
-            guestActivity.isNotBlank() &&
-            originPackage.isNotBlank()
-
-    private fun prewarmAndRelaunchUnsubstitutedProxy(
-        instanceId: String,
-        proxyIntent: Intent,
-        recoveryAttempt: Int,
-        token: String,
-        guestActivity: String,
-        lifecycleEvent: String
-    ) {
-        val hostContext = applicationContext ?: this
-        Thread(
-            {
-                val bindResult = HostedActivityRuntimeBinder().ensureBound(hostContext, instanceId)
-                Handler(Looper.getMainLooper()).post {
-                    val relaunched = relaunchProxyAfterPrewarm(
-                        bindResult = bindResult,
-                        proxyIntent = proxyIntent,
-                        nextRecoveryAttempt = recoveryAttempt + 1
-                    )
-                    writeProxyRecoveryEvidence(
-                        instanceId = instanceId,
-                        token = token,
-                        guestActivity = guestActivity,
-                        lifecycleEvent = lifecycleEvent,
-                        recoveryAttempt = recoveryAttempt,
-                        bindResult = bindResult,
-                        relaunched = relaunched
-                    )
-                    finish()
-                }
-            },
-            "multiapp-proxy-recover-${instanceId.take(8)}"
-        ).start()
-    }
-
-    private fun relaunchProxyAfterPrewarm(
-        bindResult: HostedActivityRuntimeBindResult,
-        proxyIntent: Intent,
-        nextRecoveryAttempt: Int
-    ): Boolean {
-        if (bindResult !is HostedActivityRuntimeBindResult.Bound) return false
-        if (!bindResult.result.success || bindResult.result.guestClassLoader == null) return false
-        return runCatching {
-            val relaunchIntent = Intent(proxyIntent)
-                .putExtra(EXTRA_PROXY_RECOVERY_ATTEMPT, nextRecoveryAttempt)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            val hostContext = applicationContext ?: this
-            hostContext.startActivity(relaunchIntent)
-        }.onFailure { error ->
-            Log.w(TAG, "Unable to relaunch proxy after runtime prewarm: proxy=${javaClass.name}", error)
-        }.isSuccess
+        finishUnsubstitutedProxy(
+            instanceId = instanceId,
+            token = token,
+            guestActivity = guestActivity,
+            lifecycleEvent = lifecycleEvent,
+            recoveryAttempt = recoveryAttempt
+        )
     }
 
     private fun finishUnsubstitutedProxy(
@@ -387,42 +316,6 @@ abstract class ProxyActivityBase : Activity() {
         }
     }
 
-    private fun writeProxyRecoveryEvidence(
-        instanceId: String,
-        token: String,
-        guestActivity: String,
-        lifecycleEvent: String,
-        recoveryAttempt: Int,
-        bindResult: HostedActivityRuntimeBindResult,
-        relaunched: Boolean
-    ) {
-        runCatching {
-            ContainerRuntimeEvidenceWriter.write(
-                context = this,
-                instanceId = instanceId,
-                component = "activity-proxy-recovery",
-                fields = linkedMapOf(
-                    "status" to if (relaunched) "RELAUNCHED" else "FAILED",
-                    "stage" to "ACTIVITY_PROXY_RECOVERY",
-                    "detail" to javaClass.name,
-                    "lifecycleEvent" to lifecycleEvent,
-                    "token" to token,
-                    "guestActivityClassName" to guestActivity,
-                    "recoveryAttempt" to recoveryAttempt.toString(),
-                    "fallbackAction" to FALLBACK_ACTION_PREWARM_RELAUNCH,
-                    "runtimeBindStatus" to bindResult.status,
-                    "runtimeBindDetail" to bindResult.detail,
-                    "runtimeBindErrorClass" to ((bindResult as? HostedActivityRuntimeBindResult.Failed)
-                        ?.errorClassName.orEmpty()),
-                    "runtimeBindErrorMessage" to ((bindResult as? HostedActivityRuntimeBindResult.Failed)
-                        ?.errorMessage.orEmpty()),
-                    "relaunched" to relaunched.toString()
-                )
-            )
-        }.onFailure { error ->
-            Log.w(TAG, "Unable to write proxy recovery evidence for instanceId=$instanceId", error)
-        }
-    }
 }
 
 class ProxyActivity0 : ProxyActivityBase()

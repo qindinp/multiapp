@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.app.Application
 import android.content.ContentProvider
 import android.content.ContentValues
 import android.content.Context
@@ -227,7 +228,7 @@ class VirtualProviderDispatcherTest {
         originApkPath = snapshot.sourceDir,
         dataRoot = snapshot.dataDir,
         guestClassLoader = guestClassLoader,
-        guestApplication = null,
+        guestApplication = if (success && guestClassLoader != null) mockk<Application>(relaxed = true) else null,
         installRecord = null,
         packageSnapshot = snapshot,
         launcherActivityClassName = "com.test.minimal.MainActivity",

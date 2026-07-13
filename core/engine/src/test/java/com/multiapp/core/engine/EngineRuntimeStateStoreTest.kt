@@ -84,6 +84,36 @@ class EngineRuntimeStateStoreTest {
     }
 
     @Test
+    fun `file backed runtime state rejects different session at same epoch`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val store = FileBackedEngineRuntimeStateStore(file)
+        val authoritative = EngineRuntimeStateRecord.from(
+            runtime(runtimeEpoch = 20L, engineSessionId = "engine-current")
+        )
+        val colliding = EngineRuntimeStateRecord.from(
+            runtime(runtimeEpoch = 20L, engineSessionId = "engine-stale")
+        )
+
+        assertEquals(authoritative, store.putIfNewer(authoritative))
+        assertEquals(authoritative, store.putIfNewer(colliding))
+        assertEquals(authoritative, store.get(authoritative.instanceId))
+    }
+
+    @Test
+    fun `file backed runtime state CAS rejects concurrent state transition`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val store = FileBackedEngineRuntimeStateStore(file)
+        val expected = EngineRuntimeStateRecord.from(runtime(runtimeEpoch = 20L))
+        val concurrent = expected.copy(state = VirtualRuntimeState.DEAD, processId = null)
+        val staleUpdate = expected.copy(state = VirtualRuntimeState.PREWARMED, processId = 4200)
+        store.put(expected)
+        store.put(concurrent)
+
+        assertFalse(store.compareAndSet(expected, staleUpdate))
+        assertEquals(concurrent, store.get(expected.instanceId))
+    }
+
+    @Test
     fun `independent runtime stores preserve concurrent instance writes`(@TempDir tempDir: File) {
         val file = File(tempDir, "engine_runtime_state.properties")
         val executor = Executors.newFixedThreadPool(4)
@@ -118,7 +148,8 @@ class EngineRuntimeStateStoreTest {
         instanceId: String = "instance-1",
         runtimeEpoch: Long = 99L,
         processSlot: String = "com.multiapp.app:v0",
-        proxySlot: String = "com.multiapp.app.container.ProxyActivity0"
+        proxySlot: String = "com.multiapp.app.container.ProxyActivity0",
+        engineSessionId: String = "engine-evidence-1"
     ) = VirtualInstanceRuntime(
         instanceId = instanceId,
         hostPackageName = "com.multiapp.app",
@@ -226,7 +257,7 @@ class EngineRuntimeStateStoreTest {
         proxySlot = proxySlot,
         evidenceSessionId = "evidence-1",
         runtimeEpoch = runtimeEpoch,
-        engineSessionId = "engine-evidence-1",
+        engineSessionId = engineSessionId,
         processName = processSlot,
         state = VirtualRuntimeState.CREATED
     )

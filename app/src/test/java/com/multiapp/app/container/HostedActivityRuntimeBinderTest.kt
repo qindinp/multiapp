@@ -2,6 +2,7 @@ package com.multiapp.app.container
 
 import android.content.Context
 import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.EngineRuntimeIpcSnapshot
 import com.multiapp.core.engine.HostedRuntimeBindOutcome
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.loader.BootstrapResult
@@ -29,11 +30,29 @@ class HostedActivityRuntimeBinderTest {
     }
 
     @Test
+    fun `ensureBound rejects unavailable engine authority`() {
+        val runtime = FakeHostedRuntimeEngine()
+        val binder = HostedActivityRuntimeBinder(
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { null }
+        )
+
+        val result = binder.ensureBound(hostContext(), "inst-001")
+
+        assertTrue(result is HostedActivityRuntimeBindResult.Failed)
+        val failed = result as HostedActivityRuntimeBindResult.Failed
+        assertEquals("engineRuntimeAuthorityRejected", failed.detail)
+        assertEquals("ipc_unavailable", failed.errorMessage)
+        assertEquals(0, runtime.bindCalls)
+    }
+
+    @Test
     fun `ensureBound returns cached runtime without bootstrapping`() {
         val reusable = hostedResult("inst-001")
         val runtime = FakeHostedRuntimeEngine(reusableResults = mutableMapOf("inst-001" to reusable))
         val binder = HostedActivityRuntimeBinder(
-            runtimeEngineFactory = { runtime }
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() }
         )
 
         val result = binder.ensureBound(hostContext(), "inst-001")
@@ -51,7 +70,8 @@ class HostedActivityRuntimeBinderTest {
         val bootstrapped = hostedResult("inst-001")
         val runtime = FakeHostedRuntimeEngine(bindResult = bootstrapped)
         val binder = HostedActivityRuntimeBinder(
-            runtimeEngineFactory = { runtime }
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() }
         )
 
         val result = binder.ensureBound(hostContext(), "inst-001")
@@ -68,7 +88,8 @@ class HostedActivityRuntimeBinderTest {
     fun `ensureBound reports bootstrap failure`() {
         val runtime = FakeHostedRuntimeEngine(bindError = IllegalStateException("boom"))
         val binder = HostedActivityRuntimeBinder(
-            runtimeEngineFactory = { runtime }
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() }
         )
 
         val result = binder.ensureBound(hostContext(), "inst-001")
@@ -87,6 +108,20 @@ class HostedActivityRuntimeBinderTest {
         every { filesDir } returns File("build/tmp/hosted-activity-runtime-binder-test")
         every { applicationContext } returns this
     }
+
+    private fun authoritySnapshot() = EngineRuntimeIpcSnapshot(
+        found = true,
+        instanceId = "inst-001",
+        processSlot = "com.multiapp.app:v0",
+        proxySlot = "com.multiapp.app.container.ProxyActivity0",
+        runtimeEpoch = 1L,
+        engineSessionId = "engine-1",
+        evidenceSessionId = "evidence-1",
+        runtimeState = "PREWARMED",
+        processId = 4100,
+        processName = "com.multiapp.app:v0",
+        reason = null
+    )
 
     private fun hostedResult(instanceId: String): EngineHostedBootstrapResult =
         EngineHostedBootstrapResult.fromLoader(

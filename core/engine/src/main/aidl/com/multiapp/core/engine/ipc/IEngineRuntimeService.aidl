@@ -4,6 +4,8 @@ import android.os.Bundle;
 
 interface IEngineRuntimeService {
     Bundle queryRuntime(String instanceId);
+    Bundle authorizeActivityLaunch(String capabilityToken, String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String proxyActivityClassName, String guestActivityClassName);
+    Bundle acknowledgeActivityResumed(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String capabilityToken);
     Bundle queryEvidence(String instanceId);
     Bundle planActivity(String instanceId, in Bundle request);
     boolean recordActivityDispatch(String instanceId, in Bundle result);

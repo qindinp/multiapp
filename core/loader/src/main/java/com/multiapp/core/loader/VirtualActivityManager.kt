@@ -15,7 +15,8 @@ data class ProxyActivityLaunchSpec(
     val originPackageName: String,
     val guestActivityClassName: String,
     val launchMode: String?,
-    val taskAffinity: String?
+    val taskAffinity: String?,
+    val engineLaunchIdentity: VirtualActivityLaunchIdentity? = null
 )
 
 class VirtualActivityManager(
@@ -39,6 +40,11 @@ class VirtualActivityManager(
         const val EXTRA_GUEST_TASK_AFFINITY = "multiapp.guestTaskAffinity"
         const val EXTRA_RESULT_TO_TOKEN = "multiapp.resultToToken"
         const val EXTRA_RESULT_REQUEST_CODE = "multiapp.resultRequestCode"
+        const val EXTRA_ENGINE_RUNTIME_EPOCH = "multiapp.engine.runtimeEpoch"
+        const val EXTRA_ENGINE_SESSION_ID = "multiapp.engine.sessionId"
+        const val EXTRA_ENGINE_PROCESS_SLOT = "multiapp.engine.processSlot"
+        const val EXTRA_ENGINE_PROXY_ACTIVITY_CLASS_NAME = "multiapp.engine.proxyActivityClassName"
+        const val EXTRA_ENGINE_LAUNCH_CAPABILITY = "multiapp.engine.launchCapability"
     }
 
     fun launchGuestLauncher(
@@ -46,7 +52,8 @@ class VirtualActivityManager(
         originPackageName: String,
         guestActivityClassName: String,
         launchMode: String? = null,
-        taskAffinity: String? = null
+        taskAffinity: String? = null,
+        engineLaunchIdentity: VirtualActivityLaunchIdentity? = null
     ): Result<VirtualActivityRecord> {
         return runCatching {
             val launcherIntent = Intent().addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -62,7 +69,13 @@ class VirtualActivityManager(
                     taskAffinity = resolvedTaskAffinity
                 )
             )
-            context.startActivity(createProxyIntent(record, sourceIntent = launcherIntent, forceNewTask = true))
+            val proxyIntent = createProxyIntent(
+                record,
+                sourceIntent = launcherIntent,
+                forceNewTask = true,
+                engineLaunchIdentity = engineLaunchIdentity
+            ).putExtra(EXTRA_ORIGINAL_GUEST_INTENT, Intent(launcherIntent))
+            context.startActivity(proxyIntent)
             record
         }
     }
@@ -101,9 +114,10 @@ class VirtualActivityManager(
     fun createProxyIntent(
         record: VirtualActivityRecord,
         sourceIntent: Intent? = null,
-        forceNewTask: Boolean = false
+        forceNewTask: Boolean = false,
+        engineLaunchIdentity: VirtualActivityLaunchIdentity? = null
     ): Intent {
-        val spec = createProxyLaunchSpec(record)
+        val spec = createProxyLaunchSpec(record, engineLaunchIdentity)
         return Intent().apply {
             setClassName(spec.hostPackageName, spec.proxyActivityClassName)
             putExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN, spec.token)
@@ -116,6 +130,20 @@ class VirtualActivityManager(
             }
             if (!spec.taskAffinity.isNullOrBlank()) {
                 putExtra(EXTRA_GUEST_TASK_AFFINITY, spec.taskAffinity)
+            }
+            spec.engineLaunchIdentity?.let { identity ->
+                require(identity.instanceId == spec.instanceId) { "engine launch instance mismatch" }
+                require(identity.proxyActivityClassName == spec.proxyActivityClassName) {
+                    "engine launch proxy mismatch"
+                }
+                require(identity.guestActivityClassName == spec.guestActivityClassName) {
+                    "engine launch guest Activity mismatch"
+                }
+                putExtra(EXTRA_ENGINE_RUNTIME_EPOCH, identity.runtimeEpoch)
+                putExtra(EXTRA_ENGINE_SESSION_ID, identity.engineSessionId)
+                putExtra(EXTRA_ENGINE_PROCESS_SLOT, identity.processSlot)
+                putExtra(EXTRA_ENGINE_PROXY_ACTIVITY_CLASS_NAME, identity.proxyActivityClassName)
+                putExtra(EXTRA_ENGINE_LAUNCH_CAPABILITY, identity.capabilityToken)
             }
             if (!record.resultToToken.isNullOrBlank() && record.resultRequestCode >= 0) {
                 putExtra(EXTRA_RESULT_TO_TOKEN, record.resultToToken)
@@ -130,7 +158,10 @@ class VirtualActivityManager(
         }
     }
 
-    fun createProxyLaunchSpec(record: VirtualActivityRecord): ProxyActivityLaunchSpec {
+    fun createProxyLaunchSpec(
+        record: VirtualActivityRecord,
+        engineLaunchIdentity: VirtualActivityLaunchIdentity? = null
+    ): ProxyActivityLaunchSpec {
         return ProxyActivityLaunchSpec(
             hostPackageName = hostPackageName,
             proxyActivityClassName = record.proxyActivityClassName,
@@ -139,7 +170,8 @@ class VirtualActivityManager(
             originPackageName = record.originPackageName,
             guestActivityClassName = record.guestActivityClassName,
             launchMode = record.launchMode,
-            taskAffinity = record.taskAffinity
+            taskAffinity = record.taskAffinity,
+            engineLaunchIdentity = engineLaunchIdentity
         )
     }
 

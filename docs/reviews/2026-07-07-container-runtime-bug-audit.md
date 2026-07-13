@@ -2284,9 +2284,9 @@ Binder validation. Focused loader tests pass.
 
 - No post-fix device artifact yet proves that GKD passes
   `MAKE_APPLICATION_FINISHED` and `Application.onCreate()`.
-- A process-bootstrap readiness handshake must still precede foreground proxy
-  Activity launch to prevent any future guest initialization stall from
-  becoming an input ANR.
+- The process-bootstrap readiness handshake is now implemented locally; a
+  device artifact must still prove that it precedes foreground proxy launch
+  and prevents an initialization stall from becoming an input ANR.
 - This finding does not establish QQ, WeChat, or QQ Reader compatibility.
 
 ## Execution Update - 2026-07-11 Startup and System-Service Identity
@@ -2314,10 +2314,101 @@ supersedes the statement that no post-fix GKD Application evidence exists:
   a `VirtualContextWrapperApi36` was cast to `Application`.
 - Runtime permission request/result UX is not implemented, and AstroBox still
   has an unresolved black-screen device result.
-- No process-bootstrap readiness handshake prevents a proxy Activity from
-  becoming foreground before guest readiness.
+- The local process-bootstrap readiness implementation is not yet device-
+  proven to prevent a proxy Activity from becoming foreground before guest
+  readiness.
 - Clipboard install evidence is not yet a device proof of the actual copy
   operation, and the stricter split evidence fields require a new device run.
 - Activity process-death recovery, full Service/Broadcast semantics,
   custom-process Providers, native/linker coverage, and the compatibility
   matrix remain open. Decision remains **BLOCK**.
+
+## Implementation Update - 2026-07-11 Process Bootstrap Readiness
+
+The previously missing process-bootstrap readiness gate is implemented in the
+current tree and passes the full local unit/build gate.
+
+Current mitigation:
+
+- Engine activation uses private slot Providers in `:v0..:v7`; foreground
+  proxy launch occurs only after a bounded READY response.
+- READY is bound to instance, epoch, engine session, process slot, PID, and a
+  live Binder token. Guest ClassLoader without a guest Application is not
+  reusable READY state.
+- Durable transitions use whole-record compare-and-set. Same-epoch foreign
+  sessions, stale READY responses, and old Binder death callbacks fail closed.
+- Process-local initialization distinguishes provisional `BINDING` from
+  complete `READY` and applies a deadline to ordinary waiters.
+- Central runtime state remains `PREWARMED` after `startActivity`; only the
+  real guest Application lifecycle callback after guest Activity `onResume`
+  can acknowledge `RUNNING`, with epoch/session/process/PID validation.
+- The engine directly launches the assigned proxy after READY, and launcher
+  Intent recovery preserves guest component identity across the process
+  boundary.
+
+Local evidence:
+
+- Full module tests plus `:app:assembleDebug` passed in 4m49s.
+- APK SHA-256:
+  `FFC58BB4D81A631D788C52E34763C2E0A97DFDFC26DBD923C6A9F10620A5F994`.
+
+### Still BLOCK
+
+- The mitigation is not device-proven. Required evidence is target `:vN`
+  READY, linked process token, no foreground `ContainerActivity`, successful
+  proxy substitution, and a central `PREWARMED -> RUNNING` resume ACK.
+- Timeout currently fails closed but does not explicitly kill/recycle the
+  half-initialized process slot.
+- Runtime permissions, process-death recents, custom-process Providers,
+  Service/Broadcast fidelity, native linker/load, and the commercial device
+  matrix remain incomplete.
+- This update does not establish compatibility for GKD, AstroBox, QQ, WeChat,
+  or QQ Reader. Decision remains **BLOCK**.
+
+## Review Update - 2026-07-13 Launch Authority and Process Generation
+
+The process-bootstrap implementation has been tightened after a source-level
+comparison with VirtualApp `7d739c85`, BlackBox `ffe950f7`, and DroidPlugin
+`c6ebf652`. Their common structural rule is retained: a central manager owns
+process/component authority, clients prove liveness over Binder, and proxy
+components do not invent a second local recovery truth.
+
+### Findings closed in the current tree
+
+- Foreground launch is now capability-bound to the current runtime epoch,
+  engine session, process slot, PID, proxy class, and guest class.
+- Process Binder death is generation-aware. Binder link/unlink calls no longer
+  execute under the registry lock, old callbacks are inert after replacement,
+  and a synchronous death cannot publish READY.
+- Engine authority restart marks persisted live-looking process states `DEAD`.
+  IPC loss no longer falls back to a durable record for live authorization.
+- Unsubstituted proxies fail closed. The previous app-side loader prewarm and
+  relaunch route has been removed.
+- Runtime reuse requires an exact package/artifact/data/profile/process
+  fingerprint and identical Application/ClassLoader objects.
+- A reflective Application fallback cannot satisfy READY, and app/feature main
+  sources now have a build-time engine-boundary import gate.
+
+### Verification
+
+- Full configured local gate passed in 2m37s: 502 Gradle tasks, 1,768 tests,
+  0 failures, 0 errors, and 12 skipped tests.
+- Debug APK SHA-256:
+  `D04CBB326C1854C696665B1FC667EC042FFA6FDDD64F7ECC0349CDBEAED7F879`.
+- `git diff --check` passed; only existing LF/CRLF conversion warnings remain.
+
+### Still BLOCK
+
+- The new capability/PID/death flow has no end-to-end device evidence. Local
+  tests cannot prove Android/OEM ActivityThread launch ordering or Binder death
+  timing.
+- There is no formal client reattach/restart protocol and no fresh capability
+  for recents restoration after process death. The current engine authority is
+  centralized through `EngineBinderProvider` but still lives in the default
+  app process.
+- Complete `ActivityThread.mBoundApplication` / `mInitialApplication`
+  equivalence and per-guest-`processName` process records are missing.
+- Runtime permissions, custom-process components, complete Service/Broadcast
+  semantics, native linker/load, and the commercial device matrix remain open.
+- GKD, AstroBox, QQ, WeChat, and QQ Reader remain unproven. Review decision
+  remains **BLOCK**.

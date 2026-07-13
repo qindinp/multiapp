@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.app.Application
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -458,7 +459,7 @@ class VirtualAmsComponentDispatcherTest {
             originApkPath = "/data/minimal.apk",
             dataRoot = "/data/inst",
             guestClassLoader = ClassLoader.getSystemClassLoader(),
-            guestApplication = null,
+            guestApplication = mockk<Application>(relaxed = true),
             installRecord = null,
             packageSnapshot = snapshot(),
             launcherActivityClassName = null,

@@ -8,6 +8,7 @@ import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -91,7 +92,7 @@ class AppManagerViewModel @Inject constructor(
     }
 
     fun launchInstance(instanceId: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val result = virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = instanceId))
             if (!result.success) {
                 Timber.e("Failed to launch instance via engine: ${result.message}")

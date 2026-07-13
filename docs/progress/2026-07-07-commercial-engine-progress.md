@@ -3312,6 +3312,77 @@ Remaining gate:
   still incomplete.
 - The commercial engine decision remains `BLOCK`.
 
+## Execution Update - 2026-07-11 Process Bootstrap READY and Foreground ACK
+
+This batch implements the engine-owned process bootstrap gate that was still
+missing in the previous update. The design was checked against VirtualApp
+`VActivityManagerService` / `StubContentProvider` / `VClientImpl`, BlackBox
+`BProcessManagerService` / `ProxyContentProvider` / `BActivityThread`, and
+AOSP `LoadedApk.makeApplication`. MultiApp keeps their slot-Provider process
+activation structure but uses a stricter READY result and bounded waits.
+
+Implemented:
+
+- Eight private bootstrap Providers map one-to-one to Android processes
+  `:v0..:v7`. Engine launch first calls the assigned Provider from a background
+  worker; no foreground Activity is started before a valid READY response.
+- READY validates `instanceId + runtimeEpoch + engineSessionId + processSlot`,
+  real PID, a live target-process Binder token, guest ClassLoader, guest
+  Application, Application stage, Provider preinstall status, launcher
+  Activity, and required system-service bootstrap evidence.
+- Runtime epochs are monotonic per instance. Equal-epoch different-session
+  writes are rejected, and durable runtime transitions use a file-store-level
+  whole-record compare-and-set rather than a process-local check followed by
+  an unconditional write.
+- The target Binder token is linked to death. Only the matching epoch/session
+  can transition to `DEAD`; an old process callback cannot kill a replacement
+  runtime, and repeated callbacks are idempotent.
+- `VirtualProcessRuntime` now distinguishes `BINDING`, `READY`, `FAILED`, and
+  `TIMED_OUT`. A provisional Application runtime is visible only to the
+  initialization thread; ordinary callers share a bounded 30-second wait and
+  cannot reuse a ClassLoader-only or Application-less result.
+- A successful bootstrap promotes the central runtime only to `PREWARMED`.
+  A lifecycle callback registered on the real guest Application sends an IPC
+  acknowledgement after the real guest Activity completes `onResume`; the
+  server validates epoch, session, process slot, and Binder caller PID before
+  atomically transitioning `PREWARMED -> RUNNING`.
+- READY launches the fixed proxy slot directly instead of foregrounding a
+  `ContainerActivity`. The small launcher Intent is carried across processes,
+  and recovery rebuilds a guest `ComponentName` rather than exposing the host
+  proxy component to the guest.
+- App-manager launch work runs on `Dispatchers.IO`, so the bounded Provider
+  handshake cannot block the product UI thread.
+
+Verification:
+
+```powershell
+.\gradlew.bat :core:common:testDebugUnitTest :core:model:testDebugUnitTest :core:instance:testDebugUnitTest :core:manifest:testDebugUnitTest :core:identity:testDebugUnitTest :core:loader:testDebugUnitTest :core:hook:testDebugUnitTest :core:engine:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug --no-daemon --console=plain --max-workers=1 --build-cache "-Dkotlin.compiler.execution.strategy=in-process" "-Dkotlin.incremental=false" "-Pksp.incremental=false"
+```
+
+Result:
+
+- Final full gate: `BUILD SUCCESSFUL` in 4m49s.
+- APK size: 99,509,041 bytes.
+- APK SHA-256:
+  `FFC58BB4D81A631D788C52E34763C2E0A97DFDFC26DBD923C6A9F10620A5F994`.
+- Focused regressions cover malformed/stale/timeout Provider responses,
+  missing process tokens, process-slot authorities, provisional-runtime
+  visibility, deadline expiry, durable CAS, Binder death, stale generations,
+  and guest foreground ACK identity checks.
+
+Remaining gate:
+
+- No device artifact yet proves that a real `:vN` Provider returns READY, the
+  direct proxy is substituted without foreground `ContainerActivity`, and the
+  guest `onResume` ACK changes the central state to `RUNNING`.
+- A timed-out or half-initialized target process is isolated by fail-closed
+  state, but this batch does not yet explicitly kill and recycle that slot.
+- Process-death recents recovery, runtime permission request/result, custom
+  Provider processes, full Service/Broadcast semantics, native linker/load,
+  and the API 28-36/HyperOS matrix remain open.
+- GKD permission, AstroBox black screen, QQ, WeChat, and QQ Reader still require
+  fresh device evidence. The commercial engine decision remains `BLOCK`.
+
 ## Execution Update - 2026-07-11 GKD Application Context Chain
 
 Device artifact `.tmp/manual-after-user-20260711-082728` identified a generic
@@ -3694,8 +3765,9 @@ Result:
 
 Remaining gate:
 
-- The VirtualApp-style process bootstrap readiness handshake is still absent;
-  foreground proxy Activity launch can still precede a fully ready guest.
+- The VirtualApp-style process bootstrap readiness handshake is implemented
+  locally in the later 2026-07-11 update above, but still lacks device proof
+  for target-process READY, direct proxy substitution, and resume ACK.
 - Runtime permission request/result UI, flags, groups, one-time grants, and
   per-clone controls remain incomplete.
 - System-service proxies are not yet owned by one engine
@@ -3703,3 +3775,75 @@ Remaining gate:
 - The latest device evidence still shows a partial GKD Provider preinstall,
   and AstroBox black-screen behavior has not been closed.
 - The commercial engine decision remains `BLOCK`.
+
+## Implementation Update - 2026-07-13 Authoritative Launch Handoff
+
+This batch hardens the READY-to-foreground handoff and removes app-side
+recovery paths that could bypass the engine generation. The implementation was
+reviewed against VirtualApp `7d739c85`, BlackBox `ffe950f7`, and DroidPlugin
+`c6ebf652`: process ownership and component launch authority belong to the
+central manager, while Android stub components remain carriers only.
+
+Implemented:
+
+- `launchInstance()` and `stopInstance()` are serialized per instance. A stale
+  bootstrap cannot race a newer launch/stop generation into the foreground.
+- A short-lived Activity launch capability now binds `instanceId`,
+  `runtimeEpoch`, `engineSessionId`, `processSlot`, target PID, proxy Activity,
+  and guest Activity. Record recovery and the first real guest `onResume()`
+  must present the same capability through the engine Binder authority.
+- Binder death ownership moved to `EngineProcessDeathRegistry`. `linkToDeath()`
+  and `unlinkToDeath()` run outside registry locks, newer generations replace
+  older recipients, and stale/synchronous callbacks cannot mark a current
+  runtime dead.
+- Engine server startup invalidates durable `CREATED`, `PREWARMED`, and
+  `RUNNING` records as `DEAD`; an old PID is never trusted after the authority
+  process restarts. IPC unavailability now fails closed instead of accepting a
+  local durable snapshot as live authority.
+- `ProxyActivityBase` no longer performs an app-owned prewarm/relaunch fallback.
+  Missing or mismatched launch identity finishes the proxy instead of invoking
+  loader primitives outside the engine.
+- `EngineGuestActivityLaunchBridge` is the typed engine-to-loader adapter.
+  App and feature main sources are guarded by `verifyEngineBoundary`, which
+  rejects direct `core:loader`, `core:hook`, and `core:xposed` imports.
+- Hosted runtime reuse now requires a complete fingerprint covering instance
+  identity, data root, base/split APK paths and hashes, version, profile,
+  process slot, Application class, and Provider-hook mode. A different
+  ClassLoader/Application identity cannot replace an in-flight or READY
+  runtime.
+- READY requires a guest Application and ClassLoader produced by a successful
+  `LoadedApk.makeApplication` path. Reflective `FALLBACK` evidence is no longer
+  accepted as a reusable READY runtime.
+
+Local gate:
+
+```powershell
+.\gradlew.bat --no-daemon --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process" "-Pkotlin.incremental=false" "-Pksp.incremental=false" :core:model:testDebugUnitTest :core:engine:testDebugUnitTest :core:loader:testDebugUnitTest :core:hook:testDebugUnitTest :core:instance:testDebugUnitTest :core:manifest:testDebugUnitTest :app:testDebugUnitTest :app:assembleDebug
+```
+
+Result:
+
+- `BUILD SUCCESSFUL` in 2m37s; 502 Gradle tasks executed or reused.
+- The configured modules report 1,768 tests, 0 failures, 0 errors, and 12
+  skipped tests.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,569,873 bytes.
+- APK SHA-256:
+  `D04CBB326C1854C696665B1FC667EC042FFA6FDDD64F7ECC0349CDBEAED7F879`.
+- `git diff --check` and the engine-boundary build gate pass. AGP 8.7.3 still
+  warns that compileSdk 36 is newer than its tested maximum.
+
+Remaining gate:
+
+- No device artifact yet proves capability authorization, target `:vN` PID,
+  Binder death, server-restart invalidation, proxy substitution, and the
+  central `PREWARMED -> RUNNING` resume ACK as one end-to-end sequence.
+- A formal `attachClient/processRestarted` protocol and process-death recents
+  restore capability are not implemented. The engine Binder authority also
+  still shares the default app process rather than a dedicated server process.
+- `ActivityThread.mBoundApplication` / `mInitialApplication` parity, one
+  instance with multiple guest `processName` records, runtime-permission UX,
+  custom-process Provider/Service, complete Service/Broadcast semantics,
+  native linker/load, and the API 28-36/HyperOS matrix remain open.
+- This batch is generic launch/runtime infrastructure. It is not compatibility
+  proof for GKD, AstroBox, QQ, WeChat, or QQ Reader. The commercial decision
+  remains **BLOCK**.

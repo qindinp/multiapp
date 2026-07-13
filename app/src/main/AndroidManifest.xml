@@ -23,6 +23,46 @@
             android:authorities="${applicationId}.multiapp.engine.server"
             android:exported="false"
             android:initOrder="1000" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV0"
+            android:authorities="${applicationId}.multiapp.bootstrap.v0"
+            android:exported="false"
+            android:process=":v0" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV1"
+            android:authorities="${applicationId}.multiapp.bootstrap.v1"
+            android:exported="false"
+            android:process=":v1" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV2"
+            android:authorities="${applicationId}.multiapp.bootstrap.v2"
+            android:exported="false"
+            android:process=":v2" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV3"
+            android:authorities="${applicationId}.multiapp.bootstrap.v3"
+            android:exported="false"
+            android:process=":v3" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV4"
+            android:authorities="${applicationId}.multiapp.bootstrap.v4"
+            android:exported="false"
+            android:process=":v4" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV5"
+            android:authorities="${applicationId}.multiapp.bootstrap.v5"
+            android:exported="false"
+            android:process=":v5" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV6"
+            android:authorities="${applicationId}.multiapp.bootstrap.v6"
+            android:exported="false"
+            android:process=":v6" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV7"
+            android:authorities="${applicationId}.multiapp.bootstrap.v7"
+            android:exported="false"
+            android:process=":v7" />
 
         <activity
             android:name=".MainActivity"

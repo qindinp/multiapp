@@ -1,5 +1,6 @@
 package com.multiapp.core.engine
 
+import android.app.Application
 import android.content.Intent
 import android.content.Context
 import android.content.ComponentName
@@ -909,7 +910,7 @@ class EngineContainerDispatchersTest {
         originApkPath = "/tmp/base.apk",
         dataRoot = "/tmp/$instanceId",
         guestClassLoader = ClassLoader.getSystemClassLoader(),
-        guestApplication = null,
+        guestApplication = mockk<Application>(relaxed = true),
         installRecord = null,
         packageSnapshot = null,
         launcherActivityClassName = "com.example.app.MainActivity",

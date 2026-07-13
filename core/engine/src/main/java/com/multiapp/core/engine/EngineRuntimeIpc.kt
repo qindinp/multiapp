@@ -8,6 +8,7 @@ import com.multiapp.core.engine.ipc.IEngineRuntimeService
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
+import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
@@ -20,6 +21,8 @@ object EngineRuntimeIpcContract {
     const val METHOD_GET_BINDER = "getEngineRuntimeBinder"
     const val KEY_BINDER = "engineRuntimeBinder"
     const val KEY_FOUND = "found"
+    const val KEY_ACCEPTED = "accepted"
+    const val KEY_IDEMPOTENT = "idempotent"
     const val KEY_STATUS = "status"
     const val KEY_REASON = "reason"
     const val KEY_INSTANCE_ID = "instanceId"
@@ -182,6 +185,13 @@ data class EngineRuntimeIpcSnapshot(
     val reason: String?
 )
 
+data class EngineRuntimeForegroundAck(
+    val accepted: Boolean,
+    val idempotent: Boolean,
+    val state: String?,
+    val reason: String
+)
+
 data class EngineRuntimeAuthorityDecision(
     val allowed: Boolean,
     val authorityAvailable: Boolean,
@@ -194,9 +204,9 @@ object EngineRuntimeAuthorityValidator {
         expectedProcessSlot: String? = null
     ): EngineRuntimeAuthorityDecision = when {
         snapshot == null -> EngineRuntimeAuthorityDecision(
-            allowed = true,
+            allowed = false,
             authorityAvailable = false,
-            reason = "ipc_unavailable_durable_fallback"
+            reason = "ipc_unavailable"
         )
         !snapshot.found -> EngineRuntimeAuthorityDecision(
             allowed = false,
@@ -231,6 +241,8 @@ object EngineRuntimeAuthorityValidator {
 class EngineRuntimeBinderEndpoint(
     private val registry: EngineRuntimeRegistry,
     private val hostUid: Int,
+    private val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
+        EngineActivityLaunchCapabilityRegistry.global,
     private val activityService: VirtualActivityService = DefaultVirtualSystemServer(registry).activityService,
     private val providerService: VirtualProviderService = DefaultVirtualSystemServer(registry).providerService,
     private val permissionService: VirtualPermissionService =
@@ -246,6 +258,132 @@ class EngineRuntimeBinderEndpoint(
         val runtime = instanceId.takeIf { it.isNotBlank() }?.let(registry::get)
             ?: return@authorizedBundle missingRuntimeBundle(instanceId)
         runtime.toIpcBundle()
+    }
+
+    override fun authorizeActivityLaunch(
+        capabilityToken: String,
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        proxyActivityClassName: String,
+        guestActivityClassName: String
+    ): Bundle = authorizedBundle {
+        val identity = runCatching {
+            EngineActivityLaunchIdentity(
+                capabilityToken = capabilityToken,
+                instanceId = instanceId,
+                runtimeEpoch = runtimeEpoch,
+                engineSessionId = engineSessionId,
+                processSlot = processSlot,
+                proxyActivityClassName = proxyActivityClassName,
+                guestActivityClassName = guestActivityClassName
+            )
+        }.getOrElse {
+            return@authorizedBundle activityLaunchAuthorizationBundle(
+                EngineActivityLaunchAuthorization(false, false, "invalid_activity_launch_identity")
+            )
+        }
+        val callerPid = callingPid()
+        val runtime = registry.get(instanceId)
+        val runtimeAccepted = runtime != null &&
+            runtime.runtimeEpoch == runtimeEpoch &&
+            runtime.engineSessionId == engineSessionId &&
+            runtime.processSlot == processSlot &&
+            runtime.proxySlot == proxyActivityClassName &&
+            runtime.processId == callerPid &&
+            runtime.state in setOf(VirtualRuntimeState.PREWARMED, VirtualRuntimeState.RUNNING)
+        val result = if (runtimeAccepted) {
+            activityLaunchCapabilities.authorize(identity, callerPid)
+        } else {
+            EngineActivityLaunchAuthorization(false, false, "activity_launch_runtime_mismatch")
+        }
+        registry.registerOperationEvidence(
+            instanceId,
+            EngineOperationEvidence(
+                component = "activity-foreground",
+                operation = "launch-capability",
+                verdict = if (result.accepted) EngineResultStatus.PASS else EngineResultStatus.FAIL,
+                entries = mapOf(
+                    "runtimeEpoch" to runtimeEpoch.toString(),
+                    "processSlot" to processSlot,
+                    "proxyActivityClassName" to proxyActivityClassName,
+                    "guestActivityClassName" to guestActivityClassName,
+                    "callingPid" to callerPid.toString(),
+                    "accepted" to result.accepted.toString(),
+                    "idempotent" to result.idempotent.toString(),
+                    "reason" to result.reason
+                )
+            )
+        )
+        activityLaunchAuthorizationBundle(result)
+    }
+
+    override fun acknowledgeActivityResumed(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        capabilityToken: String
+    ): Bundle = authorizedBundle {
+        if (
+            instanceId.isBlank() || runtimeEpoch <= 0L ||
+            engineSessionId.isBlank() || processSlot.isBlank() || capabilityToken.isBlank()
+        ) {
+            return@authorizedBundle invalidRequestBundle(instanceId, "invalid_activity_resume_ack")
+        }
+        val callerPid = callingPid()
+        val capability = activityLaunchCapabilities.validateResume(
+            capabilityToken = capabilityToken,
+            instanceId = instanceId,
+            runtimeEpoch = runtimeEpoch,
+            engineSessionId = engineSessionId,
+            processSlot = processSlot,
+            callingPid = callerPid
+        )
+        val result = if (capability.accepted) {
+            registry.acknowledgeActivityResumed(
+                instanceId = instanceId,
+                runtimeEpoch = runtimeEpoch,
+                engineSessionId = engineSessionId,
+                processSlot = processSlot,
+                callingPid = callerPid
+            )
+        } else {
+            EngineRuntimeForegroundAckResult(
+                accepted = false,
+                idempotent = false,
+                state = registry.get(instanceId)?.state,
+                reason = capability.reason
+            )
+        }
+        if (result.accepted) {
+            activityLaunchCapabilities.complete(capabilityToken)
+        }
+        registry.registerOperationEvidence(
+            instanceId,
+            EngineOperationEvidence(
+                component = "activity-foreground",
+                operation = "resume-ack",
+                verdict = if (result.accepted) EngineResultStatus.PASS else EngineResultStatus.FAIL,
+                entries = mapOf(
+                    "runtimeEpoch" to runtimeEpoch.toString(),
+                    "processSlot" to processSlot,
+                    "callingPid" to callerPid.toString(),
+                    "accepted" to result.accepted.toString(),
+                    "idempotent" to result.idempotent.toString(),
+                    "runtimeState" to result.state?.name.orEmpty(),
+                    "reason" to result.reason
+                )
+            )
+        )
+        Bundle().apply {
+            putBoolean(EngineRuntimeIpcContract.KEY_FOUND, result.state != null)
+            putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, result.accepted)
+            putBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT, result.idempotent)
+            putString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE, result.state?.name)
+            putString(EngineRuntimeIpcContract.KEY_REASON, result.reason)
+        }
     }
 
     override fun queryEvidence(instanceId: String): Bundle = authorizedBundle {
@@ -601,6 +739,13 @@ class EngineRuntimeBinderEndpoint(
         putString(EngineRuntimeIpcContract.KEY_REASON, reason)
     }
 
+    private fun activityLaunchAuthorizationBundle(result: EngineActivityLaunchAuthorization): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, result.accepted)
+        putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, result.accepted)
+        putBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT, result.idempotent)
+        putString(EngineRuntimeIpcContract.KEY_REASON, result.reason)
+    }
+
     private fun VirtualInstanceRuntime.toIpcBundle(): Bundle = Bundle().apply {
         putBoolean(EngineRuntimeIpcContract.KEY_FOUND, true)
         putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.PASS.name)
@@ -672,6 +817,49 @@ object EngineRuntimeIpcClients {
             },
             processName = response.getString(EngineRuntimeIpcContract.KEY_PROCESS_NAME),
             reason = response.getString(EngineRuntimeIpcContract.KEY_REASON)
+        )
+    }
+
+    fun authorizeActivityLaunch(identity: EngineActivityLaunchIdentity): EngineActivityLaunchAuthorization? {
+        val response = runCatching {
+            activeService()?.authorizeActivityLaunch(
+                identity.capabilityToken,
+                identity.instanceId,
+                identity.runtimeEpoch,
+                identity.engineSessionId,
+                identity.processSlot,
+                identity.proxyActivityClassName,
+                identity.guestActivityClassName
+            )
+        }.getOrNull() ?: return null
+        return EngineActivityLaunchAuthorization(
+            accepted = response.getBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED),
+            idempotent = response.getBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT),
+            reason = response.getString(EngineRuntimeIpcContract.KEY_REASON).orEmpty()
+        )
+    }
+
+    fun acknowledgeActivityResumed(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        capabilityToken: String
+    ): EngineRuntimeForegroundAck? {
+        val response = runCatching {
+            activeService()?.acknowledgeActivityResumed(
+                instanceId,
+                runtimeEpoch,
+                engineSessionId,
+                processSlot,
+                capabilityToken
+            )
+        }.getOrNull() ?: return null
+        return EngineRuntimeForegroundAck(
+            accepted = response.getBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED),
+            idempotent = response.getBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT),
+            state = response.getString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE),
+            reason = response.getString(EngineRuntimeIpcContract.KEY_REASON).orEmpty()
         )
     }
 

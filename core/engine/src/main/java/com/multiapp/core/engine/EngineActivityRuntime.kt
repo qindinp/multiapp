@@ -6,6 +6,7 @@ import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.loader.VirtualActivityFinishResultRecord
 import com.multiapp.core.loader.VirtualActivityIntentStore
 import com.multiapp.core.loader.VirtualActivityLaunchRequest
+import com.multiapp.core.loader.VirtualActivityLaunchIdentity
 import com.multiapp.core.loader.VirtualActivityManager
 import com.multiapp.core.loader.VirtualActivityOperations
 import com.multiapp.core.loader.VirtualActivityRecordManager
@@ -31,6 +32,9 @@ object EngineProxyActivitySlots {
 
     fun launchModeByClassName(hostPackageName: String): Map<String, String?> =
         ProxyActivitySlots.launchModeByClassName(hostPackageName)
+
+    fun processSlotForClassName(hostPackageName: String, className: String): String? =
+        ProxyActivitySlots.processNameForClassName(hostPackageName, className)
 
     fun normalizeLaunchMode(launchMode: String?): String? =
         ProxyActivityRegistry.normalizeLaunchMode(launchMode)
@@ -164,7 +168,8 @@ data class EngineActivityLaunchRequest(
     val originPackageName: String,
     val guestActivityClassName: String,
     val launchMode: String?,
-    val taskAffinity: String?
+    val taskAffinity: String?,
+    val launchIdentity: EngineActivityLaunchIdentity? = null
 )
 
 class EngineActivityProxyLauncher private constructor(
@@ -192,7 +197,18 @@ class EngineActivityProxyLauncher private constructor(
             originPackageName = request.originPackageName,
             guestActivityClassName = request.guestActivityClassName,
             launchMode = request.launchMode,
-            taskAffinity = request.taskAffinity
+            taskAffinity = request.taskAffinity,
+            engineLaunchIdentity = request.launchIdentity?.let { identity ->
+                VirtualActivityLaunchIdentity(
+                    capabilityToken = identity.capabilityToken,
+                    instanceId = identity.instanceId,
+                    runtimeEpoch = identity.runtimeEpoch,
+                    engineSessionId = identity.engineSessionId,
+                    processSlot = identity.processSlot,
+                    proxyActivityClassName = identity.proxyActivityClassName,
+                    guestActivityClassName = identity.guestActivityClassName
+                )
+            }
         )
     }
 }

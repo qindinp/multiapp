@@ -15,6 +15,7 @@ class EngineBinderProvider : ContentProvider() {
     override fun onCreate(): Boolean {
         val hostContext = context?.applicationContext ?: context ?: return false
         val handle = EngineRuntimeInstallers.fileBackedSystemServer(hostContext)
+        handle.registry.invalidateEphemeralProcessStates("engine_server_process_started")
         endpoint = EngineRuntimeBinderEndpoint(
             registry = handle.registry,
             hostUid = hostContext.applicationInfo.uid,

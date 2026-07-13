@@ -33,6 +33,7 @@ class DefaultVirtualizationEngine @Inject constructor(
     instanceManager: InstanceManager,
     virtualInstallService: VirtualInstallService,
     activityLauncher: EngineActivityLauncher,
+    processBootstrapper: EngineProcessBootstrapper,
     slotStore: EngineRuntimeSlotStore,
     hookRuntime: DefaultEngineHookRuntime
 ) : VirtualizationEngine by DefaultVirtualizationEngineCore(
@@ -40,10 +41,13 @@ class DefaultVirtualizationEngine @Inject constructor(
     instanceManager = instanceManager,
     virtualInstallService = virtualInstallService,
     activityLauncher = activityLauncher,
+    processBootstrapper = processBootstrapper,
     slotStore = slotStore,
     runtimeRegistry = EngineRuntimeRegistry.global.attachStateStore(
         FileBackedEngineRuntimeStateStore(File(context.filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME))
     ),
+    activityLaunchCapabilities = EngineActivityLaunchCapabilityRegistry.global,
+    processDeathRegistry = EngineProcessDeathRegistry(),
     profilePolicy = CompatibilityProfilePolicy(),
     hookRuntime = hookRuntime,
     permissionGrantSeeder = SourcePackagePermissionGrantSeeder(context.packageManager),
@@ -62,8 +66,12 @@ internal class DefaultVirtualizationEngineCore(
     private val instanceManager: InstanceManager,
     private val virtualInstallService: VirtualInstallService,
     private val activityLauncher: EngineActivityLauncher,
+    private val processBootstrapper: EngineProcessBootstrapper = EngineProcessBootstrapper.IMMEDIATE,
     private val slotStore: EngineRuntimeSlotStore = InMemoryEngineRuntimeSlotStore(),
     private val runtimeRegistry: EngineRuntimeRegistry = EngineRuntimeRegistry(),
+    private val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
+        EngineActivityLaunchCapabilityRegistry(),
+    private val processDeathRegistry: EngineProcessDeathRegistry = EngineProcessDeathRegistry(),
     private val profilePolicy: CompatibilityProfilePolicy = CompatibilityProfilePolicy(),
     private val hookRuntime: EngineHookRuntime = EngineHookRuntime.NO_OP,
     private val permissionGrantSeeder: EnginePermissionGrantSeeder = EnginePermissionGrantSeeder.NO_OP,
@@ -74,6 +82,9 @@ internal class DefaultVirtualizationEngineCore(
     }
 ) : VirtualizationEngine {
     private val systemServer: VirtualSystemServer = systemServerFactory(runtimeRegistry)
+    private val runtimeEpochLock = Any()
+    private val allocatedRuntimeEpochs = mutableMapOf<String, Long>()
+    private val instanceOperationLocks = Array(INSTANCE_OPERATION_LOCK_COUNT) { Any() }
 
     override fun installOrRefreshPackage(originPackageName: String): EngineResult {
         if (originPackageName.isBlank()) {
@@ -125,7 +136,12 @@ internal class DefaultVirtualizationEngineCore(
         )
     }
 
-    override fun launchInstance(request: LaunchInstanceRequest): EngineResult {
+    override fun launchInstance(request: LaunchInstanceRequest): EngineResult =
+        synchronized(instanceOperationLock(request.instanceId)) {
+            launchInstanceLocked(request)
+        }
+
+    private fun launchInstanceLocked(request: LaunchInstanceRequest): EngineResult {
         val instance = instanceManager.getInstance(request.instanceId)
             ?: return EngineResult.fail(
                 operation = OP_LAUNCH,
@@ -149,7 +165,7 @@ internal class DefaultVirtualizationEngineCore(
             )
         }
 
-        val runtime = runCatching {
+        var runtime = runCatching {
             pruneRuntimeSlots()
             buildRuntime(instance, installRecord, request.profile)
         }.getOrElse { error ->
@@ -168,7 +184,9 @@ internal class DefaultVirtualizationEngineCore(
                 message = error.message ?: "runtime slot assignment failed"
             )
         }
-        systemServer.runtimeService.register(runtime)
+        runtime = systemServer.runtimeService.register(runtime)
+        processDeathRegistry.removeInstance(runtime.instanceId)
+        activityLaunchCapabilities.revokeInstance(runtime.instanceId)
         val permissionSeed = runCatching {
             permissionGrantSeeder.seed(runtime, systemServer.permissionService)
         }.getOrElse { error ->
@@ -200,26 +218,213 @@ internal class DefaultVirtualizationEngineCore(
             instance.instanceId,
             hookRuntime.profileEvidence(decision)
         )
-        activityLauncher.launch(
-            EngineLaunchSpec(
-                instanceId = instance.instanceId,
-                profile = request.profile,
-                evidenceMode = request.evidenceMode,
-                processSlot = runtime.processSlot,
-                proxySlot = runtime.proxySlot,
-                evidenceSessionId = runtime.evidenceSessionId,
-                providerRoutingEnabled = decision.providerRoutingEnabled,
-                legacyProviderHookEnabled = decision.providerRoutingEnabled && decision.lsplantEnabled
+        if (request.prewarmPolicy == com.multiapp.core.model.engine.EnginePrewarmPolicy.DISABLED) {
+            val unsupported = EngineOperationEvidence(
+                component = "runtime",
+                operation = "process-bootstrap",
+                verdict = EngineResultStatus.UNSUPPORTED,
+                entries = mapOf(
+                    "bootstrapState" to EngineProcessBootstrapState.UNSUPPORTED.name,
+                    "reason" to "commercial_launch_requires_process_bootstrap"
+                )
             )
+            systemServer.runtimeService.registerOperationEvidence(instance.instanceId, unsupported)
+            return EngineResult.unsupported(
+                operation = OP_LAUNCH,
+                instanceId = instance.instanceId,
+                originPackageName = instance.originPackageName,
+                message = "Process bootstrap cannot be disabled for an engine-owned Activity launch"
+            )
+        }
+
+        val bootstrapRequest = EngineProcessBootstrapRequest(
+            runtime = runtime,
+            providerRoutingEnabled = decision.providerRoutingEnabled,
+            legacyProviderHookEnabled = decision.providerRoutingEnabled && decision.lsplantEnabled,
+            evidenceMode = request.evidenceMode
         )
+        val rawBootstrap = runCatching {
+            processBootstrapper.bootstrap(bootstrapRequest)
+        }.getOrElse { error ->
+            EngineProcessBootstrapResult(
+                state = EngineProcessBootstrapState.FAILED,
+                verdict = EngineResultStatus.FAIL,
+                instanceId = runtime.instanceId,
+                runtimeEpoch = runtime.runtimeEpoch,
+                engineSessionId = runtime.engineSessionId,
+                processName = runtime.processSlot,
+                message = "process bootstrap threw ${error.javaClass.name}: ${error.message.orEmpty()}",
+                evidence = mapOf("errorClass" to error.javaClass.name)
+            )
+        }
+        val bootstrap = if (rawBootstrap.validates(bootstrapRequest)) {
+            rawBootstrap
+        } else {
+            rawBootstrap.copy(
+                state = EngineProcessBootstrapState.STALE,
+                verdict = EngineResultStatus.FAIL,
+                message = "process bootstrap response did not match the authoritative runtime",
+                evidence = rawBootstrap.evidence + mapOf(
+                    "expectedInstanceId" to runtime.instanceId,
+                    "expectedRuntimeEpoch" to runtime.runtimeEpoch.toString(),
+                    "expectedEngineSessionId" to runtime.engineSessionId,
+                    "expectedProcessName" to runtime.processSlot
+                )
+            )
+        }
+        systemServer.runtimeService.registerOperationEvidence(
+            instance.instanceId,
+            bootstrap.toOperationEvidence()
+        )
+        if (!bootstrap.ready) {
+            return when (bootstrap.verdict) {
+                EngineResultStatus.UNSUPPORTED -> EngineResult.unsupported(
+                    operation = OP_LAUNCH,
+                    instanceId = instance.instanceId,
+                    originPackageName = instance.originPackageName,
+                    message = bootstrap.message
+                )
+                else -> EngineResult.fail(
+                    operation = OP_LAUNCH,
+                    instanceId = instance.instanceId,
+                    originPackageName = instance.originPackageName,
+                    message = bootstrap.message
+                )
+            }
+        }
+
+        runtime = runtimeRegistry.markPrewarmedIfCurrent(
+            instanceId = runtime.instanceId,
+            runtimeEpoch = runtime.runtimeEpoch,
+            engineSessionId = runtime.engineSessionId,
+            processId = bootstrap.processId,
+            processName = bootstrap.processName
+        ) ?: return staleBootstrapResult(
+            instance = instance,
+            bootstrap = bootstrap,
+            message = "Process bootstrap became stale before PREWARMED promotion"
+        )
+        if (!registerProcessDeath(runtime, bootstrap)) {
+            runtimeRegistry.markDeadIfCurrent(
+                instanceId = runtime.instanceId,
+                runtimeEpoch = runtime.runtimeEpoch,
+                engineSessionId = runtime.engineSessionId
+            )
+            return EngineResult.fail(
+                operation = OP_LAUNCH,
+                instanceId = instance.instanceId,
+                originPackageName = instance.originPackageName,
+                message = "Process bootstrap client token died before foreground launch"
+            )
+        }
+        val launcherActivityClassName = bootstrap.launcherActivityClassName
+            ?: runtime.packageSnapshot.launcherActivityName
+            ?: runtime.packageSnapshot.activities.firstOrNull()?.name
+            ?: return EngineResult.fail(
+                operation = OP_LAUNCH,
+                instanceId = instance.instanceId,
+                originPackageName = instance.originPackageName,
+                message = "Process bootstrap completed without a launcher Activity"
+            )
+        val launcherComponent = runtime.packageSnapshot.activities.firstOrNull { component ->
+            component.name == launcherActivityClassName ||
+                component.targetActivityName == launcherActivityClassName
+        }
+        val processId = bootstrap.processId ?: return EngineResult.fail(
+            operation = OP_LAUNCH,
+            instanceId = instance.instanceId,
+            originPackageName = instance.originPackageName,
+            message = "Process bootstrap completed without a target process id"
+        )
+        if (!isForegroundLaunchGenerationCurrent(runtime, bootstrap)) {
+            return staleBootstrapResult(
+                instance = instance,
+                bootstrap = bootstrap,
+                message = "Target process died or runtime generation changed before foreground launch"
+            )
+        }
+        val launchIdentity = runCatching {
+            activityLaunchCapabilities.issue(
+                runtime = runtime,
+                processId = processId,
+                proxyActivityClassName = runtime.proxySlot,
+                guestActivityClassName = launcherActivityClassName
+            )
+        }.getOrElse { error ->
+            return EngineResult.fail(
+                operation = OP_LAUNCH,
+                instanceId = instance.instanceId,
+                originPackageName = instance.originPackageName,
+                message = error.message ?: "Unable to issue Activity launch capability"
+            )
+        }
+        val launchFailure = runCatching {
+            activityLauncher.launch(
+                EngineLaunchSpec(
+                    instanceId = instance.instanceId,
+                    originPackageName = instance.originPackageName,
+                    guestActivityClassName = launcherActivityClassName,
+                    launchMode = launcherComponent?.launchMode,
+                    taskAffinity = launcherTaskAffinity(runtime, launcherComponent?.taskAffinity),
+                    profile = request.profile,
+                    evidenceMode = request.evidenceMode,
+                    processSlot = runtime.processSlot,
+                    proxySlot = runtime.proxySlot,
+                    evidenceSessionId = runtime.evidenceSessionId,
+                    runtimeEpoch = runtime.runtimeEpoch,
+                    engineSessionId = runtime.engineSessionId,
+                    processId = processId,
+                    launchCapabilityToken = launchIdentity.capabilityToken,
+                    bootstrapState = bootstrap.state,
+                    bootstrapVerdict = bootstrap.verdict,
+                    providerRoutingEnabled = decision.providerRoutingEnabled,
+                    legacyProviderHookEnabled = decision.providerRoutingEnabled && decision.lsplantEnabled
+                )
+            )
+        }.exceptionOrNull()
+        if (launchFailure != null) {
+            activityLaunchCapabilities.revoke(launchIdentity.capabilityToken)
+            systemServer.runtimeService.registerOperationEvidence(
+                instance.instanceId,
+                EngineOperationEvidence(
+                    component = "activity",
+                    operation = "foreground-launch",
+                    verdict = EngineResultStatus.FAIL,
+                    entries = mapOf(
+                        "bootstrapState" to bootstrap.state.name,
+                        "guestActivityClassName" to launcherActivityClassName,
+                        "errorClass" to launchFailure.javaClass.name,
+                        "message" to launchFailure.message.orEmpty()
+                    )
+                )
+            )
+            return EngineResult.fail(
+                operation = OP_LAUNCH,
+                instanceId = instance.instanceId,
+                originPackageName = instance.originPackageName,
+                message = launchFailure.message ?: "foreground proxy Activity launch failed"
+            )
+        }
+        if (!isForegroundLaunchGenerationCurrent(runtime, bootstrap)) {
+            activityLaunchCapabilities.revoke(launchIdentity.capabilityToken)
+            return staleBootstrapResult(
+                instance = instance,
+                bootstrap = bootstrap,
+                message = "Target process died or runtime generation changed during foreground launch"
+            )
+        }
+        runtime = runtimeRegistry.get(runtime.instanceId) ?: runtime
         instanceManager.updateLaunchState(instance.instanceId)
         val evidence = systemServer.runtimeService.evidence(instance.instanceId)
-        return if (permissionSeed.verdict == EngineResultStatus.PASS) {
+        return if (
+            permissionSeed.verdict == EngineResultStatus.PASS &&
+            bootstrap.verdict == EngineResultStatus.PASS
+        ) {
             EngineResult.pass(
                 operation = OP_LAUNCH,
                 instanceId = instance.instanceId,
                 originPackageName = instance.originPackageName,
-                message = "launch dispatched through engine",
+                message = "process READY confirmed and proxy Activity launched through engine",
                 runtime = runtime,
                 evidence = evidence
             )
@@ -228,15 +433,28 @@ internal class DefaultVirtualizationEngineCore(
                 operation = OP_LAUNCH,
                 instanceId = instance.instanceId,
                 originPackageName = instance.originPackageName,
-                message = "launch dispatched with partial permission seed",
+                message = "proxy Activity launched with partial bootstrap or permission evidence",
                 runtime = runtime,
                 evidence = evidence
             )
         }
     }
 
-    override fun stopInstance(instanceId: String): EngineResult {
+    override fun stopInstance(instanceId: String): EngineResult =
+        synchronized(instanceOperationLock(instanceId)) {
+            stopInstanceLocked(instanceId)
+        }
+
+    private fun stopInstanceLocked(instanceId: String): EngineResult {
+        systemServer.runtimeService.get(instanceId)?.let { runtime ->
+            processDeathRegistry.remove(
+                instanceId = runtime.instanceId,
+                runtimeEpoch = runtime.runtimeEpoch,
+                engineSessionId = runtime.engineSessionId
+            )
+        }
         val stopped = systemServer.runtimeService.stop(instanceId)
+        activityLaunchCapabilities.revokeInstance(instanceId)
         return if (stopped) {
             EngineResult.pass(operation = OP_STOP, instanceId = instanceId, message = "runtime stopped")
         } else {
@@ -277,7 +495,7 @@ internal class DefaultVirtualizationEngineCore(
             processSlot = slots.processSlot,
             proxySlot = slots.proxySlot,
             evidenceSessionId = evidenceSessionId,
-            runtimeEpoch = runtimeEpochFactory(),
+            runtimeEpoch = nextRuntimeEpoch(instance.instanceId),
             engineSessionId = "engine-$evidenceSessionId",
             processName = slots.processSlot,
             state = VirtualRuntimeState.CREATED
@@ -346,6 +564,131 @@ internal class DefaultVirtualizationEngineCore(
         } ?: snapshot.activities.firstOrNull()
     }
 
+    private fun launcherTaskAffinity(
+        runtime: VirtualInstanceRuntime,
+        componentTaskAffinity: String?
+    ): String {
+        val guestAffinity = componentTaskAffinity?.takeIf { it.isNotBlank() }
+            ?: runtime.packageSnapshot.taskAffinity?.takeIf { it.isNotBlank() }
+            ?: runtime.originPackageName
+        return "$guestAffinity:${runtime.instanceId}"
+    }
+
+    private fun registerProcessDeath(
+        runtime: VirtualInstanceRuntime,
+        bootstrap: EngineProcessBootstrapResult
+    ): Boolean {
+        val token = bootstrap.clientToken
+        if (token == null) {
+            systemServer.runtimeService.registerOperationEvidence(
+                runtime.instanceId,
+                EngineOperationEvidence(
+                    component = "runtime",
+                    operation = "process-token",
+                    verdict = EngineResultStatus.PARTIAL,
+                    entries = mapOf("reason" to "bootstrap_response_has_no_live_client_token")
+                )
+            )
+            return true
+        }
+        val linked = processDeathRegistry.register(
+            instanceId = runtime.instanceId,
+            runtimeEpoch = runtime.runtimeEpoch,
+            engineSessionId = runtime.engineSessionId,
+            token = token
+        ) {
+            if (
+                runtimeRegistry.markDeadIfCurrent(
+                    instanceId = runtime.instanceId,
+                    runtimeEpoch = runtime.runtimeEpoch,
+                    engineSessionId = runtime.engineSessionId
+                )
+            ) {
+                activityLaunchCapabilities.revokeGeneration(
+                    instanceId = runtime.instanceId,
+                    runtimeEpoch = runtime.runtimeEpoch,
+                    engineSessionId = runtime.engineSessionId
+                )
+                runtimeRegistry.registerOperationEvidence(
+                    runtime.instanceId,
+                    EngineOperationEvidence(
+                        component = "runtime",
+                        operation = "process-death",
+                        verdict = EngineResultStatus.FAIL,
+                        entries = mapOf(
+                            "runtimeEpoch" to runtime.runtimeEpoch.toString(),
+                            "engineSessionId" to runtime.engineSessionId,
+                            "reason" to "bootstrap_client_binder_died"
+                        )
+                    )
+                )
+            }
+        }
+        systemServer.runtimeService.registerOperationEvidence(
+            runtime.instanceId,
+            EngineOperationEvidence(
+                component = "runtime",
+                operation = "process-token",
+                verdict = if (linked) EngineResultStatus.PASS else EngineResultStatus.PARTIAL,
+                entries = mapOf(
+                    "clientTokenPresent" to "true",
+                    "deathRecipientLinked" to linked.toString()
+                )
+            )
+        )
+        return linked
+    }
+
+    private fun isForegroundLaunchGenerationCurrent(
+        runtime: VirtualInstanceRuntime,
+        bootstrap: EngineProcessBootstrapResult
+    ): Boolean {
+        val current = runtimeRegistry.get(runtime.instanceId) ?: return false
+        return current.runtimeEpoch == runtime.runtimeEpoch &&
+            current.engineSessionId == runtime.engineSessionId &&
+            current.processSlot == runtime.processSlot &&
+            current.processId == bootstrap.processId &&
+            current.state in setOf(VirtualRuntimeState.PREWARMED, VirtualRuntimeState.RUNNING) &&
+            (bootstrap.clientToken?.isBinderAlive != false)
+    }
+
+    private fun nextRuntimeEpoch(instanceId: String): Long = synchronized(runtimeEpochLock) {
+        val durableEpoch = runtimeRegistry.get(instanceId)?.runtimeEpoch ?: 0L
+        val allocatedEpoch = allocatedRuntimeEpochs[instanceId] ?: 0L
+        val previousEpoch = maxOf(durableEpoch, allocatedEpoch)
+        check(previousEpoch < Long.MAX_VALUE) { "runtimeEpoch exhausted for instanceId=$instanceId" }
+        val requestedEpoch = runtimeEpochFactory().coerceAtLeast(1L)
+        maxOf(requestedEpoch, previousEpoch + 1L).also { nextEpoch ->
+            allocatedRuntimeEpochs[instanceId] = nextEpoch
+        }
+    }
+
+    private fun instanceOperationLock(instanceId: String): Any {
+        val index = (instanceId.hashCode() and Int.MAX_VALUE) % instanceOperationLocks.size
+        return instanceOperationLocks[index]
+    }
+
+    private fun staleBootstrapResult(
+        instance: VirtualInstanceRecord,
+        bootstrap: EngineProcessBootstrapResult,
+        message: String
+    ): EngineResult {
+        systemServer.runtimeService.registerOperationEvidence(
+            instance.instanceId,
+            bootstrap.copy(
+                state = EngineProcessBootstrapState.STALE,
+                verdict = EngineResultStatus.FAIL,
+                message = message
+            ).toOperationEvidence()
+        )
+        return EngineResult.fail(
+            operation = OP_LAUNCH,
+            instanceId = instance.instanceId,
+            originPackageName = instance.originPackageName,
+            message = message
+        )
+    }
+
     private fun pruneRuntimeSlots() {
         val validInstanceIds = instanceManager.listInstances().mapTo(linkedSetOf()) { it.instanceId }
         slotStore.prune(validInstanceIds)
@@ -367,6 +710,7 @@ internal class DefaultVirtualizationEngineCore(
     }
 
     companion object {
+        private const val INSTANCE_OPERATION_LOCK_COUNT = 32
         private const val OP_INSTALL = "installOrRefreshPackage"
         private const val OP_CREATE = "createInstance"
         private const val OP_LAUNCH = "launchInstance"
@@ -376,11 +720,21 @@ internal class DefaultVirtualizationEngineCore(
 
 data class EngineLaunchSpec(
     val instanceId: String,
+    val originPackageName: String,
+    val guestActivityClassName: String,
+    val launchMode: String?,
+    val taskAffinity: String,
     val profile: EngineProfile,
     val evidenceMode: EngineEvidenceMode,
     val processSlot: String,
     val proxySlot: String,
     val evidenceSessionId: String,
+    val runtimeEpoch: Long,
+    val engineSessionId: String,
+    val processId: Int,
+    val launchCapabilityToken: String,
+    val bootstrapState: EngineProcessBootstrapState,
+    val bootstrapVerdict: EngineResultStatus,
     val providerRoutingEnabled: Boolean,
     val legacyProviderHookEnabled: Boolean
 )

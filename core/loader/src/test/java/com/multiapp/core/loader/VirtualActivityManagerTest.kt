@@ -42,7 +42,16 @@ class VirtualActivityManagerTest {
             nowMs = 1000L
         )
 
-        val spec = manager.createProxyLaunchSpec(record)
+        val launchIdentity = VirtualActivityLaunchIdentity(
+            capabilityToken = "capability-42",
+            instanceId = "inst-001",
+            runtimeEpoch = 42L,
+            engineSessionId = "engine-session-42",
+            processSlot = "com.multiapp.app:v0",
+            proxyActivityClassName = "com.multiapp.app.container.ProxyActivity0",
+            guestActivityClassName = "com.test.minimal.MainActivity"
+        )
+        val spec = manager.createProxyLaunchSpec(record, launchIdentity)
 
         assertEquals("com.multiapp.app", spec.hostPackageName)
         assertEquals("com.multiapp.app.container.ProxyActivity0", spec.proxyActivityClassName)
@@ -52,6 +61,7 @@ class VirtualActivityManagerTest {
         assertEquals("com.test.minimal.MainActivity", spec.guestActivityClassName)
         assertEquals(null, spec.launchMode)
         assertEquals(null, spec.taskAffinity)
+        assertSame(launchIdentity, spec.engineLaunchIdentity)
     }
 
     @Test

@@ -1,16 +1,18 @@
 package com.multiapp.core.engine
 
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class EngineRuntimeAuthorityValidatorTest {
     @Test
-    fun `unavailable authority allows durable fallback`() {
+    fun `unavailable authority fails closed`() {
         val decision = EngineRuntimeAuthorityValidator.validate(null)
 
-        assertTrue(decision.allowed)
+        assertFalse(decision.allowed)
         assertFalse(decision.authorityAvailable)
+        assertEquals("ipc_unavailable", decision.reason)
     }
 
     @Test

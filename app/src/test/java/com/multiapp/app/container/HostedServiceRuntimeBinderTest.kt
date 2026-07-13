@@ -3,6 +3,7 @@ package com.multiapp.app.container
 import android.content.Context
 import android.content.Intent
 import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.EngineRuntimeIpcSnapshot
 import com.multiapp.core.engine.EngineServiceStartRoute
 import com.multiapp.core.engine.HostedRuntimeBindOutcome
 import com.multiapp.core.engine.HostedRuntimeEngine
@@ -40,6 +41,7 @@ class HostedServiceRuntimeBinderTest {
         val cachedProxyIntent = proxyIntent()
         val binder = HostedServiceRuntimeBinder(
             runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() },
             requestDecoder = { hostPackageName, intent ->
                 assertEquals("com.multiapp.app", hostPackageName)
                 assertSame(cachedProxyIntent, intent)
@@ -64,6 +66,7 @@ class HostedServiceRuntimeBinderTest {
         val coldProxyIntent = proxyIntent()
         val binder = HostedServiceRuntimeBinder(
             runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() },
             requestDecoder = { hostPackageName, intent ->
                 assertEquals("com.multiapp.app", hostPackageName)
                 assertSame(coldProxyIntent, intent)
@@ -87,6 +90,7 @@ class HostedServiceRuntimeBinderTest {
         val runtime = FakeHostedRuntimeEngine(bindError = IllegalStateException("boom"))
         val binder = HostedServiceRuntimeBinder(
             runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() },
             requestDecoder = { hostPackageName, intent ->
                 assertEquals("com.multiapp.app", hostPackageName)
                 assertSame(failingProxyIntent, intent)
@@ -112,6 +116,7 @@ class HostedServiceRuntimeBinderTest {
         val runtime = FakeHostedRuntimeEngine(bindResult = bootstrapped)
         val binder = HostedServiceRuntimeBinder(
             runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot(processSlot) },
             requestDecoder = { _, _ -> serviceStartRoute(processSlot = processSlot) }
         )
 
@@ -131,6 +136,7 @@ class HostedServiceRuntimeBinderTest {
         )
         val binder = HostedServiceRuntimeBinder(
             runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot("com.multiapp.app:v4") },
             requestDecoder = { _, _ -> serviceStartRoute(processSlot = "com.multiapp.app:v4") }
         )
 
@@ -149,6 +155,20 @@ class HostedServiceRuntimeBinderTest {
     }
 
     private fun proxyIntent(): Intent = mockk(relaxed = true)
+
+    private fun authoritySnapshot(processSlot: String? = null) = EngineRuntimeIpcSnapshot(
+        found = true,
+        instanceId = "inst-001",
+        processSlot = processSlot ?: "com.multiapp.app:v0",
+        proxySlot = "com.multiapp.app.container.ProxyActivity0",
+        runtimeEpoch = 1L,
+        engineSessionId = "engine-1",
+        evidenceSessionId = "evidence-1",
+        runtimeState = "PREWARMED",
+        processId = 4100,
+        processName = processSlot ?: "com.multiapp.app:v0",
+        reason = null
+    )
 
     private fun serviceStartRoute(processSlot: String? = null): EngineServiceStartRoute = EngineServiceStartRoute.create(
         instanceId = "inst-001",

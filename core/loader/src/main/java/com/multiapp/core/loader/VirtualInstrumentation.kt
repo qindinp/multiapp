@@ -7,6 +7,7 @@ import android.app.ActivityManager
 import android.app.Application
 import android.app.Fragment
 import android.app.Instrumentation
+import android.content.ComponentName
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
@@ -93,6 +94,11 @@ open class VirtualInstrumentation(
             val shortInstanceId = instanceId.take(8).ifBlank { instanceId }
             return "$originPackageName #$shortInstanceId"
         }
+
+        internal fun canReuseHostedRuntimeCache(
+            cached: HostedBootstrapResult,
+            current: HostedBootstrapResult?
+        ): Boolean = current != null && cached.hasSameRuntimeIdentity(current)
     }
 
     override fun newApplication(cl: ClassLoader, className: String, context: Context): Application {
@@ -168,6 +174,7 @@ open class VirtualInstrumentation(
         rememberActivityThreadToken(activity)
         dispatchPendingActivityResultBeforeResume(activity)
         base.callActivityOnResume(activity)
+        VirtualActivityLaunchAuthority.notifyResumeCompleted(activity)
         writeLifecycleEvidence(activity, "onResume")
     }
 
@@ -938,6 +945,15 @@ open class VirtualInstrumentation(
         }
 
         return runCatching {
+            val launchPreflight = validateProxyActivityLaunchBeforeBootstrap(
+                proxyClassName = proxyClassName,
+                proxyIntent = intent,
+                instanceId = instanceId,
+                guestActivityClassName = guestActivityClassName
+            )
+            require(!launchPreflight.isRejected) {
+                "Proxy Activity launch preflight rejected: ${launchPreflight.skippedReason}"
+            }
             val runtime = createHostedRuntime(instanceId)
             val result = runtime.result
             require(result.success) {
@@ -1001,6 +1017,11 @@ open class VirtualInstrumentation(
             ?: legacyOriginalGuestIntent(proxyIntent)
             ?: Intent(proxyIntent)
         return guestIntent.apply {
+            proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { originPackageName ->
+                    component = ComponentName(originPackageName, guestActivityClassName)
+                }
             putExtra(EXTRA_INSTANCE_ID, instanceId)
             putExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME, guestActivityClassName)
             virtualActivityToken?.takeIf { it.isNotBlank() }?.let { token ->
@@ -1009,6 +1030,7 @@ open class VirtualInstrumentation(
             hostPackageName?.takeIf { it.isNotBlank() }?.let { packageName ->
                 putExtra(EXTRA_HOST_PACKAGE_NAME, packageName)
             }
+            copyEngineLaunchIdentity(proxyIntent, this)
         }
     }
 
@@ -1043,10 +1065,15 @@ open class VirtualInstrumentation(
         }.getOrNull()
 
     private fun createHostedRuntime(instanceId: String): HostedActivityRuntime {
-        hostedRuntimeCache[instanceId]?.let { return it }
+        val reusableResult = processRuntime.reusableResult(instanceId)
+        hostedRuntimeCache[instanceId]?.let { cached ->
+            if (canReuseHostedRuntimeCache(cached.result, reusableResult)) {
+                return cached
+            }
+            hostedRuntimeCache.remove(instanceId, cached)
+        }
 
         val hostApplication = ActivityThreadCompat.currentApplication()
-        val reusableResult = processRuntime.reusableResult(instanceId)
         if (shouldBlockForegroundRuntimeBootstrap(isMainThread(), reusableResult != null)) {
             writeForegroundBootstrapBlockedEvidence(
                 filesDir = hostApplication.filesDir,
@@ -1422,32 +1449,34 @@ open class VirtualInstrumentation(
     }
 
     @Suppress("DEPRECATION")
-    internal fun restoreActivityRecordFromProxyIntentIfMissing(
+    internal fun validateProxyActivityLaunchBeforeBootstrap(
         proxyClassName: String,
         proxyIntent: Intent,
-        guestIntent: Intent,
         instanceId: String,
         guestActivityClassName: String,
         fallbackOriginPackageName: String? = null,
         activityRecordManager: VirtualActivityRecordManager = this.activityRecordManager
     ): ActivityRecordRecoveryResult {
         val token = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
-            ?: guestIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
-        if (token.isNullOrBlank()) {
-            return ActivityRecordRecoveryResult(skippedReason = "TOKEN_MISSING")
-        }
+            ?.takeIf { it.isNotBlank() }
+            ?: return ActivityRecordRecoveryResult(
+                skippedReason = "TOKEN_MISSING",
+                isRejected = true
+            )
+        val originPackageName = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME)
+            ?.takeIf { it.isNotBlank() }
+            ?: fallbackOriginPackageName?.takeIf { it.isNotBlank() }
 
         activityRecordManager.resolve(token)?.let { existing ->
             if (!existing.matchesRecordOwner(
                     instanceId = instanceId,
                     guestActivityClassName = guestActivityClassName,
                     proxyActivityClassName = proxyClassName,
-                    originPackageName = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME) ?: fallbackOriginPackageName
+                    originPackageName = originPackageName
                 )
             ) {
                 return ActivityRecordRecoveryResult(
                     record = existing,
-                    activityRecordFound = false,
                     skippedReason = "TOKEN_OWNER_MISMATCH",
                     isRejected = true
                 )
@@ -1459,12 +1488,62 @@ open class VirtualInstrumentation(
             )
         }
 
+        val launchIdentity = proxyIntent.toVirtualActivityLaunchIdentity(proxyClassName)
+            ?: return ActivityRecordRecoveryResult(
+                skippedReason = "ENGINE_LAUNCH_IDENTITY_MISSING",
+                isRejected = true
+            )
+        val authorization = VirtualActivityLaunchAuthority.authorize(launchIdentity)
+        if (!authorization.accepted) {
+            return ActivityRecordRecoveryResult(
+                skippedReason = "ENGINE_LAUNCH_REJECTED:${authorization.reason}",
+                isRejected = true
+            )
+        }
+        if (originPackageName == null) {
+            return ActivityRecordRecoveryResult(
+                skippedReason = "ORIGIN_PACKAGE_MISSING",
+                isRejected = true
+            )
+        }
+        return ActivityRecordRecoveryResult(skippedReason = "ENGINE_LAUNCH_AUTHORIZED")
+    }
+
+    @Suppress("DEPRECATION")
+    internal fun restoreActivityRecordFromProxyIntentIfMissing(
+        proxyClassName: String,
+        proxyIntent: Intent,
+        guestIntent: Intent,
+        instanceId: String,
+        guestActivityClassName: String,
+        fallbackOriginPackageName: String? = null,
+        activityRecordManager: VirtualActivityRecordManager = this.activityRecordManager
+    ): ActivityRecordRecoveryResult {
+        val token = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+            ?.takeIf { it.isNotBlank() }
+            ?: guestIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+                ?.takeIf { it.isNotBlank() }
+            ?: return ActivityRecordRecoveryResult(
+                skippedReason = "TOKEN_MISSING",
+                isRejected = true
+            )
+        val launchPreflight = validateProxyActivityLaunchBeforeBootstrap(
+            proxyClassName = proxyClassName,
+            proxyIntent = proxyIntent,
+            instanceId = instanceId,
+            guestActivityClassName = guestActivityClassName,
+            fallbackOriginPackageName = fallbackOriginPackageName,
+            activityRecordManager = activityRecordManager
+        )
+        if (launchPreflight.isRejected || launchPreflight.activityRecordFound) return launchPreflight
+
         val originPackageName = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME)
             ?.takeIf { it.isNotBlank() }
             ?: fallbackOriginPackageName?.takeIf { it.isNotBlank() }
-        if (originPackageName.isNullOrBlank()) {
-            return ActivityRecordRecoveryResult(skippedReason = "ORIGIN_PACKAGE_MISSING")
-        }
+        if (originPackageName.isNullOrBlank()) return ActivityRecordRecoveryResult(
+            skippedReason = "ORIGIN_PACKAGE_MISSING",
+            isRejected = true
+        )
 
         return runCatching {
             val originalGuestIntent = VirtualActivityIntentStore.find(token)
@@ -1513,7 +1592,10 @@ open class VirtualInstrumentation(
                     "token=${EvidenceSanitizer.redactTokenForEvidence(token)}",
                 error
             )
-            ActivityRecordRecoveryResult(skippedReason = "RECOVERY_FAILED:${error.javaClass.name}")
+            ActivityRecordRecoveryResult(
+                skippedReason = "RECOVERY_FAILED:${error.javaClass.name}",
+                isRejected = true
+            )
         }
     }
 
@@ -2189,6 +2271,23 @@ open class VirtualInstrumentation(
     private fun String.redactUriForEvidence(): String = EvidenceSanitizer.redactUriForEvidence(this)
 
     private fun Intent.safeFlags(): Int = runCatching { flags }.getOrDefault(0)
+
+    private fun copyEngineLaunchIdentity(source: Intent, target: Intent) {
+        if (source.hasExtra(VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH)) {
+            target.putExtra(
+                VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH,
+                source.getLongExtra(VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH, 0L)
+            )
+        }
+        listOf(
+            VirtualActivityManager.EXTRA_ENGINE_SESSION_ID,
+            VirtualActivityManager.EXTRA_ENGINE_PROCESS_SLOT,
+            VirtualActivityManager.EXTRA_ENGINE_PROXY_ACTIVITY_CLASS_NAME,
+            VirtualActivityManager.EXTRA_ENGINE_LAUNCH_CAPABILITY
+        ).forEach { key ->
+            source.getStringExtra(key)?.let { value -> target.putExtra(key, value) }
+        }
+    }
 
     private fun Intent.toVirtualIntentSnapshot(): VirtualIntentSnapshot {
         val sourceExtras = runCatching { extras }.getOrNull()

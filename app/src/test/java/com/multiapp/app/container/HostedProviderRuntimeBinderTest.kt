@@ -3,6 +3,7 @@ package com.multiapp.app.container
 import android.content.Context
 import android.net.Uri
 import com.multiapp.core.engine.EngineHostedBootstrapResult
+import com.multiapp.core.engine.EngineRuntimeIpcSnapshot
 import com.multiapp.core.engine.HostedRuntimeBindOutcome
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.loader.BootstrapResult
@@ -35,7 +36,8 @@ class HostedProviderRuntimeBinderTest {
         val reusable = hostedResult("inst-001")
         val runtime = FakeHostedRuntimeEngine(reusableResults = mutableMapOf("inst-001" to reusable))
         val binder = HostedProviderRuntimeBinder(
-            runtimeEngineFactory = { runtime }
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() }
         )
 
         val result = binder.ensureBound(hostContext(), proxyUri())
@@ -54,7 +56,8 @@ class HostedProviderRuntimeBinderTest {
         val bootstrapped = hostedResult("inst-001")
         val runtime = FakeHostedRuntimeEngine(bindResult = bootstrapped)
         val binder = HostedProviderRuntimeBinder(
-            runtimeEngineFactory = { runtime }
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() }
         )
 
         val result = binder.ensureBound(hostContext(), proxyUri())
@@ -71,7 +74,8 @@ class HostedProviderRuntimeBinderTest {
     fun `ensureBound reports bootstrap failure`() {
         val runtime = FakeHostedRuntimeEngine(bindError = IllegalStateException("boom"))
         val binder = HostedProviderRuntimeBinder(
-            runtimeEngineFactory = { runtime }
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot() }
         )
 
         val result = binder.ensureBound(hostContext(), proxyUri())
@@ -92,7 +96,8 @@ class HostedProviderRuntimeBinderTest {
         val bootstrapped = hostedResult("inst-001", processSlot = processSlot)
         val runtime = FakeHostedRuntimeEngine(bindResult = bootstrapped)
         val binder = HostedProviderRuntimeBinder(
-            runtimeEngineFactory = { runtime }
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot(processSlot) }
         )
 
         val result = binder.ensureBound(hostContext(), proxyUri(processSlot = processSlot))
@@ -110,7 +115,8 @@ class HostedProviderRuntimeBinderTest {
             )
         )
         val binder = HostedProviderRuntimeBinder(
-            runtimeEngineFactory = { runtime }
+            runtimeEngineFactory = { runtime },
+            authorityQuery = { authoritySnapshot("com.multiapp.app:v3") }
         )
 
         val result = binder.ensureBound(hostContext(), proxyUri(processSlot = "com.multiapp.app:v3"))
@@ -136,6 +142,20 @@ class HostedProviderRuntimeBinderTest {
         every { getQueryParameter(ProviderRouteContract.PROXY_GUEST_AUTHORITY) } returns guestAuthority
         every { getQueryParameter(ProviderRouteContract.PROXY_PROCESS_SLOT) } returns processSlot
     }
+
+    private fun authoritySnapshot(processSlot: String? = null) = EngineRuntimeIpcSnapshot(
+        found = true,
+        instanceId = "inst-001",
+        processSlot = processSlot ?: "com.multiapp.app:v0",
+        proxySlot = "com.multiapp.app.container.ProxyActivity0",
+        runtimeEpoch = 1L,
+        engineSessionId = "engine-1",
+        evidenceSessionId = "evidence-1",
+        runtimeState = "PREWARMED",
+        processId = 4100,
+        processName = processSlot ?: "com.multiapp.app:v0",
+        reason = null
+    )
 
     private fun hostedResult(
         instanceId: String,

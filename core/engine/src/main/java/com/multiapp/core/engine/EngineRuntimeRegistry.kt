@@ -7,7 +7,15 @@ import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineSubsystem
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
+import com.multiapp.core.model.engine.VirtualRuntimeState
 import java.util.concurrent.ConcurrentHashMap
+
+data class EngineRuntimeForegroundAckResult(
+    val accepted: Boolean,
+    val idempotent: Boolean,
+    val state: VirtualRuntimeState?,
+    val reason: String
+)
 
 class EngineRuntimeRegistry(
     private var stateStore: EngineRuntimeStateStore = InMemoryEngineRuntimeStateStore()
@@ -140,6 +148,125 @@ class EngineRuntimeRegistry(
         return removed
     }
 
+    @Synchronized
+    fun markDeadIfCurrent(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String
+    ): Boolean {
+        return updateIfCurrent(instanceId, runtimeEpoch, engineSessionId) { runtime ->
+            if (runtime.state == VirtualRuntimeState.DEAD) return@updateIfCurrent null
+            runtime.copy(
+                processId = null,
+                state = VirtualRuntimeState.DEAD
+            )
+        } != null
+    }
+
+    @Synchronized
+    fun invalidateEphemeralProcessStates(reason: String): Int {
+        require(reason.isNotBlank()) { "reason must not be blank" }
+        var invalidated = 0
+        stateStore.list().forEach { record ->
+            val runtime = record.toRuntime()
+            if (runtime.state !in EPHEMERAL_PROCESS_STATES) return@forEach
+            val dead = runtime.copy(processId = null, state = VirtualRuntimeState.DEAD)
+            if (stateStore.compareAndSet(record, EngineRuntimeStateRecord.from(dead))) {
+                cacheRuntime(dead, source = "server-restart-invalidation")
+                registerOperationEvidence(
+                    dead.instanceId,
+                    EngineOperationEvidence(
+                        component = "runtime",
+                        operation = "server-restart-invalidation",
+                        verdict = EngineResultStatus.FAIL,
+                        entries = mapOf(
+                            "previousState" to runtime.state.name,
+                            "previousProcessId" to runtime.processId?.toString().orEmpty(),
+                            "reason" to reason
+                        )
+                    )
+                )
+                invalidated += 1
+            }
+        }
+        return invalidated
+    }
+
+    @Synchronized
+    fun markPrewarmedIfCurrent(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processId: Int?,
+        processName: String?
+    ): VirtualInstanceRuntime? = updateIfCurrent(
+        instanceId = instanceId,
+        runtimeEpoch = runtimeEpoch,
+        engineSessionId = engineSessionId
+    ) { runtime ->
+        if (runtime.state != VirtualRuntimeState.CREATED) return@updateIfCurrent null
+        runtime.copy(
+            processId = processId,
+            processName = processName,
+            state = VirtualRuntimeState.PREWARMED
+        )
+    }
+
+    @Synchronized
+    fun acknowledgeActivityResumed(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        processSlot: String,
+        callingPid: Int
+    ): EngineRuntimeForegroundAckResult {
+        val runtime = stateStore.get(instanceId)?.toRuntime() ?: return EngineRuntimeForegroundAckResult(
+            accepted = false,
+            idempotent = false,
+            state = null,
+            reason = "runtime_not_found"
+        )
+        if (runtime.runtimeEpoch != runtimeEpoch || runtime.engineSessionId != engineSessionId) {
+            cacheRuntime(runtime, source = "durable-refresh")
+            return foregroundAckRejected(runtime, "runtime_identity_mismatch")
+        }
+        if (runtime.processSlot != processSlot || runtime.processName != processSlot) {
+            return foregroundAckRejected(runtime, "process_slot_mismatch")
+        }
+        if (callingPid <= 0 || runtime.processId == null || runtime.processId != callingPid) {
+            return foregroundAckRejected(runtime, "process_id_mismatch")
+        }
+        if (runtime.state == VirtualRuntimeState.RUNNING) {
+            return EngineRuntimeForegroundAckResult(
+                accepted = true,
+                idempotent = true,
+                state = runtime.state,
+                reason = "already_running"
+            )
+        }
+        if (runtime.state != VirtualRuntimeState.PREWARMED) {
+            return foregroundAckRejected(runtime, "invalid_state:${runtime.state.name}")
+        }
+        val expectedRecord = EngineRuntimeStateRecord.from(runtime)
+        val updated = runtime.copy(state = VirtualRuntimeState.RUNNING)
+        if (!stateStore.compareAndSet(expectedRecord, EngineRuntimeStateRecord.from(updated))) {
+            get(instanceId)
+            return EngineRuntimeForegroundAckResult(
+                accepted = false,
+                idempotent = false,
+                state = get(instanceId)?.state,
+                reason = "runtime_changed_during_ack"
+            )
+        }
+        cacheRuntime(updated, source = "foreground-ack")
+        return EngineRuntimeForegroundAckResult(
+            accepted = true,
+            idempotent = false,
+            state = updated.state,
+            reason = "guest_activity_resumed"
+        )
+    }
+
     fun evidence(instanceId: String): EngineEvidenceReport {
         val runtime = get(instanceId)
         if (runtime != null) return reports[instanceId] ?: reportFor(runtime, source = "durable")
@@ -174,6 +301,48 @@ class EngineRuntimeRegistry(
         }
     }
 
+    private fun updateIfCurrent(
+        instanceId: String,
+        runtimeEpoch: Long,
+        engineSessionId: String,
+        update: (VirtualInstanceRuntime) -> VirtualInstanceRuntime?
+    ): VirtualInstanceRuntime? {
+        val runtime = stateStore.get(instanceId)?.toRuntime() ?: run {
+            runtimes.remove(instanceId)
+            reports.remove(instanceId)
+            return null
+        }
+        if (runtime.runtimeEpoch != runtimeEpoch || runtime.engineSessionId != engineSessionId) {
+            cacheRuntime(runtime, source = "durable-refresh")
+            return null
+        }
+        val updated = update(runtime) ?: return null
+        require(updated.instanceId == instanceId) { "runtime update changed instanceId" }
+        require(updated.runtimeEpoch == runtimeEpoch) { "runtime update changed runtimeEpoch" }
+        require(updated.engineSessionId == engineSessionId) { "runtime update changed engineSessionId" }
+        if (
+            !stateStore.compareAndSet(
+                expected = EngineRuntimeStateRecord.from(runtime),
+                updated = EngineRuntimeStateRecord.from(updated)
+            )
+        ) {
+            get(instanceId)
+            return null
+        }
+        cacheRuntime(updated, source = "identity-cas")
+        return updated
+    }
+
+    private fun foregroundAckRejected(
+        runtime: VirtualInstanceRuntime,
+        reason: String
+    ): EngineRuntimeForegroundAckResult = EngineRuntimeForegroundAckResult(
+        accepted = false,
+        idempotent = false,
+        state = runtime.state,
+        reason = reason
+    )
+
     private fun EngineOperationEvidence.sanitizedForReport(): EngineOperationEvidence {
         return copy(
             component = EvidenceSanitizer.sanitizeEvidenceLabel(component, defaultValue = "unknown"),
@@ -183,6 +352,12 @@ class EngineRuntimeRegistry(
     }
 
     companion object {
+        private val EPHEMERAL_PROCESS_STATES = setOf(
+            VirtualRuntimeState.CREATED,
+            VirtualRuntimeState.PREWARMED,
+            VirtualRuntimeState.RUNNING
+        )
+
         val global: EngineRuntimeRegistry = EngineRuntimeRegistry()
     }
 }
