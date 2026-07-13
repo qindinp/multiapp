@@ -6,6 +6,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertSame
 
@@ -25,10 +26,8 @@ class EnginePermissionIpcServiceTest {
     }
 
     @Test
-    fun `connected malformed response fails closed and unavailable authority uses fallback`() {
-        val fallback = mockk<VirtualPermissionService>()
-        val local = result(granted = true)
-        every { fallback.checkPermission("instance-1", PERMISSION) } returns local
+    fun `malformed and unavailable permission authority fail closed without fallback`() {
+        val fallback = mockk<VirtualPermissionService>(relaxed = true)
         val connected = IpcBackedVirtualPermissionService(
             fallback = fallback,
             remoteCheck = { _, _ -> null },
@@ -40,8 +39,81 @@ class EnginePermissionIpcServiceTest {
             authorityConnected = { false }
         )
 
-        assertFalse(connected.checkPermission("instance-1", PERMISSION).granted)
-        assertSame(local, unavailable.checkPermission("instance-1", PERMISSION))
+        val invalid = connected.checkPermission("instance-1", PERMISSION)
+        val disconnected = unavailable.checkPermission("instance-1", PERMISSION)
+
+        assertFalse(invalid.granted)
+        assertEquals("engine_permission_ipc_check_invalid", invalid.message)
+        assertFalse(disconnected.granted)
+        assertEquals("engine_permission_authority_unavailable:check", disconnected.message)
+        verify(exactly = 0) { fallback.checkPermission(any(), any()) }
+    }
+
+    @Test
+    fun `permission mutations are unsupported and never use local fallback`() {
+        val fallback = mockk<VirtualPermissionService>(relaxed = true)
+        val service = IpcBackedVirtualPermissionService(
+            fallback = fallback,
+            authorityConnected = { false }
+        )
+
+        val set = service.setPermissionGrant(
+            "instance-1",
+            PERMISSION,
+            true,
+            EnginePermissionGrantSource.USER_DECISION
+        )
+        val cleared = service.clearPermissionGrant("instance-1", PERMISSION)
+
+        assertEquals(EngineResultStatus.UNSUPPORTED, set.verdict)
+        assertEquals("engine_permission_remote_mutation_unsupported:set-grant", set.message)
+        assertEquals(0, cleared)
+        verify(exactly = 0) { fallback.setPermissionGrant(any(), any(), any(), any()) }
+        verify(exactly = 0) { fallback.clearPermissionGrant(any(), any()) }
+    }
+
+    @Test
+    fun `unavailable authority exposes explicit read only permission snapshots as partial`() {
+        val fallback = mockk<VirtualPermissionService>(relaxed = true)
+        val state = VirtualPermissionRuntimeState(
+            instanceId = "instance-1",
+            verdict = EngineResultStatus.PASS,
+            message = "durable_permission_snapshot"
+        )
+        val binding = VirtualSubsystemRuntimeBinding(
+            instanceId = "instance-1",
+            subsystem = com.multiapp.core.model.engine.EngineSubsystem.PERMISSION,
+            verdict = EngineResultStatus.PASS,
+            message = "durable_permission_binding"
+        )
+        val service = IpcBackedVirtualPermissionService(
+            fallback = fallback,
+            remoteState = { null },
+            readOnlyRuntimeStateSnapshot = { state },
+            readOnlyRuntimeBindingSnapshot = { binding },
+            authorityConnected = { false }
+        )
+
+        assertEquals(EngineResultStatus.PARTIAL, service.queryRuntimeState("instance-1").verdict)
+        assertEquals(EngineResultStatus.PARTIAL, service.queryRuntimeBinding("instance-1").verdict)
+        verify(exactly = 0) { fallback.queryRuntimeState(any()) }
+        verify(exactly = 0) { fallback.queryRuntimeBinding(any()) }
+    }
+
+    @Test
+    fun `mismatched permission response identity fails closed`() {
+        val fallback = mockk<VirtualPermissionService>(relaxed = true)
+        val service = IpcBackedVirtualPermissionService(
+            fallback = fallback,
+            remoteCheck = { _, _ -> result(granted = true).copy(instanceId = "instance-2") },
+            authorityConnected = { true }
+        )
+
+        val actual = service.checkPermission("instance-1", PERMISSION)
+
+        assertEquals(EngineResultStatus.FAIL, actual.verdict)
+        assertFalse(actual.granted)
+        verify(exactly = 0) { fallback.checkPermission(any(), any()) }
     }
 
     @Test

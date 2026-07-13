@@ -29,6 +29,7 @@ interface EngineRuntimeSlotStore {
 
     fun get(instanceId: String): EngineRuntimeSlotAssignment?
     fun list(): List<EngineRuntimeSlotAssignment>
+    fun remove(instanceId: String): Boolean
     fun prune(validInstanceIds: Set<String>): Int
 }
 
@@ -71,6 +72,9 @@ class InMemoryEngineRuntimeSlotStore : EngineRuntimeSlotStore {
     override fun list(): List<EngineRuntimeSlotAssignment> = assignments.values.toList()
 
     @Synchronized
+    override fun remove(instanceId: String): Boolean = assignments.remove(instanceId) != null
+
+    @Synchronized
     override fun prune(validInstanceIds: Set<String>): Int {
         val before = assignments.size
         assignments.keys.removeAll { it !in validInstanceIds }
@@ -111,6 +115,15 @@ class FileBackedEngineRuntimeSlotStore(
 
     @Synchronized
     override fun list(): List<EngineRuntimeSlotAssignment> = load()
+
+    @Synchronized
+    override fun remove(instanceId: String): Boolean {
+        val current = load()
+        val retained = current.filterNot { it.instanceId == instanceId }
+        if (retained.size == current.size) return false
+        store(retained)
+        return true
+    }
 
     @Synchronized
     override fun prune(validInstanceIds: Set<String>): Int {

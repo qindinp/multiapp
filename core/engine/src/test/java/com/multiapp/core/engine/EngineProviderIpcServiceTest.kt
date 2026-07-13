@@ -1,7 +1,6 @@
 package com.multiapp.core.engine
 
 import com.multiapp.core.model.engine.EngineResultStatus
-import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlin.test.Test
@@ -93,11 +92,9 @@ class EngineProviderIpcServiceTest {
     }
 
     @Test
-    fun `unavailable authority uses durable Provider fallback`() {
-        val fallback = mockk<VirtualProviderService>()
+    fun `unavailable authority fails closed without Provider planning fallback`() {
+        val fallback = mockk<VirtualProviderService>(relaxed = true)
         val request = request()
-        val local = plan(message = "durable_provider_plan")
-        every { fallback.planProvider("instance-1", request) } returns local
         val service = IpcBackedVirtualProviderService(
             fallback = fallback,
             remotePlan = { _, _ -> null },
@@ -105,7 +102,11 @@ class EngineProviderIpcServiceTest {
             authorityConnected = { false }
         )
 
-        assertSame(local, service.planProvider("instance-1", request))
+        val actual = service.planProvider("instance-1", request)
+
+        assertEquals(EngineResultStatus.FAIL, actual.verdict)
+        assertEquals("engine_provider_authority_unavailable:plan", actual.message)
+        verify(exactly = 0) { fallback.planProvider(any(), any()) }
     }
 
     @Test
@@ -238,6 +239,29 @@ class EngineProviderIpcServiceTest {
     }
 
     @Test
+    fun `unavailable authority rejects Provider URI mutation without fallback`() {
+        val fallback = mockk<VirtualProviderService>(relaxed = true)
+        val request = VirtualProviderUriGrantRequest(
+            guestAuthority = "com.example.provider",
+            encodedPath = "/books/7",
+            modeFlags = EngineProviderUriGrantModes.READ,
+            targetInstanceId = "instance-2"
+        )
+        val service = IpcBackedVirtualProviderService(
+            fallback = fallback,
+            remoteGrant = { _, _ -> null },
+            authorityConnected = { false }
+        )
+
+        val actual = service.grantUriPermission("instance-1", request)
+
+        assertEquals(EngineResultStatus.FAIL, actual.verdict)
+        assertFalse(actual.granted)
+        assertEquals("engine_provider_authority_unavailable:uri_grant", actual.message)
+        verify(exactly = 0) { fallback.grantUriPermission(any(), any()) }
+    }
+
+    @Test
     fun `connected authority owns persistable Provider URI take and release`() {
         val fallback = mockk<VirtualProviderService>(relaxed = true)
         val request = VirtualProviderUriGrantRequest(
@@ -275,6 +299,77 @@ class EngineProviderIpcServiceTest {
         assertSame(released, service.releasePersistableUriPermission("instance-2", request))
         verify(exactly = 0) { fallback.takePersistableUriPermission(any(), any()) }
         verify(exactly = 0) { fallback.releasePersistableUriPermission(any(), any()) }
+    }
+
+    @Test
+    fun `unavailable authority may expose explicit read only Provider snapshots as partial`() {
+        val fallback = mockk<VirtualProviderService>(relaxed = true)
+        val state = VirtualProviderRuntimeState(
+            instanceId = "instance-1",
+            verdict = EngineResultStatus.PASS,
+            message = "durable_provider_snapshot"
+        )
+        val binding = VirtualSubsystemRuntimeBinding(
+            instanceId = "instance-1",
+            subsystem = com.multiapp.core.model.engine.EngineSubsystem.PROVIDER,
+            verdict = EngineResultStatus.PASS,
+            message = "durable_runtime_snapshot"
+        )
+        val service = IpcBackedVirtualProviderService(
+            fallback = fallback,
+            remoteState = { null },
+            readOnlyRuntimeStateSnapshot = { state },
+            readOnlyRuntimeBindingSnapshot = { binding },
+            authorityConnected = { false }
+        )
+
+        val runtimeState = service.queryProviderRuntimeState("instance-1")
+        val runtimeBinding = service.queryRuntimeBinding("instance-1")
+
+        assertEquals(EngineResultStatus.PARTIAL, runtimeState.verdict)
+        assertEquals(
+            "engine_provider_read_only_runtime_snapshot:durable_provider_snapshot",
+            runtimeState.message
+        )
+        assertEquals(EngineResultStatus.PARTIAL, runtimeBinding.verdict)
+        verify(exactly = 0) { fallback.queryProviderRuntimeState(any()) }
+        verify(exactly = 0) { fallback.queryRuntimeBinding(any()) }
+    }
+
+    @Test
+    fun `mismatched Provider response identity fails closed`() {
+        val fallback = mockk<VirtualProviderService>(relaxed = true)
+        val request = request()
+        val service = IpcBackedVirtualProviderService(
+            fallback = fallback,
+            remotePlan = { _, _ -> plan("forged").copy(instanceId = "instance-2") },
+            remoteGrant = { _, uriRequest ->
+                VirtualProviderUriGrantResult(
+                    ownerInstanceId = "instance-forged",
+                    targetInstanceId = uriRequest.targetInstanceId,
+                    guestAuthority = uriRequest.guestAuthority,
+                    encodedPath = uriRequest.encodedPath,
+                    modeFlags = uriRequest.modeFlags,
+                    verdict = EngineResultStatus.PASS,
+                    granted = true,
+                    message = "forged"
+                )
+            },
+            authorityConnected = { true }
+        )
+        val uriRequest = VirtualProviderUriGrantRequest(
+            guestAuthority = request.guestAuthority,
+            modeFlags = EngineProviderUriGrantModes.READ,
+            targetInstanceId = "instance-2"
+        )
+
+        assertEquals(EngineResultStatus.FAIL, service.planProvider("instance-1", request).verdict)
+        assertEquals(
+            EngineResultStatus.FAIL,
+            service.grantUriPermission("instance-1", uriRequest).verdict
+        )
+        verify(exactly = 0) { fallback.planProvider(any(), any()) }
+        verify(exactly = 0) { fallback.grantUriPermission(any(), any()) }
     }
 
     private fun request() = VirtualProviderDispatchPlanRequest(

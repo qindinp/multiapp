@@ -85,6 +85,20 @@ class FileBackedProxyActivitySlotAssignmentStore(
         }
     }
 
+    override fun removeInstance(instanceId: String): Int {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        return withFileLock {
+            val current = load()
+            if (current.isEmpty()) return@withFileLock 0
+            val retained = current.filterKeys { storageKey ->
+                storageKey.toSlotKeyOrNull()?.instanceId != instanceId
+            }
+            val removed = current.size - retained.size
+            if (removed > 0) store(retained)
+            removed
+        }
+    }
+
     override fun pruneStaleAssignments(
         validInstanceIds: Set<String>,
         liveProxyActivityClassNames: Set<String>,

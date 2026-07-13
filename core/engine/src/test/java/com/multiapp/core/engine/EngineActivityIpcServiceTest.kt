@@ -1,12 +1,10 @@
 package com.multiapp.core.engine
 
 import com.multiapp.core.model.engine.EngineResultStatus
-import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualTaskRecord
-import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlin.test.Test
@@ -56,11 +54,9 @@ class EngineActivityIpcServiceTest {
     }
 
     @Test
-    fun `unavailable authority uses durable Activity fallback`() {
-        val fallback = mockk<VirtualActivityService>()
+    fun `unavailable authority fails closed without Activity planning fallback`() {
+        val fallback = mockk<VirtualActivityService>(relaxed = true)
         val request = VirtualActivityDispatchPlanRequest(action = "test.OPEN")
-        val local = plan(message = "durable_activity_plan")
-        every { fallback.planActivity("instance-1", request) } returns local
         val service = IpcBackedVirtualActivityService(
             fallback = fallback,
             remotePlan = { _, _ -> null },
@@ -68,7 +64,11 @@ class EngineActivityIpcServiceTest {
             authorityConnected = { false }
         )
 
-        assertSame(local, service.planActivity("instance-1", request))
+        val actual = service.planActivity("instance-1", request)
+
+        assertEquals(EngineResultStatus.FAIL, actual.verdict)
+        assertEquals("engine_activity_authority_unavailable", actual.message)
+        verify(exactly = 0) { fallback.planActivity(any(), any()) }
     }
 
     @Test
@@ -149,24 +149,8 @@ class EngineActivityIpcServiceTest {
     }
 
     @Test
-    fun `unavailable authority uses durable Activity mutation fallback`() {
-        val fallback = mockk<VirtualActivityService>()
-        val local = operationResult(
-            operation = EngineActivityIpcOperation.SET_RESULT,
-            message = "durable_activity_result_persisted"
-        )
-        every {
-            fallback.setActivityResult(
-                "instance-1",
-                "token-1",
-                201,
-                any(),
-                9,
-                null,
-                false,
-                false
-            )
-        } returns local
+    fun `unavailable authority fails closed without Activity mutation fallback`() {
+        val fallback = mockk<VirtualActivityService>(relaxed = true)
         val service = IpcBackedVirtualActivityService(
             fallback = fallback,
             remoteMutation = { _, _ -> null },
@@ -184,7 +168,11 @@ class EngineActivityIpcServiceTest {
             frameworkDispatchInvoked = false
         )
 
-        assertSame(local, actual)
+        assertEquals(EngineResultStatus.FAIL, actual.verdict)
+        assertEquals("engine_activity_authority_unavailable:set-result", actual.message)
+        verify(exactly = 0) {
+            fallback.setActivityResult(any(), any(), any(), any(), any(), any(), any(), any())
+        }
     }
 
     @Test
@@ -203,17 +191,16 @@ class EngineActivityIpcServiceTest {
     }
 
     @Test
-    fun `unavailable authority uses durable Activity consume fallback`() {
-        val fallback = mockk<VirtualActivityService>()
-        val local = VirtualActivityResult(resultCode = 202, requestCode = 9)
-        every { fallback.consumeActivityResult("instance-1", "token-1") } returns local
+    fun `unavailable authority never consumes stale Activity fallback state`() {
+        val fallback = mockk<VirtualActivityService>(relaxed = true)
         val service = IpcBackedVirtualActivityService(
             fallback = fallback,
             remoteConsume = { _, _, _ -> null },
             authorityConnected = { false }
         )
 
-        assertSame(local, service.consumeActivityResult("instance-1", "token-1"))
+        assertNull(service.consumeActivityResult("instance-1", "token-1"))
+        verify(exactly = 0) { fallback.consumeActivityResult(any(), any()) }
     }
 
     @Test
@@ -279,16 +266,9 @@ class EngineActivityIpcServiceTest {
     }
 
     @Test
-    fun `unavailable authority persists Activity task snapshot through fallback`() {
-        val fallback = mockk<VirtualActivityService>()
+    fun `unavailable authority rejects Activity task sync without mutable fallback`() {
+        val fallback = mockk<VirtualActivityService>(relaxed = true)
         val task = taskRecord()
-        val local = operationResult(
-            operation = EngineActivityIpcOperation.MARK_STATE,
-            message = "durable_activity_task_state_synced"
-        ).copy(operation = "sync-task-state")
-        every {
-            fallback.syncActivityTaskState("instance-1", "launch-remapped", listOf(task))
-        } returns local
         val service = IpcBackedVirtualActivityService(
             fallback = fallback,
             remoteTaskSync = { _, _, _ -> null },
@@ -296,7 +276,68 @@ class EngineActivityIpcServiceTest {
             authorityConnected = { false }
         )
 
-        assertSame(local, service.syncActivityTaskState("instance-1", "launch-remapped"))
+        val actual = service.syncActivityTaskState("instance-1", "launch-remapped")
+
+        assertEquals(EngineResultStatus.FAIL, actual.verdict)
+        assertEquals("engine_activity_authority_unavailable:sync-task-state", actual.message)
+        verify(exactly = 0) { fallback.syncActivityTaskState(any(), any(), any()) }
+    }
+
+    @Test
+    fun `unavailable authority may expose explicit read only Activity snapshots as partial`() {
+        val fallback = mockk<VirtualActivityService>(relaxed = true)
+        val taskState = VirtualActivityTaskState(
+            instanceId = "instance-1",
+            verdict = EngineResultStatus.PASS,
+            taskCount = 1,
+            message = "durable_task_snapshot"
+        )
+        val binding = VirtualSubsystemRuntimeBinding(
+            instanceId = "instance-1",
+            subsystem = com.multiapp.core.model.engine.EngineSubsystem.ACTIVITY,
+            verdict = EngineResultStatus.PASS,
+            originPackageName = "com.example",
+            message = "durable_runtime_snapshot"
+        )
+        val service = IpcBackedVirtualActivityService(
+            fallback = fallback,
+            remoteTaskState = { null },
+            readOnlyTaskStateSnapshot = { taskState },
+            readOnlyRuntimeBindingSnapshot = { binding },
+            authorityConnected = { false }
+        )
+
+        val state = service.queryTaskState("instance-1")
+        val runtime = service.queryRuntimeBinding("instance-1")
+
+        assertEquals(EngineResultStatus.PARTIAL, state.verdict)
+        assertEquals("engine_activity_read_only_task_snapshot:durable_task_snapshot", state.message)
+        assertEquals(EngineResultStatus.PARTIAL, runtime.verdict)
+        assertEquals("engine_activity_read_only_runtime_snapshot:durable_runtime_snapshot", runtime.message)
+        verify(exactly = 0) { fallback.queryTaskState(any()) }
+        verify(exactly = 0) { fallback.queryRuntimeBinding(any()) }
+    }
+
+    @Test
+    fun `mismatched Activity response identity fails closed`() {
+        val fallback = mockk<VirtualActivityService>(relaxed = true)
+        val service = IpcBackedVirtualActivityService(
+            fallback = fallback,
+            remotePlan = { _, _ -> plan("forged").copy(instanceId = "instance-2") },
+            remoteMutation = { _, _ ->
+                operationResult(EngineActivityIpcOperation.FINISH, message = "forged")
+                    .copy(instanceId = "instance-2")
+            },
+            authorityConnected = { true }
+        )
+
+        assertEquals(
+            EngineResultStatus.FAIL,
+            service.planActivity("instance-1", VirtualActivityDispatchPlanRequest(action = "test.OPEN")).verdict
+        )
+        assertEquals(EngineResultStatus.FAIL, service.finishActivity("instance-1", "token-1").verdict)
+        verify(exactly = 0) { fallback.planActivity(any(), any()) }
+        verify(exactly = 0) { fallback.finishActivity(any(), any()) }
     }
 
     private fun plan(message: String) = VirtualActivityDispatchPlan(

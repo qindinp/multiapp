@@ -150,4 +150,21 @@ class FileBackedProxyActivitySlotAssignmentStoreTest {
         assertEquals(1, removed)
         assertNull(store.find(key))
     }
+
+    @Test
+    fun `removeInstance releases only assignments owned by the deleted instance`(@TempDir tempDir: File) {
+        val store = FileBackedProxyActivitySlotAssignmentStore(File(tempDir, "proxy_activity_slots.properties"))
+        val first = ProxyActivitySlotKey("inst-001", null, "task-1")
+        val second = ProxyActivitySlotKey("inst-001", "singleTop", "task-2")
+        val sibling = ProxyActivitySlotKey("inst-002", null, "task-3")
+        store.save(first, "com.multiapp.app.container.ProxyActivity0")
+        store.save(second, "com.multiapp.app.container.ProxyActivity1")
+        store.save(sibling, "com.multiapp.app.container.ProxyActivity2")
+
+        assertEquals(2, store.removeInstance("inst-001"))
+        assertNull(store.find(first))
+        assertNull(store.find(second))
+        assertEquals("com.multiapp.app.container.ProxyActivity2", store.find(sibling))
+        assertEquals(0, store.removeInstance("inst-001"))
+    }
 }

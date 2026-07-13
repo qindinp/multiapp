@@ -1,7 +1,6 @@
 package com.multiapp.core.engine
 
 import com.multiapp.core.model.engine.EngineResultStatus
-import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
 import kotlin.test.Test
@@ -47,11 +46,9 @@ class EngineComponentIpcServicesTest {
     }
 
     @Test
-    fun `unavailable authority uses durable Service fallback`() {
-        val fallback = mockk<VirtualServiceService>()
+    fun `unavailable authority fails closed without Service fallback`() {
+        val fallback = mockk<VirtualServiceService>(relaxed = true)
         val request = serviceRequest()
-        val local = servicePlan("durable_service_plan")
-        every { fallback.planService("instance-1", request) } returns local
         val service = IpcBackedVirtualServiceService(
             fallback = fallback,
             remotePlan = { _, _ -> null },
@@ -59,7 +56,13 @@ class EngineComponentIpcServicesTest {
             authorityConnected = { false }
         )
 
-        assertSame(local, service.planService("instance-1", request))
+        val plan = service.planService("instance-1", request)
+
+        assertEquals(EngineResultStatus.FAIL, plan.verdict)
+        assertEquals("engine_service_authority_unavailable:plan", plan.message)
+        assertFalse(service.recordServiceDispatch("instance-1", serviceResult()))
+        verify(exactly = 0) { fallback.planService(any(), any()) }
+        verify(exactly = 0) { fallback.recordServiceDispatch(any(), any()) }
     }
 
     @Test
@@ -142,11 +145,9 @@ class EngineComponentIpcServicesTest {
     }
 
     @Test
-    fun `unavailable authority uses durable Broadcast fallback`() {
-        val fallback = mockk<VirtualBroadcastService>()
+    fun `unavailable authority fails closed without Broadcast fallback`() {
+        val fallback = mockk<VirtualBroadcastService>(relaxed = true)
         val request = broadcastRequest()
-        val local = broadcastPlan("durable_broadcast_plan")
-        every { fallback.planBroadcast("instance-1", request) } returns local
         val service = IpcBackedVirtualBroadcastService(
             fallback = fallback,
             remotePlan = { _, _ -> null },
@@ -154,7 +155,13 @@ class EngineComponentIpcServicesTest {
             authorityConnected = { false }
         )
 
-        assertSame(local, service.planBroadcast("instance-1", request))
+        val plan = service.planBroadcast("instance-1", request)
+
+        assertEquals(EngineResultStatus.FAIL, plan.verdict)
+        assertEquals("engine_broadcast_authority_unavailable:plan", plan.message)
+        assertFalse(service.recordBroadcastDispatch("instance-1", broadcastResult()))
+        verify(exactly = 0) { fallback.planBroadcast(any(), any()) }
+        verify(exactly = 0) { fallback.recordBroadcastDispatch(any(), any()) }
     }
 
     @Test
@@ -202,6 +209,81 @@ class EngineComponentIpcServicesTest {
         assertEquals(EngineResultStatus.FAIL, state.verdict)
         assertEquals("engine_broadcast_ipc_runtime_state_invalid", state.message)
         verify(exactly = 0) { fallback.queryBroadcastRuntimeState(any()) }
+    }
+
+    @Test
+    fun `unavailable authority exposes only explicit read only component snapshots`() {
+        val serviceFallback = mockk<VirtualServiceService>(relaxed = true)
+        val broadcastFallback = mockk<VirtualBroadcastService>(relaxed = true)
+        val serviceState = VirtualServiceRuntimeState(
+            instanceId = "instance-1",
+            verdict = EngineResultStatus.PASS,
+            message = "durable_service_snapshot"
+        )
+        val broadcastState = VirtualBroadcastRuntimeState(
+            instanceId = "instance-1",
+            verdict = EngineResultStatus.PASS,
+            message = "durable_broadcast_snapshot"
+        )
+        val serviceBinding = VirtualSubsystemRuntimeBinding(
+            instanceId = "instance-1",
+            subsystem = com.multiapp.core.model.engine.EngineSubsystem.SERVICE,
+            verdict = EngineResultStatus.PASS,
+            message = "durable_service_binding"
+        )
+        val broadcastBinding = VirtualSubsystemRuntimeBinding(
+            instanceId = "instance-1",
+            subsystem = com.multiapp.core.model.engine.EngineSubsystem.BROADCAST,
+            verdict = EngineResultStatus.PASS,
+            message = "durable_broadcast_binding"
+        )
+        val service = IpcBackedVirtualServiceService(
+            fallback = serviceFallback,
+            remoteState = { null },
+            readOnlyRuntimeStateSnapshot = { serviceState },
+            readOnlyRuntimeBindingSnapshot = { serviceBinding },
+            authorityConnected = { false }
+        )
+        val broadcast = IpcBackedVirtualBroadcastService(
+            fallback = broadcastFallback,
+            remoteState = { null },
+            readOnlyRuntimeStateSnapshot = { broadcastState },
+            readOnlyRuntimeBindingSnapshot = { broadcastBinding },
+            authorityConnected = { false }
+        )
+
+        assertEquals(EngineResultStatus.PARTIAL, service.queryServiceRuntimeState("instance-1").verdict)
+        assertEquals(EngineResultStatus.PARTIAL, service.queryRuntimeBinding("instance-1").verdict)
+        assertEquals(EngineResultStatus.PARTIAL, broadcast.queryBroadcastRuntimeState("instance-1").verdict)
+        assertEquals(EngineResultStatus.PARTIAL, broadcast.queryRuntimeBinding("instance-1").verdict)
+        verify(exactly = 0) { serviceFallback.queryServiceRuntimeState(any()) }
+        verify(exactly = 0) { serviceFallback.queryRuntimeBinding(any()) }
+        verify(exactly = 0) { broadcastFallback.queryBroadcastRuntimeState(any()) }
+        verify(exactly = 0) { broadcastFallback.queryRuntimeBinding(any()) }
+    }
+
+    @Test
+    fun `mismatched component response identity fails closed`() {
+        val serviceFallback = mockk<VirtualServiceService>(relaxed = true)
+        val broadcastFallback = mockk<VirtualBroadcastService>(relaxed = true)
+        val service = IpcBackedVirtualServiceService(
+            fallback = serviceFallback,
+            remotePlan = { _, _ -> servicePlan("forged").copy(instanceId = "instance-2") },
+            authorityConnected = { true }
+        )
+        val broadcast = IpcBackedVirtualBroadcastService(
+            fallback = broadcastFallback,
+            remotePlan = { _, _ -> broadcastPlan("forged").copy(instanceId = "instance-2") },
+            authorityConnected = { true }
+        )
+
+        assertEquals(EngineResultStatus.FAIL, service.planService("instance-1", serviceRequest()).verdict)
+        assertEquals(
+            EngineResultStatus.FAIL,
+            broadcast.planBroadcast("instance-1", broadcastRequest()).verdict
+        )
+        verify(exactly = 0) { serviceFallback.planService(any(), any()) }
+        verify(exactly = 0) { broadcastFallback.planBroadcast(any(), any()) }
     }
 
     private fun serviceRequest() = VirtualServiceDispatchPlanRequest(

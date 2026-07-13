@@ -165,4 +165,25 @@ class EngineRuntimeSlotStoreTest {
         assertNull(store.get("inst_001"))
         assertEquals("Proxy1", store.get("inst_002")?.proxySlot)
     }
+
+    @Test
+    fun `remove releases one in-memory assignment`() {
+        val store = InMemoryEngineRuntimeSlotStore()
+        store.assign("inst_001", "com.example.one", listOf("host:v0"), listOf("Proxy0"))
+
+        assertEquals(true, store.remove("inst_001"))
+        assertEquals(false, store.remove("inst_001"))
+        assertNull(store.get("inst_001"))
+    }
+
+    @Test
+    fun `remove persists released file assignment`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_slots.properties")
+        val store = FileBackedEngineRuntimeSlotStore(file)
+        store.assign("inst_001", "com.example.one", listOf("host:v0"), listOf("Proxy0"))
+
+        assertEquals(true, store.remove("inst_001"))
+
+        assertNull(FileBackedEngineRuntimeSlotStore(file).get("inst_001"))
+    }
 }

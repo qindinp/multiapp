@@ -316,6 +316,12 @@ class EngineRuntimeBinderEndpoint(
         engine.stopInstance(instanceId).toEngineIpcBundle()
     }
 
+    override fun engineDeleteInstance(instanceId: String): Bundle = authorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@authorizedBundle engineOperationUnavailableBundle("deleteInstance")
+        engine.deleteInstance(instanceId).toEngineIpcBundle()
+    }
+
     override fun engineQueryRuntimeState(instanceId: String): Bundle = authorizedBundle {
         val engine = virtualizationEngine
             ?: return@authorizedBundle engineOperationUnavailableBundle("queryRuntimeState")
@@ -1281,6 +1287,9 @@ object EngineRuntimeIpcClients {
 
     internal fun engineStopInstance(instanceId: String): EngineRemoteResult? =
         invokeEngineResult { service -> service.engineStopInstance(instanceId) }
+
+    internal fun engineDeleteInstance(instanceId: String): EngineRemoteResult? =
+        invokeEngineResult { service -> service.engineDeleteInstance(instanceId) }
 
     internal fun engineQueryRuntimeState(instanceId: String): EngineRuntimeIdentity? {
         val active = activeService() ?: return null

@@ -24,7 +24,8 @@ class DefaultInstanceManager(
     private val store: InstanceRecordStore,
     private val dataRootBase: File,
     private val installRecordStore: InstallRecordStore? = null,
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val dataRootDeleter: (File) -> Boolean = { directory -> directory.deleteRecursively() }
 ) : InstanceManager {
 
     override fun createInstance(
@@ -100,7 +101,8 @@ class DefaultInstanceManager(
         // Clean up data root directory
         val baseDir = File(record.dataRoot)
         if (baseDir.exists()) {
-            baseDir.deleteRecursively()
+            val deleted = runCatching { dataRootDeleter(baseDir) }.getOrDefault(false)
+            if (!deleted || baseDir.exists()) return false
         }
 
         return store.delete(instanceId)

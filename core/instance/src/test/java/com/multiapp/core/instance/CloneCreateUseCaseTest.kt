@@ -1,6 +1,8 @@
 package com.multiapp.core.instance
 
 import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.model.engine.EngineResult
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
@@ -18,15 +20,18 @@ class CloneCreateUseCaseTest {
 
     private lateinit var instanceManager: InstanceManager
     private lateinit var installService: VirtualInstallService
+    private lateinit var virtualizationEngine: VirtualizationEngine
     private var now = 1000L
 
     @BeforeEach
     fun setUp() {
         instanceManager = mockk(relaxed = true)
         installService = mockk(relaxed = true)
+        virtualizationEngine = mockk()
         every { instanceManager.listInstances() } returns emptyList()
         every { installService.hasInstallRecord(any()) } returns true
         every { installService.ensureInstallRecord(any()) } returns Result.success(mockk<ImportResult>())
+        every { virtualizationEngine.deleteInstance(any()) } returns EngineResult.pass("deleteInstance")
     }
 
     @AfterEach
@@ -117,10 +122,66 @@ class CloneCreateUseCaseTest {
         assertEquals(75L, result.createLatencyMs)
     }
 
+    @Test
+    fun `rollback deletes a created instance through engine authority`() {
+        val app = testApp()
+        val created = testRecord("new", app.packageName, app.appName)
+        every {
+            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
+        } returns Result.success(created)
+        var clockCalls = 0
+        val useCase = CloneCreateUseCase(
+            instanceManager = instanceManager,
+            virtualInstallService = installService,
+            virtualizationEngine = virtualizationEngine,
+            clock = {
+                clockCalls += 1
+                if (clockCalls == 1) now else error("clock failed")
+            }
+        )
+
+        val result = useCase.create(app)
+
+        assertTrue(result.isFailure)
+        verify(exactly = 1) { virtualizationEngine.deleteInstance(created.instanceId) }
+        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
+    }
+
+    @Test
+    fun `rollback preserves new install record when engine cannot delete created instance`() {
+        val app = testApp()
+        val created = testRecord("new", app.packageName, app.appName)
+        every { installService.hasInstallRecord(app.packageName) } returns false
+        every {
+            instanceManager.createInstance(app.packageName, app.appName, CompatibilityMode.DEFAULT)
+        } returns Result.success(created)
+        every { virtualizationEngine.deleteInstance(created.instanceId) } returns EngineResult.fail(
+            operation = "deleteInstance",
+            instanceId = created.instanceId,
+            message = "authority unavailable"
+        )
+        var clockCalls = 0
+        val useCase = CloneCreateUseCase(
+            instanceManager = instanceManager,
+            virtualInstallService = installService,
+            virtualizationEngine = virtualizationEngine,
+            clock = {
+                clockCalls += 1
+                if (clockCalls == 1) now else error("clock failed")
+            }
+        )
+
+        val error = useCase.create(app).exceptionOrNull() as CloneCreateFailureException
+
+        assertEquals("instance_delete_skipped,install_preserved", error.cleanupStatus)
+        verify(exactly = 0) { installService.deleteInstallRecord(app.packageName) }
+    }
+
     private fun useCase(): CloneCreateUseCase {
         return CloneCreateUseCase(
             instanceManager = instanceManager,
             virtualInstallService = installService,
+            virtualizationEngine = virtualizationEngine,
             clock = { now }
         )
     }

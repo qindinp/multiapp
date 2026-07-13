@@ -238,14 +238,20 @@ class LauncherViewModel @Inject constructor(
     }
 
     fun deleteInstance(instanceId: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(launcherIoDispatcher) {
             try {
-                instanceManager.deleteInstance(instanceId)
-                loadInstances()
+                val result = virtualizationEngine.deleteInstance(instanceId)
+                if (result.success) {
+                    loadInstances()
+                } else {
+                    _uiState.update {
+                        it.copy(error = "删除分身失败", errorDetail = result.message)
+                    }
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to delete instance")
-                _uiState.update { it.copy(error = e.message) }
+                _uiState.update { it.copy(error = "删除分身失败", errorDetail = e.message) }
             }
         }
     }

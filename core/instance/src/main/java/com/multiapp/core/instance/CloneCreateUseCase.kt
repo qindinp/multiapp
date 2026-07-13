@@ -1,6 +1,7 @@
 package com.multiapp.core.instance
 
 import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
@@ -25,16 +26,19 @@ class CloneCreateFailureException(
 class CloneCreateUseCase internal constructor(
     private val instanceManager: InstanceManager,
     private val virtualInstallService: VirtualInstallService,
+    private val virtualizationEngine: VirtualizationEngine,
     private val clock: () -> Long
 ) {
 
     @Inject
     constructor(
         instanceManager: InstanceManager,
-        virtualInstallService: VirtualInstallService
+        virtualInstallService: VirtualInstallService,
+        virtualizationEngine: VirtualizationEngine
     ) : this(
         instanceManager = instanceManager,
         virtualInstallService = virtualInstallService,
+        virtualizationEngine = virtualizationEngine,
         clock = System::currentTimeMillis
     )
 
@@ -91,19 +95,25 @@ class CloneCreateUseCase internal constructor(
         createdInstanceId: String?
     ): String {
         val cleanup = mutableListOf<String>()
+        var instanceDeleted = createdInstanceId == null
         createdInstanceId?.let { instanceId ->
-            cleanup += if (runCatching { instanceManager.deleteInstance(instanceId) }.getOrDefault(false)) {
+            instanceDeleted = runCatching {
+                virtualizationEngine.deleteInstance(instanceId).success
+            }.getOrDefault(false)
+            cleanup += if (instanceDeleted) {
                 "instance_deleted"
             } else {
                 "instance_delete_skipped"
             }
         }
-        if (!hadInstallRecord) {
+        if (!hadInstallRecord && instanceDeleted) {
             cleanup += if (runCatching { virtualInstallService.deleteInstallRecord(packageName) }.getOrDefault(false)) {
                 "install_deleted"
             } else {
                 "install_delete_skipped"
             }
+        } else if (!hadInstallRecord) {
+            cleanup += "install_preserved"
         }
         return cleanup.ifEmpty { listOf("not_required") }.joinToString(",")
     }

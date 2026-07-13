@@ -96,6 +96,87 @@ class EngineAppOpsServiceTest {
         verify(exactly = 0) { fallback.queryMode(any(), any()) }
     }
 
+    @Test
+    fun `unavailable AppOps authority fails closed without local query or mutation fallback`() {
+        val fallback = mockk<VirtualAppOpsService>(relaxed = true)
+        val request = VirtualAppOpsQueryRequest(
+            methodName = "checkOperation",
+            opCode = 26,
+            uid = 1000,
+            packageName = "com.test.app"
+        )
+        val service = IpcBackedVirtualAppOpsService(
+            fallback = fallback,
+            remoteQuery = { _, _ -> null },
+            authorityConnected = { false }
+        )
+
+        val query = service.queryMode("instance-1", request)
+        val set = service.setMode("instance-1", 26, EngineAppOpModes.IGNORED)
+        val reset = service.resetModes("instance-1", 26)
+
+        assertEquals(EngineResultStatus.FAIL, query.verdict)
+        assertTrue(query.blockSystemCall)
+        assertEquals("engine_app_ops_authority_unavailable:query", query.message)
+        assertEquals(EngineResultStatus.UNSUPPORTED, set.verdict)
+        assertEquals(EngineResultStatus.UNSUPPORTED, reset.verdict)
+        verify(exactly = 0) { fallback.queryMode(any(), any()) }
+        verify(exactly = 0) { fallback.setMode(any(), any(), any()) }
+        verify(exactly = 0) { fallback.resetModes(any(), any()) }
+    }
+
+    @Test
+    fun `unavailable AppOps authority exposes explicit read only snapshots as partial`() {
+        val fallback = mockk<VirtualAppOpsService>(relaxed = true)
+        val state = VirtualAppOpsRuntimeState(
+            instanceId = "instance-1",
+            verdict = EngineResultStatus.PASS,
+            records = listOf(EngineAppOpModeRecord("instance-1", 26, EngineAppOpModes.IGNORED)),
+            message = "durable_app_ops_snapshot"
+        )
+        val binding = VirtualSubsystemRuntimeBinding(
+            instanceId = "instance-1",
+            subsystem = com.multiapp.core.model.engine.EngineSubsystem.APP_OPS,
+            verdict = EngineResultStatus.PASS,
+            message = "durable_app_ops_binding"
+        )
+        val service = IpcBackedVirtualAppOpsService(
+            fallback = fallback,
+            readOnlyRuntimeStateSnapshot = { state },
+            readOnlyRuntimeBindingSnapshot = { binding },
+            authorityConnected = { false }
+        )
+
+        assertEquals(EngineResultStatus.PARTIAL, service.queryRuntimeState("instance-1").verdict)
+        assertEquals(EngineResultStatus.PARTIAL, service.queryRuntimeBinding("instance-1").verdict)
+        verify(exactly = 0) { fallback.queryRuntimeState(any()) }
+        verify(exactly = 0) { fallback.queryRuntimeBinding(any()) }
+    }
+
+    @Test
+    fun `mismatched AppOps response identity fails closed`() {
+        val fallback = mockk<VirtualAppOpsService>(relaxed = true)
+        val request = VirtualAppOpsQueryRequest(methodName = "checkOperation")
+        val service = IpcBackedVirtualAppOpsService(
+            fallback = fallback,
+            remoteQuery = { _, _ ->
+                VirtualAppOpsQueryResult(
+                    instanceId = "instance-2",
+                    verdict = EngineResultStatus.PASS,
+                    mode = EngineAppOpModes.ALLOWED,
+                    message = "forged"
+                )
+            },
+            authorityConnected = { true }
+        )
+
+        val actual = service.queryMode("instance-1", request)
+
+        assertEquals(EngineResultStatus.FAIL, actual.verdict)
+        assertTrue(actual.blockSystemCall)
+        verify(exactly = 0) { fallback.queryMode(any(), any()) }
+    }
+
     private fun query(runtime: VirtualInstanceRuntime, pid: Int) = VirtualAppOpsQueryRequest(
         methodName = "checkOperation",
         opCode = 26,

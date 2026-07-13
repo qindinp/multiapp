@@ -310,6 +310,7 @@ internal interface EngineVirtualizationRemote {
     fun createInstance(originPackageName: String): EngineRemoteResult?
     fun launchInstance(request: LaunchInstanceRequest): EngineRemoteResult?
     fun stopInstance(instanceId: String): EngineRemoteResult?
+    fun deleteInstance(instanceId: String): EngineRemoteResult?
     fun queryRuntimeState(instanceId: String): EngineRuntimeIdentity?
     fun exportEvidence(instanceId: String): EngineEvidenceReport?
 }
@@ -326,6 +327,9 @@ private object BinderEngineVirtualizationRemote : EngineVirtualizationRemote {
 
     override fun stopInstance(instanceId: String): EngineRemoteResult? =
         EngineRuntimeIpcClients.engineStopInstance(instanceId)
+
+    override fun deleteInstance(instanceId: String): EngineRemoteResult? =
+        EngineRuntimeIpcClients.engineDeleteInstance(instanceId)
 
     override fun queryRuntimeState(instanceId: String): EngineRuntimeIdentity? =
         EngineRuntimeIpcClients.engineQueryRuntimeState(instanceId)
@@ -361,6 +365,8 @@ class IpcVirtualizationEngine @Inject constructor(
     override fun launchInstance(request: LaunchInstanceRequest): EngineResult = core.launchInstance(request)
 
     override fun stopInstance(instanceId: String): EngineResult = core.stopInstance(instanceId)
+
+    override fun deleteInstance(instanceId: String): EngineResult = core.deleteInstance(instanceId)
 
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? =
         core.queryRuntimeState(instanceId)
@@ -402,6 +408,14 @@ internal class IpcVirtualizationEngineCore(
             instanceId = instanceId,
             originPackageName = null,
             remoteResult = remote.stopInstance(instanceId)
+        )
+
+    override fun deleteInstance(instanceId: String): EngineResult =
+        complete(
+            operation = "deleteInstance",
+            instanceId = instanceId,
+            originPackageName = null,
+            remoteResult = remote.deleteInstance(instanceId)
         )
 
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? {

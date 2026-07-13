@@ -59,6 +59,7 @@ interface EngineActivityTaskStateStore {
         snapshot: EngineActivityTaskStateSnapshot
     ): EngineActivityTaskStateSnapshot
     fun load(): EngineActivityTaskStateSnapshot
+    fun clearInstance(instanceId: String): Int
     fun clear()
 }
 
@@ -86,6 +87,18 @@ class InMemoryEngineActivityTaskStateStore : EngineActivityTaskStateStore {
     override fun load(): EngineActivityTaskStateSnapshot = snapshot
 
     @Synchronized
+    override fun clearInstance(instanceId: String): Int {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        val removed = snapshot.tasks.sumOf { task ->
+            task.activities.count { activity -> activity.instanceId == instanceId }
+        }
+        if (removed > 0) {
+            snapshot = snapshot.replacingInstance(instanceId, EngineActivityTaskStateSnapshot.EMPTY)
+        }
+        return removed
+    }
+
+    @Synchronized
     override fun clear() {
         snapshot = EngineActivityTaskStateSnapshot.EMPTY
     }
@@ -110,6 +123,18 @@ class FileBackedEngineActivityTaskStateStore(
 
     override fun load(): EngineActivityTaskStateSnapshot = withFileLock {
         readSnapshot()
+    }
+
+    override fun clearInstance(instanceId: String): Int = withFileLock {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        val current = readSnapshot()
+        val removed = current.tasks.sumOf { task ->
+            task.activities.count { activity -> activity.instanceId == instanceId }
+        }
+        if (removed > 0) {
+            writeSnapshot(current.replacingInstance(instanceId, EngineActivityTaskStateSnapshot.EMPTY))
+        }
+        removed
     }
 
     override fun clear() = withFileLock {

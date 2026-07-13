@@ -50,6 +50,7 @@ class LauncherViewModelTest {
         every { instanceManager.listInstances() } returns emptyList()
         every { installedAppRepository.listInstalledApps(any()) } returns emptyList()
         every { virtualizationEngine.launchInstance(any()) } returns EngineResult.pass(operation = "launchInstance")
+        every { virtualizationEngine.deleteInstance(any()) } returns EngineResult.pass(operation = "deleteInstance")
     }
 
     @AfterEach
@@ -213,6 +214,37 @@ class LauncherViewModelTest {
         viewModel.launchInstance("instance-1")
 
         verify { virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1")) }
+    }
+
+    @Test
+    fun `deleteInstance delegates to engine authority and refreshes instances`() = runTest {
+        val viewModel = createViewModel()
+
+        viewModel.deleteInstance("instance-1")
+
+        verify { virtualizationEngine.deleteInstance("instance-1") }
+        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
+        verify(atLeast = 2) { instanceManager.listInstances() }
+        assertNull(viewModel.uiState.value.error)
+    }
+
+    @Test
+    fun `deleteInstance exposes engine rejection without direct model delete`() = runTest {
+        every { virtualizationEngine.deleteInstance("instance-1") } returns EngineResult.fail(
+            operation = "deleteInstance",
+            instanceId = "instance-1",
+            message = "active_runtime_requires_confirmed_process_termination"
+        )
+        val viewModel = createViewModel()
+
+        viewModel.deleteInstance("instance-1")
+
+        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
+        assertEquals("删除分身失败", viewModel.uiState.value.error)
+        assertEquals(
+            "active_runtime_requires_confirmed_process_termination",
+            viewModel.uiState.value.errorDetail
+        )
     }
 
     @Test

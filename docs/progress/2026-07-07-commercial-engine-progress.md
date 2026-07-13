@@ -4113,3 +4113,66 @@ Remaining gate:
 - No device artifact proves this owner/IPC batch. Commercial status remains
   **BLOCK**; it is not compatibility proof for GKD, AstroBox, QQ, WeChat, or
   QQ Reader.
+
+## Implementation Update - 2026-07-13 Fail-Closed Clients and Authoritative Delete
+
+This batch removes mutable client fallback from the current IPC component
+facades and gives permanent instance deletion one engine-owned command. It is
+the first half of the single-writer migration; instance creation and all proxy
+slot allocation are not yet server-owned.
+
+Implemented:
+
+- Activity, Provider, Service, Broadcast, Permission, and AppOps IPC facades no
+  longer mutate a local `DefaultVirtualSystemServer` after Binder failure,
+  malformed replies, or identity mismatch. Mutations fail closed; explicitly
+  injected read-only runtime snapshots are capped at `PARTIAL`.
+- `VirtualizationEngine.deleteInstance()` now crosses AIDL, the Binder
+  endpoint, `IpcVirtualizationEngine`, and both product delete entry points.
+  An unknown Binder result is not retried locally.
+- Deletion revokes Activity launch capability, terminates the exact `:v0..:v7`
+  guest process and waits for `/proc/<pid>/cmdline` identity to disappear,
+  removes Binder-death authority only after confirmed termination, clears the
+  target instance's task/activity/Provider/Service/Broadcast/URI grant/
+  permission/AppOps state, removes runtime state, deletes data and the record,
+  then releases proxy and runtime slots.
+- Process termination rejects the host PID, non-canonical/unknown process
+  slots, PID/slot mismatch, ambiguous process ownership, unreadable process
+  identity, timeout, and thread interruption. All rejection paths are explicit
+  failures instead of an assumed kill.
+- `DefaultInstanceManager` retains the instance record when recursive dataRoot
+  deletion fails. Runtime/proxy slot assignments are also retained until the
+  record deletion succeeds, making a failed delete retryable.
+- `CloneCreateUseCase` rollback now invokes the engine delete authority. If
+  that delete is unconfirmed, a newly created package install record is kept so
+  an orphan instance is not left without its package artifact.
+
+Verification:
+
+- Focused model/instance/engine/component IPC tests passed.
+- Full local gate passed in 7m55s, including model, instance, manifest,
+  identity, loader, hook, engine, launcher, app-manager, app unit tests, and
+  `:app:assembleDebug`.
+- Aggregated UTF-8 JUnit reports contain 2,020 tests, 0 failures, 0 errors, and
+  12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,717,265 bytes.
+- APK SHA-256:
+  `EE67E2FAD2BD77B5924D1D8A7D399653EE1548FB1AFE83AEAF33234743271A37`.
+- `git diff --check` passed; existing LF/CRLF conversion warnings remain.
+
+Remaining gate:
+
+- `CloneCreateUseCase` still creates instances through `InstanceManager`; the
+  engine create contract must accept install metadata/display-name input before
+  creation can become a remote single-writer command.
+- Foreground launch deletion can release proxy assignments centrally, but
+  guest Activity hot paths still construct file-backed proxy-slot stores and
+  can allocate from multiple processes. Allocation must move into
+  `VirtualActivityService` before dedicated server migration.
+- Client paths still construct file-backed system-server objects for legacy
+  reads/adapters. Mutable IPC fallback is closed in the covered facades, but
+  all direct owner-file reads and remaining dispatcher-local writes are not yet
+  eliminated.
+- The Binder Provider remains in the host process. Process-role routing,
+  atomic migration to `:engine`, server-death tests, and API 28-36/HyperOS
+  evidence remain open. Commercial status remains **BLOCK**.

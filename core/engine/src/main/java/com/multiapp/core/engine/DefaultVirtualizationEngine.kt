@@ -42,6 +42,7 @@ internal class DefaultVirtualizationEngineCore(
     private val virtualInstallService: VirtualInstallService,
     private val activityLauncher: EngineActivityLauncher,
     private val processBootstrapper: EngineProcessBootstrapper = EngineProcessBootstrapper.IMMEDIATE,
+    private val processTerminator: EngineProcessTerminator = EngineProcessTerminator.TEST_NO_OP,
     private val slotStore: EngineRuntimeSlotStore = InMemoryEngineRuntimeSlotStore(),
     internal val runtimeRegistry: EngineRuntimeRegistry = EngineRuntimeRegistry(),
     internal val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
@@ -421,20 +422,106 @@ internal class DefaultVirtualizationEngineCore(
         }
 
     private fun stopInstanceLocked(instanceId: String): EngineResult {
-        systemServer.runtimeService.get(instanceId)?.let { runtime ->
-            processDeathRegistry.remove(
-                instanceId = runtime.instanceId,
-                runtimeEpoch = runtime.runtimeEpoch,
-                engineSessionId = runtime.engineSessionId
-            )
-        }
-        val stopped = systemServer.runtimeService.stop(instanceId)
+        val runtime = systemServer.runtimeService.get(instanceId)
+        val slotAssignment = slotStore.get(instanceId)
         activityLaunchCapabilities.revokeInstance(instanceId)
+        val processSlot = runtime?.processSlot ?: slotAssignment?.processSlot
+        if (processSlot != null) {
+            val termination = processTerminator.terminateAndAwait(
+                instanceId = instanceId,
+                processSlot = processSlot,
+                expectedProcessId = runtime?.processId
+            )
+            if (!termination.confirmed) {
+                return EngineResult.fail(
+                    operation = OP_STOP,
+                    instanceId = instanceId,
+                    originPackageName = runtime?.originPackageName ?: slotAssignment?.originPackageName,
+                    message = "process_termination_unconfirmed:${termination.status}:${termination.message}"
+                )
+            }
+        }
+        processDeathRegistry.removeInstance(instanceId)
+        val stopped = systemServer.runtimeService.stop(instanceId)
         return if (stopped) {
             EngineResult.pass(operation = OP_STOP, instanceId = instanceId, message = "runtime stopped")
         } else {
             EngineResult.partial(operation = OP_STOP, instanceId = instanceId, message = "runtime was not active")
         }
+    }
+
+    override fun deleteInstance(instanceId: String): EngineResult =
+        synchronized(instanceOperationLock(instanceId)) {
+            deleteInstanceLocked(instanceId)
+        }
+
+    private fun deleteInstanceLocked(instanceId: String): EngineResult {
+        if (instanceId.isBlank()) {
+            return EngineResult.fail(operation = OP_DELETE, message = "instanceId must not be blank")
+        }
+        val instance = instanceManager.getInstance(instanceId)
+        val runtime = systemServer.runtimeService.get(instanceId)
+        val slotAssignment = slotStore.get(instanceId)
+        val originPackageName = instance?.originPackageName
+            ?: runtime?.originPackageName
+            ?: slotAssignment?.originPackageName
+
+        activityLaunchCapabilities.revokeInstance(instanceId)
+        val processSlot = runtime?.processSlot ?: slotAssignment?.processSlot
+        if (processSlot != null) {
+            val termination = processTerminator.terminateAndAwait(
+                instanceId = instanceId,
+                processSlot = processSlot,
+                expectedProcessId = runtime?.processId
+            )
+            if (!termination.confirmed) {
+                return EngineResult.fail(
+                    operation = OP_DELETE,
+                    instanceId = instanceId,
+                    originPackageName = originPackageName,
+                    message = "process_termination_unconfirmed:${termination.status}:${termination.message}"
+                )
+            }
+        }
+        processDeathRegistry.removeInstance(instanceId)
+
+        val cleanup = runCatching {
+            systemServer.instanceLifecycleService.clearInstanceState(instanceId)
+        }.getOrElse { error ->
+            return EngineResult.fail(
+                operation = OP_DELETE,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                message = "instance_state_cleanup_failed:${error.javaClass.name}:${error.message.orEmpty()}"
+            )
+        }
+        systemServer.runtimeService.stop(instanceId)
+        if (instance != null && !instanceManager.deleteInstance(instanceId)) {
+            return EngineResult.fail(
+                operation = OP_DELETE,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                message = "instance_record_delete_failed"
+            )
+        }
+        val releasedProxySlots = runCatching {
+            systemServer.instanceLifecycleService.releaseInstanceSlots(instanceId)
+        }.getOrElse { error ->
+            return EngineResult.fail(
+                operation = OP_DELETE,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                message = "proxy_slot_release_failed:${error.javaClass.name}:${error.message.orEmpty()}"
+            )
+        }
+        slotStore.remove(instanceId)
+        return EngineResult.pass(
+            operation = OP_DELETE,
+            instanceId = instanceId,
+            originPackageName = originPackageName,
+            message = "instance deleted after engine cleanup " +
+                "(${cleanup.totalRemoved} state records, $releasedProxySlots proxy slots removed)"
+        )
     }
 
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? =
@@ -698,6 +785,7 @@ internal class DefaultVirtualizationEngineCore(
         private const val OP_CREATE = "createInstance"
         private const val OP_LAUNCH = "launchInstance"
         private const val OP_STOP = "stopInstance"
+        private const val OP_DELETE = "deleteInstance"
     }
 }
 

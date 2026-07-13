@@ -2609,3 +2609,53 @@ process.
   the Provider to `:engine` in one change with server-death and device tests.
 - No current device artifact proves the new owner/IPC path. Review decision
   remains **BLOCK**.
+
+## Review Update - 2026-07-13 Fail-Closed IPC and Instance Deletion
+
+The central-owner preparation finding has been partially closed. Covered IPC
+facades no longer turn an unavailable engine Binder into local mutable
+authority, and permanent deletion is now an engine command rather than a UI
+record/dataRoot operation.
+
+### Findings closed in the current tree
+
+- Activity, Provider, Service, Broadcast, Permission, and AppOps facade
+  mutations have zero `fallback.*`/`fallback::` production calls. Null,
+  exception, malformed identity, and unavailable authority paths fail closed.
+- Runtime/task fallback is read-only and explicitly injected; a successful
+  local snapshot cannot claim more than `PARTIAL`.
+- `deleteInstance` is covered by the public engine contract, AIDL endpoint,
+  IPC facade, launcher, app manager, and clone-creation rollback.
+- A delete cannot proceed past an active guest process until exact process-slot
+  termination is confirmed. Host PID, PID mismatch, bad `:vN` slot,
+  unverified `/proc` identity, interruption, and timeout are rejected.
+- Target-instance task/activity, Provider, Service, Broadcast, URI grant,
+  permission, and AppOps state is cleared without deleting sibling state.
+  Task deletion count is instance-specific rather than a global before/after
+  difference.
+- dataRoot deletion failure retains the instance record and both persistent
+  slot assignments. Package-scoped install artifacts remain available to
+  sibling clones and failed rollback retries.
+
+### Verification
+
+- Full local gate passed in 7m55s.
+- UTF-8 JUnit aggregation: 2,020 tests, 0 failures, 0 errors, 12 skipped.
+- Debug APK SHA-256:
+  `EE67E2FAD2BD77B5924D1D8A7D399653EE1548FB1AFE83AEAF33234743271A37`.
+- `git diff --check` passed apart from existing line-ending warnings.
+
+### Still BLOCK
+
+- Instance creation still bypasses the engine command because the current
+  create API cannot carry the imported package metadata and requested display
+  name. This must be solved before moving the owner to another process.
+- Proxy Activity slot allocation still has app/loader/guest file-backed
+  writers. Central deletion cleanup is not proof of single-writer allocation.
+- File-backed local server construction and remaining direct dispatcher reads
+  must be removed or converted to immutable snapshots delivered by the engine.
+- The Provider has not moved to `:engine`; server-death/reconnect, process-role
+  startup, and device evidence are absent.
+- PMS/AMS/Provider/Service/Broadcast/runtime-permission/native completeness and
+  the GKD/AstroBox/QQ/WeChat/QQ Reader matrix remain unresolved. Review
+  decision remains **BLOCK**.

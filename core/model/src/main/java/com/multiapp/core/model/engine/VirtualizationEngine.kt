@@ -7,6 +7,7 @@ interface VirtualizationEngine {
     fun createInstance(originPackageName: String): EngineResult
     fun launchInstance(request: LaunchInstanceRequest): EngineResult
     fun stopInstance(instanceId: String): EngineResult
+    fun deleteInstance(instanceId: String): EngineResult
     fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime?
     fun exportEvidence(instanceId: String): EngineEvidenceReport
 }

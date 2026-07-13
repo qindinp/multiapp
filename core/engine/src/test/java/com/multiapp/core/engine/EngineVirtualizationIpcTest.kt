@@ -127,6 +127,8 @@ class EngineVirtualizationIpcTest {
 
         override fun stopInstance(instanceId: String): EngineRemoteResult? = null
 
+        override fun deleteInstance(instanceId: String): EngineRemoteResult? = null
+
         override fun queryRuntimeState(instanceId: String): EngineRuntimeIdentity? = queryIdentity
 
         override fun exportEvidence(instanceId: String): EngineEvidenceReport? = null

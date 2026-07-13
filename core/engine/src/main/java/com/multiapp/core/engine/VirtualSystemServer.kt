@@ -9,6 +9,7 @@ import com.multiapp.core.model.engine.EngineSubsystem
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.loader.VirtualActivityRecordManager
+import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
@@ -33,6 +34,7 @@ interface VirtualSystemServer {
     val storageService: VirtualStorageService
     val nativeService: VirtualNativeService
     val evidenceService: VirtualEvidenceService
+    val instanceLifecycleService: VirtualInstanceLifecycleService
 }
 
 interface VirtualRuntimeService {
@@ -200,6 +202,28 @@ interface VirtualNativeService : VirtualRuntimeBoundSubsystemService
 
 interface VirtualEvidenceService : VirtualEngineSubsystemService {
     fun exportReport(instanceId: String): EngineEvidenceReport?
+}
+
+data class VirtualInstanceCleanupResult(
+    val instanceId: String,
+    val activityRecordCount: Int,
+    val activityTaskRecordCount: Int,
+    val serviceRecordCount: Int,
+    val providerRecordCount: Int,
+    val broadcastRecordCount: Int,
+    val uriGrantCount: Int,
+    val permissionGrantCount: Int,
+    val appOpCount: Int
+) {
+    val totalRemoved: Int
+        get() = activityRecordCount + activityTaskRecordCount + serviceRecordCount +
+            providerRecordCount + broadcastRecordCount + uriGrantCount +
+            permissionGrantCount + appOpCount
+}
+
+interface VirtualInstanceLifecycleService {
+    fun clearInstanceState(instanceId: String): VirtualInstanceCleanupResult
+    fun releaseInstanceSlots(instanceId: String): Int
 }
 
 enum class VirtualPackageComponentType {
@@ -946,7 +970,8 @@ class DefaultVirtualSystemServer(
     providerUriGrantStore: EngineProviderUriGrantStore = InMemoryEngineProviderUriGrantStore(),
     permissionGrantStore: EnginePermissionGrantStore = InMemoryEnginePermissionGrantStore(),
     appOpsStateStore: EngineAppOpsStateStore = InMemoryEngineAppOpsStateStore(),
-    broadcastRuntimeStateStore: EngineBroadcastRuntimeStateStore = InMemoryEngineBroadcastRuntimeStateStore()
+    broadcastRuntimeStateStore: EngineBroadcastRuntimeStateStore = InMemoryEngineBroadcastRuntimeStateStore(),
+    proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore? = null
 ) : VirtualSystemServer {
     override val runtimeService: VirtualRuntimeService = RegistryBackedVirtualRuntimeService(registry)
     override val packageService: VirtualPackageService = RegistryBackedVirtualPackageService(runtimeService)
@@ -992,6 +1017,62 @@ class DefaultVirtualSystemServer(
         appOpsService,
         permissionService
     )
+    override val instanceLifecycleService: VirtualInstanceLifecycleService =
+        RegistryBackedVirtualInstanceLifecycleService(
+            activityTaskStateStore = activityTaskStateStore,
+            activityRecordManager = activityRecordManager,
+            serviceRuntimeStateStore = serviceRuntimeStateStore,
+            providerRuntimeStateStore = providerRuntimeStateStore,
+            providerUriGrantStore = providerUriGrantStore,
+            permissionGrantStore = permissionGrantStore,
+            appOpsStateStore = appOpsStateStore,
+            broadcastRuntimeStateStore = broadcastRuntimeStateStore,
+            proxyActivitySlotAssignmentStore = proxyActivitySlotAssignmentStore
+        )
+}
+
+class RegistryBackedVirtualInstanceLifecycleService(
+    private val activityTaskStateStore: EngineActivityTaskStateStore,
+    private val activityRecordManager: VirtualActivityRecordManager,
+    private val serviceRuntimeStateStore: EngineServiceRuntimeStateStore,
+    private val providerRuntimeStateStore: EngineProviderRuntimeStateStore,
+    private val providerUriGrantStore: EngineProviderUriGrantStore,
+    private val permissionGrantStore: EnginePermissionGrantStore,
+    private val appOpsStateStore: EngineAppOpsStateStore,
+    private val broadcastRuntimeStateStore: EngineBroadcastRuntimeStateStore,
+    private val proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore? = null
+) : VirtualInstanceLifecycleService {
+    override fun clearInstanceState(instanceId: String): VirtualInstanceCleanupResult {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        val activityRecordCount = activityRecordManager.clearByInstance(instanceId)
+        val activityTaskRecordCount = activityTaskStateStore.clearInstance(instanceId)
+        val serviceRecordCount = serviceRuntimeStateStore.list(instanceId).size
+        serviceRuntimeStateStore.clear(instanceId)
+        val providerRecordCount = providerRuntimeStateStore.list(instanceId).size
+        providerRuntimeStateStore.clear(instanceId)
+        val uriGrantCount = providerUriGrantStore.listForInstance(instanceId).size
+        providerUriGrantStore.clearInstance(instanceId)
+        val permissionGrantCount = permissionGrantStore.clear(instanceId)
+        val appOpCount = appOpsStateStore.reset(instanceId)
+        val broadcastRecordCount = broadcastRuntimeStateStore.list(instanceId).size
+        broadcastRuntimeStateStore.clear(instanceId)
+        return VirtualInstanceCleanupResult(
+            instanceId = instanceId,
+            activityRecordCount = activityRecordCount,
+            activityTaskRecordCount = activityTaskRecordCount,
+            serviceRecordCount = serviceRecordCount,
+            providerRecordCount = providerRecordCount,
+            broadcastRecordCount = broadcastRecordCount,
+            uriGrantCount = uriGrantCount,
+            permissionGrantCount = permissionGrantCount,
+            appOpCount = appOpCount
+        )
+    }
+
+    override fun releaseInstanceSlots(instanceId: String): Int {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        return proxyActivitySlotAssignmentStore?.removeInstance(instanceId) ?: 0
+    }
 }
 
 object DefaultVirtualPackageService : VirtualPackageService {

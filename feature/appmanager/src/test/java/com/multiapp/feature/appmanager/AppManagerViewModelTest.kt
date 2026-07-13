@@ -33,14 +33,17 @@ class AppManagerViewModelTest {
     @BeforeEach
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
+        appManagerIoDispatcher = testDispatcher
         instanceManager = mockk(relaxed = true)
         virtualizationEngine = mockk(relaxed = true)
         every { instanceManager.listInstances() } returns emptyList()
         every { virtualizationEngine.launchInstance(any()) } returns EngineResult.pass(operation = "launchInstance")
+        every { virtualizationEngine.deleteInstance(any()) } returns EngineResult.pass(operation = "deleteInstance")
     }
 
     @AfterEach
     fun tearDown() {
+        appManagerIoDispatcher = Dispatchers.IO
         Dispatchers.resetMain()
         unmockkAll()
     }
@@ -72,19 +75,23 @@ class AppManagerViewModelTest {
 
     @Test
     fun `delete removes instance and reloads list`() = runTest {
-        every { instanceManager.deleteInstance("instance-1") } returns true
         val viewModel = AppManagerViewModel(instanceManager, virtualizationEngine)
 
         viewModel.onEvent(AppManagerEvent.DeleteInstance("instance-1"))
 
-        verify { instanceManager.deleteInstance("instance-1") }
+        verify { virtualizationEngine.deleteInstance("instance-1") }
+        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
         verify(exactly = 2) { instanceManager.listInstances() }
         assertNull(viewModel.uiState.value.error)
     }
 
     @Test
     fun `delete failure sets error`() = runTest {
-        every { instanceManager.deleteInstance("missing") } throws IllegalArgumentException("missing")
+        every { virtualizationEngine.deleteInstance("missing") } returns EngineResult.fail(
+            operation = "deleteInstance",
+            instanceId = "missing",
+            message = "missing"
+        )
         val viewModel = AppManagerViewModel(instanceManager, virtualizationEngine)
 
         viewModel.onEvent(AppManagerEvent.DeleteInstance("missing"))

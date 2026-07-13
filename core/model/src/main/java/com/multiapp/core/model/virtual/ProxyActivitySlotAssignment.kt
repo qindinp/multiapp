@@ -32,6 +32,7 @@ interface ProxyActivitySlotAssignmentStore {
         return selected
     }
     fun ownerOf(proxyActivityClassName: String): ProxyActivitySlotKey? = null
+    fun removeInstance(instanceId: String): Int = 0
     fun pruneStaleAssignments(
         validInstanceIds: Set<String>,
         liveProxyActivityClassNames: Set<String>,

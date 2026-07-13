@@ -4,7 +4,7 @@ import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineSubsystem
 
 class IpcBackedVirtualProviderService(
-    private val fallback: VirtualProviderService,
+    @Suppress("UNUSED_PARAMETER") fallback: VirtualProviderService,
     private val remotePlan: (String, VirtualProviderDispatchPlanRequest) -> VirtualProviderDispatchPlan? =
         EngineRuntimeIpcClients::planProvider,
     private val remoteResolve: (
@@ -29,6 +29,8 @@ class IpcBackedVirtualProviderService(
         String,
         VirtualProviderUriGrantRequest
     ) -> VirtualProviderUriGrantResult? = EngineRuntimeIpcClients::releasePersistableProviderUriPermission,
+    private val readOnlyRuntimeStateSnapshot: (String) -> VirtualProviderRuntimeState? = { null },
+    private val readOnlyRuntimeBindingSnapshot: (String) -> VirtualSubsystemRuntimeBinding? = { null },
     private val authorityConnected: () -> Boolean = EngineRuntimeIpcClients::isConnected
 ) : VirtualProviderService {
     override val subsystem: EngineSubsystem = EngineSubsystem.PROVIDER
@@ -37,14 +39,22 @@ class IpcBackedVirtualProviderService(
         callerInstanceId: String,
         request: VirtualProviderAuthorityResolveRequest
     ): VirtualProviderAuthorityResolveResult {
-        remoteResolve(callerInstanceId, request)?.let { return it }
-        if (!authorityConnected()) return fallback.resolveProviderAuthority(callerInstanceId, request)
+        runCatching { remoteResolve(callerInstanceId, request) }.getOrNull()
+            ?.takeIf {
+                it.callerInstanceId == callerInstanceId &&
+                    it.guestAuthority == request.guestAuthority &&
+                    (it.targetInstanceId == null || it.targetInstanceId.isNotBlank())
+            }
+            ?.let { return it }
         return VirtualProviderAuthorityResolveResult(
             callerInstanceId = callerInstanceId.ifBlank { "invalid" },
             guestAuthority = request.guestAuthority,
             verdict = EngineResultStatus.FAIL,
             virtualAuthority = true,
-            message = "engine_provider_ipc_authority_resolve_invalid"
+            message = authorityFailureMessage(
+                invalid = "engine_provider_ipc_authority_resolve_invalid",
+                unavailable = "engine_provider_authority_unavailable:resolve"
+            )
         )
     }
 
@@ -52,29 +62,56 @@ class IpcBackedVirtualProviderService(
         instanceId: String,
         request: VirtualProviderDispatchPlanRequest
     ): VirtualProviderDispatchPlan {
-        remotePlan(instanceId, request)?.let { return it }
-        if (!authorityConnected()) return fallback.planProvider(instanceId, request)
+        runCatching { remotePlan(instanceId, request) }.getOrNull()
+            ?.takeIf {
+                it.instanceId == instanceId &&
+                    it.operation == request.operation &&
+                    it.guestAuthority == request.guestAuthority &&
+                    it.targets.all { target -> target.instanceId == instanceId }
+            }
+            ?.let { return it }
         return VirtualProviderDispatchPlan(
             instanceId = instanceId,
             operation = request.operation,
             verdict = EngineResultStatus.FAIL,
             guestAuthority = request.guestAuthority,
-            message = "engine_provider_ipc_plan_invalid"
+            message = authorityFailureMessage(
+                invalid = "engine_provider_ipc_plan_invalid",
+                unavailable = "engine_provider_authority_unavailable:plan"
+            )
         )
     }
 
     override fun recordProviderDispatch(instanceId: String, result: VirtualProviderOperationResult): Boolean {
-        val remote = remoteRecord(instanceId, result)
-        return remote ?: if (authorityConnected()) false else fallback.recordProviderDispatch(instanceId, result)
+        if (result.instanceId != instanceId) return false
+        return runCatching { remoteRecord(instanceId, result) }.getOrNull() ?: false
     }
 
     override fun queryProviderRuntimeState(instanceId: String): VirtualProviderRuntimeState {
-        remoteState(instanceId)?.let { return it }
-        if (!authorityConnected()) return fallback.queryProviderRuntimeState(instanceId)
+        runCatching { remoteState(instanceId) }.getOrNull()
+            ?.takeIf { state ->
+                state.instanceId == instanceId && state.records.all { it.instanceId == instanceId }
+            }
+            ?.let { return it }
+        if (!authorityConnected()) {
+            val snapshot = runCatching { readOnlyRuntimeStateSnapshot(instanceId) }.getOrNull()
+                ?.takeIf { state ->
+                    state.instanceId == instanceId && state.records.all { it.instanceId == instanceId }
+                }
+            if (snapshot != null) {
+                return snapshot.copy(
+                    verdict = snapshot.verdict.asReadOnlySnapshotVerdict(),
+                    message = "engine_provider_read_only_runtime_snapshot:${snapshot.message}"
+                )
+            }
+        }
         return VirtualProviderRuntimeState(
             instanceId = instanceId.ifBlank { "invalid" },
             verdict = EngineResultStatus.FAIL,
-            message = "engine_provider_ipc_runtime_state_invalid"
+            message = authorityFailureMessage(
+                invalid = "engine_provider_ipc_runtime_state_invalid",
+                unavailable = "engine_provider_authority_unavailable:query-runtime-state"
+            )
         )
     }
 
@@ -85,7 +122,6 @@ class IpcBackedVirtualProviderService(
         primaryInstanceId = ownerInstanceId,
         request = request,
         remote = remoteGrant,
-        fallbackCall = fallback::grantUriPermission,
         invalidMessage = "engine_provider_ipc_uri_grant_invalid"
     )
 
@@ -96,7 +132,6 @@ class IpcBackedVirtualProviderService(
         primaryInstanceId = ownerInstanceId,
         request = request,
         remote = remoteRevoke,
-        fallbackCall = fallback::revokeUriPermission,
         invalidMessage = "engine_provider_ipc_uri_revoke_invalid"
     )
 
@@ -107,7 +142,6 @@ class IpcBackedVirtualProviderService(
         primaryInstanceId = targetInstanceId,
         request = request,
         remote = remoteCheck,
-        fallbackCall = fallback::checkUriPermission,
         invalidMessage = "engine_provider_ipc_uri_check_invalid"
     )
 
@@ -118,7 +152,6 @@ class IpcBackedVirtualProviderService(
         primaryInstanceId = targetInstanceId,
         request = request,
         remote = remoteTakePersistable,
-        fallbackCall = fallback::takePersistableUriPermission,
         invalidMessage = "engine_provider_ipc_persistable_uri_take_invalid"
     )
 
@@ -129,31 +162,66 @@ class IpcBackedVirtualProviderService(
         primaryInstanceId = targetInstanceId,
         request = request,
         remote = remoteReleasePersistable,
-        fallbackCall = fallback::releasePersistableUriPermission,
         invalidMessage = "engine_provider_ipc_persistable_uri_release_invalid"
     )
 
-    override fun queryRuntimeBinding(instanceId: String): VirtualSubsystemRuntimeBinding =
-        fallback.queryRuntimeBinding(instanceId)
+    override fun queryRuntimeBinding(instanceId: String): VirtualSubsystemRuntimeBinding {
+        val snapshot = runCatching { readOnlyRuntimeBindingSnapshot(instanceId) }.getOrNull()
+            ?.takeIf { it.instanceId == instanceId && it.subsystem == subsystem }
+        if (snapshot != null) {
+            return snapshot.copy(
+                verdict = snapshot.verdict.asReadOnlySnapshotVerdict(),
+                message = "engine_provider_read_only_binding_snapshot:${snapshot.message}"
+            )
+        }
+        return VirtualSubsystemRuntimeBinding(
+            instanceId = instanceId.ifBlank { "invalid" },
+            subsystem = subsystem,
+            verdict = EngineResultStatus.FAIL,
+            message = "engine_provider_runtime_snapshot_unavailable"
+        )
+    }
 
     private fun authorityOwnedUriGrantResult(
         primaryInstanceId: String,
         request: VirtualProviderUriGrantRequest,
         remote: (String, VirtualProviderUriGrantRequest) -> VirtualProviderUriGrantResult?,
-        fallbackCall: (String, VirtualProviderUriGrantRequest) -> VirtualProviderUriGrantResult,
         invalidMessage: String
     ): VirtualProviderUriGrantResult {
-        remote(primaryInstanceId, request)?.let { return it }
-        if (!authorityConnected()) return fallbackCall(primaryInstanceId, request)
+        val expectedOwner = request.ownerInstanceId ?: primaryInstanceId
+        val expectedTarget = request.targetInstanceId ?: primaryInstanceId
+        runCatching { remote(primaryInstanceId, request) }.getOrNull()
+            ?.takeIf {
+                it.ownerInstanceId == expectedOwner &&
+                    it.targetInstanceId == expectedTarget &&
+                    it.guestAuthority == request.guestAuthority &&
+                    it.encodedPath == request.encodedPath &&
+                    it.modeFlags == request.modeFlags &&
+                    it.affectedGrantCount >= 0 &&
+                    it.persistedModeFlags >= 0
+            }
+            ?.let { return it }
         return VirtualProviderUriGrantResult(
-            ownerInstanceId = request.ownerInstanceId ?: primaryInstanceId,
-            targetInstanceId = request.targetInstanceId ?: primaryInstanceId,
+            ownerInstanceId = expectedOwner,
+            targetInstanceId = expectedTarget,
             guestAuthority = request.guestAuthority,
             encodedPath = request.encodedPath,
             modeFlags = request.modeFlags,
             verdict = EngineResultStatus.FAIL,
             granted = false,
-            message = invalidMessage
+            message = authorityFailureMessage(
+                invalid = invalidMessage,
+                unavailable = "engine_provider_authority_unavailable:${uriGrantOperation(invalidMessage)}"
+            )
         )
     }
+
+    private fun authorityFailureMessage(invalid: String, unavailable: String): String =
+        if (authorityConnected()) invalid else unavailable
+
+    private fun uriGrantOperation(invalidMessage: String): String =
+        invalidMessage.removePrefix("engine_provider_ipc_").removeSuffix("_invalid")
+
+    private fun EngineResultStatus.asReadOnlySnapshotVerdict(): EngineResultStatus =
+        if (this == EngineResultStatus.FAIL) EngineResultStatus.FAIL else EngineResultStatus.PARTIAL
 }

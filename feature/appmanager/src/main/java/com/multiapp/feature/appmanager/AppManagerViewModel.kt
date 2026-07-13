@@ -8,6 +8,7 @@ import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -19,6 +20,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import timber.log.Timber
 import javax.inject.Inject
+
+internal var appManagerIoDispatcher: CoroutineDispatcher = Dispatchers.IO
 
 data class AppManagerUiState(
     val instances: List<VirtualInstanceRecord> = emptyList(),
@@ -79,10 +82,14 @@ class AppManagerViewModel @Inject constructor(
     }
 
     private fun deleteInstance(instanceId: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(appManagerIoDispatcher) {
             try {
-                instanceManager.deleteInstance(instanceId)
-                loadInstances()
+                val result = virtualizationEngine.deleteInstance(instanceId)
+                if (result.success) {
+                    loadInstances()
+                } else {
+                    _uiState.update { it.copy(error = result.message ?: "删除分身失败") }
+                }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to delete instance")
@@ -92,7 +99,7 @@ class AppManagerViewModel @Inject constructor(
     }
 
     fun launchInstance(instanceId: String) {
-        viewModelScope.launch(Dispatchers.IO) {
+        viewModelScope.launch(appManagerIoDispatcher) {
             val result = virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = instanceId))
             if (!result.success) {
                 Timber.e("Failed to launch instance via engine: ${result.message}")

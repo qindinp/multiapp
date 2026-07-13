@@ -14,6 +14,8 @@ import com.multiapp.core.loader.VirtualContentServiceProxyInstaller
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
 import com.multiapp.core.loader.VirtualPermissionCheckDispatchers
 import com.multiapp.core.loader.VirtualUriPermissionDispatcherFactories
+import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
+import com.multiapp.core.model.virtual.ProxySlotContract
 import java.io.File
 
 data class EngineSystemServerHandle(
@@ -166,6 +168,9 @@ object EngineRuntimeInstallers {
             ),
             broadcastRuntimeStateStore = FileBackedEngineBroadcastRuntimeStateStore(
                 File(filesDir, EngineBroadcastRuntimeStateFiles.DEFAULT_FILE_NAME)
+            ),
+            proxyActivitySlotAssignmentStore = FileBackedProxyActivitySlotAssignmentStore(
+                File(filesDir, ProxySlotContract.SLOT_ASSIGNMENT_FILE)
             )
         )
         return EngineSystemServerHandle(registry = registry, server = server)

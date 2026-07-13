@@ -117,6 +117,23 @@ class EngineVirtualizationEndpointContractTest {
     }
 
     @Test
+    fun `delete endpoint returns the authoritative engine result`() {
+        val engine = mockk<VirtualizationEngine>()
+        val expected = EngineResult.pass(
+            operation = "deleteInstance",
+            instanceId = INSTANCE_ID,
+            message = "instance deleted"
+        )
+        every { engine.deleteInstance(INSTANCE_ID) } returns expected
+
+        val result = endpoint(engine).engineDeleteInstance(INSTANCE_ID)
+            .toEngineRemoteResultOrNull()
+
+        assertEquals(expected, result?.result)
+        verify(exactly = 1) { engine.deleteInstance(INSTANCE_ID) }
+    }
+
+    @Test
     fun `query endpoint returns the authoritative runtime identity`() {
         val engine = mockk<VirtualizationEngine>()
         val runtime = runtime()

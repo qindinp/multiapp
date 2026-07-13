@@ -8,6 +8,7 @@ interface IEngineRuntimeService {
     Bundle engineCreateInstance(String originPackageName);
     Bundle engineLaunchInstance(in Bundle request);
     Bundle engineStopInstance(String instanceId);
+    Bundle engineDeleteInstance(String instanceId);
     Bundle engineQueryRuntimeState(String instanceId);
     Bundle engineExportEvidence(String instanceId);
     Bundle attachClient(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, IBinder clientToken);

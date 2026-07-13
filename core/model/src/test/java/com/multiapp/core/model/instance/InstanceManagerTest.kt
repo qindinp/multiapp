@@ -187,6 +187,21 @@ class InstanceManagerTest {
     }
 
     @Test
+    fun `deleteInstance retains record when dataRoot deletion fails`() {
+        val failingManager = DefaultInstanceManager(
+            store = store,
+            dataRootBase = File(tempDir, "data_delete_failure"),
+            clock = { currentTimeMs },
+            dataRootDeleter = { false }
+        )
+        val created = failingManager.createInstance("com.example.app", "Example").getOrThrow()
+
+        assertFalse(failingManager.deleteInstance(created.instanceId))
+        assertNotNull(failingManager.getInstance(created.instanceId))
+        assertTrue(File(created.dataRoot).exists())
+    }
+
+    @Test
     fun `updateLaunchState increments launchCount`() {
         val created = manager.createInstance("com.example.app", "Example").getOrNull()!!
         assertEquals(0, created.launchCount)

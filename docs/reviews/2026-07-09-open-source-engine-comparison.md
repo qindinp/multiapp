@@ -151,3 +151,73 @@ This closes the local watchdog/recycle code slice. It does not change the
 commercial `BLOCK`: process-death recents and timeout recycling still need API
 28-36/HyperOS evidence, and the engine authority must still move to a dedicated
 virtual-system-server process.
+
+## Authoritative Delete Comparison - 2026-07-13
+
+Pinned source review:
+
+- VirtualApp `7d739c85`,
+  [`VAppManagerService.uninstallPackageAsUser/uninstallPackageFully`](https://github.com/asLody/VirtualApp/blob/7d739c85/VirtualApp/lib/src/main/java/com/lody/virtual/server/pm/VAppManagerService.java#L317-L368):
+  serializes uninstall in the server, kills the target virtual user/package,
+  preserves package artifacts when sibling users remain, then removes the
+  selected user data. Full uninstall stops broadcasts, kills all package
+  processes, deletes package/user artifacts, and removes package cache state.
+- VirtualApp `7d739c85`,
+  [`VActivityManagerService.killAppByPkg`](https://github.com/asLody/VirtualApp/blob/7d739c85/VirtualApp/lib/src/main/java/com/lody/virtual/server/am/VActivityManagerService.java#L872-L900):
+  selects process records by package and virtual user before calling
+  `killProcess(pid)`. It does not wait for process disappearance before package
+  deletion continues.
+- BlackBox `ffe950f7`,
+  [`BPackageManagerService.uninstallPackageAsUser/uninstallPackage`](https://github.com/FBlackBox/BlackBox/blob/ffe950f7/Bcore/src/main/java/top/niunaijun/blackbox/core/system/pm/BPackageManagerService.java#L530-L588):
+  keeps uninstall under package/install locks, kills the package/user first,
+  deletes per-user artifacts, then removes package settings and component
+  resolver state only when the final user is removed.
+- BlackBox `ffe950f7`,
+  [`BProcessManagerService.onProcessDie/killPackageAsUser`](https://github.com/FBlackBox/BlackBox/blob/ffe950f7/Bcore/src/main/java/top/niunaijun/blackbox/core/system/BProcessManagerService.java#L199-L257):
+  owns process maps and notification cleanup. Explicit kill removes process-map
+  entries immediately; Binder/process death is a separate callback, so an
+  issued kill is not a confirmed exit barrier.
+- DroidPlugin `c6ebf652`,
+  [`IPluginManagerImpl.deletePackage`](https://github.com/DroidPluginTeam/DroidPlugin/blob/c6ebf652/project/Libraries/DroidPlugin/src/main/java/com/morgoo/droidplugin/pm/IPluginManagerImpl.java#L995-L1014):
+  force-stops the package, removes the parser/cache and plugin base directory,
+  notifies its Activity manager, clears signatures, and broadcasts removal.
+  [`killBackgroundProcesses`](https://github.com/DroidPluginTeam/DroidPlugin/blob/c6ebf652/project/Libraries/DroidPlugin/src/main/java/com/morgoo/droidplugin/pm/IPluginManagerImpl.java#L1191-L1217)
+  only observes that `killProcess(pid)` was issued. DroidPlugin has no
+  VirtualApp-style per-user instance/dataRoot contract, and its base
+  `onPkgDeleted` hook is empty.
+
+Binder client behavior is also consistent on the key safety point. VirtualApp
+`VirtualCore.uninstallPackage*` returns `false` after `RemoteException`,
+BlackBox's package client logs the remote failure, and DroidPlugin logs/no-ops
+when its manager is disconnected. They may reconnect or return weak errors,
+but none performs a second local package deletion as a fallback authority.
+
+MultiApp decisions:
+
+1. Keep one engine/server command as the only permanent-delete writer. A
+   Binder failure must remain an unknown/failed command, never a local retry.
+2. Revoke launch capability and terminate the exact instance process before
+   clearing mutable component state or deleting data.
+3. Improve on all three references by confirming PID/processSlot disappearance
+   before deletion continues; `killProcess()` issuance alone is insufficient.
+4. Preserve package-scoped install artifacts for sibling instances. Delete
+   only instance-scoped data, task, component, grant, policy, and slot state.
+5. Do not copy VirtualApp/BlackBox partial-failure behavior: installer/dataRoot
+   failure must retain a durable instance record and slot ownership so deletion
+   can be retried without creating an untracked orphan.
+6. Keep process-death cleanup and explicit delete idempotent. Either path may
+   run first, but stale Binder callbacks must not affect a successor runtime
+   generation.
+7. Treat proxy/runtime slots as server-owned resources and release them only
+   after durable instance deletion succeeds.
+8. DroidPlugin's package-wide plugin deletion is useful for ordering only; it
+   is not a sufficient multi-instance isolation or lifecycle model.
+
+Current mapping:
+
+- The current `VirtualizationEngine.deleteInstance` implementation follows the
+  above ordering and adds confirmed process termination, target-instance state
+  cleanup, dataRoot failure retention, and post-record slot release.
+- Creation and proxy Activity slot allocation still have non-engine writers.
+  Dedicated `:engine` migration remains blocked until those paths and direct
+  owner-file reads are removed.
