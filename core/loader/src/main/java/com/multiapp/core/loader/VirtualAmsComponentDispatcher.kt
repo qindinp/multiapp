@@ -6,12 +6,11 @@ import android.content.ServiceConnection
 import android.os.Handler
 import android.os.Looper
 import com.multiapp.core.common.EvidenceSanitizer
-import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
-import java.io.File
 import java.util.concurrent.Executor
 
 data class VirtualBroadcastDispatchOptions(
@@ -76,9 +75,9 @@ class DefaultVirtualAmsComponentDispatcher(
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val proxyActivityRegistry: ProxyActivityRegistry = defaultProxyActivityRegistry(
         hostPackageName,
-        hostContext?.filesDir,
         processSlot
     ),
+    private val proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore? = null,
     private val servicePackageRegistry: VirtualPackageRegistry = VirtualPackageRegistry.global,
     private val serviceRuntime: VirtualServiceRuntime = VirtualServiceRuntime.global,
     private val broadcastManager: VirtualBroadcastManager = VirtualBroadcastManager(),
@@ -118,9 +117,26 @@ class DefaultVirtualAmsComponentDispatcher(
         if (blocked != null) return listOf(blocked.result)
 
         proxyActivityRegistry.registerExisting(activityRecordManager.list())
-        return plans
-            .filterIsInstance<ActivityStartPlan.Resolved>()
-            .map { plan -> remapStartActivityRequest(plan.request) }
+        val assignmentStore = proxyActivitySlotAssignmentStore
+            ?: ProxyActivitySlotAssignmentStoreProvider.requireStore()
+        val assignmentRollback = ProxyActivitySlotAssignmentRollback(assignmentStore)
+        val activityStateSnapshot = activityRecordManager.snapshotState()
+        val registryTokensBeforeBatch = proxyActivityRegistry.listRecords().mapTo(hashSetOf()) { it.token }
+        return try {
+            plans
+                .filterIsInstance<ActivityStartPlan.Resolved>()
+                .map { plan ->
+                    assignmentRollback.remember(plan.request.proxyActivitySlotKey())
+                    remapStartActivityRequest(plan.request)
+                }
+        } catch (error: Throwable) {
+            proxyActivityRegistry.listRecords()
+                .filterNot { it.token in registryTokensBeforeBatch }
+                .forEach { proxyActivityRegistry.consume(it.token) }
+            activityRecordManager.restoreState(activityStateSnapshot)
+            assignmentRollback.restore()
+            throw error
+        }
     }
 
     private fun planStartActivityIntent(intent: Intent): ActivityStartPlan {
@@ -509,17 +525,12 @@ class DefaultVirtualAmsComponentDispatcher(
     companion object {
         fun defaultProxyActivityRegistry(
             hostPackageName: String,
-            filesDir: File? = null,
             processSlot: String? = null
         ): ProxyActivityRegistry {
             return ProxyActivityRegistry(
                 ProxyActivitySlots.classNamesForProcessSlot(hostPackageName, processSlot),
                 ProxyActivitySlots.launchModeByClassName(hostPackageName),
-                filesDir?.let {
-                    FileBackedProxyActivitySlotAssignmentStore(
-                        File(it, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
-                    )
-                }
+                ProviderBackedProxyActivitySlotAssignmentStore
             )
         }
 

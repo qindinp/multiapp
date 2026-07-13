@@ -1,6 +1,7 @@
 package com.multiapp.core.engine
 
 import com.multiapp.core.model.engine.EngineResultStatus
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
@@ -10,6 +11,7 @@ import io.mockk.verify
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -340,6 +342,131 @@ class EngineActivityIpcServiceTest {
         verify(exactly = 0) { fallback.finishActivity(any(), any()) }
     }
 
+    @Test
+    fun `IPC proxy slot store uses only remote authority`() {
+        val key = proxySlotKey()
+        val proxy = "com.multiapp.app.container.ProxyActivity0"
+        val store = IpcBackedProxyActivitySlotAssignmentStore(
+            remoteFind = { proxySlotResult(key, PROXY_ACTIVITY_SLOT_QUERY_OPERATION, proxy) },
+            remoteReserve = { _, _ ->
+                proxySlotResult(key, PROXY_ACTIVITY_SLOT_RESERVE_OPERATION, proxy)
+            },
+            remoteCompareAndSet = { _, _, new ->
+                proxySlotResult(
+                    key = key,
+                    operation = PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION,
+                    proxyActivityClassName = new
+                )
+            }
+        )
+
+        assertEquals(proxy, store.find(key))
+        assertEquals(proxy, store.reserve(key, listOf(proxy)))
+        assertTrue(store.compareAndSet(key, proxy, null))
+        assertFailsWith<UnsupportedOperationException> { store.save(key, proxy) }
+        assertNull(store.ownerOf(proxy))
+        assertEquals(0, store.removeInstance(key.instanceId))
+        assertEquals(0, store.pruneStaleAssignments(setOf(key.instanceId), setOf(proxy), setOf(proxy)))
+    }
+
+    @Test
+    fun `disconnected proxy slot store fails closed`() {
+        val key = proxySlotKey()
+        val proxy = "com.multiapp.app.container.ProxyActivity0"
+        val store = IpcBackedProxyActivitySlotAssignmentStore(
+            remoteFind = { null },
+            remoteReserve = { _, _ -> throw IllegalStateException("binder disconnected") },
+            remoteCompareAndSet = { _, _, _ -> null }
+        )
+
+        assertNull(store.find(key))
+        assertNull(store.reserve(key, listOf(proxy)))
+        assertFalse(store.compareAndSet(key, null, proxy))
+    }
+
+    @Test
+    fun `proxy slot store rejects response identity and operation mismatch`() {
+        val key = proxySlotKey()
+        val otherKey = key.copy(instanceId = "instance-2")
+        val proxy = "com.multiapp.app.container.ProxyActivity0"
+        val store = IpcBackedProxyActivitySlotAssignmentStore(
+            remoteFind = {
+                proxySlotResult(otherKey, PROXY_ACTIVITY_SLOT_QUERY_OPERATION, proxy)
+            },
+            remoteReserve = { _, _ ->
+                proxySlotResult(key, PROXY_ACTIVITY_SLOT_QUERY_OPERATION, proxy)
+            },
+            remoteCompareAndSet = { _, _, _ ->
+                proxySlotResult(
+                    key,
+                    PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION,
+                    proxy
+                ).copy(instanceId = "instance-2")
+            }
+        )
+
+        assertNull(store.find(key))
+        assertNull(store.reserve(key, listOf(proxy)))
+        assertFalse(store.compareAndSet(key, null, proxy))
+    }
+
+    @Test
+    fun `proxy slot candidate budget is enforced before remote call`() {
+        val key = proxySlotKey()
+        var reserveCalls = 0
+        val store = IpcBackedProxyActivitySlotAssignmentStore(
+            remoteReserve = { _, _ ->
+                reserveCalls += 1
+                null
+            }
+        )
+        val overBudget = List(EngineRuntimeIpcContract.MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_COUNT + 1) {
+            "com.multiapp.app.container.ProxyActivity$it"
+        }
+
+        assertNull(store.reserve(key, overBudget))
+        assertNull(store.reserve(key, listOf("x".repeat(
+            EngineRuntimeIpcContract.MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_LENGTH + 1
+        ))))
+        assertEquals(0, reserveCalls)
+    }
+
+    @Test
+    fun `IPC backed Activity service forwards proxy slot operations and rejects mismatch`() {
+        val fallback = mockk<VirtualActivityService>(relaxed = true)
+        val key = proxySlotKey()
+        val proxy = "com.multiapp.app.container.ProxyActivity0"
+        val remote = proxySlotResult(key, PROXY_ACTIVITY_SLOT_QUERY_OPERATION, proxy)
+        val service = IpcBackedVirtualActivityService(
+            fallback = fallback,
+            remoteProxySlotQuery = { _, _ -> remote },
+            remoteProxySlotReserve = { _, _, _ ->
+                remote.copy(operation = PROXY_ACTIVITY_SLOT_RESERVE_OPERATION)
+            },
+            remoteProxySlotCompareAndSet = { _, _, _, _ ->
+                remote.copy(
+                    operation = PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION,
+                    proxyActivityClassName = null
+                )
+            },
+            authorityConnected = { true }
+        )
+
+        assertSame(remote, service.queryProxyActivitySlot(key.instanceId, key))
+        assertEquals(
+            EngineResultStatus.PASS,
+            service.reserveProxyActivitySlot(key.instanceId, key, listOf(proxy)).verdict
+        )
+        assertEquals(
+            EngineResultStatus.PASS,
+            service.compareAndSetProxyActivitySlot(key.instanceId, key, proxy, null).verdict
+        )
+        assertEquals(
+            EngineResultStatus.FAIL,
+            service.queryProxyActivitySlot("instance-2", key).verdict
+        )
+    }
+
     private fun plan(message: String) = VirtualActivityDispatchPlan(
         instanceId = "instance-1",
         verdict = EngineResultStatus.PARTIAL,
@@ -358,6 +485,27 @@ class EngineActivityIpcServiceTest {
         token = "token-1",
         state = state,
         message = message
+    )
+
+    private fun proxySlotKey() = ProxyActivitySlotKey(
+        instanceId = "instance-1",
+        launchMode = "standard",
+        taskKey = "task-1"
+    )
+
+    private fun proxySlotResult(
+        key: ProxyActivitySlotKey,
+        operation: String,
+        proxyActivityClassName: String?
+    ) = VirtualProxyActivitySlotOperationResult(
+        instanceId = key.instanceId,
+        operation = operation,
+        verdict = EngineResultStatus.PASS,
+        key = key,
+        proxyActivityClassName = proxyActivityClassName,
+        matched = true,
+        removedCount = 0,
+        message = "proxy_activity_slot_test"
     )
 
     private fun taskRecord() = VirtualTaskRecord(

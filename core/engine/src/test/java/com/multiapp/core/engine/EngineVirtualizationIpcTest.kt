@@ -16,6 +16,7 @@ import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.instance.CompatibilityMode
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
@@ -61,6 +62,94 @@ class EngineVirtualizationIpcTest {
 
         assertEquals(request, decoded)
         assertNull(bundles.create().toCreateInstanceRequestOrNull())
+    }
+
+    @Test
+    fun `proxy Activity slot requests preserve key candidates and nullable CAS values`() {
+        val bundles = MockBundleFactory()
+        val key = ProxyActivitySlotKey(
+            instanceId = INSTANCE_ID,
+            launchMode = null,
+            taskKey = "task-1"
+        )
+        val candidates = listOf(
+            "$HOST_PACKAGE.container.ProxyActivity0",
+            "$HOST_PACKAGE.container.ProxyActivity1"
+        )
+
+        assertEquals(
+            key,
+            key.toProxyActivitySlotQueryIpcBundle(bundles::create)
+                .toProxyActivitySlotQueryIpcKeyOrNull()
+        )
+        assertEquals(
+            EngineProxyActivitySlotReserveIpcRequest(key, candidates),
+            key.toProxyActivitySlotReserveIpcBundle(candidates, bundles::create)
+                .toProxyActivitySlotReserveIpcRequestOrNull()
+        )
+        assertEquals(
+            EngineProxyActivitySlotCompareAndSetIpcRequest(key, null, null),
+            key.toProxyActivitySlotCompareAndSetIpcBundle(null, null, bundles::create)
+                .toProxyActivitySlotCompareAndSetIpcRequestOrNull()
+        )
+    }
+
+    @Test
+    fun `proxy Activity slot result survives strict Bundle round trip`() {
+        val bundles = MockBundleFactory()
+        val key = ProxyActivitySlotKey(INSTANCE_ID, "standard", "task-1")
+        val expected = VirtualProxyActivitySlotOperationResult(
+            instanceId = INSTANCE_ID,
+            operation = PROXY_ACTIVITY_SLOT_RESERVE_OPERATION,
+            verdict = EngineResultStatus.PASS,
+            key = key,
+            proxyActivityClassName = "$HOST_PACKAGE.container.ProxyActivity0",
+            matched = true,
+            removedCount = 0,
+            message = "proxy_activity_slot_reserved"
+        )
+
+        assertEquals(
+            expected,
+            expected.toProxyActivitySlotResultIpcBundle(bundles::create)
+                .toProxyActivitySlotIpcResultOrNull()
+        )
+    }
+
+    @Test
+    fun `proxy Activity slot codec rejects extra fields budgets and identity mismatch`() {
+        val bundles = MockBundleFactory()
+        val key = ProxyActivitySlotKey(INSTANCE_ID, "standard", "task-1")
+        val extraFieldRequest = key.toProxyActivitySlotQueryIpcBundle(bundles::create).apply {
+            putString("unexpected", "value")
+        }
+        val missingNullableLaunchMode = bundles.create().apply {
+            putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, INSTANCE_ID)
+            putString(EngineRuntimeIpcContract.KEY_TASK_KEY, "task-1")
+        }
+        val overBudgetCandidates = List(
+            EngineRuntimeIpcContract.MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_COUNT + 1
+        ) { "$HOST_PACKAGE.container.ProxyActivity$it" }
+        val mismatchedResult = VirtualProxyActivitySlotOperationResult(
+            instanceId = INSTANCE_ID,
+            operation = PROXY_ACTIVITY_SLOT_QUERY_OPERATION,
+            verdict = EngineResultStatus.PASS,
+            key = key,
+            proxyActivityClassName = null,
+            matched = false,
+            removedCount = 0,
+            message = "proxy_activity_slot_unassigned"
+        ).toProxyActivitySlotResultIpcBundle(bundles::create).apply {
+            putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, "instance-other")
+        }
+
+        assertNull(extraFieldRequest.toProxyActivitySlotQueryIpcKeyOrNull())
+        assertNull(missingNullableLaunchMode.toProxyActivitySlotQueryIpcKeyOrNull())
+        assertNull(
+            key.toProxyActivitySlotReserveIpcBundle(overBudgetCandidates, bundles::create)
+                .toProxyActivitySlotReserveIpcRequestOrNull()
+        )
+        assertNull(mismatchedResult.toProxyActivitySlotIpcResultOrNull())
     }
 
     @Test

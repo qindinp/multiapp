@@ -21,11 +21,10 @@ import com.multiapp.core.engine.EngineProxyActivityRecords
 import com.multiapp.core.engine.EngineProxyActivitySlots
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.engine.HostedRuntimeBindOutcome
+import com.multiapp.core.engine.IpcBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.engine.EngineProfile
-import com.multiapp.core.model.instance.JsonInstanceRecordStore
-import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
@@ -538,13 +537,9 @@ open class ContainerActivity : Activity() {
         engineProxySlot: String?
     ): Result<com.multiapp.core.model.virtual.VirtualActivityRecord> {
         Log.i(TAG, "Launching proxy Activity for guest: $guestActivityClassName")
-        val slotAssignmentStore =
-            FileBackedProxyActivitySlotAssignmentStore(ContainerRuntimePaths.proxyActivitySlotsFile(this))
+        val slotAssignmentStore = IpcBackedProxyActivitySlotAssignmentStore()
         restoreActivityTaskState(instanceId, "before-proxy-launch")
-        pruneProxyActivitySlotAssignments(
-            instanceId = instanceId,
-            slotAssignmentStore = slotAssignmentStore
-        )
+        pruneProxyActivityRuntimeRecords(instanceId)
         val candidateProxyActivityClassNames = proxyActivityCandidatesFromEngineSlot(
             instanceId = instanceId,
             engineProxySlot = engineProxySlot,
@@ -573,14 +568,15 @@ open class ContainerActivity : Activity() {
         launchMode: String?
     ): Result<List<String>> {
         if (engineProxySlot.isNullOrBlank()) {
+            val detail = "engine proxy slot missing"
             writeEngineProxySlotEvidence(
                 instanceId = instanceId,
-                status = "FALLBACK",
-                detail = "engine proxy slot missing; using full proxy registry",
+                status = "FAIL",
+                detail = detail,
                 engineProxySlot = "",
                 launchMode = launchMode
             )
-            return Result.success(proxyActivityClassNames)
+            return Result.failure(IllegalStateException(detail))
         }
         if (engineProxySlot !in proxyActivityClassNames) {
             val detail = "unknown engine proxy slot: $engineProxySlot"
@@ -619,41 +615,21 @@ open class ContainerActivity : Activity() {
         return Result.success(listOf(engineProxySlot))
     }
 
-    private fun pruneProxyActivitySlotAssignments(
-        instanceId: String,
-        slotAssignmentStore: FileBackedProxyActivitySlotAssignmentStore
-    ) {
-        val validInstanceIds = linkedSetOf(instanceId)
-        runCatching {
-            JsonInstanceRecordStore(getInstanceStoreDir())
-                .listAll()
-                .map { record -> record.instanceId }
-        }.onSuccess { persistedInstanceIds ->
-            validInstanceIds.addAll(persistedInstanceIds)
-        }.onFailure { error ->
-            Log.w(TAG, "Unable to list instances while pruning proxy Activity slots", error)
-        }
+    private fun pruneProxyActivityRuntimeRecords(instanceId: String) {
         val knownProxyClasses = proxyActivityClassNames.toSet()
         val liveProxyClasses = liveProxyActivityClassNames(knownProxyClasses)
         val removedRuntimeRecords = EngineProxyActivityRecords().pruneStaleProxyRecords(
             knownProxyActivityClassNames = knownProxyClasses,
             liveProxyActivityClassNames = liveProxyClasses
         )
-        val removed = slotAssignmentStore.pruneStaleAssignments(
-            validInstanceIds = validInstanceIds,
-            liveProxyActivityClassNames = liveProxyClasses,
-            knownProxyActivityClassNames = knownProxyClasses
-        )
 
         writeProxySlotPruneEvidence(
             instanceId = instanceId,
-            removedAssignments = removed,
             removedRuntimeRecords = removedRuntimeRecords,
-            validInstanceCount = validInstanceIds.size,
             liveProxyClasses = liveProxyClasses,
             knownProxyCount = knownProxyClasses.size
         )
-        persistActivityTaskState(instanceId, "after-slot-prune")
+        persistActivityTaskState(instanceId, "after-runtime-record-prune")
     }
 
     @Suppress("DEPRECATION")
@@ -674,10 +650,6 @@ open class ContainerActivity : Activity() {
             emptySet()
         }
     }
-
-    /** Directory for [JsonInstanceRecordStore] persistence. */
-    private fun getInstanceStoreDir(): File =
-        ContainerRuntimePaths.instanceStoreDir(this)
 
     /** Directory for [JsonInstallRecordStore] persistence. */
     private fun getInstallStoreDir(): File =
@@ -927,9 +899,7 @@ open class ContainerActivity : Activity() {
 
     private fun writeProxySlotPruneEvidence(
         instanceId: String,
-        removedAssignments: Int,
         removedRuntimeRecords: Int,
-        validInstanceCount: Int,
         liveProxyClasses: Set<String>,
         knownProxyCount: Int
     ) {
@@ -937,20 +907,19 @@ open class ContainerActivity : Activity() {
             ContainerRuntimeEvidenceWriter.write(
                 context = applicationContext ?: this,
                 instanceId = instanceId,
-                component = "activity-slot-prune",
+                component = "activity-runtime-record-prune",
                 fields = linkedMapOf(
                     "status" to "PASS",
-                    "stage" to "activity-slot-prune",
-                    "removedAssignments" to removedAssignments.toString(),
+                    "stage" to "activity-runtime-record-prune",
+                    "assignmentAuthority" to "engine-server",
                     "removedRuntimeRecords" to removedRuntimeRecords.toString(),
-                    "validInstanceCount" to validInstanceCount.toString(),
                     "liveProxyActivityCount" to liveProxyClasses.size.toString(),
                     "liveProxyActivityClasses" to liveProxyClasses.joinToString(","),
                     "knownProxyActivityCount" to knownProxyCount.toString()
                 )
             )
         }.onFailure { error ->
-            Log.w(TAG, "Unable to write proxy Activity slot prune evidence for instanceId=$instanceId", error)
+            Log.w(TAG, "Unable to write proxy Activity runtime prune evidence for instanceId=$instanceId", error)
         }
     }
 

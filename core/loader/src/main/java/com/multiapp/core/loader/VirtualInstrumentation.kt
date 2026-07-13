@@ -22,7 +22,6 @@ import com.multiapp.core.hook.NativeHookPolicyResolver
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
-import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
@@ -671,15 +670,14 @@ open class VirtualInstrumentation(
         )
 
         return runCatching {
+            val assignmentStore = ProxyActivitySlotAssignmentStoreProvider.requireStore()
             val registry = ProxyActivityRegistry(
                 ProxyActivitySlots.classNamesForProcessSlot(
                     runtime.hostApplication.packageName,
                     runtime.result.processSlot
                 ),
                 ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
-                FileBackedProxyActivitySlotAssignmentStore(
-                    File(runtime.hostApplication.filesDir, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
-                )
+                assignmentStore
             )
             val manager = VirtualActivityManager(
                 context = who,
@@ -770,15 +768,16 @@ open class VirtualInstrumentation(
         }
 
         return runCatching {
+            val assignmentStore = ProxyActivitySlotAssignmentStoreProvider.requireStore()
+            val assignmentRollback = ProxyActivitySlotAssignmentRollback(assignmentStore)
+            val activityStateSnapshot = activityRecordManager.snapshotState()
             val registry = ProxyActivityRegistry(
                 ProxyActivitySlots.classNamesForProcessSlot(
                     runtime.hostApplication.packageName,
                     runtime.result.processSlot
                 ),
                 ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
-                FileBackedProxyActivitySlotAssignmentStore(
-                    File(runtime.hostApplication.filesDir, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
-                )
+                assignmentStore
             )
             val manager = VirtualActivityManager(
                 context = who,
@@ -786,12 +785,19 @@ open class VirtualInstrumentation(
                 hostPackageName = runtime.hostApplication.packageName,
                 activityRecordManager = activityRecordManager
             )
-            val proxyIntents = requests.filterNotNull().map { request ->
-                val record = manager.allocateGuestActivity(request)
-                manager.createProxyIntent(record, request.sourceIntent).apply {
-                    flags = flags or (request.sourceIntent.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
-                    putExtra("multiapp.activityBatchSize", intents.size)
-                } to (request to record)
+            val proxyIntents = try {
+                requests.filterNotNull().map { request ->
+                    assignmentRollback.remember(request.proxyActivitySlotKey())
+                    val record = manager.allocateGuestActivity(request)
+                    manager.createProxyIntent(record, request.sourceIntent).apply {
+                        flags = flags or (request.sourceIntent.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
+                        putExtra("multiapp.activityBatchSize", intents.size)
+                    } to (request to record)
+                }
+            } catch (error: Throwable) {
+                activityRecordManager.restoreState(activityStateSnapshot)
+                assignmentRollback.restore()
+                throw error
             }
             writeRemapBatchEvidence(
                 filesDir = runtime.hostApplication.filesDir,

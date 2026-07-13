@@ -4249,3 +4249,77 @@ Remaining gate:
   API 28-36/HyperOS evidence remain incomplete.
 - No new device artifact proves GKD, AstroBox, QQ, WeChat, or QQ Reader. The
   commercial decision remains **BLOCK**.
+
+## Implementation Update - 2026-07-13 Authoritative Proxy Activity Slots
+
+This batch closes the known multi-process writer for
+`proxy_activity_slots.properties`. Proxy Activity allocation now follows the
+same server-owned resource model as the engine create/delete commands: clients
+submit strict commands and cannot repair an unavailable authority by writing
+the shared file themselves.
+
+Implemented:
+
+- `RegistryBackedVirtualActivityService` is the only production class that
+  mutates proxy Activity assignments. It owns query, atomic reserve, CAS
+  rollback, startup reconciliation, and instance-delete release over one
+  persistent store.
+- `DefaultVirtualSystemServer` gives Activity allocation and instance cleanup
+  the same authority. `VirtualInstanceLifecycleService` only delegates release
+  to the Activity service and no longer holds the store itself.
+- AIDL and strict Bundle codecs expose query/reserve/CAS. The endpoint rejects
+  wrong host UIDs, malformed fields, oversized or duplicate candidates,
+  unnormalized launch modes, unknown runtimes, instance mismatches, process
+  slot mismatches, and proxy launch-mode mismatches.
+- `IpcBackedProxyActivitySlotAssignmentStore` is fail-closed. It has no local
+  save path, does not choose a first candidate when Binder is unavailable, and
+  accepts replies only when operation, instance, key, candidate, and result
+  identity all match.
+- App launchers, `EngineActivityLaunchCoordinator`, loader AMS/context paths,
+  and Instrumentation now consume the engine assignment adapter. Single and
+  batch allocation failures restore process-local Activity records and use
+  authoritative CAS for assignment rollback.
+- `ContainerActivity` no longer prunes the shared assignment file. It only
+  prunes process-local Activity records, and a missing `engineProxySlot` is a
+  launch failure instead of a full-registry fallback.
+- Engine startup reconciles assignments against durable instance records and
+  the declared proxy catalog. Valid assignments are retained even when their
+  Android task is not currently visible so system-recents recovery can reuse
+  the same proxy component after process death.
+- A source boundary test enforces that
+  `FileBackedProxyActivitySlotAssignmentStore(...)` has exactly one production
+  construction site: the engine server installer. Binder endpoint, codec,
+  concurrency, rollback, deletion, provider-installation, and fail-closed
+  loader tests cover the new authority.
+- The bootstrap tombstone regression test now waits for its simulated Binder
+  transport to enter before measuring the 20 ms timeout. This removes a
+  build-load scheduler race without changing production timeout policy.
+
+Verification:
+
+- Full required local gate passed in 2m21s with 502 Gradle tasks executed or
+  reused: model, instance, manifest, loader, hook, engine, and app unit tests
+  plus `:app:assembleDebug`.
+- The executed module reports contain 1,899 tests, 0 failures, 0 errors, and
+  12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,776,973 bytes.
+- APK SHA-256:
+  `361A6FF25377D7934F183F14B03314359ABAB50744225DD227CD5AEBFCF39CC6`.
+- `git diff --check` passed; existing LF/CRLF conversion warnings remain.
+- Production source has one persistent store constructor and no app/loader
+  construction of the file-backed slot store.
+
+Remaining gate:
+
+- Slot Binder authorization currently proves the host UID, but guest and host
+  code share that UID. A generation-bound, one-time Activity allocation
+  capability is still required before this is a complete security boundary.
+- Client/guest paths still construct file-backed system-server graphs for
+  legacy read adapters and directly read durable runtime files. These paths
+  must move to authoritative Binder reads before the Provider can move to a
+  dedicated `:engine` process.
+- Crash recovery for abandoned content-addressed package staging, dedicated
+  package upgrade transactions, full PMS/AMS/Provider/Service/Broadcast/native
+  semantics, and API 28-36/HyperOS evidence remain open.
+- No new device artifact proves simultaneous recents, process-death recovery,
+  GKD, AstroBox, QQ, WeChat, or QQ Reader. Commercial status remains **BLOCK**.

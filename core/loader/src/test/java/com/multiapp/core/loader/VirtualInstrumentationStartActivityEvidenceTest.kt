@@ -38,6 +38,8 @@ class VirtualInstrumentationStartActivityEvidenceTest {
 
     @BeforeTest
     fun setUp() {
+        ProxyActivitySlotAssignmentStoreProvider.clearForTests()
+        ProxyActivitySlotAssignmentStoreProvider.install(TestProxyActivitySlotAssignmentStore())
         VirtualActivityLaunchAuthority.install(
             validator = VirtualActivityLaunchValidator {
                 VirtualActivityLaunchAuthorityResult(true, "test_authorized")
@@ -54,6 +56,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         VirtualProcessRuntime.global.clearAll()
         VirtualPackageRegistry.global.clear()
         VirtualActivityLaunchAuthority.clearForTests()
+        ProxyActivitySlotAssignmentStoreProvider.clearForTests()
         unmockkObject(ActivityThreadCompat)
         unmockkStatic(Log::class)
     }

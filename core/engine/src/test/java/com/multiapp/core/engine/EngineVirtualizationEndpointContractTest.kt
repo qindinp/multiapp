@@ -15,6 +15,7 @@ import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
@@ -291,9 +292,102 @@ class EngineVirtualizationEndpointContractTest {
         verify(exactly = 0) { engine.exportEvidence(any()) }
     }
 
+    @Test
+    fun `proxy Activity slot endpoints reject a caller outside the host uid`() {
+        val activityService = mockk<VirtualActivityService>(relaxed = true)
+        val endpoint = endpoint(
+            virtualizationEngine = null,
+            callerUid = HOST_UID + 1,
+            activityService = activityService
+        )
+        val key = proxyActivitySlotKey()
+
+        val responses = listOf(
+            endpoint.queryProxyActivitySlot(
+                key.toProxyActivitySlotQueryIpcBundle(bundles::create)
+            ),
+            endpoint.reserveProxyActivitySlot(
+                key.toProxyActivitySlotReserveIpcBundle(
+                    listOf(PROXY_ACTIVITY_CLASS_NAME),
+                    bundles::create
+                )
+            ),
+            endpoint.compareAndSetProxyActivitySlot(
+                key.toProxyActivitySlotCompareAndSetIpcBundle(
+                    expectedProxyActivityClassName = PROXY_ACTIVITY_CLASS_NAME,
+                    newProxyActivityClassName = null,
+                    bundleFactory = bundles::create
+                )
+            )
+        )
+
+        responses.forEach(::assertUnauthorized)
+        verify(exactly = 0) { activityService.queryProxyActivitySlot(any(), any()) }
+        verify(exactly = 0) { activityService.reserveProxyActivitySlot(any(), any(), any()) }
+        verify(exactly = 0) {
+            activityService.compareAndSetProxyActivitySlot(any(), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `proxy Activity slot endpoints reject malformed Bundles without invoking service`() {
+        val activityService = mockk<VirtualActivityService>(relaxed = true)
+        val endpoint = endpoint(
+            virtualizationEngine = null,
+            activityService = activityService
+        )
+
+        assertInvalidProxySlotRequest(
+            endpoint.queryProxyActivitySlot(bundles.create()),
+            "invalid_proxy_activity_slot_query_request"
+        )
+        assertInvalidProxySlotRequest(
+            endpoint.reserveProxyActivitySlot(bundles.create()),
+            "invalid_proxy_activity_slot_reserve_request"
+        )
+        assertInvalidProxySlotRequest(
+            endpoint.compareAndSetProxyActivitySlot(bundles.create()),
+            "invalid_proxy_activity_slot_compare_and_set_request"
+        )
+        verify(exactly = 0) { activityService.queryProxyActivitySlot(any(), any()) }
+        verify(exactly = 0) { activityService.reserveProxyActivitySlot(any(), any(), any()) }
+        verify(exactly = 0) {
+            activityService.compareAndSetProxyActivitySlot(any(), any(), any(), any())
+        }
+    }
+
+    @Test
+    fun `proxy Activity slot endpoint rejects an unknown instance through authoritative service`() {
+        val registry = EngineRuntimeRegistry()
+        val activityService = DefaultVirtualSystemServer(registry).activityService
+        val endpoint = endpoint(
+            virtualizationEngine = null,
+            activityService = activityService
+        )
+        val key = proxyActivitySlotKey(instanceId = "missing-instance")
+
+        val response = endpoint.queryProxyActivitySlot(
+            key.toProxyActivitySlotQueryIpcBundle(bundles::create)
+        )
+
+        assertEquals(
+            EngineResultStatus.FAIL.name,
+            response.getString(EngineRuntimeIpcContract.KEY_VERDICT)
+        )
+        assertEquals(
+            "missing-instance",
+            response.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID)
+        )
+        assertEquals(
+            "runtime_not_found:missing-instance",
+            response.getString(EngineRuntimeIpcContract.KEY_MESSAGE)
+        )
+    }
+
     private fun endpoint(
         virtualizationEngine: VirtualizationEngine?,
-        callerUid: Int = HOST_UID
+        callerUid: Int = HOST_UID,
+        activityService: VirtualActivityService? = null
     ): EngineRuntimeBinderEndpoint {
         // Local JVM tests have no Android Binder implementation. Allocate the concrete
         // endpoint without running Stub.attachInterface; these contract methods only
@@ -308,6 +402,7 @@ class EngineVirtualizationEndpointContractTest {
         setEndpointField(endpoint, "hostUid", HOST_UID)
         setEndpointField(endpoint, "virtualizationEngine", virtualizationEngine)
         setEndpointField(endpoint, "callingUid", { callerUid })
+        activityService?.let { setEndpointField(endpoint, "activityService", it) }
         return endpoint
     }
 
@@ -329,6 +424,14 @@ class EngineVirtualizationEndpointContractTest {
             response.getString(EngineRuntimeIpcContract.KEY_STATUS)
         )
         assertEquals("caller_uid_mismatch", response.getString(EngineRuntimeIpcContract.KEY_REASON))
+    }
+
+    private fun assertInvalidProxySlotRequest(response: Bundle, expectedReason: String) {
+        assertEquals(
+            EngineResultStatus.FAIL.name,
+            response.getString(EngineRuntimeIpcContract.KEY_VERDICT)
+        )
+        assertEquals(expectedReason, response.getString(EngineRuntimeIpcContract.KEY_REASON))
     }
 
     private fun launchRequest() = LaunchInstanceRequest(
@@ -360,6 +463,14 @@ class EngineVirtualizationEndpointContractTest {
         ),
         displayName = "Test Work",
         compatibilityMode = CompatibilityMode.LEGACY
+    )
+
+    private fun proxyActivitySlotKey(
+        instanceId: String = INSTANCE_ID
+    ) = ProxyActivitySlotKey(
+        instanceId = instanceId,
+        launchMode = null,
+        taskKey = "$ORIGIN_PACKAGE:$instanceId"
     )
 
     private fun runtime() = VirtualInstanceRuntime(
@@ -503,5 +614,6 @@ class EngineVirtualizationEndpointContractTest {
         const val HOST_PACKAGE = "com.multiapp.app"
         const val ORIGIN_PACKAGE = "com.test.app"
         const val HOST_UID = 10123
+        const val PROXY_ACTIVITY_CLASS_NAME = "com.multiapp.app.container.ProxyActivity2"
     }
 }

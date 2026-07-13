@@ -6,11 +6,11 @@ import com.multiapp.core.engine.EngineActivityLaunchIdentity
 import com.multiapp.core.engine.EngineActivityLauncher
 import com.multiapp.core.engine.EngineActivityProxyLauncher
 import com.multiapp.core.engine.EngineActivityTaskControllers
+import com.multiapp.core.engine.IpcBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.engine.EngineLaunchSpec
 import com.multiapp.core.engine.EngineProxyActivitySlots
 import com.multiapp.core.engine.EngineProcessBootstrapState
 import com.multiapp.core.model.engine.EngineResultStatus
-import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 
 class EngineReadyActivityLauncher(
     context: Context,
@@ -38,9 +38,7 @@ class EngineReadyActivityLauncher(
                 hostContext = hostContext,
                 candidateProxyActivityClassNames = listOf(spec.proxySlot),
                 proxyLaunchModeByClassName = EngineProxyActivitySlots.launchModeByClassName(hostContext.packageName),
-                slotAssignmentStore = FileBackedProxyActivitySlotAssignmentStore(
-                    ContainerRuntimePaths.proxyActivitySlotsFile(hostContext)
-                ),
+                slotAssignmentStore = IpcBackedProxyActivitySlotAssignmentStore(),
                 instanceId = spec.instanceId,
                 originPackageName = spec.originPackageName,
                 guestActivityClassName = spec.guestActivityClassName,

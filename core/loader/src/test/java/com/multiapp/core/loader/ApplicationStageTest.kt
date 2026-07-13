@@ -176,6 +176,7 @@ class ApplicationStageTest {
         TestApplicationWithOnCreate.reset()
         VirtualActivityRecordManager.global.clearAll()
         VirtualActivityIntentStore.setIntentCopierForTest { it }
+        ProxyActivitySlotAssignmentStoreProvider.install(TestProxyActivitySlotAssignmentStore())
         try {
             val recordManager = VirtualActivityRecordManager()
             val snapshot = packageSnapshot(
@@ -220,6 +221,7 @@ class ApplicationStageTest {
         } finally {
             VirtualActivityIntentStore.clearAll()
             VirtualActivityIntentStore.resetIntentCopierForTest()
+            ProxyActivitySlotAssignmentStoreProvider.clearForTests()
             VirtualActivityRecordManager.global.clearAll()
             TestApplicationWithOnCreate.reset()
         }

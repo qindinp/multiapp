@@ -25,7 +25,6 @@ import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import android.os.Binder
 import android.os.Process
-import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.File
 import java.io.FileInputStream
@@ -329,17 +328,10 @@ open class VirtualContextWrapper(
     }
 
     private val proxyActivityRegistry by lazy(LazyThreadSafetyMode.NONE) {
-        val assignmentStore = base.filesDir
-            ?.takeIf { filesDir -> filesDir.path?.isNotBlank() == true }
-            ?.let { filesDir ->
-            FileBackedProxyActivitySlotAssignmentStore(
-                File(filesDir, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
-            )
-        }
         com.multiapp.core.model.virtual.ProxyActivityRegistry(
             ProxyActivitySlots.classNamesForProcessSlot(base.packageName, config.processSlot),
             ProxyActivitySlots.launchModeByClassName(base.packageName),
-            assignmentStore
+            ProviderBackedProxyActivitySlotAssignmentStore
         )
     }
 

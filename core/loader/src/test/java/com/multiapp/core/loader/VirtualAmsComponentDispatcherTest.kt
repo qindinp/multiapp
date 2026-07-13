@@ -9,6 +9,8 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
@@ -17,6 +19,7 @@ import io.mockk.verify
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -67,6 +70,39 @@ class VirtualAmsComponentDispatcherTest {
         assertEquals(
             "com.test.minimal:inst-001",
             proxyIntent.getStringExtra(VirtualActivityManager.EXTRA_GUEST_TASK_AFFINITY)
+        )
+    }
+
+    @Test
+    fun `resolveStartActivityIntents rolls back partial slot allocation through find and CAS`() {
+        val recordManager = VirtualActivityRecordManager()
+        val store = FailSecondReserveStore()
+        val proxyClassName = "com.multiapp.app.container.ProxyActivity0"
+        val registry = ProxyActivityRegistry(listOf(proxyClassName), slotAssignmentStore = store)
+        val dispatcher = dispatcher(
+            activityRecordManager = recordManager,
+            proxyActivityRegistry = registry,
+            proxyActivitySlotAssignmentStore = store
+        )
+        val intents = listOf(
+            explicitIntent("com.test.minimal", "com.test.minimal.MainActivity"),
+            explicitIntent("com.test.minimal", "com.test.minimal.MainActivity")
+        )
+
+        assertFailsWith<IllegalStateException> {
+            dispatcher.resolveStartActivityIntents(intents)
+        }
+
+        val key = ProxyActivitySlotKey("inst-001", null, "com.test.minimal:inst-001")
+        assertTrue(recordManager.list().isEmpty())
+        assertTrue(registry.listRecords().isEmpty())
+        assertNull(store.find(key))
+        assertTrue(store.findCalls.count { it == key } >= 2)
+        assertEquals(
+            listOf(
+                Triple<ProxyActivitySlotKey, String?, String?>(key, proxyClassName, null)
+            ),
+            store.compareAndSetCalls
         )
     }
 
@@ -364,13 +400,15 @@ class VirtualAmsComponentDispatcherTest {
         serviceRuntime: VirtualServiceRuntime = VirtualServiceRuntime(recordManager = VirtualServiceRecordManager()),
         processRuntime: VirtualProcessRuntime = VirtualProcessRuntime(),
         broadcastManager: VirtualBroadcastManager = VirtualBroadcastManager(),
-        proxyActivityRegistry: ProxyActivityRegistry = ProxyActivityRegistry(listOf("com.multiapp.app.container.ProxyActivity0"))
+        proxyActivityRegistry: ProxyActivityRegistry = ProxyActivityRegistry(listOf("com.multiapp.app.container.ProxyActivity0")),
+        proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore? = null
     ): VirtualAmsComponentDispatcher {
         return DefaultVirtualAmsComponentDispatcher(
             hostPackageName = "com.multiapp.app",
             packageSnapshot = snapshot(),
             activityRecordManager = activityRecordManager,
             proxyActivityRegistry = proxyActivityRegistry,
+            proxyActivitySlotAssignmentStore = proxyActivitySlotAssignmentStore,
             servicePackageRegistry = VirtualPackageRegistry().apply { register(snapshot()) },
             serviceRuntime = serviceRuntime,
             processRuntime = processRuntime,
@@ -448,6 +486,43 @@ class VirtualAmsComponentDispatcherTest {
             ResolvedComponent(name = "com.test.minimal.BootReceiver", exported = false)
         )
     )
+
+    private class FailSecondReserveStore : TestProxyActivitySlotAssignmentStore() {
+        val findCalls = mutableListOf<ProxyActivitySlotKey>()
+        val compareAndSetCalls = mutableListOf<Triple<ProxyActivitySlotKey, String?, String?>>()
+        private var reserveCalls = 0
+
+        override fun find(key: ProxyActivitySlotKey): String? {
+            findCalls += key
+            return super.find(key)
+        }
+
+        override fun reserve(
+            key: ProxyActivitySlotKey,
+            candidateProxyActivityClassNames: List<String>
+        ): String? {
+            reserveCalls += 1
+            if (reserveCalls == 2) error("forced second reserve failure")
+            return super.reserve(key, candidateProxyActivityClassNames)
+        }
+
+        override fun compareAndSet(
+            key: ProxyActivitySlotKey,
+            expectedProxyActivityClassName: String?,
+            newProxyActivityClassName: String?
+        ): Boolean {
+            compareAndSetCalls += Triple(
+                key,
+                expectedProxyActivityClassName,
+                newProxyActivityClassName
+            )
+            return super.compareAndSet(
+                key,
+                expectedProxyActivityClassName,
+                newProxyActivityClassName
+            )
+        }
+    }
 
     private fun hostedResult(processSlot: String?): HostedBootstrapResult =
         HostedBootstrapResult(

@@ -27,6 +27,9 @@ interface IEngineRuntimeService {
     Bundle consumeActivity(String instanceId, String operation, in Bundle request);
     Bundle syncActivityTaskState(String instanceId, String reason, in Bundle snapshot);
     Bundle queryActivityTaskState(String instanceId);
+    Bundle queryProxyActivitySlot(in Bundle request);
+    Bundle reserveProxyActivitySlot(in Bundle request);
+    Bundle compareAndSetProxyActivitySlot(in Bundle request);
     Bundle resolveProviderAuthority(String callerInstanceId, in Bundle request);
     Bundle planProvider(String instanceId, in Bundle request);
     boolean recordProviderDispatch(String instanceId, in Bundle result);

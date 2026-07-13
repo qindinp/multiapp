@@ -9,7 +9,9 @@ import com.multiapp.core.model.engine.EngineSubsystem
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.loader.VirtualActivityRecordManager
+import com.multiapp.core.model.virtual.InMemoryProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
@@ -77,6 +79,51 @@ interface VirtualRuntimeBoundSubsystemService : VirtualEngineSubsystemService {
 }
 
 interface VirtualActivityService : VirtualRuntimeBoundSubsystemService {
+    fun queryProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey
+    ): VirtualProxyActivitySlotOperationResult = VirtualProxyActivitySlotOperationResult(
+        instanceId = instanceId.ifBlank { "invalid" },
+        operation = "queryProxyActivitySlot",
+        verdict = EngineResultStatus.FAIL,
+        key = key,
+        proxyActivityClassName = null,
+        matched = false,
+        removedCount = 0,
+        message = "proxy_activity_slot_operation_unavailable"
+    )
+
+    fun reserveProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        candidates: List<String>
+    ): VirtualProxyActivitySlotOperationResult = VirtualProxyActivitySlotOperationResult(
+        instanceId = instanceId.ifBlank { "invalid" },
+        operation = "reserveProxyActivitySlot",
+        verdict = EngineResultStatus.FAIL,
+        key = key,
+        proxyActivityClassName = null,
+        matched = false,
+        removedCount = 0,
+        message = "proxy_activity_slot_operation_unavailable"
+    )
+
+    fun compareAndSetProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        expected: String?,
+        new: String?
+    ): VirtualProxyActivitySlotOperationResult = VirtualProxyActivitySlotOperationResult(
+        instanceId = instanceId.ifBlank { "invalid" },
+        operation = "compareAndSetProxyActivitySlot",
+        verdict = EngineResultStatus.FAIL,
+        key = key,
+        proxyActivityClassName = null,
+        matched = false,
+        removedCount = 0,
+        message = "proxy_activity_slot_operation_unavailable"
+    )
+
     fun planActivity(
         instanceId: String,
         request: VirtualActivityDispatchPlanRequest
@@ -322,6 +369,27 @@ data class VirtualActivityOperationResult(
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
         require(operation.isNotBlank()) { "operation must not be blank" }
         require(requestCode >= -1) { "requestCode must be -1 or greater" }
+        require(message.isNotBlank()) { "message must not be blank" }
+    }
+}
+
+data class VirtualProxyActivitySlotOperationResult(
+    val instanceId: String,
+    val operation: String,
+    val verdict: EngineResultStatus,
+    val key: ProxyActivitySlotKey,
+    val proxyActivityClassName: String?,
+    val matched: Boolean,
+    val removedCount: Int,
+    val message: String
+) {
+    init {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        require(operation.isNotBlank()) { "operation must not be blank" }
+        require(proxyActivityClassName == null || proxyActivityClassName.isNotBlank()) {
+            "proxyActivityClassName must not be blank"
+        }
+        require(removedCount >= 0) { "removedCount must not be negative" }
         require(message.isNotBlank()) { "message must not be blank" }
     }
 }
@@ -971,16 +1039,20 @@ class DefaultVirtualSystemServer(
     permissionGrantStore: EnginePermissionGrantStore = InMemoryEnginePermissionGrantStore(),
     appOpsStateStore: EngineAppOpsStateStore = InMemoryEngineAppOpsStateStore(),
     broadcastRuntimeStateStore: EngineBroadcastRuntimeStateStore = InMemoryEngineBroadcastRuntimeStateStore(),
-    proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore? = null
+    proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore =
+        InMemoryProxyActivitySlotAssignmentStore()
 ) : VirtualSystemServer {
+    private val authoritativeProxyActivitySlotAssignmentStore = proxyActivitySlotAssignmentStore
     override val runtimeService: VirtualRuntimeService = RegistryBackedVirtualRuntimeService(registry)
     override val packageService: VirtualPackageService = RegistryBackedVirtualPackageService(runtimeService)
-    override val activityService: VirtualActivityService = RegistryBackedVirtualActivityService(
+    private val registryBackedActivityService = RegistryBackedVirtualActivityService(
         runtimeService,
         packageService,
         activityTaskStateStore,
-        activityRecordManager
+        activityRecordManager,
+        authoritativeProxyActivitySlotAssignmentStore
     )
+    override val activityService: VirtualActivityService = registryBackedActivityService
     override val permissionService: VirtualPermissionService = RegistryBackedVirtualPermissionService(
         runtimeService,
         permissionGrantStore
@@ -1027,8 +1099,16 @@ class DefaultVirtualSystemServer(
             permissionGrantStore = permissionGrantStore,
             appOpsStateStore = appOpsStateStore,
             broadcastRuntimeStateStore = broadcastRuntimeStateStore,
-            proxyActivitySlotAssignmentStore = proxyActivitySlotAssignmentStore
+            proxyActivitySlotReleaser = registryBackedActivityService::releaseProxyActivitySlots
         )
+
+    internal fun reconcileProxyActivitySlots(
+        validInstanceIds: Set<String>,
+        knownProxyActivityClassNames: Set<String>
+    ): Int = registryBackedActivityService.reconcileProxyActivitySlots(
+        validInstanceIds = validInstanceIds,
+        knownProxyActivityClassNames = knownProxyActivityClassNames
+    )
 }
 
 class RegistryBackedVirtualInstanceLifecycleService(
@@ -1040,7 +1120,7 @@ class RegistryBackedVirtualInstanceLifecycleService(
     private val permissionGrantStore: EnginePermissionGrantStore,
     private val appOpsStateStore: EngineAppOpsStateStore,
     private val broadcastRuntimeStateStore: EngineBroadcastRuntimeStateStore,
-    private val proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore? = null
+    private val proxyActivitySlotReleaser: (String) -> Int = { 0 }
 ) : VirtualInstanceLifecycleService {
     override fun clearInstanceState(instanceId: String): VirtualInstanceCleanupResult {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
@@ -1071,7 +1151,7 @@ class RegistryBackedVirtualInstanceLifecycleService(
 
     override fun releaseInstanceSlots(instanceId: String): Int {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
-        return proxyActivitySlotAssignmentStore?.removeInstance(instanceId) ?: 0
+        return proxyActivitySlotReleaser(instanceId)
     }
 }
 
@@ -1107,7 +1187,9 @@ internal class RegistryBackedVirtualActivityService(
     private val runtimeService: VirtualRuntimeService,
     private val packageService: VirtualPackageService,
     private val activityTaskStateStore: EngineActivityTaskStateStore = InMemoryEngineActivityTaskStateStore(),
-    private val activityRecordManager: VirtualActivityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager
+    private val activityRecordManager: VirtualActivityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+    private val proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore =
+        InMemoryProxyActivitySlotAssignmentStore()
 ) : RegistryBackedRuntimeBoundSubsystemService(
     runtimeService = runtimeService,
     subsystem = EngineSubsystem.ACTIVITY,
@@ -1126,6 +1208,234 @@ internal class RegistryBackedVirtualActivityService(
     ),
     unsupportedOperations = setOf("result-delivery", "finish-result-delivery", "recents-device-proof")
 ), VirtualActivityService {
+    override fun queryProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey
+    ): VirtualProxyActivitySlotOperationResult {
+        val operation = OP_QUERY_PROXY_ACTIVITY_SLOT
+        val validation = validateProxyActivitySlotOperation(instanceId, key, operation)
+        validation.failure?.let { return it }
+        val runtime = checkNotNull(validation.runtime)
+        val assigned = proxyActivitySlotAssignmentStore.find(key)
+        if (assigned != null) {
+            validateProxyActivityClassNames(runtime, key, operation, listOf(assigned))?.let { return it }
+        }
+        return VirtualProxyActivitySlotOperationResult(
+            instanceId = instanceId,
+            operation = operation,
+            verdict = EngineResultStatus.PASS,
+            key = key,
+            proxyActivityClassName = assigned,
+            matched = assigned != null,
+            removedCount = 0,
+            message = if (assigned == null) {
+                "proxy_activity_slot_unassigned"
+            } else {
+                "proxy_activity_slot_assigned"
+            }
+        )
+    }
+
+    override fun reserveProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        candidates: List<String>
+    ): VirtualProxyActivitySlotOperationResult {
+        val operation = OP_RESERVE_PROXY_ACTIVITY_SLOT
+        val validation = validateProxyActivitySlotOperation(instanceId, key, operation)
+        validation.failure?.let { return it }
+        val runtime = checkNotNull(validation.runtime)
+        if (candidates.isEmpty()) {
+            return proxyActivitySlotFailure(
+                instanceId = instanceId,
+                operation = operation,
+                key = key,
+                message = "proxy_activity_slot_candidates_empty"
+            )
+        }
+        validateProxyActivityClassNames(runtime, key, operation, candidates)?.let { return it }
+        val assigned = proxyActivitySlotAssignmentStore.reserve(key, candidates.distinct())
+            ?: return proxyActivitySlotFailure(
+                instanceId = instanceId,
+                operation = operation,
+                key = key,
+                message = "proxy_activity_slot_unavailable"
+            )
+        return VirtualProxyActivitySlotOperationResult(
+            instanceId = instanceId,
+            operation = operation,
+            verdict = EngineResultStatus.PASS,
+            key = key,
+            proxyActivityClassName = assigned,
+            matched = true,
+            removedCount = 0,
+            message = "proxy_activity_slot_reserved"
+        )
+    }
+
+    override fun compareAndSetProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        expected: String?,
+        new: String?
+    ): VirtualProxyActivitySlotOperationResult {
+        val operation = OP_COMPARE_AND_SET_PROXY_ACTIVITY_SLOT
+        val validation = validateProxyActivitySlotOperation(instanceId, key, operation)
+        validation.failure?.let { return it }
+        val runtime = checkNotNull(validation.runtime)
+        validateProxyActivityClassNames(runtime, key, operation, listOfNotNull(expected, new))?.let {
+            return it
+        }
+        val matched = proxyActivitySlotAssignmentStore.compareAndSet(
+            key = key,
+            expectedProxyActivityClassName = expected,
+            newProxyActivityClassName = new
+        )
+        if (!matched) {
+            return proxyActivitySlotFailure(
+                instanceId = instanceId,
+                operation = operation,
+                key = key,
+                proxyActivityClassName = proxyActivitySlotAssignmentStore.find(key),
+                message = "proxy_activity_slot_compare_and_set_failed"
+            )
+        }
+        return VirtualProxyActivitySlotOperationResult(
+            instanceId = instanceId,
+            operation = operation,
+            verdict = EngineResultStatus.PASS,
+            key = key,
+            proxyActivityClassName = new,
+            matched = true,
+            removedCount = if (expected != null && new == null) 1 else 0,
+            message = if (new == null) {
+                "proxy_activity_slot_removed"
+            } else {
+                "proxy_activity_slot_updated"
+            }
+        )
+    }
+
+    internal fun reconcileProxyActivitySlots(
+        validInstanceIds: Set<String>,
+        knownProxyActivityClassNames: Set<String>
+    ): Int = proxyActivitySlotAssignmentStore.pruneStaleAssignments(
+        validInstanceIds = validInstanceIds,
+        liveProxyActivityClassNames = knownProxyActivityClassNames,
+        knownProxyActivityClassNames = knownProxyActivityClassNames
+    )
+
+    internal fun releaseProxyActivitySlots(instanceId: String): Int {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        return proxyActivitySlotAssignmentStore.removeInstance(instanceId)
+    }
+
+    private fun validateProxyActivitySlotOperation(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        operation: String
+    ): ProxyActivitySlotValidation {
+        if (instanceId.isBlank()) {
+            return ProxyActivitySlotValidation(
+                failure = proxyActivitySlotFailure(
+                    instanceId = "invalid",
+                    operation = operation,
+                    key = key,
+                    message = "instanceId must not be blank"
+                )
+            )
+        }
+        val runtime = runtimeService.get(instanceId)
+            ?: return ProxyActivitySlotValidation(
+                failure = proxyActivitySlotFailure(
+                    instanceId = instanceId,
+                    operation = operation,
+                    key = key,
+                    message = "runtime_not_found:$instanceId"
+                )
+            )
+        if (key.instanceId != instanceId) {
+            return ProxyActivitySlotValidation(
+                failure = proxyActivitySlotFailure(
+                    instanceId = instanceId,
+                    operation = operation,
+                    key = key,
+                    message = "proxy_activity_slot_instance_mismatch:${key.instanceId}"
+                )
+            )
+        }
+        if (EngineProxyActivitySlots.normalizeLaunchMode(key.launchMode) != key.launchMode) {
+            return ProxyActivitySlotValidation(
+                failure = proxyActivitySlotFailure(
+                    instanceId = instanceId,
+                    operation = operation,
+                    key = key,
+                    message = "proxy_activity_slot_launch_mode_not_normalized:${key.launchMode.orEmpty()}"
+                )
+            )
+        }
+        return ProxyActivitySlotValidation(runtime = runtime)
+    }
+
+    private fun validateProxyActivityClassNames(
+        runtime: VirtualInstanceRuntime,
+        key: ProxyActivitySlotKey,
+        operation: String,
+        classNames: List<String>
+    ): VirtualProxyActivitySlotOperationResult? {
+        val launchModesByClassName = EngineProxyActivitySlots.launchModeByClassName(runtime.hostPackageName)
+        classNames.forEach { className ->
+            if (
+                className.isBlank() ||
+                EngineProxyActivitySlots.processSlotForClassName(runtime.hostPackageName, className) !=
+                runtime.processSlot
+            ) {
+                return proxyActivitySlotFailure(
+                    instanceId = runtime.instanceId,
+                    operation = operation,
+                    key = key,
+                    proxyActivityClassName = className.takeIf { it.isNotBlank() },
+                    message = "proxy_activity_slot_process_mismatch:$className"
+                )
+            }
+            val candidateLaunchMode = EngineProxyActivitySlots.normalizeLaunchMode(
+                launchModesByClassName[className]
+            )
+            if (candidateLaunchMode != key.launchMode) {
+                return proxyActivitySlotFailure(
+                    instanceId = runtime.instanceId,
+                    operation = operation,
+                    key = key,
+                    proxyActivityClassName = className,
+                    message = "proxy_activity_slot_launch_mode_mismatch:$className"
+                )
+            }
+        }
+        return null
+    }
+
+    private fun proxyActivitySlotFailure(
+        instanceId: String,
+        operation: String,
+        key: ProxyActivitySlotKey,
+        proxyActivityClassName: String? = null,
+        message: String
+    ) = VirtualProxyActivitySlotOperationResult(
+        instanceId = instanceId,
+        operation = operation,
+        verdict = EngineResultStatus.FAIL,
+        key = key,
+        proxyActivityClassName = proxyActivityClassName,
+        matched = false,
+        removedCount = 0,
+        message = message
+    )
+
+    private data class ProxyActivitySlotValidation(
+        val runtime: VirtualInstanceRuntime? = null,
+        val failure: VirtualProxyActivitySlotOperationResult? = null
+    )
+
     override fun planActivity(
         instanceId: String,
         request: VirtualActivityDispatchPlanRequest
@@ -1166,6 +1476,12 @@ internal class RegistryBackedVirtualActivityService(
         )
         recordActivityPlan(plan, runtime, request)
         return plan
+    }
+
+    private companion object {
+        const val OP_QUERY_PROXY_ACTIVITY_SLOT = "queryProxyActivitySlot"
+        const val OP_RESERVE_PROXY_ACTIVITY_SLOT = "reserveProxyActivitySlot"
+        const val OP_COMPARE_AND_SET_PROXY_ACTIVITY_SLOT = "compareAndSetProxyActivitySlot"
     }
 
     override fun recordActivityDispatch(

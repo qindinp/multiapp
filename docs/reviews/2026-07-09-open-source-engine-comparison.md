@@ -276,3 +276,59 @@ Current mapping:
   validation and `ProductionVirtualInstallService` propagates resolver failure.
 - Proxy Activity slot assignment is the next single-writer gap. Until it moves
   behind `VirtualActivityService`, commercial status remains `BLOCK`.
+
+## Proxy Activity Slot Authority Comparison - 2026-07-13
+
+Pinned-source conclusions remain consistent across the three reference
+families:
+
+- VirtualApp `7d739c85` allocates virtual process and stub Activity resources
+  through its server-side Activity manager/stack before the client binds and
+  patches the launch record. Client code consumes the selected stub; it is not
+  a peer writer of a shared slot file.
+- BlackBox `ffe950f7` similarly keeps process/stub selection in its central
+  Activity/process services and sends the resulting proxy component to the
+  client. Its exact records are not copied, but the ownership boundary is the
+  relevant invariant.
+- DroidPlugin `c6ebf652` centralizes Stub Activity selection with its plugin
+  manager/Activity manager structures, but it has no VirtualApp-style
+  per-instance generation and dataRoot model. It remains useful for stub-pool
+  mechanics, not as MultiApp's durable multi-instance authority.
+
+MultiApp decisions:
+
+1. Keep the persistent assignment map inside the engine server. All app and
+   guest paths use strict query/reserve/CAS commands and fail closed when the
+   authority cannot answer.
+2. Bind candidates to the authoritative instance runtime's host package,
+   process slot, and normalized launch mode. A client cannot ask the server to
+   reserve a proxy from another virtual process.
+3. Preserve valid assignments across guest process death and temporary
+   absence from recents. Explicit instance deletion or engine startup
+   reconciliation owns durable release.
+4. Keep Activity record rollback process-local, but make assignment rollback
+   an authoritative CAS so a stale failure cannot overwrite a newer owner.
+5. Reject a missing engine-selected foreground proxy instead of widening to
+   the complete stub registry. This prevents a launch from silently changing
+   processSlot/task identity.
+6. Improve the boundary beyond the older references with strict Bundle field
+   sets, candidate budgets, reply identity checks, and an executable source
+   guard for the only persistent-store constructor.
+7. Do not confuse host-UID checks with a complete capability model. The next
+   security step is a runtime-generation-bound, one-time Activity allocation
+   capability, followed by dedicated `:engine` process migration.
+
+Current mapping:
+
+- `RegistryBackedVirtualActivityService` is the single assignment authority.
+- `IpcBackedProxyActivitySlotAssignmentStore` and the loader provider are the
+  client adapters.
+- Engine startup reconciles durable assignments; instance deletion delegates
+  release to the Activity authority.
+- The former eight production file-store construction paths are reduced to
+  one server construction site and enforced by a unit-test source boundary.
+
+This closes the proxy-slot multi-writer gap locally. Direct owner-file reads,
+client file-backed read graphs, dedicated server isolation, complete component
+semantics, and device evidence remain open, so commercial status stays
+`BLOCK`.

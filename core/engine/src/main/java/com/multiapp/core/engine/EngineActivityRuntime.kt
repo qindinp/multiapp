@@ -11,8 +11,8 @@ import com.multiapp.core.loader.VirtualActivityManager
 import com.multiapp.core.loader.VirtualActivityOperations
 import com.multiapp.core.loader.VirtualActivityRecordManager
 import com.multiapp.core.loader.VirtualContextWrapper
+import com.multiapp.core.loader.ProxyActivitySlotAssignmentStoreProvider
 import com.multiapp.core.model.engine.EngineResultStatus
-import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
@@ -44,9 +44,7 @@ class EngineActivityLaunchCoordinator(
     private val hostContext: Context,
     private val processSlot: String?,
     private val slotAssignmentStore: ProxyActivitySlotAssignmentStore =
-        FileBackedProxyActivitySlotAssignmentStore(
-            File(hostContext.filesDir, ProxyActivitySlots.SLOT_ASSIGNMENT_FILE)
-        ),
+        ProxyActivitySlotAssignmentStoreProvider.requireStore(),
     private val activityRecordManager: VirtualActivityRecordManager =
         EngineHostedProcessRuntimeDefaults.activityRecordManager,
     private val proxyIntentFactory: (VirtualActivityManager, VirtualActivityRecord, Intent) -> Intent =

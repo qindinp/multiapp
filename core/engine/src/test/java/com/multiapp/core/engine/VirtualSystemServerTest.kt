@@ -7,6 +7,8 @@ import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineSubsystem
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
+import com.multiapp.core.model.virtual.InMemoryProxyActivitySlotAssignmentStore
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
@@ -19,6 +21,9 @@ import com.multiapp.core.model.virtual.VirtualProviderPathPattern
 import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
 import com.multiapp.core.model.virtual.VirtualProviderPathPermission
 import com.multiapp.core.model.virtual.VirtualTaskRecord
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -1684,6 +1689,161 @@ class VirtualSystemServerTest {
         )
 
         assertTrue(server.broadcastService.queryBroadcastRuntimeState(runtime.instanceId).records.isEmpty())
+    }
+
+    @Test
+    fun `activity service owns query reserve compare and set and lifecycle release`() {
+        val store = InMemoryProxyActivitySlotAssignmentStore()
+        val server = DefaultVirtualSystemServer(
+            registry = EngineRuntimeRegistry(),
+            proxyActivitySlotAssignmentStore = store
+        )
+        val runtime = server.runtimeService.register(runtime())
+        val key = ProxyActivitySlotKey(runtime.instanceId, null, "task-main")
+        val candidate = "${runtime.hostPackageName}.container.ProxyActivity0"
+
+        val empty = server.activityService.queryProxyActivitySlot(runtime.instanceId, key)
+        val reserved = server.activityService.reserveProxyActivitySlot(
+            runtime.instanceId,
+            key,
+            listOf(candidate)
+        )
+        val queried = server.activityService.queryProxyActivitySlot(runtime.instanceId, key)
+        val staleExpected = server.activityService.compareAndSetProxyActivitySlot(
+            runtime.instanceId,
+            key,
+            expected = null,
+            new = candidate
+        )
+        val removed = server.activityService.compareAndSetProxyActivitySlot(
+            runtime.instanceId,
+            key,
+            expected = candidate,
+            new = null
+        )
+        val restored = server.activityService.compareAndSetProxyActivitySlot(
+            runtime.instanceId,
+            key,
+            expected = null,
+            new = candidate
+        )
+
+        assertEquals(EngineResultStatus.PASS, empty.verdict)
+        assertFalse(empty.matched)
+        assertNull(empty.proxyActivityClassName)
+        assertEquals("reserveProxyActivitySlot", reserved.operation)
+        assertEquals(EngineResultStatus.PASS, reserved.verdict)
+        assertTrue(reserved.matched)
+        assertEquals(candidate, reserved.proxyActivityClassName)
+        assertEquals(candidate, queried.proxyActivityClassName)
+        assertFalse(staleExpected.matched)
+        assertEquals(EngineResultStatus.FAIL, staleExpected.verdict)
+        assertEquals(candidate, staleExpected.proxyActivityClassName)
+        assertTrue(removed.matched)
+        assertEquals(1, removed.removedCount)
+        assertNull(removed.proxyActivityClassName)
+        assertTrue(restored.matched)
+        assertEquals(candidate, restored.proxyActivityClassName)
+
+        assertEquals(1, server.instanceLifecycleService.releaseInstanceSlots(runtime.instanceId))
+        assertFalse(server.activityService.queryProxyActivitySlot(runtime.instanceId, key).matched)
+    }
+
+    @Test
+    fun `activity service rejects invalid proxy slot requests without writing`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(runtime())
+        val key = ProxyActivitySlotKey(runtime.instanceId, null, "task-main")
+        val valid = "${runtime.hostPackageName}.container.ProxyActivity0"
+        val wrongProcess = "${runtime.hostPackageName}.container.ProxyActivity1"
+        val wrongMode = "${runtime.hostPackageName}.container.ProxyActivitySingleTop0"
+
+        val mixedCandidates = server.activityService.reserveProxyActivitySlot(
+            runtime.instanceId,
+            key,
+            listOf(valid, wrongProcess)
+        )
+        val modeMismatch = server.activityService.reserveProxyActivitySlot(
+            runtime.instanceId,
+            key,
+            listOf(wrongMode)
+        )
+        val invalidExpected = server.activityService.compareAndSetProxyActivitySlot(
+            runtime.instanceId,
+            key,
+            expected = wrongProcess,
+            new = null
+        )
+        val invalidNew = server.activityService.compareAndSetProxyActivitySlot(
+            runtime.instanceId,
+            key,
+            expected = null,
+            new = wrongMode
+        )
+        val instanceMismatch = server.activityService.queryProxyActivitySlot(
+            runtime.instanceId,
+            ProxyActivitySlotKey("another-instance", null, "task-main")
+        )
+        val unnormalizedMode = server.activityService.queryProxyActivitySlot(
+            runtime.instanceId,
+            ProxyActivitySlotKey(runtime.instanceId, "standard", "task-main")
+        )
+        val missingRuntime = server.activityService.reserveProxyActivitySlot(
+            "missing-instance",
+            ProxyActivitySlotKey("missing-instance", null, "task-main"),
+            listOf(valid)
+        )
+
+        assertEquals(EngineResultStatus.FAIL, mixedCandidates.verdict)
+        assertTrue(mixedCandidates.message.startsWith("proxy_activity_slot_process_mismatch:"))
+        assertEquals(EngineResultStatus.FAIL, modeMismatch.verdict)
+        assertTrue(modeMismatch.message.startsWith("proxy_activity_slot_launch_mode_mismatch:"))
+        assertEquals(EngineResultStatus.FAIL, invalidExpected.verdict)
+        assertEquals(EngineResultStatus.FAIL, invalidNew.verdict)
+        assertEquals(EngineResultStatus.FAIL, instanceMismatch.verdict)
+        assertEquals(EngineResultStatus.FAIL, unnormalizedMode.verdict)
+        assertEquals(EngineResultStatus.FAIL, missingRuntime.verdict)
+        assertFalse(server.activityService.queryProxyActivitySlot(runtime.instanceId, key).matched)
+    }
+
+    @Test
+    fun `concurrent proxy slot reservations keep one owner per proxy class`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(runtime())
+        val candidate = "${runtime.hostPackageName}.container.ProxyActivity0"
+        val keys = (0 until 12).map { index ->
+            ProxyActivitySlotKey(runtime.instanceId, null, "task-$index")
+        }
+        val ready = CountDownLatch(keys.size)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(keys.size)
+        val futures = keys.map { key ->
+            executor.submit<VirtualProxyActivitySlotOperationResult> {
+                ready.countDown()
+                start.await()
+                server.activityService.reserveProxyActivitySlot(
+                    runtime.instanceId,
+                    key,
+                    listOf(candidate)
+                )
+            }
+        }
+
+        try {
+            assertTrue(ready.await(5, TimeUnit.SECONDS))
+            start.countDown()
+            val results = futures.map { future -> future.get(5, TimeUnit.SECONDS) }
+            val owners = keys.map { key ->
+                server.activityService.queryProxyActivitySlot(runtime.instanceId, key)
+            }
+
+            assertEquals(1, results.count { it.matched })
+            assertEquals(1, owners.count { it.matched })
+            assertEquals(setOf(candidate), owners.mapNotNull { it.proxyActivityClassName }.toSet())
+        } finally {
+            start.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test

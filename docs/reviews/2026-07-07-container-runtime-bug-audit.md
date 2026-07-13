@@ -2710,3 +2710,58 @@ split artifact filename collisions, and APK/package identity fallback.
   plus device evidence are incomplete.
 - This batch is infrastructure proof only. GKD, AstroBox, QQ, WeChat, and QQ
   Reader compatibility remain unproven; review decision remains **BLOCK**.
+
+## Review Update - 2026-07-13 Proxy Activity Slot Single Writer
+
+The prior BLOCK finding that app, engine-client, and guest loader processes
+could concurrently rewrite `proxy_activity_slots.properties` is closed in the
+current local tree. This closes one resource-ownership defect, not the overall
+commercial-container decision.
+
+### Findings closed in the current tree
+
+- Persistent proxy Activity slot construction is restricted by an executable
+  source boundary to one engine-server installer site.
+- `RegistryBackedVirtualActivityService` exclusively owns reserve, CAS,
+  startup reconcile, and instance-delete release. Instance lifecycle cleanup
+  delegates release and no longer receives the persistent store.
+- App, engine-client, loader AMS/context, and Instrumentation allocations use
+  a Binder-backed adapter. Missing authority, malformed response, identity
+  mismatch, or exhausted candidates fail closed; no production path falls
+  back to a file write or arbitrary first proxy.
+- Candidate proxy classes are checked against the authoritative runtime host
+  package, process slot, and normalized launch mode before the store is
+  touched. Unknown runtime and mismatched instance keys are rejected.
+- Batch launch rollback restores process-local records and uses engine CAS for
+  slot rollback. Startup reconciliation removes deleted-instance/unknown-proxy
+  entries while preserving valid assignments needed by Android recents.
+- `ContainerActivity` cannot delete durable assignments based only on its
+  process-local view of live Activities, and a missing engine-selected proxy
+  is an explicit failure.
+- Unit coverage includes endpoint UID checks, strict malformed Bundle checks,
+  candidate budgets, identity mismatches, concurrent reservation, deletion,
+  startup reconciliation, unavailable authority, and loader rollback.
+
+### Verification
+
+- Full required local gate passed in 2m21s: 502 Gradle tasks, 1,899 tests,
+  0 failures, 0 errors, and 12 skipped.
+- Debug APK: 99,776,973 bytes; SHA-256
+  `361A6FF25377D7934F183F14B03314359ABAB50744225DD227CD5AEBFCF39CC6`.
+- `git diff --check` passed apart from existing LF/CRLF conversion warnings.
+
+### Still BLOCK
+
+- Host-UID authorization is not yet a per-launch capability boundary because
+  host and guest code share the UID. Slot commands need a runtime-generation
+  and one-time Activity capability before dedicated server isolation.
+- `EngineRuntimeInstallers.fileBackedSystemServer()` still supplies legacy
+  client/guest read graphs, and several bootstrap/content paths read durable
+  owner files directly. The system does not yet have one IPC-only fact source.
+- `EngineBinderProvider` remains in the host process. Dedicated `:engine`
+  startup routing, server death/reconnect, and stale generation rejection are
+  not device-proven.
+- Full package/activity/task/provider/service/broadcast/storage/native
+  semantics and API 28-36/HyperOS compatibility evidence remain incomplete.
+- This batch is not evidence that GKD, AstroBox, QQ, WeChat, or QQ Reader is
+  compatible. Review decision remains **BLOCK**.

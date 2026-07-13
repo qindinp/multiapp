@@ -2,6 +2,8 @@ package com.multiapp.core.engine
 
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineSubsystem
+import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualActivityState
@@ -43,8 +45,155 @@ data class EngineActivityIpcConsumeResponse(
     val pendingNewIntent: VirtualActivityPendingNewIntent? = null
 )
 
+internal const val PROXY_ACTIVITY_SLOT_QUERY_OPERATION = "queryProxyActivitySlot"
+internal const val PROXY_ACTIVITY_SLOT_RESERVE_OPERATION = "reserveProxyActivitySlot"
+internal const val PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION = "compareAndSetProxyActivitySlot"
+
+class IpcBackedProxyActivitySlotAssignmentStore(
+    private val remoteFind: (ProxyActivitySlotKey) -> VirtualProxyActivitySlotOperationResult? =
+        EngineRuntimeIpcClients::queryProxyActivitySlot,
+    private val remoteReserve: (
+        ProxyActivitySlotKey,
+        List<String>
+    ) -> VirtualProxyActivitySlotOperationResult? = EngineRuntimeIpcClients::reserveProxyActivitySlot,
+    private val remoteCompareAndSet: (
+        ProxyActivitySlotKey,
+        String?,
+        String?
+    ) -> VirtualProxyActivitySlotOperationResult? = EngineRuntimeIpcClients::compareAndSetProxyActivitySlot
+) : ProxyActivitySlotAssignmentStore {
+    override fun find(key: ProxyActivitySlotKey): String? {
+        if (!key.isValidProxyActivitySlotIpcKey()) return null
+        return runCatching { remoteFind(key) }.getOrNull()
+            ?.takeIf {
+                it.isValidProxyActivitySlotIpcResult(
+                    key,
+                    PROXY_ACTIVITY_SLOT_QUERY_OPERATION
+                ) && it.verdict != EngineResultStatus.FAIL
+            }
+            ?.proxyActivityClassName
+            ?.takeIf(String::isValidProxyActivitySlotClassName)
+    }
+
+    override fun reserve(
+        key: ProxyActivitySlotKey,
+        candidateProxyActivityClassNames: List<String>
+    ): String? {
+        if (!key.isValidProxyActivitySlotIpcKey() ||
+            !candidateProxyActivityClassNames.isValidProxyActivitySlotCandidates()
+        ) {
+            return null
+        }
+        return runCatching { remoteReserve(key, candidateProxyActivityClassNames) }.getOrNull()
+            ?.takeIf {
+                it.isValidProxyActivitySlotIpcResult(
+                    key,
+                    PROXY_ACTIVITY_SLOT_RESERVE_OPERATION
+                ) && it.verdict != EngineResultStatus.FAIL && it.matched
+            }
+            ?.proxyActivityClassName
+            ?.takeIf { it in candidateProxyActivityClassNames }
+    }
+
+    override fun compareAndSet(
+        key: ProxyActivitySlotKey,
+        expectedProxyActivityClassName: String?,
+        newProxyActivityClassName: String?
+    ): Boolean {
+        if (!key.isValidProxyActivitySlotIpcKey() ||
+            !expectedProxyActivityClassName.isValidNullableProxyActivitySlotClassName() ||
+            !newProxyActivityClassName.isValidNullableProxyActivitySlotClassName()
+        ) {
+            return false
+        }
+        return runCatching {
+            remoteCompareAndSet(
+                key,
+                expectedProxyActivityClassName,
+                newProxyActivityClassName
+            )
+        }.getOrNull()?.let { result ->
+            result.isValidProxyActivitySlotIpcResult(
+                key,
+                PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION
+            ) && result.verdict != EngineResultStatus.FAIL && result.matched &&
+                result.proxyActivityClassName == newProxyActivityClassName
+        } ?: false
+    }
+
+    override fun save(key: ProxyActivitySlotKey, proxyActivityClassName: String): Nothing {
+        throw UnsupportedOperationException(
+            "IPC proxy Activity slot store does not permit client-authoritative save"
+        )
+    }
+
+    override fun ownerOf(proxyActivityClassName: String): ProxyActivitySlotKey? = null
+
+    override fun removeInstance(instanceId: String): Int = 0
+
+    override fun pruneStaleAssignments(
+        validInstanceIds: Set<String>,
+        liveProxyActivityClassNames: Set<String>,
+        knownProxyActivityClassNames: Set<String>
+    ): Int = 0
+}
+
+internal fun ProxyActivitySlotKey.isValidProxyActivitySlotIpcKey(): Boolean =
+    instanceId.isValidProxyActivitySlotIdentityPart() &&
+        launchMode.let { it == null || it.isValidProxyActivitySlotIdentityPart() } &&
+        taskKey.isValidProxyActivitySlotTaskKey()
+
+internal fun List<String>.isValidProxyActivitySlotCandidates(): Boolean =
+    isNotEmpty() &&
+        size <= EngineRuntimeIpcContract.MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_COUNT &&
+        distinct().size == size &&
+        all(String::isValidProxyActivitySlotClassName) &&
+        sumOf(String::length) <= EngineRuntimeIpcContract.MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_TOTAL_LENGTH
+
+private fun String.isValidProxyActivitySlotIdentityPart(): Boolean =
+    isNotBlank() && length <= EngineRuntimeIpcContract.MAX_PROXY_ACTIVITY_SLOT_IDENTITY_LENGTH
+
+private fun String.isValidProxyActivitySlotTaskKey(): Boolean =
+    isNotBlank() && length <= EngineRuntimeIpcContract.MAX_PROXY_ACTIVITY_SLOT_TASK_KEY_LENGTH
+
+internal fun String.isValidProxyActivitySlotClassName(): Boolean =
+    isNotBlank() && length <= EngineRuntimeIpcContract.MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_LENGTH
+
+internal fun String?.isValidNullableProxyActivitySlotClassName(): Boolean =
+    this == null || isValidProxyActivitySlotClassName()
+
+internal fun VirtualProxyActivitySlotOperationResult.isValidProxyActivitySlotIpcResult(
+    expectedKey: ProxyActivitySlotKey,
+    expectedOperation: String
+): Boolean =
+    instanceId == expectedKey.instanceId &&
+        key == expectedKey &&
+        operation == expectedOperation &&
+        proxyActivityClassName.isValidNullableProxyActivitySlotClassName()
+
 class IpcBackedVirtualActivityService(
     @Suppress("UNUSED_PARAMETER") fallback: VirtualActivityService,
+    private val remoteProxySlotQuery: (
+        String,
+        ProxyActivitySlotKey
+    ) -> VirtualProxyActivitySlotOperationResult? = { _, key ->
+        EngineRuntimeIpcClients.queryProxyActivitySlot(key)
+    },
+    private val remoteProxySlotReserve: (
+        String,
+        ProxyActivitySlotKey,
+        List<String>
+    ) -> VirtualProxyActivitySlotOperationResult? = { _, key, candidates ->
+        EngineRuntimeIpcClients.reserveProxyActivitySlot(key, candidates)
+    },
+    private val remoteProxySlotCompareAndSet: (
+        String,
+        ProxyActivitySlotKey,
+        String?,
+        String?
+    ) -> VirtualProxyActivitySlotOperationResult? = { _, key, expected, new ->
+        EngineRuntimeIpcClients.compareAndSetProxyActivitySlot(key, expected, new)
+    },
     private val remotePlan: (String, VirtualActivityDispatchPlanRequest) -> VirtualActivityDispatchPlan? =
         EngineRuntimeIpcClients::planActivity,
     private val remoteRecord: (String, VirtualActivityDispatchResult) -> Boolean? =
@@ -63,6 +212,48 @@ class IpcBackedVirtualActivityService(
     private val authorityConnected: () -> Boolean = EngineRuntimeIpcClients::isConnected
 ) : VirtualActivityService {
     override val subsystem: EngineSubsystem = EngineSubsystem.ACTIVITY
+
+    override fun queryProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey
+    ): VirtualProxyActivitySlotOperationResult = proxySlotAuthority(
+        instanceId = instanceId,
+        key = key,
+        operation = PROXY_ACTIVITY_SLOT_QUERY_OPERATION
+    ) { remoteProxySlotQuery(instanceId, key) }
+
+    override fun reserveProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        candidates: List<String>
+    ): VirtualProxyActivitySlotOperationResult {
+        if (!candidates.isValidProxyActivitySlotCandidates()) {
+            return proxySlotFailure(instanceId, key, PROXY_ACTIVITY_SLOT_RESERVE_OPERATION)
+        }
+        return proxySlotAuthority(
+            instanceId = instanceId,
+            key = key,
+            operation = PROXY_ACTIVITY_SLOT_RESERVE_OPERATION
+        ) { remoteProxySlotReserve(instanceId, key, candidates) }
+    }
+
+    override fun compareAndSetProxyActivitySlot(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        expected: String?,
+        new: String?
+    ): VirtualProxyActivitySlotOperationResult {
+        if (!expected.isValidNullableProxyActivitySlotClassName() ||
+            !new.isValidNullableProxyActivitySlotClassName()
+        ) {
+            return proxySlotFailure(instanceId, key, PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION)
+        }
+        return proxySlotAuthority(
+            instanceId = instanceId,
+            key = key,
+            operation = PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION
+        ) { remoteProxySlotCompareAndSet(instanceId, key, expected, new) }
+    }
 
     override fun planActivity(
         instanceId: String,
@@ -297,6 +488,38 @@ class IpcBackedVirtualActivityService(
 
     private fun authorityFailureMessage(invalid: String, unavailable: String): String =
         if (authorityConnected()) invalid else unavailable
+
+    private fun proxySlotAuthority(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        operation: String,
+        remote: () -> VirtualProxyActivitySlotOperationResult?
+    ): VirtualProxyActivitySlotOperationResult {
+        if (instanceId == key.instanceId && key.isValidProxyActivitySlotIpcKey()) {
+            runCatching(remote).getOrNull()
+                ?.takeIf { it.isValidProxyActivitySlotIpcResult(key, operation) }
+                ?.let { return it }
+        }
+        return proxySlotFailure(instanceId, key, operation)
+    }
+
+    private fun proxySlotFailure(
+        instanceId: String,
+        key: ProxyActivitySlotKey,
+        operation: String
+    ) = VirtualProxyActivitySlotOperationResult(
+        instanceId = instanceId.ifBlank { "invalid" },
+        operation = operation,
+        verdict = EngineResultStatus.FAIL,
+        key = key,
+        proxyActivityClassName = null,
+        matched = false,
+        removedCount = 0,
+        message = authorityFailureMessage(
+            invalid = "engine_activity_ipc_proxy_slot_invalid:$operation",
+            unavailable = "engine_activity_authority_unavailable:$operation"
+        )
+    )
 
     private fun EngineResultStatus.asReadOnlySnapshotVerdict(): EngineResultStatus =
         if (this == EngineResultStatus.FAIL) EngineResultStatus.FAIL else EngineResultStatus.PARTIAL

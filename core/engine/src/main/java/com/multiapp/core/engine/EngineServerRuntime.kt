@@ -125,6 +125,13 @@ private fun createEngineServerRuntimeGraph(
 ): EngineServerRuntimeGraph {
     val runtimeRegistry = systemServerHandle.registry
     val systemServer = systemServerHandle.server
+    if (systemServer is DefaultVirtualSystemServer) {
+        systemServer.reconcileProxyActivitySlots(
+            validInstanceIds = instanceManager.listInstances()
+                .mapTo(linkedSetOf()) { instance -> instance.instanceId },
+            knownProxyActivityClassNames = EngineProxyActivitySlots.classNames(hostPackageName).toSet()
+        )
+    }
     val processControlPlane = processControlPlaneFactory.create(
         runtimeRegistry,
         processDeathRegistry,

@@ -13,6 +13,7 @@ import com.multiapp.core.loader.VirtualContentServiceOperationRecorders
 import com.multiapp.core.loader.VirtualContentServiceProxyInstaller
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
 import com.multiapp.core.loader.VirtualPermissionCheckDispatchers
+import com.multiapp.core.loader.ProxyActivitySlotAssignmentStoreProvider
 import com.multiapp.core.loader.VirtualUriPermissionDispatcherFactories
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxySlotContract
@@ -35,6 +36,9 @@ object EngineRuntimeInstallers {
 
     fun installSystemServerClient(context: Context): Boolean {
         rememberProcessHostContext(context)
+        ProxyActivitySlotAssignmentStoreProvider.install(
+            IpcBackedProxyActivitySlotAssignmentStore()
+        )
         val connected = EngineRuntimeIpcClients.install(context)
         if (connected) {
             EngineOperationEvidenceSinks.install(EngineRuntimeIpcClients.evidenceSink())

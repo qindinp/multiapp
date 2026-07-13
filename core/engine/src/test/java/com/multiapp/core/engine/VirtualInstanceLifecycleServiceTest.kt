@@ -111,7 +111,7 @@ class VirtualInstanceLifecycleServiceTest {
             permissionStore,
             appOpsStore,
             broadcastStore,
-            proxySlotStore
+            proxySlotStore::removeInstance
         )
 
         val result = lifecycle.clearInstanceState(INSTANCE_ID)

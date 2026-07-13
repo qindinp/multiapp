@@ -90,14 +90,21 @@ class EngineProcessBootstrapTransportTest {
 
     @Test
     fun `timed out binder call keeps slot tombstone until transport actually exits`() {
-        val executor = ThreadPoolExecutor(
+        val entered = CountDownLatch(1)
+        val executor = object : ThreadPoolExecutor(
             1,
             1,
             0L,
             TimeUnit.MILLISECONDS,
             LinkedBlockingQueue()
-        ).apply { prestartCoreThread() }
-        val entered = CountDownLatch(1)
+        ) {
+            override fun execute(command: Runnable) {
+                super.execute(command)
+                check(entered.await(1, TimeUnit.SECONDS)) {
+                    "bootstrap transport did not enter before timeout measurement"
+                }
+            }
+        }.apply { prestartCoreThread() }
         val release = CountDownLatch(1)
         val exited = CountDownLatch(1)
         val calls = AtomicInteger()

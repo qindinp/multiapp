@@ -16,6 +16,7 @@ import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualTaskRecord
 import java.io.File
 
@@ -169,6 +170,13 @@ object EngineRuntimeIpcContract {
     const val KEY_EXTRAS = "extras"
     const val KEY_GUEST_ACTIVITY_CLASS_NAME = "guestActivityClassName"
     const val KEY_TASK_ID = "taskId"
+    const val KEY_TASK_KEY = "taskKey"
+    const val KEY_PROXY_ACTIVITY_SLOT_KEY = "proxyActivitySlotKey"
+    const val KEY_CANDIDATE_PROXY_ACTIVITY_CLASS_NAMES = "candidateProxyActivityClassNames"
+    const val KEY_EXPECTED_PROXY_ACTIVITY_CLASS_NAME = "expectedProxyActivityClassName"
+    const val KEY_NEW_PROXY_ACTIVITY_CLASS_NAME = "newProxyActivityClassName"
+    const val KEY_MATCHED = "matched"
+    const val KEY_REMOVED_COUNT = "removedCount"
     const val KEY_RESULT_TO_TOKEN = "resultToToken"
     const val KEY_PENDING_NEW_INTENTS = "pendingNewIntents"
     const val KEY_TASKS = "tasks"
@@ -183,6 +191,12 @@ object EngineRuntimeIpcContract {
     const val KEY_ENGINE_PROFILE = "engineProfile"
     const val KEY_ENGINE_SUBSYSTEM_VERDICTS = "engineSubsystemVerdicts"
     const val KEY_ENGINE_OPERATION_EVIDENCE = "engineOperationEvidence"
+
+    const val MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_COUNT = 64
+    const val MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_LENGTH = 512
+    const val MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_TOTAL_LENGTH = 16_384
+    const val MAX_PROXY_ACTIVITY_SLOT_IDENTITY_LENGTH = 512
+    const val MAX_PROXY_ACTIVITY_SLOT_TASK_KEY_LENGTH = 1_024
 
     fun authority(hostPackageName: String): String = hostPackageName + AUTHORITY_SUFFIX
 }
@@ -756,6 +770,43 @@ class EngineRuntimeBinderEndpoint(
             reason = reason,
             tasks = decoded.tasks
         ).toIpcBundle()
+    }
+
+    override fun queryProxyActivitySlot(request: Bundle): Bundle = authorizedBundle {
+        val key = request.toProxyActivitySlotQueryIpcKeyOrNull()
+            ?: return@authorizedBundle invalidRequestBundle(
+                "invalid",
+                "invalid_proxy_activity_slot_query_request"
+            )
+        activityService.queryProxyActivitySlot(key.instanceId, key)
+            .toProxyActivitySlotResultIpcBundle()
+    }
+
+    override fun reserveProxyActivitySlot(request: Bundle): Bundle = authorizedBundle {
+        val decoded = request.toProxyActivitySlotReserveIpcRequestOrNull()
+            ?: return@authorizedBundle invalidRequestBundle(
+                "invalid",
+                "invalid_proxy_activity_slot_reserve_request"
+            )
+        activityService.reserveProxyActivitySlot(
+            decoded.key.instanceId,
+            decoded.key,
+            decoded.candidateProxyActivityClassNames
+        ).toProxyActivitySlotResultIpcBundle()
+    }
+
+    override fun compareAndSetProxyActivitySlot(request: Bundle): Bundle = authorizedBundle {
+        val decoded = request.toProxyActivitySlotCompareAndSetIpcRequestOrNull()
+            ?: return@authorizedBundle invalidRequestBundle(
+                "invalid",
+                "invalid_proxy_activity_slot_compare_and_set_request"
+            )
+        activityService.compareAndSetProxyActivitySlot(
+            decoded.key.instanceId,
+            decoded.key,
+            decoded.expectedProxyActivityClassName,
+            decoded.newProxyActivityClassName
+        ).toProxyActivitySlotResultIpcBundle()
     }
 
     override fun planProvider(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
@@ -1530,6 +1581,77 @@ object EngineRuntimeIpcClients {
         return response.toActivityOperationResultOrNull()
     }
 
+    internal fun queryProxyActivitySlot(
+        key: ProxyActivitySlotKey
+    ): VirtualProxyActivitySlotOperationResult? {
+        if (!key.isValidProxyActivitySlotIpcKey()) return null
+        val response = runCatching {
+            activeService()?.queryProxyActivitySlot(key.toProxyActivitySlotQueryIpcBundle())
+        }.getOrNull() ?: return null
+        return response.toProxyActivitySlotIpcResultOrNull()
+            ?.takeIf {
+                it.isValidProxyActivitySlotIpcResult(
+                    key,
+                    PROXY_ACTIVITY_SLOT_QUERY_OPERATION
+                )
+            }
+    }
+
+    internal fun reserveProxyActivitySlot(
+        key: ProxyActivitySlotKey,
+        candidateProxyActivityClassNames: List<String>
+    ): VirtualProxyActivitySlotOperationResult? {
+        if (!key.isValidProxyActivitySlotIpcKey() ||
+            !candidateProxyActivityClassNames.isValidProxyActivitySlotCandidates()
+        ) {
+            return null
+        }
+        val response = runCatching {
+            activeService()?.reserveProxyActivitySlot(
+                key.toProxyActivitySlotReserveIpcBundle(candidateProxyActivityClassNames)
+            )
+        }.getOrNull() ?: return null
+        return response.toProxyActivitySlotIpcResultOrNull()
+            ?.takeIf { result ->
+                result.isValidProxyActivitySlotIpcResult(
+                    key,
+                    PROXY_ACTIVITY_SLOT_RESERVE_OPERATION
+                ) &&
+                    (result.verdict == EngineResultStatus.FAIL ||
+                        result.proxyActivityClassName in candidateProxyActivityClassNames)
+            }
+    }
+
+    internal fun compareAndSetProxyActivitySlot(
+        key: ProxyActivitySlotKey,
+        expectedProxyActivityClassName: String?,
+        newProxyActivityClassName: String?
+    ): VirtualProxyActivitySlotOperationResult? {
+        if (!key.isValidProxyActivitySlotIpcKey() ||
+            !expectedProxyActivityClassName.isValidNullableProxyActivitySlotClassName() ||
+            !newProxyActivityClassName.isValidNullableProxyActivitySlotClassName()
+        ) {
+            return null
+        }
+        val response = runCatching {
+            activeService()?.compareAndSetProxyActivitySlot(
+                key.toProxyActivitySlotCompareAndSetIpcBundle(
+                    expectedProxyActivityClassName,
+                    newProxyActivityClassName
+                )
+            )
+        }.getOrNull() ?: return null
+        return response.toProxyActivitySlotIpcResultOrNull()
+            ?.takeIf { result ->
+                result.isValidProxyActivitySlotIpcResult(
+                    key,
+                    PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION
+                ) &&
+                    (result.verdict == EngineResultStatus.FAIL ||
+                        result.proxyActivityClassName == newProxyActivityClassName)
+            }
+    }
+
     fun planProvider(
         instanceId: String,
         request: VirtualProviderDispatchPlanRequest
@@ -1809,6 +1931,165 @@ private fun EngineOperationEvidence.toIpcBundle(): Bundle = Bundle().apply {
     putString(EngineRuntimeIpcContract.KEY_VERDICT, verdict.name)
     putBundle(EngineRuntimeIpcContract.KEY_ENTRIES, entries.toStringBundle())
 }
+
+internal data class EngineProxyActivitySlotReserveIpcRequest(
+    val key: ProxyActivitySlotKey,
+    val candidateProxyActivityClassNames: List<String>
+)
+
+internal data class EngineProxyActivitySlotCompareAndSetIpcRequest(
+    val key: ProxyActivitySlotKey,
+    val expectedProxyActivityClassName: String?,
+    val newProxyActivityClassName: String?
+)
+
+internal fun ProxyActivitySlotKey.toProxyActivitySlotQueryIpcBundle(
+    bundleFactory: () -> Bundle = ::Bundle
+): Bundle = toProxyActivitySlotKeyIpcBundle(bundleFactory)
+
+internal fun ProxyActivitySlotKey.toProxyActivitySlotReserveIpcBundle(
+    candidateProxyActivityClassNames: List<String>,
+    bundleFactory: () -> Bundle = ::Bundle
+): Bundle = toProxyActivitySlotKeyIpcBundle(bundleFactory).apply {
+    putStringArrayList(
+        EngineRuntimeIpcContract.KEY_CANDIDATE_PROXY_ACTIVITY_CLASS_NAMES,
+        ArrayList(candidateProxyActivityClassNames)
+    )
+}
+
+internal fun ProxyActivitySlotKey.toProxyActivitySlotCompareAndSetIpcBundle(
+    expectedProxyActivityClassName: String?,
+    newProxyActivityClassName: String?,
+    bundleFactory: () -> Bundle = ::Bundle
+): Bundle = toProxyActivitySlotKeyIpcBundle(bundleFactory).apply {
+    putString(
+        EngineRuntimeIpcContract.KEY_EXPECTED_PROXY_ACTIVITY_CLASS_NAME,
+        expectedProxyActivityClassName
+    )
+    putString(
+        EngineRuntimeIpcContract.KEY_NEW_PROXY_ACTIVITY_CLASS_NAME,
+        newProxyActivityClassName
+    )
+}
+
+internal fun Bundle.toProxyActivitySlotQueryIpcKeyOrNull(): ProxyActivitySlotKey? =
+    decodeProxyActivitySlotKeyOrNull(PROXY_ACTIVITY_SLOT_KEY_FIELDS)
+
+internal fun Bundle.toProxyActivitySlotReserveIpcRequestOrNull():
+    EngineProxyActivitySlotReserveIpcRequest? = runCatching {
+        val expectedFields = PROXY_ACTIVITY_SLOT_KEY_FIELDS +
+            EngineRuntimeIpcContract.KEY_CANDIDATE_PROXY_ACTIVITY_CLASS_NAMES
+        val key = decodeProxyActivitySlotKeyOrNull(expectedFields) ?: return@runCatching null
+        val candidates = getStringArrayList(
+            EngineRuntimeIpcContract.KEY_CANDIDATE_PROXY_ACTIVITY_CLASS_NAMES
+        )?.toList()?.takeIf { it.isValidProxyActivitySlotCandidates() }
+            ?: return@runCatching null
+        EngineProxyActivitySlotReserveIpcRequest(key, candidates)
+    }.getOrNull()
+
+internal fun Bundle.toProxyActivitySlotCompareAndSetIpcRequestOrNull():
+    EngineProxyActivitySlotCompareAndSetIpcRequest? = runCatching {
+        val expectedFields = PROXY_ACTIVITY_SLOT_KEY_FIELDS + setOf(
+            EngineRuntimeIpcContract.KEY_EXPECTED_PROXY_ACTIVITY_CLASS_NAME,
+            EngineRuntimeIpcContract.KEY_NEW_PROXY_ACTIVITY_CLASS_NAME
+        )
+        val key = decodeProxyActivitySlotKeyOrNull(expectedFields) ?: return@runCatching null
+        val expected = getString(EngineRuntimeIpcContract.KEY_EXPECTED_PROXY_ACTIVITY_CLASS_NAME)
+        val new = getString(EngineRuntimeIpcContract.KEY_NEW_PROXY_ACTIVITY_CLASS_NAME)
+        if (!expected.isValidNullableProxyActivitySlotClassName() ||
+            !new.isValidNullableProxyActivitySlotClassName()
+        ) {
+            return@runCatching null
+        }
+        EngineProxyActivitySlotCompareAndSetIpcRequest(key, expected, new)
+    }.getOrNull()
+
+internal fun VirtualProxyActivitySlotOperationResult.toProxyActivitySlotResultIpcBundle(
+    bundleFactory: () -> Bundle = ::Bundle
+): Bundle = bundleFactory().apply {
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+        putString(EngineRuntimeIpcContract.KEY_OPERATION, operation)
+        putString(EngineRuntimeIpcContract.KEY_VERDICT, verdict.name)
+        putBundle(
+            EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_SLOT_KEY,
+            key.toProxyActivitySlotKeyIpcBundle(bundleFactory)
+        )
+        putString(
+            EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME,
+            proxyActivityClassName
+        )
+        putBoolean(EngineRuntimeIpcContract.KEY_MATCHED, matched)
+        putInt(EngineRuntimeIpcContract.KEY_REMOVED_COUNT, removedCount)
+        putString(EngineRuntimeIpcContract.KEY_MESSAGE, message)
+    }
+
+internal fun Bundle.toProxyActivitySlotIpcResultOrNull(): VirtualProxyActivitySlotOperationResult? =
+    runCatching {
+        val expectedFields = setOf(
+            EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+            EngineRuntimeIpcContract.KEY_OPERATION,
+            EngineRuntimeIpcContract.KEY_VERDICT,
+            EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_SLOT_KEY,
+            EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME,
+            EngineRuntimeIpcContract.KEY_MATCHED,
+            EngineRuntimeIpcContract.KEY_REMOVED_COUNT,
+            EngineRuntimeIpcContract.KEY_MESSAGE
+        )
+        if (keySet() != expectedFields) return@runCatching null
+        val key = getBundle(EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_SLOT_KEY)
+            ?.toProxyActivitySlotQueryIpcKeyOrNull()
+            ?: return@runCatching null
+        val instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID)
+            ?.takeIf { it == key.instanceId }
+            ?: return@runCatching null
+        val proxyActivityClassName = getString(
+            EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME
+        )
+        if (!proxyActivityClassName.isValidNullableProxyActivitySlotClassName()) {
+            return@runCatching null
+        }
+        VirtualProxyActivitySlotOperationResult(
+            instanceId = instanceId,
+            operation = getString(EngineRuntimeIpcContract.KEY_OPERATION).orEmpty(),
+            verdict = EngineResultStatus.valueOf(
+                getString(EngineRuntimeIpcContract.KEY_VERDICT).orEmpty()
+            ),
+            key = key,
+            proxyActivityClassName = proxyActivityClassName,
+            matched = getBoolean(EngineRuntimeIpcContract.KEY_MATCHED),
+            removedCount = getInt(EngineRuntimeIpcContract.KEY_REMOVED_COUNT),
+            message = getString(EngineRuntimeIpcContract.KEY_MESSAGE).orEmpty()
+        )
+    }.getOrNull()
+
+private fun ProxyActivitySlotKey.toProxyActivitySlotKeyIpcBundle(
+    bundleFactory: () -> Bundle
+): Bundle = bundleFactory().apply {
+    putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+    putString(EngineRuntimeIpcContract.KEY_LAUNCH_MODE, launchMode)
+    putString(EngineRuntimeIpcContract.KEY_TASK_KEY, taskKey)
+}
+
+private fun Bundle.decodeProxyActivitySlotKeyOrNull(
+    expectedFields: Set<String>
+): ProxyActivitySlotKey? = runCatching {
+    if (keySet() != expectedFields ||
+        !containsKey(EngineRuntimeIpcContract.KEY_LAUNCH_MODE)
+    ) {
+        return@runCatching null
+    }
+    ProxyActivitySlotKey(
+        instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+        launchMode = getString(EngineRuntimeIpcContract.KEY_LAUNCH_MODE),
+        taskKey = getString(EngineRuntimeIpcContract.KEY_TASK_KEY).orEmpty()
+    ).takeIf(ProxyActivitySlotKey::isValidProxyActivitySlotIpcKey)
+}.getOrNull()
+
+private val PROXY_ACTIVITY_SLOT_KEY_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+    EngineRuntimeIpcContract.KEY_LAUNCH_MODE,
+    EngineRuntimeIpcContract.KEY_TASK_KEY
+)
 
 private fun VirtualActivityDispatchPlanRequest.toIpcBundle(): Bundle = Bundle().apply {
     putString(EngineRuntimeIpcContract.KEY_ACTION, action)
