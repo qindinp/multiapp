@@ -20,11 +20,6 @@ class ContainerRuntimePathsTest {
         assertEquals(File(filesDir, "artifacts"), ContainerRuntimePaths.artifactDir(filesDir))
         assertEquals(File(filesDir, "instance_data"), ContainerRuntimePaths.instanceDataRootBase(filesDir))
         assertEquals(File(filesDir, "hosted_launch_evidence"), ContainerRuntimePaths.hostedLaunchEvidenceDir(filesDir))
-        assertEquals(
-            File(filesDir, "engine_activity_task_state.properties"),
-            ContainerRuntimePaths.engineActivityTaskStateFile(filesDir)
-        )
-
         assertTrue(ContainerRuntimePaths.instanceStoreDir(filesDir).isDirectory)
         assertTrue(ContainerRuntimePaths.installStoreDir(filesDir).isDirectory)
         assertTrue(ContainerRuntimePaths.artifactDir(filesDir).isDirectory)

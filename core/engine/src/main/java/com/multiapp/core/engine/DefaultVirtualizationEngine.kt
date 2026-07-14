@@ -1,6 +1,7 @@
 package com.multiapp.core.engine
 
 import com.multiapp.core.loader.ProxyActivitySlots
+import com.multiapp.core.loader.VirtualActivityLaunchAllocationRequest
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EnginePackageInstallRequest
@@ -34,10 +35,6 @@ class DefaultVirtualizationEngine @Inject constructor(
     engineServerRuntime: EngineServerRuntime
 ) : VirtualizationEngine by engineServerRuntime.virtualizationEngine {
     internal val delegatedEngine: VirtualizationEngine = engineServerRuntime.virtualizationEngine
-
-    companion object {
-        internal const val ENGINE_RUNTIME_STATE_FILE = EngineRuntimeStateFiles.DEFAULT_FILE_NAME
-    }
 }
 
 internal class DefaultVirtualizationEngineCore(
@@ -62,6 +59,11 @@ internal class DefaultVirtualizationEngineCore(
     }
 ) : VirtualizationEngine {
     internal val systemServer: VirtualSystemServer = systemServerFactory(runtimeRegistry)
+    private val activityLaunchAllocator = EngineActivityLaunchAllocator(
+        runtimeRegistry = runtimeRegistry,
+        activityService = systemServer.activityService,
+        capabilities = activityLaunchCapabilities
+    )
     private val runtimeEpochLock = Any()
     private val allocatedRuntimeEpochs = mutableMapOf<String, Long>()
     private val instanceOperationLocks = Array(INSTANCE_OPERATION_LOCK_COUNT) { Any() }
@@ -545,19 +547,25 @@ internal class DefaultVirtualizationEngineCore(
                 message = "Target process died or runtime generation changed before foreground launch"
             )
         }
-        val launchIdentity = runCatching {
-            activityLaunchCapabilities.issue(
-                runtime = runtime,
-                processId = processId,
-                proxyActivityClassName = runtime.proxySlot,
-                guestActivityClassName = launcherActivityClassName
-            )
-        }.getOrElse { error ->
+        val launchAllocation = activityLaunchAllocator.allocate(
+            request = VirtualActivityLaunchAllocationRequest(
+                instanceId = runtime.instanceId,
+                originPackageName = runtime.originPackageName,
+                guestActivityClassName = launcherActivityClassName,
+                processSlot = runtime.processSlot,
+                launchMode = launcherComponent?.launchMode,
+                taskAffinity = launcherTaskAffinity(runtime, launcherComponent?.taskAffinity)
+            ),
+            callingPid = processId
+        )
+        val launchIdentity = launchAllocation.launchIdentity?.toEngineIdentity()
+        val allocatedProxySlot = launchAllocation.proxyActivityClassName
+        if (!launchAllocation.accepted || launchIdentity == null || allocatedProxySlot == null) {
             return EngineResult.fail(
                 operation = OP_LAUNCH,
                 instanceId = instance.instanceId,
                 originPackageName = instance.originPackageName,
-                message = error.message ?: "Unable to issue Activity launch capability"
+                message = launchAllocation.reason
             )
         }
         val launchFailure = runCatching {
@@ -571,7 +579,7 @@ internal class DefaultVirtualizationEngineCore(
                     profile = request.profile,
                     evidenceMode = request.evidenceMode,
                     processSlot = runtime.processSlot,
-                    proxySlot = runtime.proxySlot,
+                    proxySlot = allocatedProxySlot,
                     evidenceSessionId = runtime.evidenceSessionId,
                     runtimeEpoch = runtime.runtimeEpoch,
                     engineSessionId = runtime.engineSessionId,
@@ -585,7 +593,7 @@ internal class DefaultVirtualizationEngineCore(
             )
         }.exceptionOrNull()
         if (launchFailure != null) {
-            activityLaunchCapabilities.revoke(launchIdentity.capabilityToken)
+            val allocationReleased = activityLaunchAllocator.release(launchAllocation, processId)
             systemServer.runtimeService.registerOperationEvidence(
                 instance.instanceId,
                 EngineOperationEvidence(
@@ -596,7 +604,8 @@ internal class DefaultVirtualizationEngineCore(
                         "bootstrapState" to bootstrap.state.name,
                         "guestActivityClassName" to launcherActivityClassName,
                         "errorClass" to launchFailure.javaClass.name,
-                        "message" to launchFailure.message.orEmpty()
+                        "message" to launchFailure.message.orEmpty(),
+                        "allocationReleased" to allocationReleased.toString()
                     )
                 )
             )
@@ -804,13 +813,17 @@ internal class DefaultVirtualizationEngineCore(
             targetSdk = installRecord.targetSdk,
             minSdk = installRecord.minSdk,
             sourceDir = installRecord.originApkPath,
+            sourceSha256 = installRecord.originApkSha256,
             publicSourceDir = installRecord.originApkPath,
             splitSourceDirs = installRecord.splitApkPaths,
+            splitSha256s = installRecord.splitApkSha256s,
             splitPublicSourceDirs = installRecord.splitPublicSourceDirs.ifEmpty { installRecord.splitApkPaths },
             splitNames = installRecord.splitNames,
             isolatedSplits = installRecord.isolatedSplits,
             dataDir = instance.dataRoot,
             nativeLibraryDir = File(instance.dataRoot, "lib").absolutePath,
+            nativeLibraries = installRecord.nativeLibraries,
+            abiList = installRecord.abiList,
             applicationClassName = installRecord.applicationClassName,
             metaData = installRecord.applicationMetaData.toLegacyMetaDataMap(),
             typedMetaData = installRecord.applicationMetaData,
@@ -820,7 +833,7 @@ internal class DefaultVirtualizationEngineCore(
             receivers = installRecord.receivers.toResolvedComponents(),
             providers = installRecord.providers.toResolvedComponents(),
             permissions = installRecord.permissions,
-            originCertSha256 = installRecord.originCertSha256,
+            originCertSha256 = installRecord.originCertSha256.takeIf { it.isNotBlank() },
             signerSha256Digests = installRecord.signerSha256Digests,
             hasMultipleSigners = installRecord.hasMultipleSigners
         )

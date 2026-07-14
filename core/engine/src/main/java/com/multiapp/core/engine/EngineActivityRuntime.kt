@@ -3,6 +3,9 @@ package com.multiapp.core.engine
 import android.content.Context
 import android.content.Intent
 import com.multiapp.core.loader.ProxyActivitySlots
+import com.multiapp.core.loader.VirtualActivityLaunchAllocation
+import com.multiapp.core.loader.VirtualActivityLaunchAllocationProvider
+import com.multiapp.core.loader.VirtualActivityLaunchAllocationRequest
 import com.multiapp.core.loader.VirtualActivityFinishResultRecord
 import com.multiapp.core.loader.VirtualActivityIntentStore
 import com.multiapp.core.loader.VirtualActivityLaunchRequest
@@ -11,10 +14,9 @@ import com.multiapp.core.loader.VirtualActivityManager
 import com.multiapp.core.loader.VirtualActivityOperations
 import com.multiapp.core.loader.VirtualActivityRecordManager
 import com.multiapp.core.loader.VirtualContextWrapper
-import com.multiapp.core.loader.ProxyActivitySlotAssignmentStoreProvider
 import com.multiapp.core.model.engine.EngineResultStatus
+import com.multiapp.core.model.virtual.PreassignedProxyActivitySlotStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
-import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityRecord
@@ -36,6 +38,17 @@ object EngineProxyActivitySlots {
     fun processSlotForClassName(hostPackageName: String, className: String): String? =
         ProxyActivitySlots.processNameForClassName(hostPackageName, className)
 
+    fun classNamesForProcessSlot(
+        hostPackageName: String,
+        processSlot: String,
+        launchMode: String?
+    ): List<String> {
+        val normalizedMode = normalizeLaunchMode(launchMode)
+        val modes = launchModeByClassName(hostPackageName)
+        return ProxyActivitySlots.classNamesForProcessSlot(hostPackageName, processSlot)
+            .filter { className -> normalizeLaunchMode(modes[className]) == normalizedMode }
+    }
+
     fun normalizeLaunchMode(launchMode: String?): String? =
         ProxyActivityRegistry.normalizeLaunchMode(launchMode)
 }
@@ -43,36 +56,69 @@ object EngineProxyActivitySlots {
 class EngineActivityLaunchCoordinator(
     private val hostContext: Context,
     private val processSlot: String?,
-    private val slotAssignmentStore: ProxyActivitySlotAssignmentStore =
-        ProxyActivitySlotAssignmentStoreProvider.requireStore(),
     private val activityRecordManager: VirtualActivityRecordManager =
         EngineHostedProcessRuntimeDefaults.activityRecordManager,
+    private val allocationProvider: VirtualActivityLaunchAllocationProvider =
+        IpcVirtualActivityLaunchAllocationProvider(),
     private val proxyIntentFactory: (VirtualActivityManager, VirtualActivityRecord, Intent) -> Intent =
         { manager, record, sourceIntent -> manager.createProxyIntent(record, sourceIntent) }
 ) {
     fun remap(
         sourceIntent: Intent,
         plan: VirtualActivityDispatchPlan
+    ): VirtualContextWrapper.StartActivityMappingResult = remapInternal(
+        sourceIntent = sourceIntent,
+        plan = plan,
+        releaseOnFailure = true
+    )
+
+    private fun remapInternal(
+        sourceIntent: Intent,
+        plan: VirtualActivityDispatchPlan,
+        releaseOnFailure: Boolean
     ): VirtualContextWrapper.StartActivityMappingResult {
-        val target = plan.targets.singleOrNull()
-            ?: return blocked(sourceIntent, "engine_activity_target_count:${plan.targets.size}")
+        val target = plan.targets.singleOrNull() ?: run {
+            if (releaseOnFailure) {
+                plan.targets.mapNotNull { it.toAuthoritativeAllocation() }
+                    .asReversed()
+                    .forEach(::release)
+            }
+            return blocked(sourceIntent, "engine_activity_target_count:${plan.targets.size}")
+        }
+        val allocation = target.toAuthoritativeAllocation()
+            ?: return blocked(sourceIntent, "engine_activity_launch_allocation_missing")
         if (target.instanceId != plan.instanceId) {
+            if (releaseOnFailure) release(allocation)
             return blocked(sourceIntent, "engine_activity_instance_mismatch:${target.instanceId}")
         }
         if (!processSlot.isNullOrBlank() && target.processSlot != processSlot) {
+            if (releaseOnFailure) release(allocation)
             return blocked(
                 sourceIntent,
                 "engine_activity_process_slot_mismatch:expected=$processSlot,actual=${target.processSlot}"
             )
         }
+        val identity = checkNotNull(allocation.launchIdentity)
+        val proxyActivityClassName = checkNotNull(allocation.proxyActivityClassName)
+        val allocatedProcessSlot = EngineProxyActivitySlots.processSlotForClassName(
+            hostPackageName = hostContext.packageName,
+            className = proxyActivityClassName
+        )
+        if (allocatedProcessSlot != target.processSlot) {
+            if (releaseOnFailure) release(allocation)
+            return blocked(
+                sourceIntent,
+                "engine_activity_proxy_process_slot_mismatch:" +
+                    "expected=${target.processSlot},actual=${allocatedProcessSlot.orEmpty()}"
+            )
+        }
         val managerSnapshot = activityRecordManager.snapshotState()
         val assignmentKey = target.assignmentKey()
-        val previousAssignment = slotAssignmentStore.find(assignmentKey)
         return runCatching {
             val registry = ProxyActivityRegistry(
-                ProxyActivitySlots.classNamesForProcessSlot(hostContext.packageName, target.processSlot),
+                listOf(proxyActivityClassName),
                 ProxyActivitySlots.launchModeByClassName(hostContext.packageName),
-                slotAssignmentStore
+                PreassignedProxyActivitySlotStore(assignmentKey, proxyActivityClassName)
             )
             val manager = VirtualActivityManager(
                 context = hostContext,
@@ -94,13 +140,16 @@ class EngineActivityLaunchCoordinator(
             VirtualContextWrapper.StartActivityMappingResult.Remapped(
                 sourceIntent = sourceIntent,
                 proxyIntent = proxyIntentFactory(manager, record, sourceIntent)
+                    .attachEngineLaunchIdentity(identity)
             )
         }.getOrElse { error ->
             activityRecordManager.restoreState(managerSnapshot)
-            restoreAssignment(assignmentKey, previousAssignment)
+            val released = releaseOnFailure && release(allocation)
             blocked(
                 sourceIntent,
-                "engine_activity_allocation_failed:${error.javaClass.name}:${error.message.orEmpty()}"
+                "engine_activity_allocation_failed:${error.javaClass.name}:" +
+                    "${error.message.orEmpty()}:allocationReleased=$released:" +
+                    "allocationReleaseDeferred=${!releaseOnFailure}"
             )
         }
     }
@@ -110,18 +159,24 @@ class EngineActivityLaunchCoordinator(
     ): List<VirtualContextWrapper.StartActivityMappingResult> {
         if (entries.isEmpty()) return emptyList()
         val managerSnapshot = activityRecordManager.snapshotState()
-        val assignmentSnapshots = linkedMapOf<ProxyActivitySlotKey, String?>()
+        val allocations = entries.flatMap { (_, plan) ->
+            plan.targets.mapNotNull { it.toAuthoritativeAllocation() }
+        }
+        val hasExactlyOneAllocationPerEntry = entries.all { (_, plan) ->
+            plan.targets.size == 1 && plan.targets.single().toAuthoritativeAllocation() != null
+        }
+        if (!hasExactlyOneAllocationPerEntry || allocations.size != entries.size) {
+            allocations.asReversed().forEach(::release)
+            return entries.map { (sourceIntent, _) ->
+                blocked(sourceIntent, "engine_activity_batch_allocation_missing")
+            }
+        }
         val results = mutableListOf<VirtualContextWrapper.StartActivityMappingResult>()
         entries.forEach { (intent, plan) ->
-            plan.targets.singleOrNull()?.assignmentKey()?.let { key ->
-                assignmentSnapshots.putIfAbsent(key, slotAssignmentStore.find(key))
-            }
-            val result = remap(intent, plan)
+            val result = remapInternal(intent, plan, releaseOnFailure = false)
             if (result is VirtualContextWrapper.StartActivityMappingResult.Blocked) {
                 activityRecordManager.restoreState(managerSnapshot)
-                assignmentSnapshots.forEach { (key, previousAssignment) ->
-                    restoreAssignment(key, previousAssignment)
-                }
+                allocations.asReversed().forEach(::release)
                 return entries.map { (sourceIntent, _) ->
                     blocked(sourceIntent, "engine_activity_batch_rolled_back:${result.reason}")
                 }
@@ -129,6 +184,38 @@ class EngineActivityLaunchCoordinator(
             results += result
         }
         return results
+    }
+
+    private fun VirtualActivityDispatchTarget.toAuthoritativeAllocation(): VirtualActivityLaunchAllocation? {
+        val proxyActivityClassName = proxyActivityClassName?.takeIf { it.isNotBlank() } ?: return null
+        val capabilityToken = launchCapabilityToken?.takeIf { it.isNotBlank() } ?: return null
+        val runtimeEpoch = runtimeEpoch?.takeIf { it > 0L } ?: return null
+        val engineSessionId = engineSessionId?.takeIf { it.isNotBlank() } ?: return null
+        return runCatching {
+            val request = VirtualActivityLaunchAllocationRequest(
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                guestActivityClassName = activityClassName,
+                processSlot = processSlot,
+                launchMode = launchMode,
+                taskAffinity = taskAffinity
+            )
+            VirtualActivityLaunchAllocation(
+                accepted = true,
+                request = request,
+                proxyActivityClassName = proxyActivityClassName,
+                launchIdentity = VirtualActivityLaunchIdentity(
+                    capabilityToken = capabilityToken,
+                    instanceId = instanceId,
+                    runtimeEpoch = runtimeEpoch,
+                    engineSessionId = engineSessionId,
+                    processSlot = processSlot,
+                    proxyActivityClassName = proxyActivityClassName,
+                    guestActivityClassName = activityClassName
+                ),
+                reason = "activity_allocation_authorized"
+            )
+        }.getOrNull()
     }
 
     private fun VirtualActivityDispatchTarget.assignmentKey(): ProxyActivitySlotKey {
@@ -140,11 +227,18 @@ class EngineActivityLaunchCoordinator(
         )
     }
 
-    private fun restoreAssignment(key: ProxyActivitySlotKey, previousAssignment: String?) {
-        val currentAssignment = slotAssignmentStore.find(key)
-        if (currentAssignment != previousAssignment) {
-            slotAssignmentStore.compareAndSet(key, currentAssignment, previousAssignment)
-        }
+    private fun release(allocation: VirtualActivityLaunchAllocation): Boolean =
+        runCatching { allocationProvider.release(allocation) }.getOrDefault(false)
+
+    private fun Intent.attachEngineLaunchIdentity(identity: VirtualActivityLaunchIdentity): Intent = apply {
+        putExtra(VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH, identity.runtimeEpoch)
+        putExtra(VirtualActivityManager.EXTRA_ENGINE_SESSION_ID, identity.engineSessionId)
+        putExtra(VirtualActivityManager.EXTRA_ENGINE_PROCESS_SLOT, identity.processSlot)
+        putExtra(
+            VirtualActivityManager.EXTRA_ENGINE_PROXY_ACTIVITY_CLASS_NAME,
+            identity.proxyActivityClassName
+        )
+        putExtra(VirtualActivityManager.EXTRA_ENGINE_LAUNCH_CAPABILITY, identity.capabilityToken)
     }
 
     private fun blocked(
@@ -161,13 +255,12 @@ data class EngineActivityLaunchRequest(
     val hostContext: Context,
     val candidateProxyActivityClassNames: List<String>,
     val proxyLaunchModeByClassName: Map<String, String?>,
-    val slotAssignmentStore: ProxyActivitySlotAssignmentStore,
     val instanceId: String,
     val originPackageName: String,
     val guestActivityClassName: String,
     val launchMode: String?,
     val taskAffinity: String?,
-    val launchIdentity: EngineActivityLaunchIdentity? = null
+    val launchIdentity: EngineActivityLaunchIdentity
 )
 
 class EngineActivityProxyLauncher private constructor(
@@ -181,12 +274,25 @@ class EngineActivityProxyLauncher private constructor(
     ) : this(manager)
 
     fun launchGuestLauncher(request: EngineActivityLaunchRequest): Result<VirtualActivityRecord> {
+        val identity = request.launchIdentity
+        require(identity.instanceId == request.instanceId) { "engine launch instance mismatch" }
+        require(identity.guestActivityClassName == request.guestActivityClassName) {
+            "engine launch guest Activity mismatch"
+        }
+        require(identity.proxyActivityClassName in request.candidateProxyActivityClassNames) {
+            "engine launch proxy was not preassigned"
+        }
+        val assignmentKey = ProxyActivitySlotKey(
+            instanceId = request.instanceId,
+            launchMode = EngineProxyActivitySlots.normalizeLaunchMode(request.launchMode),
+            taskKey = request.taskAffinity ?: "${request.originPackageName}:${request.instanceId}"
+        )
         val activityManager = VirtualActivityManager(
             context = request.hostContext,
             proxyActivityRegistry = ProxyActivityRegistry(
-                request.candidateProxyActivityClassNames,
+                listOf(identity.proxyActivityClassName),
                 request.proxyLaunchModeByClassName,
-                request.slotAssignmentStore
+                PreassignedProxyActivitySlotStore(assignmentKey, identity.proxyActivityClassName)
             ),
             activityRecordManager = manager
         )
@@ -196,17 +302,7 @@ class EngineActivityProxyLauncher private constructor(
             guestActivityClassName = request.guestActivityClassName,
             launchMode = request.launchMode,
             taskAffinity = request.taskAffinity,
-            engineLaunchIdentity = request.launchIdentity?.let { identity ->
-                VirtualActivityLaunchIdentity(
-                    capabilityToken = identity.capabilityToken,
-                    instanceId = identity.instanceId,
-                    runtimeEpoch = identity.runtimeEpoch,
-                    engineSessionId = identity.engineSessionId,
-                    processSlot = identity.processSlot,
-                    proxyActivityClassName = identity.proxyActivityClassName,
-                    guestActivityClassName = identity.guestActivityClassName
-                )
-            }
+            engineLaunchIdentity = identity.toLoaderIdentity()
         )
     }
 }
@@ -419,21 +515,46 @@ class EngineActivityTaskController(
 ) {
     fun restorePersisted(instanceId: String): EngineActivityTaskControlResult {
         requireValidInstanceId(instanceId)
-        val restoredActivityCount = taskRecords.restorePersisted()
+        val state = activityService.queryTaskState(instanceId)
+        if (state.verdict == EngineResultStatus.FAIL) {
+            return EngineActivityTaskControlResult(
+                status = "FAIL",
+                activityCount = 0,
+                taskCount = null,
+                detail = state.message
+            )
+        }
+        val restoredActivityCount = taskRecords.restore(state.tasks)
         return EngineActivityTaskControlResult(
             status = "RESTORED",
             activityCount = restoredActivityCount,
-            taskCount = null
+            taskCount = state.taskCount
         )
     }
 
     fun restorePersistedIfEmpty(instanceId: String): EngineActivityTaskControlResult {
         requireValidInstanceId(instanceId)
-        val restoredActivityCount = taskRecords.restorePersistedIfEmpty()
+        if (taskRecords.snapshot().activityCount > 0) {
+            return EngineActivityTaskControlResult(
+                status = "SKIPPED_OR_EMPTY",
+                activityCount = 0,
+                taskCount = null
+            )
+        }
+        val state = activityService.queryTaskState(instanceId)
+        if (state.verdict == EngineResultStatus.FAIL) {
+            return EngineActivityTaskControlResult(
+                status = "FAIL",
+                activityCount = 0,
+                taskCount = null,
+                detail = state.message
+            )
+        }
+        val restoredActivityCount = taskRecords.restore(state.tasks)
         return EngineActivityTaskControlResult(
             status = if (restoredActivityCount > 0) "RESTORED" else "SKIPPED_OR_EMPTY",
             activityCount = restoredActivityCount,
-            taskCount = null
+            taskCount = state.taskCount
         )
     }
 
@@ -509,28 +630,16 @@ object EngineActivityTaskControllers {
         fileBacked(context.filesDir)
 
     fun fileBacked(filesDir: File): EngineActivityTaskController {
-        val stateStore = FileBackedEngineActivityTaskStateStore(
-            File(filesDir, EngineActivityTaskStateFiles.DEFAULT_FILE_NAME)
-        )
-        val registry = EngineRuntimeRegistry.global.attachStateStore(
-            FileBackedEngineRuntimeStateStore(
-                File(filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME)
-            )
-        )
+        @Suppress("UNUSED_VARIABLE")
+        val ignored = filesDir
         val activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager
-        val systemServer = DefaultVirtualSystemServer(
-            registry = registry,
-            activityTaskStateStore = stateStore,
-            activityRecordManager = activityRecordManager
-        )
         return EngineActivityTaskController(
             activityService = IpcBackedVirtualActivityService(
-                fallback = systemServer.activityService,
                 localTaskSnapshot = { activityRecordManager.exportTasks() }
             ),
             taskRecords = EngineActivityTaskRecords(
                 manager = activityRecordManager,
-                stateStore = stateStore
+                stateStore = InMemoryEngineActivityTaskStateStore()
             )
         )
     }
@@ -611,28 +720,11 @@ class EngineVirtualActivityOperations(
 
 object EngineVirtualActivityOperationsFactory {
     fun hotPath(filesDir: File? = null): VirtualActivityOperations {
+        @Suppress("UNUSED_VARIABLE")
+        val ignored = filesDir
         val activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager
-        val registry = if (filesDir == null) {
-            EngineRuntimeRegistry.global
-        } else {
-            EngineRuntimeRegistry.global.attachStateStore(
-                FileBackedEngineRuntimeStateStore(
-                    File(filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME)
-                )
-            )
-        }
-        val systemServer = DefaultVirtualSystemServer(
-            registry = registry,
-            activityTaskStateStore = filesDir?.let {
-                FileBackedEngineActivityTaskStateStore(
-                    File(it, EngineActivityTaskStateFiles.DEFAULT_FILE_NAME)
-                )
-            } ?: InMemoryEngineActivityTaskStateStore(),
-            activityRecordManager = activityRecordManager
-        )
         return EngineVirtualActivityOperations(
             activityService = IpcBackedVirtualActivityService(
-                fallback = systemServer.activityService,
                 localTaskSnapshot = { activityRecordManager.exportTasks() }
             )
         )

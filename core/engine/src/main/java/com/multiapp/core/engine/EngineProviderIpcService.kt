@@ -4,7 +4,7 @@ import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineSubsystem
 
 class IpcBackedVirtualProviderService(
-    @Suppress("UNUSED_PARAMETER") fallback: VirtualProviderService,
+    @Suppress("UNUSED_PARAMETER") fallback: VirtualProviderService? = null,
     private val remotePlan: (String, VirtualProviderDispatchPlanRequest) -> VirtualProviderDispatchPlan? =
         EngineRuntimeIpcClients::planProvider,
     private val remoteResolve: (

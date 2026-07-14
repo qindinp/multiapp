@@ -19,7 +19,6 @@ import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
 import dagger.hilt.android.qualifiers.ApplicationContext
-import java.io.File
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -170,7 +169,7 @@ internal fun EngineResult.toEngineIpcBundle(
     putString(EngineRuntimeIpcContract.KEY_MESSAGE, message)
     putBundle(
         EngineRuntimeIpcContract.KEY_ENGINE_RUNTIME,
-        runtime?.toEngineRuntimeIdentityBundle(bundleFactory)
+        runtime?.toAuthoritativeRuntimeBundle(bundleFactory)
     )
     putBundle(
         EngineRuntimeIpcContract.KEY_ENGINE_EVIDENCE,
@@ -183,8 +182,8 @@ internal fun Bundle.toEngineRemoteResultOrNull(): EngineRemoteResult? = runCatch
     val operation = requiredString(EngineRuntimeIpcContract.KEY_OPERATION)
     val status = requiredEnum<EngineResultStatus>(EngineRuntimeIpcContract.KEY_STATUS)
     val runtimeBundle = getBundle(EngineRuntimeIpcContract.KEY_ENGINE_RUNTIME)
-    val runtimeIdentity = runtimeBundle?.toEngineRuntimeIdentityOrNull()
-    check(runtimeBundle == null || runtimeIdentity != null)
+    val runtime = runtimeBundle?.toAuthoritativeRuntimeOrNull()
+    check(runtimeBundle == null || runtime != null)
     val evidenceBundle = getBundle(EngineRuntimeIpcContract.KEY_ENGINE_EVIDENCE)
     val evidence = evidenceBundle?.toEngineEvidenceOrNull()
     check(evidenceBundle == null || evidence != null)
@@ -195,10 +194,10 @@ internal fun Bundle.toEngineRemoteResultOrNull(): EngineRemoteResult? = runCatch
             instanceId = optionalNonBlankString(EngineRuntimeIpcContract.KEY_INSTANCE_ID),
             originPackageName = optionalNonBlankString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME),
             message = getString(EngineRuntimeIpcContract.KEY_MESSAGE),
-            runtime = null,
+            runtime = runtime,
             evidence = evidence
         ),
-        runtimeIdentity = runtimeIdentity
+        runtimeIdentity = runtime?.toEngineRuntimeIdentity()
     )
 }.getOrNull()
 
@@ -245,6 +244,24 @@ internal fun Bundle.toEngineRuntimeIdentityOrNull(): EngineRuntimeIdentity? = ru
         state = requiredEnum(EngineRuntimeIpcContract.KEY_RUNTIME_STATE)
     )
 }.getOrNull()
+
+private fun VirtualInstanceRuntime.toEngineRuntimeIdentity(): EngineRuntimeIdentity =
+    EngineRuntimeIdentity(
+        instanceId = instanceId,
+        hostPackageName = hostPackageName,
+        originPackageName = originPackageName,
+        virtualPackageName = virtualPackageName,
+        dataRoot = dataRoot,
+        profile = profile,
+        processSlot = processSlot,
+        proxySlot = proxySlot,
+        evidenceSessionId = evidenceSessionId,
+        runtimeEpoch = runtimeEpoch,
+        engineSessionId = engineSessionId,
+        processId = processId,
+        processName = processName,
+        state = state
+    )
 
 internal fun EngineEvidenceReport.toEngineEvidenceBundle(
     bundleFactory: () -> Bundle = ::Bundle
@@ -385,7 +402,7 @@ internal interface EngineVirtualizationRemote {
     fun launchInstance(request: LaunchInstanceRequest): EngineRemoteResult?
     fun stopInstance(instanceId: String): EngineRemoteResult?
     fun deleteInstance(instanceId: String): EngineRemoteResult?
-    fun queryRuntimeState(instanceId: String): EngineRuntimeIdentity?
+    fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime?
     fun exportEvidence(instanceId: String): EngineEvidenceReport?
 }
 
@@ -408,7 +425,7 @@ private object BinderEngineVirtualizationRemote : EngineVirtualizationRemote {
     override fun deleteInstance(instanceId: String): EngineRemoteResult? =
         EngineRuntimeIpcClients.engineDeleteInstance(instanceId)
 
-    override fun queryRuntimeState(instanceId: String): EngineRuntimeIdentity? =
+    override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? =
         EngineRuntimeIpcClients.engineQueryRuntimeState(instanceId)
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport? =
@@ -420,14 +437,7 @@ class IpcVirtualizationEngine @Inject constructor(
     @ApplicationContext context: Context
 ) : VirtualizationEngine {
     private val hostContext = context.applicationContext ?: context
-    private val core = IpcVirtualizationEngineCore(
-        remote = BinderEngineVirtualizationRemote,
-        runtimeReader = { instanceId ->
-            FileBackedEngineRuntimeStateStore(
-                File(hostContext.filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME)
-            ).get(instanceId)?.toRuntime()
-        }
-    )
+    private val core = IpcVirtualizationEngineCore(remote = BinderEngineVirtualizationRemote)
 
     init {
         EngineRuntimeIpcClients.install(hostContext)
@@ -455,8 +465,7 @@ class IpcVirtualizationEngine @Inject constructor(
 }
 
 internal class IpcVirtualizationEngineCore(
-    private val remote: EngineVirtualizationRemote,
-    private val runtimeReader: (String) -> VirtualInstanceRuntime?
+    private val remote: EngineVirtualizationRemote
 ) : VirtualizationEngine {
     override fun installOrRefreshPackage(originPackageName: String): EngineResult =
         complete(
@@ -507,8 +516,9 @@ internal class IpcVirtualizationEngineCore(
         )
 
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? {
-        val identity = remote.queryRuntimeState(instanceId) ?: return null
-        return runtimeReader(instanceId)?.takeIf(identity::matches)
+        return remote.queryRuntimeState(instanceId)?.takeIf { runtime ->
+            runtime.instanceId == instanceId
+        }
     }
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport =
@@ -533,7 +543,7 @@ internal class IpcVirtualizationEngineCore(
             message = "engine_authority_unavailable_or_unknown_result"
         )
         val identity = remoteValue.runtimeIdentity ?: return remoteValue.result
-        val runtime = runtimeReader(identity.instanceId)?.takeIf(identity::matches)
+        val runtime = remoteValue.result.runtime?.takeIf(identity::matches)
             ?: return EngineResult.fail(
                 operation = operation,
                 instanceId = identity.instanceId,

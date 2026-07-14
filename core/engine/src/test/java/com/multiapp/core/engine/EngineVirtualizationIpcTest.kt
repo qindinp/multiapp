@@ -17,7 +17,13 @@ import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
+import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentFilter
+import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import com.multiapp.core.model.virtual.VirtualProviderPathPattern
+import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
+import com.multiapp.core.model.virtual.VirtualProviderPathPermission
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -153,7 +159,7 @@ class EngineVirtualizationIpcTest {
     }
 
     @Test
-    fun `engine result round trip carries runtime identity without parceling package snapshot`() {
+    fun `engine result round trip carries complete authoritative runtime snapshot`() {
         val bundles = MockBundleFactory()
         val runtime = runtime()
         val remote = EngineResult.pass(
@@ -167,13 +173,73 @@ class EngineVirtualizationIpcTest {
         assertEquals(EngineResultStatus.PASS, remote?.result?.status)
         assertEquals(evidence(), remote?.result?.evidence)
         assertTrue(requireNotNull(remote?.runtimeIdentity).matches(runtime))
-        assertNull(remote.result.runtime)
+        assertEquals(runtime, remote.result.runtime)
+    }
+
+    @Test
+    fun `authoritative runtime codec preserves nested package facts and rejects tampering`() {
+        val bundles = MockBundleFactory()
+        val provider = ResolvedComponent(
+            name = "com.test.Provider",
+            exported = true,
+            resolvedIntentFilters = listOf(
+                ResolvedIntentFilter(
+                    actions = listOf("com.test.QUERY"),
+                    dataSchemes = listOf("content"),
+                    dataAuthorities = listOf("com.test.provider"),
+                    dataPaths = listOf("/books"),
+                    priority = 9
+                )
+            ),
+            authorities = listOf("com.test.provider"),
+            readPermission = "com.test.READ",
+            grantUriPermissions = true,
+            pathPermissions = listOf(
+                VirtualProviderPathPermission(
+                    pattern = VirtualProviderPathPattern(
+                        "/books",
+                        VirtualProviderPathPatternType.PREFIX
+                    ),
+                    readPermission = "com.test.READ"
+                )
+            ),
+            uriPermissionPatterns = listOf(
+                VirtualProviderPathPattern("/books/*", VirtualProviderPathPatternType.SIMPLE_GLOB)
+            ),
+            typedMetaData = mapOf("enabled" to VirtualMetaDataValue.boolean(true))
+        )
+        val expected = runtime().let { runtime ->
+            runtime.copy(
+                packageSnapshot = runtime.packageSnapshot.copy(
+                    sourceSha256 = "a".repeat(64),
+                    splitSourceDirs = listOf("/data/app/test/config.apk"),
+                    splitSha256s = listOf("b".repeat(64)),
+                    splitPublicSourceDirs = listOf("/data/app/test/config.apk"),
+                    splitNames = listOf("config"),
+                    nativeLibraries = listOf("libsample.so"),
+                    abiList = listOf("arm64-v8a"),
+                    typedMetaData = mapOf("answer" to VirtualMetaDataValue.int(42)),
+                    providers = listOf(provider)
+                )
+            )
+        }
+        val encoded = expected.toAuthoritativeRuntimeBundle(bundles::create)
+
+        assertEquals(expected, encoded.toAuthoritativeRuntimeOrNull())
+
+        encoded.putString("unexpected", "value")
+        assertNull(encoded.toAuthoritativeRuntimeOrNull())
+
+        val mismatched = expected.toAuthoritativeRuntimeBundle(bundles::create).apply {
+            putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, "instance-other")
+        }
+        assertNull(mismatched.toAuthoritativeRuntimeOrNull())
     }
 
     @Test
     fun `remote mutation is not retried when authority result is unknown`() {
         val remote = RecordingRemote()
-        val engine = IpcVirtualizationEngineCore(remote) { runtime() }
+        val engine = IpcVirtualizationEngineCore(remote)
 
         val result = engine.launchInstance(LaunchInstanceRequest(INSTANCE_ID))
 
@@ -185,7 +251,7 @@ class EngineVirtualizationIpcTest {
     @Test
     fun `remote create mutation with metadata is not retried when result is unknown`() {
         val remote = RecordingRemote()
-        val engine = IpcVirtualizationEngineCore(remote) { null }
+        val engine = IpcVirtualizationEngineCore(remote)
 
         val result = engine.createInstance(createRequest())
 
@@ -196,7 +262,7 @@ class EngineVirtualizationIpcTest {
     }
 
     @Test
-    fun `remote runtime identity must match read only durable snapshot`() {
+    fun `remote runtime identity must match the runtime delivered by authority`() {
         val bundles = MockBundleFactory()
         val expected = runtime()
         val remote = RecordingRemote().apply {
@@ -204,18 +270,26 @@ class EngineVirtualizationIpcTest {
                 result = EngineResult.pass(
                     operation = "launchInstance",
                     instanceId = INSTANCE_ID,
-                    originPackageName = ORIGIN_PACKAGE
+                    originPackageName = ORIGIN_PACKAGE,
+                    runtime = expected
                 ),
                 runtimeIdentity = expected.toEngineRuntimeIdentityBundle(
                     bundles::create
                 ).toEngineRuntimeIdentityOrNull()
             )
-            queryIdentity = launchResult?.runtimeIdentity
+            queryRuntime = expected
         }
-        val matchingEngine = IpcVirtualizationEngineCore(remote) { expected }
-        val staleEngine = IpcVirtualizationEngineCore(remote) {
-            expected.copy(engineSessionId = "stale-session")
-        }
+        val matchingEngine = IpcVirtualizationEngineCore(remote)
+        val staleEngine = IpcVirtualizationEngineCore(
+            RecordingRemote().apply {
+                launchResult = remote.launchResult?.copy(
+                    runtimeIdentity = remote.launchResult?.runtimeIdentity?.copy(
+                        engineSessionId = "stale-session"
+                    )
+                )
+                queryRuntime = expected.copy(instanceId = "instance-other")
+            }
+        )
 
         val matching = matchingEngine.launchInstance(LaunchInstanceRequest(INSTANCE_ID))
         val stale = staleEngine.launchInstance(LaunchInstanceRequest(INSTANCE_ID))
@@ -232,7 +306,7 @@ class EngineVirtualizationIpcTest {
         var createRequestCalls: Int = 0
         var legacyCreateCalls: Int = 0
         var launchResult: EngineRemoteResult? = null
-        var queryIdentity: EngineRuntimeIdentity? = null
+        var queryRuntime: VirtualInstanceRuntime? = null
 
         override fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult? = null
 
@@ -255,7 +329,7 @@ class EngineVirtualizationIpcTest {
 
         override fun deleteInstance(instanceId: String): EngineRemoteResult? = null
 
-        override fun queryRuntimeState(instanceId: String): EngineRuntimeIdentity? = queryIdentity
+        override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? = queryRuntime
 
         override fun exportEvidence(instanceId: String): EngineEvidenceReport? = null
     }

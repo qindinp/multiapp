@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ProxyActivitySlotExhaustedException
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
@@ -16,9 +17,11 @@ import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkConstructor
 import io.mockk.mockkObject
 import io.mockk.mockkStatic
 import io.mockk.unmockkObject
+import io.mockk.unmockkConstructor
 import io.mockk.unmockkStatic
 import io.mockk.verify
 import org.junit.jupiter.api.io.TempDir
@@ -40,6 +43,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     fun setUp() {
         ProxyActivitySlotAssignmentStoreProvider.clearForTests()
         ProxyActivitySlotAssignmentStoreProvider.install(TestProxyActivitySlotAssignmentStore())
+        VirtualActivityLaunchAllocationProviders.install(TestActivityLaunchAllocationProvider())
         VirtualActivityLaunchAuthority.install(
             validator = VirtualActivityLaunchValidator {
                 VirtualActivityLaunchAuthorityResult(true, "test_authorized")
@@ -56,7 +60,9 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         VirtualProcessRuntime.global.clearAll()
         VirtualPackageRegistry.global.clear()
         VirtualActivityLaunchAuthority.clearForTests()
+        VirtualActivityLaunchAllocationProviders.clearForTest()
         ProxyActivitySlotAssignmentStoreProvider.clearForTests()
+        unmockkConstructor(Intent::class)
         unmockkObject(ActivityThreadCompat)
         unmockkStatic(Log::class)
     }
@@ -740,6 +746,98 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     }
 
     @Test
+    fun `remap start activities releases allocations in reverse and restores state when second local allocation fails`(
+        @TempDir filesDir: File
+    ) {
+        val loggedFailures = mutableListOf<Throwable>()
+        val allocationProvider = SameSlotRecordingAllocationProvider()
+        VirtualActivityLaunchAllocationProviders.install(allocationProvider)
+        mockkConstructor(Intent::class)
+        every {
+            anyConstructed<Intent>().setClassName(any<String>(), any<String>())
+        } answers { self as Intent }
+        every {
+            anyConstructed<Intent>().putExtra(any<String>(), any<String>())
+        } answers { self as Intent }
+        every {
+            anyConstructed<Intent>().putExtra(any<String>(), any<Long>())
+        } answers { self as Intent }
+        every {
+            anyConstructed<Intent>().putExtra(any<String>(), any<Int>())
+        } answers { self as Intent }
+        every { anyConstructed<Intent>().flags } returns 0
+        every { anyConstructed<Intent>().setFlags(any()) } answers { self as Intent }
+        val recordManager = VirtualActivityRecordManager()
+        val processRuntime = VirtualProcessRuntime()
+        val instrumentation = VirtualInstrumentation(
+            base = mockk<Instrumentation>(relaxed = true),
+            processRuntime = processRuntime,
+            activityRecordManager = recordManager
+        )
+        val snapshot = snapshotForInstance(
+            instanceId = "inst-001",
+            virtualPackageName = "com.multiapp.instance.minimal"
+        ).copy(
+            activities = listOf(
+                ResolvedComponent(
+                    name = "com.test.minimal.FirstActivity",
+                    taskAffinity = "com.test.minimal:first"
+                ),
+                ResolvedComponent(
+                    name = "com.test.minimal.SecondActivity",
+                    taskAffinity = "com.test.minimal:second"
+                )
+            )
+        )
+        val hostApplication = mockk<Application>(relaxed = true) {
+            every { packageName } returns "com.multiapp.app"
+            every { this@mockk.filesDir } returns filesDir
+        }
+        VirtualPackageRegistry.global.register(snapshot)
+        mockkStatic(Log::class)
+        every { Log.i(any(), any()) } returns 0
+        every { Log.w(any(), any<String>()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } answers {
+            loggedFailures += thirdArg<Throwable>()
+            0
+        }
+        rememberHostedRuntime(
+            instrumentation = instrumentation,
+            instanceId = "inst-001",
+            hostApplication = hostApplication,
+            result = hostedBootstrapResult(snapshot = snapshot)
+        )
+        val who = mockk<Context>(relaxed = true) {
+            every { packageName } returns "com.multiapp.instance.minimal"
+        }
+
+        val result = instrumentation.remapStartActivityIntents(
+            target = null,
+            who = who,
+            intents = arrayOf(
+                explicitRemapIntent("com.test.minimal.FirstActivity"),
+                explicitRemapIntent("com.test.minimal.SecondActivity")
+            ),
+            api = "execStartActivities:test"
+        )
+
+        assertNull(result)
+        assertEquals(
+            2,
+            allocationProvider.allocations.size,
+            loggedFailures.joinToString("\n") { it.stackTraceToString() }
+        )
+        assertEquals(
+            allocationProvider.allocations.asReversed()
+                .mapNotNull { it.launchIdentity?.capabilityToken },
+            allocationProvider.releasedCapabilityTokens
+        )
+        assertTrue(loggedFailures.any { it is ProxyActivitySlotExhaustedException })
+        assertTrue(recordManager.list().isEmpty())
+        assertTrue(recordManager.listTasks().isEmpty())
+    }
+
+    @Test
     fun `activity record recovery restores missing proxy record during substitution`() {
         val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
         val recordManager = VirtualActivityRecordManager()
@@ -1038,6 +1136,23 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         every { getStringExtra("multiapp.guestActivityClassName") } returns guestActivityClassName
     }
 
+    private fun explicitRemapIntent(activityClassName: String): Intent {
+        val component = mockk<ComponentName>(relaxed = true) {
+            every { packageName } returns "com.test.minimal"
+            every { className } returns activityClassName
+        }
+        return mockk(relaxed = true) {
+            every { this@mockk.component } returns component
+            every { selector } returns null
+            every { `package` } returns null
+            every { flags } returns 0
+            every { action } returns null
+            every { dataString } returns null
+            every { categories } returns emptySet()
+            every { extras } returns null
+        }
+    }
+
     private fun sourceIntentForRecovery(
         flags: Int = 0,
         action: String? = null,
@@ -1191,6 +1306,70 @@ class VirtualInstrumentationStartActivityEvidenceTest {
 
         override fun finishActivity(instanceId: String, token: String): Boolean {
             finishCalls += instanceId to token
+            return true
+        }
+    }
+
+    private class TestActivityLaunchAllocationProvider : VirtualActivityLaunchAllocationProvider {
+        private var tokenIndex = 0
+
+        override fun allocate(
+            request: VirtualActivityLaunchAllocationRequest
+        ): VirtualActivityLaunchAllocation {
+            val hostPackageName = request.processSlot.substringBeforeLast(":v")
+            val launchModes = ProxyActivitySlots.launchModeByClassName(hostPackageName)
+            val proxyActivityClassName = ProxyActivitySlots.classNamesForProcessSlot(
+                hostPackageName,
+                request.processSlot
+            ).first { className -> launchModes[className] == request.launchMode }
+            val identity = VirtualActivityLaunchIdentity(
+                capabilityToken = "instrumentation-capability-${++tokenIndex}",
+                instanceId = request.instanceId,
+                runtimeEpoch = 42L,
+                engineSessionId = "engine-session-42",
+                processSlot = request.processSlot,
+                proxyActivityClassName = proxyActivityClassName,
+                guestActivityClassName = request.guestActivityClassName
+            )
+            return VirtualActivityLaunchAllocation(
+                accepted = true,
+                request = request,
+                proxyActivityClassName = proxyActivityClassName,
+                launchIdentity = identity,
+                reason = "activity_allocation_authorized"
+            )
+        }
+
+        override fun release(allocation: VirtualActivityLaunchAllocation): Boolean = true
+    }
+
+    private class SameSlotRecordingAllocationProvider : VirtualActivityLaunchAllocationProvider {
+        val allocations = mutableListOf<VirtualActivityLaunchAllocation>()
+        val releasedCapabilityTokens = mutableListOf<String>()
+
+        override fun allocate(
+            request: VirtualActivityLaunchAllocationRequest
+        ): VirtualActivityLaunchAllocation {
+            val identity = VirtualActivityLaunchIdentity(
+                capabilityToken = "batch-capability-${allocations.size + 1}",
+                instanceId = request.instanceId,
+                runtimeEpoch = 42L,
+                engineSessionId = "engine-session-42",
+                processSlot = request.processSlot,
+                proxyActivityClassName = "com.multiapp.app.container.ProxyActivity0",
+                guestActivityClassName = request.guestActivityClassName
+            )
+            return VirtualActivityLaunchAllocation(
+                accepted = true,
+                request = request,
+                proxyActivityClassName = identity.proxyActivityClassName,
+                launchIdentity = identity,
+                reason = "activity_allocation_authorized"
+            ).also(allocations::add)
+        }
+
+        override fun release(allocation: VirtualActivityLaunchAllocation): Boolean {
+            releasedCapabilityTokens += allocation.launchIdentity?.capabilityToken.orEmpty()
             return true
         }
     }

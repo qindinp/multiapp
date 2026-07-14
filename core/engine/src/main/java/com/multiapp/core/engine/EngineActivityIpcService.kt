@@ -172,7 +172,7 @@ internal fun VirtualProxyActivitySlotOperationResult.isValidProxyActivitySlotIpc
         proxyActivityClassName.isValidNullableProxyActivitySlotClassName()
 
 class IpcBackedVirtualActivityService(
-    @Suppress("UNUSED_PARAMETER") fallback: VirtualActivityService,
+    @Suppress("UNUSED_PARAMETER") fallback: VirtualActivityService? = null,
     private val remoteProxySlotQuery: (
         String,
         ProxyActivitySlotKey
@@ -262,7 +262,9 @@ class IpcBackedVirtualActivityService(
         runCatching { remotePlan(instanceId, request) }.getOrNull()
             ?.takeIf { response ->
                 response.instanceId == instanceId &&
-                    response.targets.all { it.instanceId == instanceId }
+                    response.targets.all {
+                        it.instanceId == instanceId && it.hasAuthoritativeLaunchAllocation()
+                    }
             }
             ?.let { return it }
         return VirtualActivityDispatchPlan(
@@ -524,3 +526,9 @@ class IpcBackedVirtualActivityService(
     private fun EngineResultStatus.asReadOnlySnapshotVerdict(): EngineResultStatus =
         if (this == EngineResultStatus.FAIL) EngineResultStatus.FAIL else EngineResultStatus.PARTIAL
 }
+
+private fun VirtualActivityDispatchTarget.hasAuthoritativeLaunchAllocation(): Boolean =
+    proxyActivityClassName?.isNotBlank() == true &&
+        launchCapabilityToken?.isNotBlank() == true &&
+        runtimeEpoch?.let { it > 0L } == true &&
+        engineSessionId?.isNotBlank() == true

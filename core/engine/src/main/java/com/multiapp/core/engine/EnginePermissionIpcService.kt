@@ -4,7 +4,7 @@ import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineSubsystem
 
 class IpcBackedVirtualPermissionService(
-    @Suppress("UNUSED_PARAMETER") fallback: VirtualPermissionService,
+    @Suppress("UNUSED_PARAMETER") fallback: VirtualPermissionService? = null,
     private val remoteCheck: (String, String) -> VirtualPermissionCheckResult? =
         EngineRuntimeIpcClients::checkPermission,
     private val remoteState: (String) -> VirtualPermissionRuntimeState? =

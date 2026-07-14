@@ -1,6 +1,7 @@
 package com.multiapp.core.engine
 
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import java.security.SecureRandom
 import java.util.Base64
 
@@ -30,6 +31,14 @@ data class EngineActivityLaunchAuthorization(
     val reason: String
 )
 
+data class EngineActivityLaunchAllocationRelease(
+    val accepted: Boolean,
+    val key: ProxyActivitySlotKey? = null,
+    val allocatedProxyActivityClassName: String? = null,
+    val previousProxyActivityClassName: String? = null,
+    val reason: String
+)
+
 class EngineActivityLaunchCapabilityRegistry(
     private val clockNanos: () -> Long = System::nanoTime,
     private val tokenFactory: () -> String = ::secureCapabilityToken,
@@ -47,7 +56,9 @@ class EngineActivityLaunchCapabilityRegistry(
         runtime: VirtualInstanceRuntime,
         processId: Int,
         proxyActivityClassName: String,
-        guestActivityClassName: String
+        guestActivityClassName: String,
+        allocationKey: ProxyActivitySlotKey? = null,
+        previousProxyActivityClassName: String? = null
     ): EngineActivityLaunchIdentity {
         require(processId > 0) { "processId must be positive" }
         require(runtime.processId == processId) {
@@ -55,6 +66,12 @@ class EngineActivityLaunchCapabilityRegistry(
         }
         require(proxyActivityClassName.isNotBlank()) { "proxyActivityClassName must not be blank" }
         require(guestActivityClassName.isNotBlank()) { "guestActivityClassName must not be blank" }
+        require(allocationKey == null || allocationKey.instanceId == runtime.instanceId) {
+            "allocation key must belong to the authoritative runtime"
+        }
+        require(previousProxyActivityClassName == null || previousProxyActivityClassName.isNotBlank()) {
+            "previousProxyActivityClassName must not be blank"
+        }
         val now = clockNanos()
         pruneExpiredLocked(now)
         val generation = CapabilityGeneration(
@@ -95,7 +112,9 @@ class EngineActivityLaunchCapabilityRegistry(
         records[identity.capabilityToken] = CapabilityRecord(
             identity = identity,
             processId = processId,
-            expiresAtNanos = generation.expiresAtNanos
+            expiresAtNanos = generation.expiresAtNanos,
+            allocationKey = allocationKey,
+            previousProxyActivityClassName = previousProxyActivityClassName
         )
         return identity
     }
@@ -109,12 +128,40 @@ class EngineActivityLaunchCapabilityRegistry(
         if (callingPid <= 0 || callingPid != record.processId) {
             return rejected("launch_capability_process_id_mismatch")
         }
-        val idempotent = record.authorized
+        if (record.authorized) return rejected("launch_capability_replayed")
         record.authorized = true
         return EngineActivityLaunchAuthorization(
             accepted = true,
-            idempotent = idempotent,
-            reason = if (idempotent) "launch_capability_already_authorized" else "launch_capability_authorized"
+            idempotent = false,
+            reason = "launch_capability_authorized"
+        )
+    }
+
+    @Synchronized
+    fun releaseUnconsumedAllocation(
+        identity: EngineActivityLaunchIdentity,
+        callingPid: Int
+    ): EngineActivityLaunchAllocationRelease {
+        pruneExpiredLocked()
+        val record = records[identity.capabilityToken]
+            ?: return allocationRejected("launch_allocation_capability_not_found")
+        if (record.identity != identity) {
+            return allocationRejected("launch_allocation_capability_identity_mismatch")
+        }
+        if (callingPid <= 0 || callingPid != record.processId) {
+            return allocationRejected("launch_allocation_process_id_mismatch")
+        }
+        if (record.authorized || record.completed) {
+            return allocationRejected("launch_allocation_already_consumed")
+        }
+        val key = record.allocationKey
+            ?: return allocationRejected("launch_allocation_not_capability_bound")
+        return EngineActivityLaunchAllocationRelease(
+            accepted = true,
+            key = key,
+            allocatedProxyActivityClassName = identity.proxyActivityClassName,
+            previousProxyActivityClassName = record.previousProxyActivityClassName,
+            reason = "launch_allocation_released"
         )
     }
 
@@ -211,10 +258,17 @@ class EngineActivityLaunchCapabilityRegistry(
         reason = reason
     )
 
+    private fun allocationRejected(reason: String) = EngineActivityLaunchAllocationRelease(
+        accepted = false,
+        reason = reason
+    )
+
     private data class CapabilityRecord(
         val identity: EngineActivityLaunchIdentity,
         val processId: Int,
         val expiresAtNanos: Long,
+        val allocationKey: ProxyActivitySlotKey?,
+        val previousProxyActivityClassName: String?,
         var authorized: Boolean = false,
         var completed: Boolean = false
     )

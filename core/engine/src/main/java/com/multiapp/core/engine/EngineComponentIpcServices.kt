@@ -4,7 +4,7 @@ import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineSubsystem
 
 class IpcBackedVirtualServiceService(
-    @Suppress("UNUSED_PARAMETER") fallback: VirtualServiceService,
+    @Suppress("UNUSED_PARAMETER") fallback: VirtualServiceService? = null,
     private val remotePlan: (String, VirtualServiceDispatchPlanRequest) -> VirtualServiceDispatchPlan? =
         EngineRuntimeIpcClients::planService,
     private val remoteRecord: (String, VirtualServiceOperationResult) -> Boolean? =
@@ -98,7 +98,7 @@ class IpcBackedVirtualServiceService(
 }
 
 class IpcBackedVirtualBroadcastService(
-    @Suppress("UNUSED_PARAMETER") fallback: VirtualBroadcastService,
+    @Suppress("UNUSED_PARAMETER") fallback: VirtualBroadcastService? = null,
     private val remotePlan: (String, VirtualBroadcastDispatchPlanRequest) -> VirtualBroadcastDispatchPlan? =
         EngineRuntimeIpcClients::planBroadcast,
     private val remoteRecord: (String, VirtualBroadcastOperationResult) -> Boolean? =

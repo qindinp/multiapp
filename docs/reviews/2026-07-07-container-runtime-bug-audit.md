@@ -2765,3 +2765,58 @@ commercial-container decision.
   semantics and API 28-36/HyperOS compatibility evidence remain incomplete.
 - This batch is not evidence that GKD, AstroBox, QQ, WeChat, or QQ Reader is
   compatible. Review decision remains **BLOCK**.
+
+## Review Update - 2026-07-14 Authoritative Reads, Launch Capability, and Package Recovery
+
+The three prerequisites called out by the proxy-slot review are closed in the
+current local tree: runtime/task reads no longer depend on client-owned file
+graphs, Activity allocation has a generation-bound one-time capability, and
+package-generation startup recovery is journaled and fail-closed.
+
+### Findings closed in the current tree
+
+- A strict Binder codec carries the complete `VirtualInstanceRuntime` and
+  package snapshot. Runtime, PID mapping, Provider index/authority,
+  URI-permission target PID, and Activity task-state reads come from the
+  engine authority; client/guest code cannot treat owner persistence files as
+  a second live system server.
+- Boundary tests reject new owner-file reads and malformed authoritative IPC
+  payloads. Missing or tampered responses fail closed.
+- `EngineActivityLaunchAllocator` atomically reserves the proxy slot and
+  issues a one-time capability bound to the exact instance, PID, process slot,
+  runtime epoch, and engine session. Replay, stale generation, wrong process,
+  and legacy reserve/CAS entry points are rejected.
+- Foreground, instrumentation, and guest AMS paths consume only the
+  preassigned allocation. Partial batch failures release owned allocations in
+  reverse order and cannot double-release or overwrite a successor runtime.
+- Package-generation mutations are journaled. Startup reconciliation repairs
+  or removes abandoned staging, record temp/backup state, tombstones, and
+  orphan content-addressed APKs after validating containment, symlinks, and
+  digests.
+- Recovery executes before the engine Binder Provider and prevents engine
+  initialization when package state cannot be reconciled deterministically.
+
+### Verification
+
+- Focused Activity allocation/capability and Instrumentation rollback tests
+  pass.
+- Package journal/reconciliation tests pass: 98 tests, 0 failures.
+- The required full multi-module gate and APK build passed once in 7m18s: 511
+  Gradle tasks, 1,933 tests, 0 failures, 0 errors, and 12 skipped.
+- Debug APK: 99,808,049 bytes; SHA-256
+  `4B4B3C727695409DA273ACAAB6422D4BBE23EE48EFF1AF59F732E7F33C3DAABD`.
+- AGP 8.7.3 still reports its known `compileSdk=36` support warning; it did not
+  fail this gate and does not change the runtime `BLOCK` decision.
+
+### Still BLOCK
+
+- `EngineBinderProvider` has not moved to a dedicated `:engine` process.
+  Process-role startup, Binder death/reconnect, and stale server-generation
+  rejection still need implementation and tests.
+- A legacy loader dispatcher retains unreachable local reserve/CAS fallback
+  code and should return structured `Blocked` rather than relying on an
+  uninstalled production store to throw.
+- Android-grade PMS/AMS/task/Provider/Service/Broadcast/runtime-permission/
+  storage/native behavior and API 28-36/HyperOS device artifacts remain open.
+- No device evidence from this batch proves GKD, AstroBox, QQ, WeChat, or QQ
+  Reader compatibility. Review decision remains **BLOCK**.

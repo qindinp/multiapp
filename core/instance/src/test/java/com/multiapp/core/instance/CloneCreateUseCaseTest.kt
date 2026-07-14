@@ -1,5 +1,7 @@
 package com.multiapp.core.instance
 
+import com.multiapp.core.installer.PackageGenerationTransaction
+import com.multiapp.core.installer.PackageGenerationTransactionJournal
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EngineResult
@@ -12,6 +14,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import io.mockk.verify
+import io.mockk.verifyOrder
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -114,6 +117,75 @@ class CloneCreateUseCaseTest {
                 }
             )
         }
+    }
+
+    @Test
+    fun `create publishes journal before engine and completes it after authoritative response`() {
+        val transaction = mockk<PackageGenerationTransaction>(relaxed = true)
+        val journal = mockk<PackageGenerationTransactionJournal>()
+        every { journal.begin(any(), any(), any()) } returns transaction
+        val useCase = useCase(packageGenerationJournal = journal)
+        val app = testApp()
+        val attempt = useCase.prepareAttempt(app)
+
+        useCase.create(app, attempt).getOrThrow()
+
+        verifyOrder {
+            journal.begin(app.packageName, attempt.creationRequestId, attempt.payloadFingerprint)
+            virtualizationEngine.createInstance(any<CreateInstanceRequest>())
+            transaction.complete()
+        }
+        verify(exactly = 0) { transaction.abandon() }
+    }
+
+    @Test
+    fun `unknown engine result abandons journal for startup reconcile`() {
+        val transaction = mockk<PackageGenerationTransaction>(relaxed = true)
+        val journal = mockk<PackageGenerationTransactionJournal>()
+        every { journal.begin(any(), any(), any()) } returns transaction
+        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } returns EngineResult.fail(
+            operation = "createInstance",
+            message = "engine_authority_unavailable_or_unknown_result"
+        )
+        val useCase = useCase(packageGenerationJournal = journal)
+        val app = testApp()
+
+        val result = useCase.create(app, useCase.prepareAttempt(app))
+
+        assertTrue(result.isFailure)
+        verify(exactly = 1) { transaction.abandon() }
+        verify(exactly = 0) { transaction.complete() }
+    }
+
+    @Test
+    fun `transport exception abandons journal`() {
+        val transaction = mockk<PackageGenerationTransaction>(relaxed = true)
+        val journal = mockk<PackageGenerationTransactionJournal>()
+        every { journal.begin(any(), any(), any()) } returns transaction
+        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } throws
+            IllegalStateException("binder died")
+        val useCase = useCase(packageGenerationJournal = journal)
+        val app = testApp()
+
+        val result = useCase.create(app, useCase.prepareAttempt(app))
+
+        assertTrue(result.isFailure)
+        verify(exactly = 1) { transaction.abandon() }
+        verify(exactly = 0) { transaction.complete() }
+    }
+
+    @Test
+    fun `journal persistence failure prevents unjournaled engine mutation`() {
+        val journal = mockk<PackageGenerationTransactionJournal>()
+        every { journal.begin(any(), any(), any()) } throws
+            IllegalStateException("Unable to persist package generation journal")
+        val useCase = useCase(packageGenerationJournal = journal)
+        val app = testApp()
+
+        val result = useCase.create(app, useCase.prepareAttempt(app))
+
+        assertTrue(result.isFailure)
+        verify(exactly = 0) { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) }
     }
 
     @Test
@@ -260,12 +332,15 @@ class CloneCreateUseCaseTest {
     }
 
     private fun useCase(
+        packageGenerationJournal: PackageGenerationTransactionJournal =
+            PackageGenerationTransactionJournal.NO_OP,
         creationRequestIdFactory: () -> String = { CREATION_REQUEST_ID }
     ): CloneCreateUseCase = CloneCreateUseCase(
         instanceManager = instanceManager,
         virtualizationEngine = virtualizationEngine,
         clock = { now },
-        creationRequestIdFactory = creationRequestIdFactory
+        creationRequestIdFactory = creationRequestIdFactory,
+        packageGenerationJournal = packageGenerationJournal
     )
 
     private fun testApp(): VirtualApp = VirtualApp(

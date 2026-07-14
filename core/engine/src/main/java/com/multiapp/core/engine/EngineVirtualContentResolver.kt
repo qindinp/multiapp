@@ -83,8 +83,9 @@ internal class DefaultEngineProviderAuthorityResolver(
     private val hostContext: Context,
     private val config: VirtualContextConfig,
     private val providerServiceFactory: (Context) -> VirtualProviderService = { context ->
-        val handle = EngineRuntimeInstallers.fileBackedSystemServer(context)
-        IpcBackedVirtualProviderService(handle.server.providerService)
+        @Suppress("UNUSED_VARIABLE")
+        val ignored = context
+        IpcBackedVirtualProviderService()
     }
 ) : EngineProviderAuthorityResolver {
     private val providerService by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

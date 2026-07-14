@@ -73,7 +73,7 @@ class DefaultEngineAmsComponentDispatcher(
                 )
             }
         }
-        if (blocked != null) return listOf(blocked)
+        if (blocked != null && activityLaunchCoordinator == null) return listOf(blocked)
 
         val results = if (activityLaunchCoordinator == null) {
             fallback.resolveStartActivityIntents(intents)

@@ -4,6 +4,7 @@ import android.content.Context
 import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorders
 import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorder
 import com.multiapp.core.loader.VirtualAmsComponentDispatchers
+import com.multiapp.core.loader.VirtualActivityLaunchAllocationProviders
 import com.multiapp.core.loader.VirtualAppOpsDispatchers
 import com.multiapp.core.loader.VirtualBroadcastRecorders
 import com.multiapp.core.loader.VirtualBroadcastRecorder
@@ -13,7 +14,6 @@ import com.multiapp.core.loader.VirtualContentServiceOperationRecorders
 import com.multiapp.core.loader.VirtualContentServiceProxyInstaller
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
 import com.multiapp.core.loader.VirtualPermissionCheckDispatchers
-import com.multiapp.core.loader.ProxyActivitySlotAssignmentStoreProvider
 import com.multiapp.core.loader.VirtualUriPermissionDispatcherFactories
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxySlotContract
@@ -36,8 +36,8 @@ object EngineRuntimeInstallers {
 
     fun installSystemServerClient(context: Context): Boolean {
         rememberProcessHostContext(context)
-        ProxyActivitySlotAssignmentStoreProvider.install(
-            IpcBackedProxyActivitySlotAssignmentStore()
+        VirtualActivityLaunchAllocationProviders.install(
+            IpcVirtualActivityLaunchAllocationProvider()
         )
         val connected = EngineRuntimeIpcClients.install(context)
         if (connected) {
@@ -48,15 +48,13 @@ object EngineRuntimeInstallers {
 
     fun installAmsComponentDispatcher(context: Context) {
         rememberProcessHostContext(context)
-        val systemServer = fileBackedSystemServer(context).server
         val activityService = IpcBackedVirtualActivityService(
-            fallback = systemServer.activityService,
             localTaskSnapshot = { EngineHostedProcessRuntimeDefaults.activityRecordManager.exportTasks() }
         )
-        val serviceService = IpcBackedVirtualServiceService(systemServer.serviceService)
-        val broadcastService = IpcBackedVirtualBroadcastService(systemServer.broadcastService)
-        val appOpsService = IpcBackedVirtualAppOpsService(systemServer.appOpsService)
-        val permissionService = IpcBackedVirtualPermissionService(systemServer.permissionService)
+        val serviceService = IpcBackedVirtualServiceService()
+        val broadcastService = IpcBackedVirtualBroadcastService()
+        val appOpsService = IpcBackedVirtualAppOpsService()
+        val permissionService = IpcBackedVirtualPermissionService()
         VirtualPermissionCheckDispatchers.install(
             EngineVirtualPermissionDispatcher(permissionService)
         )

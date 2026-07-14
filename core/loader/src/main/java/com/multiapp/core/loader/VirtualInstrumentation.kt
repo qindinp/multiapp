@@ -23,6 +23,7 @@ import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.PreassignedProxyActivitySlotStore
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualActivityState
@@ -670,12 +671,29 @@ open class VirtualInstrumentation(
         )
 
         return runCatching {
-            val assignmentStore = ProxyActivitySlotAssignmentStoreProvider.requireStore()
+            val processSlot = checkNotNull(runtime.result.processSlot?.takeIf { it.isNotBlank() }) {
+                "authoritative runtime is missing processSlot for instance $instanceId"
+            }
+            val allocationProvider = VirtualActivityLaunchAllocationProviders.requireProvider()
+            val allocation = allocationProvider.allocate(
+                VirtualActivityLaunchAllocationRequest(
+                    instanceId = instanceId,
+                    originPackageName = launchRequest.originPackageName,
+                    guestActivityClassName = launchRequest.guestActivityClassName,
+                    processSlot = processSlot,
+                    launchMode = launchRequest.launchMode,
+                    taskAffinity = launchRequest.taskAffinity
+                )
+            )
+            check(allocation.accepted) { allocation.reason }
+            val identity = checkNotNull(allocation.launchIdentity)
+            val proxyClassName = checkNotNull(allocation.proxyActivityClassName)
+            val assignmentStore = PreassignedProxyActivitySlotStore(
+                launchRequest.proxyActivitySlotKey(),
+                proxyClassName
+            )
             val registry = ProxyActivityRegistry(
-                ProxyActivitySlots.classNamesForProcessSlot(
-                    runtime.hostApplication.packageName,
-                    runtime.result.processSlot
-                ),
+                listOf(proxyClassName),
                 ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
                 assignmentStore
             )
@@ -685,20 +703,29 @@ open class VirtualInstrumentation(
                 hostPackageName = runtime.hostApplication.packageName,
                 activityRecordManager = activityRecordManager
             )
-            val record = manager.allocateGuestActivity(launchRequest)
-            manager.createProxyIntent(record, launchRequest.sourceIntent).apply {
-                flags = flags or (intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
-                writeRemapEvidence(
-                    filesDir = runtime.hostApplication.filesDir,
-                    instanceId = instanceId,
-                    guestActivityClassName = launchRequest.guestActivityClassName,
-                    proxyActivityClassName = record.proxyActivityClassName,
-                    api = api,
-                    requestCode = requestCode,
-                    reason = launchRequest.reason,
-                    launchMode = record.launchMode,
-                    resultRoute = resultRoute
-                )
+            try {
+                val record = manager.allocateGuestActivity(launchRequest)
+                manager.createProxyIntent(
+                    record,
+                    launchRequest.sourceIntent,
+                    engineLaunchIdentity = identity
+                ).apply {
+                    flags = flags or (intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
+                    writeRemapEvidence(
+                        filesDir = runtime.hostApplication.filesDir,
+                        instanceId = instanceId,
+                        guestActivityClassName = launchRequest.guestActivityClassName,
+                        proxyActivityClassName = record.proxyActivityClassName,
+                        api = api,
+                        requestCode = requestCode,
+                        reason = launchRequest.reason,
+                        launchMode = record.launchMode,
+                        resultRoute = resultRoute
+                    )
+                }
+            } catch (error: Throwable) {
+                allocationProvider.release(allocation)
+                throw error
             }
         }.onSuccess { proxyIntent ->
             Log.i(TAG, "Remapped guest startActivity to proxy: ${intent.component} -> ${proxyIntent.component}")
@@ -768,35 +795,51 @@ open class VirtualInstrumentation(
         }
 
         return runCatching {
-            val assignmentStore = ProxyActivitySlotAssignmentStoreProvider.requireStore()
-            val assignmentRollback = ProxyActivitySlotAssignmentRollback(assignmentStore)
+            val processSlot = checkNotNull(runtime.result.processSlot?.takeIf { it.isNotBlank() }) {
+                "authoritative runtime is missing processSlot for instance $instanceId"
+            }
+            val allocationProvider = VirtualActivityLaunchAllocationProviders.requireProvider()
             val activityStateSnapshot = activityRecordManager.snapshotState()
-            val registry = ProxyActivityRegistry(
-                ProxyActivitySlots.classNamesForProcessSlot(
-                    runtime.hostApplication.packageName,
-                    runtime.result.processSlot
-                ),
-                ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
-                assignmentStore
-            )
-            val manager = VirtualActivityManager(
-                context = who,
-                proxyActivityRegistry = registry,
-                hostPackageName = runtime.hostApplication.packageName,
-                activityRecordManager = activityRecordManager
-            )
+            val allocations = mutableListOf<VirtualActivityLaunchAllocation>()
             val proxyIntents = try {
                 requests.filterNotNull().map { request ->
-                    assignmentRollback.remember(request.proxyActivitySlotKey())
+                    val allocation = allocationProvider.allocate(
+                        VirtualActivityLaunchAllocationRequest(
+                            instanceId = instanceId,
+                            originPackageName = request.originPackageName,
+                            guestActivityClassName = request.guestActivityClassName,
+                            processSlot = processSlot,
+                            launchMode = request.launchMode,
+                            taskAffinity = request.taskAffinity
+                        )
+                    )
+                    check(allocation.accepted) { allocation.reason }
+                    allocations += allocation
+                    val identity = checkNotNull(allocation.launchIdentity)
+                    val proxyClassName = checkNotNull(allocation.proxyActivityClassName)
+                    val manager = VirtualActivityManager(
+                        context = who,
+                        proxyActivityRegistry = ProxyActivityRegistry(
+                            listOf(proxyClassName),
+                            ProxyActivitySlots.launchModeByClassName(runtime.hostApplication.packageName),
+                            PreassignedProxyActivitySlotStore(request.proxyActivitySlotKey(), proxyClassName)
+                        ),
+                        hostPackageName = runtime.hostApplication.packageName,
+                        activityRecordManager = activityRecordManager
+                    )
                     val record = manager.allocateGuestActivity(request)
-                    manager.createProxyIntent(record, request.sourceIntent).apply {
+                    manager.createProxyIntent(
+                        record,
+                        request.sourceIntent,
+                        engineLaunchIdentity = identity
+                    ).apply {
                         flags = flags or (request.sourceIntent.flags and Intent.FLAG_ACTIVITY_NEW_TASK)
                         putExtra("multiapp.activityBatchSize", intents.size)
                     } to (request to record)
                 }
             } catch (error: Throwable) {
                 activityRecordManager.restoreState(activityStateSnapshot)
-                assignmentRollback.restore()
+                allocations.asReversed().forEach(allocationProvider::release)
                 throw error
             }
             writeRemapBatchEvidence(

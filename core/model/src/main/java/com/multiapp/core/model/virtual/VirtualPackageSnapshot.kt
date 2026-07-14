@@ -17,13 +17,17 @@ data class VirtualPackageSnapshot(
     val targetSdk: Int,
     val minSdk: Int,
     val sourceDir: String,
+    val sourceSha256: String? = null,
     val publicSourceDir: String = sourceDir,
     val splitSourceDirs: List<String> = emptyList(),
+    val splitSha256s: List<String> = emptyList(),
     val splitPublicSourceDirs: List<String> = splitSourceDirs,
     val splitNames: List<String> = emptyList(),
     val isolatedSplits: Boolean = false,
     val dataDir: String,
     val nativeLibraryDir: String? = null,
+    val nativeLibraries: List<String> = emptyList(),
+    val abiList: List<String> = emptyList(),
     val applicationClassName: String? = null,
     val processName: String? = null,
     val taskAffinity: String? = null,
@@ -54,16 +58,27 @@ data class VirtualPackageSnapshot(
         require(virtualPackageName.isNotBlank()) { "virtualPackageName must not be blank" }
         require(sourceDir.isNotBlank()) { "sourceDir must not be blank" }
         require(publicSourceDir.isNotBlank()) { "publicSourceDir must not be blank" }
+        require(sourceSha256 == null || sourceSha256.isNotBlank()) {
+            "sourceSha256 must not be blank"
+        }
         require(splitSourceDirs.none { it.isBlank() }) { "splitSourceDirs must not contain blank entries" }
+        require(splitSha256s.none { it.isBlank() }) { "splitSha256s must not contain blank entries" }
         require(splitPublicSourceDirs.none { it.isBlank() }) {
             "splitPublicSourceDirs must not contain blank entries"
         }
         require(splitNames.none { it.isBlank() }) { "splitNames must not contain blank entries" }
+        require(nativeLibraries.none { it.isBlank() }) {
+            "nativeLibraries must not contain blank entries"
+        }
+        require(abiList.none { it.isBlank() }) { "abiList must not contain blank entries" }
         require(signerSha256Digests.none { it.isBlank() }) {
             "signerSha256Digests must not contain blank entries"
         }
         require(splitPublicSourceDirs.isEmpty() || splitPublicSourceDirs.size == splitSourceDirs.size) {
             "splitPublicSourceDirs size must match splitSourceDirs size"
+        }
+        require(splitSha256s.isEmpty() || splitSha256s.size == splitSourceDirs.size) {
+            "splitSha256s size must match splitSourceDirs size"
         }
         require(splitNames.isEmpty() || splitNames.size == splitSourceDirs.size) {
             "splitNames size must match splitSourceDirs size"

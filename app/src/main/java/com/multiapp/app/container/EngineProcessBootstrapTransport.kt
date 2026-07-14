@@ -19,7 +19,6 @@ import com.multiapp.core.engine.EngineProcessBootstrapper
 import com.multiapp.core.engine.EngineProcessClientIdentity
 import com.multiapp.core.engine.EngineRuntimeAuthorityValidator
 import com.multiapp.core.engine.EngineRuntimeIpcClients
-import com.multiapp.core.engine.EngineRuntimeInstallers
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualRuntimeState
@@ -426,13 +425,11 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                 failed(envelope, EngineProcessBootstrapState.FAILED, "bootstrap caller uid mismatch")
             )
         }
-        val localRuntime = EngineRuntimeInstallers.fileBackedSystemServer(hostContext)
-            .registry
-            .get(envelope.instanceId)
-            ?: return EngineProcessBootstrapIpc.resultBundle(
-                failed(envelope, EngineProcessBootstrapState.STALE, "local runtime state missing")
-            )
         EngineRuntimeIpcClients.install(hostContext)
+        val authoritativeRuntime = EngineRuntimeIpcClients.engineQueryRuntimeState(envelope.instanceId)
+            ?: return EngineProcessBootstrapIpc.resultBundle(
+                failed(envelope, EngineProcessBootstrapState.STALE, "authoritative runtime state missing")
+            )
         val authoritySnapshot = EngineRuntimeIpcClients.queryRuntime(envelope.instanceId)
         val authority = EngineRuntimeAuthorityValidator.validate(
             snapshot = authoritySnapshot,
@@ -442,9 +439,10 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
         if (authoritySnapshot == null || !authority.allowed ||
             authoritySnapshot?.runtimeEpoch != envelope.runtimeEpoch ||
             authoritySnapshot?.engineSessionId != envelope.engineSessionId ||
-            localRuntime.runtimeEpoch != envelope.runtimeEpoch ||
-            localRuntime.engineSessionId != envelope.engineSessionId ||
-            localRuntime.processSlot != envelope.processSlot
+            authoritativeRuntime.runtimeEpoch != envelope.runtimeEpoch ||
+            authoritativeRuntime.engineSessionId != envelope.engineSessionId ||
+            authoritativeRuntime.processSlot != envelope.processSlot ||
+            authoritativeRuntime.state != VirtualRuntimeState.CREATED
         ) {
             return failed(
                 envelope,
@@ -461,7 +459,7 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
             ).let(EngineProcessBootstrapIpc::resultBundle)
         }
         val request = EngineProcessBootstrapRequest(
-            runtime = localRuntime,
+            runtime = authoritativeRuntime,
             providerRoutingEnabled = envelope.providerRoutingEnabled,
             legacyProviderHookEnabled = envelope.legacyProviderHookEnabled,
             evidenceMode = envelope.evidenceMode
@@ -489,9 +487,7 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
             if (!readiness.ready) {
                 readiness
             } else {
-                val postBootstrapRuntime = EngineRuntimeInstallers.fileBackedSystemServer(hostContext)
-                    .registry
-                    .get(envelope.instanceId)
+                val postBootstrapRuntime = EngineRuntimeIpcClients.engineQueryRuntimeState(envelope.instanceId)
                 val postBootstrapAuthority = EngineRuntimeIpcClients.queryRuntime(envelope.instanceId)
                 val postBootstrapDecision = EngineRuntimeAuthorityValidator.validate(
                     snapshot = postBootstrapAuthority,

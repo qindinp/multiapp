@@ -114,7 +114,7 @@ class EngineVirtualizationEndpointContractTest {
     }
 
     @Test
-    fun `launch endpoint decodes the full request and returns runtime identity`() {
+    fun `launch endpoint decodes the full request and returns runtime payload`() {
         val engine = mockk<VirtualizationEngine>()
         val request = launchRequest()
         val runtime = runtime()
@@ -129,10 +129,15 @@ class EngineVirtualizationEndpointContractTest {
 
         val result = endpoint(engine).engineLaunchInstance(
             request.toEngineIpcBundle(bundles::create)
-        ).toEngineRemoteResultOrNull()
+        )
 
-        assertEquals(expected.copy(runtime = null), result?.result)
-        assertTrue(requireNotNull(result?.runtimeIdentity).matches(runtime))
+        assertEquals("launchInstance", result.getString(EngineRuntimeIpcContract.KEY_OPERATION))
+        assertEquals(EngineResultStatus.PASS.name, result.getString(EngineRuntimeIpcContract.KEY_STATUS))
+        assertEquals(
+            INSTANCE_ID,
+            result.getBundle(EngineRuntimeIpcContract.KEY_ENGINE_RUNTIME)
+                ?.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID)
+        )
         verify(exactly = 1) { engine.launchInstance(request) }
     }
 
@@ -171,15 +176,16 @@ class EngineVirtualizationEndpointContractTest {
     }
 
     @Test
-    fun `query endpoint returns the authoritative runtime identity`() {
+    fun `query endpoint returns the complete authoritative runtime`() {
         val engine = mockk<VirtualizationEngine>()
         val runtime = runtime()
         every { engine.queryRuntimeState(INSTANCE_ID) } returns runtime
 
-        val identity = endpoint(engine).engineQueryRuntimeState(INSTANCE_ID)
-            .toEngineRuntimeIdentityOrNull()
+        val decoded = endpoint(engine).engineQueryRuntimeState(INSTANCE_ID)
 
-        assertTrue(requireNotNull(identity).matches(runtime))
+        assertTrue(decoded.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertEquals(INSTANCE_ID, decoded.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID))
+        assertEquals(runtime.runtimeEpoch, decoded.getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH))
         verify(exactly = 1) { engine.queryRuntimeState(INSTANCE_ID) }
     }
 
@@ -224,7 +230,7 @@ class EngineVirtualizationEndpointContractTest {
         assertEquals(EngineResultStatus.FAIL, query?.result?.status)
         assertEquals("queryRuntimeState", query?.result?.operation)
         assertEquals("engine_server_owner_unavailable", query?.result?.message)
-        assertNull(endpoint.engineQueryRuntimeState(INSTANCE_ID).toEngineRuntimeIdentityOrNull())
+        assertNull(endpoint.engineQueryRuntimeState(INSTANCE_ID).toAuthoritativeRuntimeOrNull())
         assertEquals(EngineResultStatus.FAIL, export?.result?.status)
         assertEquals("exportEvidence", export?.result?.operation)
         assertEquals("engine_server_owner_unavailable", export?.result?.message)
@@ -245,8 +251,50 @@ class EngineVirtualizationEndpointContractTest {
         )
         assertEquals(INSTANCE_ID, response.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID))
         assertEquals("runtime_not_found", response.getString(EngineRuntimeIpcContract.KEY_REASON))
-        assertNull(response.toEngineRuntimeIdentityOrNull())
+        assertNull(response.toAuthoritativeRuntimeOrNull())
         verify(exactly = 1) { engine.queryRuntimeState(INSTANCE_ID) }
+    }
+
+    @Test
+    fun `PID runtime query uses the authoritative registry and rejects ambiguity`() {
+        val registry = EngineRuntimeRegistry().apply { register(runtime()) }
+        val controlPlane = mockk<EngineProcessControlPlane>()
+        every { controlPlane.authorize(INSTANCE_ID, 4321) } returns EngineProcessAuthorityDecision(
+            allowed = true,
+            identity = EngineProcessClientIdentity(
+                instanceId = INSTANCE_ID,
+                runtimeEpoch = 7L,
+                engineSessionId = "engine-session",
+                processSlot = "$HOST_PACKAGE:v2",
+                processId = 4321
+            ),
+            reason = "live_runtime_authority_confirmed"
+        )
+        val endpoint = endpoint(virtualizationEngine = null).also {
+            setEndpointField(it, "registry", registry)
+            setEndpointField(it, "processControlPlane", controlPlane)
+        }
+
+        val found = endpoint.queryRuntimeByProcessId(4321)
+
+        assertTrue(found.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertTrue(found.getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY))
+        assertEquals(INSTANCE_ID, found.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID))
+        assertEquals(4321, found.getInt(EngineRuntimeIpcContract.KEY_PROCESS_ID))
+
+        registry.register(
+            runtime().copy(
+                instanceId = "instance-other",
+                virtualPackageName = "com.multiapp.instance.other",
+                packageSnapshot = runtime().packageSnapshot.copy(
+                    instanceId = "instance-other",
+                    virtualPackageName = "com.multiapp.instance.other"
+                )
+            )
+        )
+        val ambiguous = endpoint.queryRuntimeByProcessId(4321)
+        assertFalse(ambiguous.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertEquals("runtime_process_id_ambiguous", ambiguous.getString(EngineRuntimeIpcContract.KEY_REASON))
     }
 
     @Test
@@ -286,7 +334,7 @@ class EngineVirtualizationEndpointContractTest {
 
         assertUnauthorized(query)
         assertUnauthorized(export)
-        assertNull(query.toEngineRuntimeIdentityOrNull())
+        assertNull(query.toAuthoritativeRuntimeOrNull())
         assertNull(export.toEngineEvidenceOrNull())
         verify(exactly = 0) { engine.queryRuntimeState(any()) }
         verify(exactly = 0) { engine.exportEvidence(any()) }
@@ -402,6 +450,18 @@ class EngineVirtualizationEndpointContractTest {
         setEndpointField(endpoint, "hostUid", HOST_UID)
         setEndpointField(endpoint, "virtualizationEngine", virtualizationEngine)
         setEndpointField(endpoint, "callingUid", { callerUid })
+        setEndpointField(endpoint, "callingPid", { CALLING_PID })
+        setEndpointField(
+            endpoint,
+            "processControlPlane",
+            mockk<EngineProcessControlPlane> {
+                every { authorize(any(), CALLING_PID) } returns EngineProcessAuthorityDecision(
+                    allowed = true,
+                    identity = null,
+                    reason = "test_runtime_authorized"
+                )
+            }
+        )
         activityService?.let { setEndpointField(endpoint, "activityService", it) }
         return endpoint
     }
@@ -614,6 +674,7 @@ class EngineVirtualizationEndpointContractTest {
         const val HOST_PACKAGE = "com.multiapp.app"
         const val ORIGIN_PACKAGE = "com.test.app"
         const val HOST_UID = 10123
+        const val CALLING_PID = 4321
         const val PROXY_ACTIVITY_CLASS_NAME = "com.multiapp.app.container.ProxyActivity2"
     }
 }

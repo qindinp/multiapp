@@ -3,10 +3,7 @@ package com.multiapp.core.engine
 import android.net.Uri
 import com.multiapp.core.loader.VirtualUriPermissionOperation
 import com.multiapp.core.loader.VirtualUriPermissionRequest
-import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResultStatus
-import com.multiapp.core.model.engine.VirtualInstanceRuntime
-import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
@@ -63,7 +60,7 @@ class EngineVirtualUriPermissionDispatcherTest {
         )
         val dispatcher = dispatcher(
             service = service,
-            runtimes = listOf(runtime("target", 3002))
+            runtimesByPid = mapOf(3002 to runtimeSnapshot("target", 3002))
         )
 
         val actual = dispatcher.dispatch(
@@ -87,6 +84,15 @@ class EngineVirtualUriPermissionDispatcherTest {
     @Test
     fun `system authority is not claimed by virtual URI permission dispatcher`() {
         val service = mockk<VirtualProviderService>(relaxed = true)
+        every {
+            service.resolveProviderAuthority("owner", any())
+        } returns VirtualProviderAuthorityResolveResult(
+            callerInstanceId = "owner",
+            guestAuthority = "settings",
+            verdict = EngineResultStatus.FAIL,
+            virtualAuthority = false,
+            message = "provider_authority_not_virtual"
+        )
         val dispatcher = dispatcher(service)
 
         val actual = dispatcher.dispatch(
@@ -115,9 +121,18 @@ class EngineVirtualUriPermissionDispatcherTest {
             granted = true,
             message = "provider_persistable_uri_grant_taken:modes=1"
         )
+        every {
+            service.resolveProviderAuthority("owner", any())
+        } returns VirtualProviderAuthorityResolveResult(
+            callerInstanceId = "owner",
+            guestAuthority = "com.external.provider",
+            verdict = EngineResultStatus.PASS,
+            virtualAuthority = true,
+            targetInstanceId = "provider-owner",
+            message = "provider_authority_resolved"
+        )
         val dispatcher = dispatcher(
-            service = service,
-            runtimes = listOf(runtime("provider-owner", 4001, "com.external.provider"))
+            service = service
         )
 
         val actual = dispatcher.dispatch(
@@ -137,11 +152,11 @@ class EngineVirtualUriPermissionDispatcherTest {
 
     private fun dispatcher(
         service: VirtualProviderService,
-        runtimes: List<VirtualInstanceRuntime> = emptyList()
+        runtimesByPid: Map<Int, EngineRuntimeIpcSnapshot> = emptyMap()
     ) = EngineVirtualUriPermissionDispatcher(
         config = config(),
         providerService = service,
-        runtimes = { runtimes },
+        runtimeByProcessId = runtimesByPid::get,
         hostUid = 1000,
         processId = 3001
     )
@@ -178,31 +193,22 @@ class EngineVirtualUriPermissionDispatcherTest {
         packageSnapshot = snapshot("owner", "com.test.app", "com.multiapp.virtual.owner")
     )
 
-    private fun runtime(
+    private fun runtimeSnapshot(
         instanceId: String,
-        processId: Int,
-        authority: String = "com.test.provider"
-    ) = VirtualInstanceRuntime(
+        processId: Int
+    ) = EngineRuntimeIpcSnapshot(
+        found = true,
         instanceId = instanceId,
-        hostPackageName = "com.multiapp.app",
-        originPackageName = "com.target.app",
-        virtualPackageName = "com.multiapp.virtual.$instanceId",
-        dataRoot = "/data/$instanceId",
-        packageSnapshot = snapshot(
-            instanceId,
-            "com.target.app",
-            "com.multiapp.virtual.$instanceId",
-            authority
-        ),
-        profile = EngineProfile.BASELINE,
         processSlot = "com.multiapp.app:v2",
         proxySlot = "com.multiapp.app.container.ProxyActivity2",
-        evidenceSessionId = "evidence-$instanceId",
         runtimeEpoch = 42L,
         engineSessionId = "engine-$instanceId",
+        evidenceSessionId = "evidence-$instanceId",
+        runtimeState = "RUNNING",
         processId = processId,
         processName = "com.multiapp.app:v2",
-        state = VirtualRuntimeState.RUNNING
+        reason = "live_runtime_authority_confirmed",
+        liveAuthority = true
     )
 
     private fun snapshot(

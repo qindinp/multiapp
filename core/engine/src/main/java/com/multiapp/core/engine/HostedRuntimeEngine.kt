@@ -2,12 +2,23 @@ package com.multiapp.core.engine
 
 import android.content.Context
 import com.multiapp.core.loader.ActivityThreadCompat
+import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.HostedRuntimeBootstrap
 import com.multiapp.core.loader.HostedRuntimeBindingFingerprint
 import com.multiapp.core.loader.MainLooperApplicationThreadRunner
+import com.multiapp.core.loader.RuntimeStage
+import com.multiapp.core.loader.toSummary
+import com.multiapp.core.model.engine.VirtualInstanceRuntime
+import com.multiapp.core.model.engine.VirtualRuntimeState
+import com.multiapp.core.model.instance.CompatibilityMode
+import com.multiapp.core.model.instance.InstanceDataRoot
 import com.multiapp.core.model.instance.InstanceManager
+import com.multiapp.core.model.instance.VirtualInstanceRecord
+import com.multiapp.core.model.installer.ComponentInfo
+import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.InstallRecordStore
+import com.multiapp.core.model.virtual.ResolvedComponent
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
@@ -40,19 +51,15 @@ data class HostedRuntimeBindOutcome(
 
 @Singleton
 class DefaultHostedRuntimeEngine @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val instanceManager: InstanceManager,
-    private val installRecordStore: InstallRecordStore
+    @ApplicationContext private val context: Context
 ) : HostedRuntimeEngine {
     private val processRuntime: EngineHostedProcessRuntime = DefaultEngineHostedProcessRuntime()
     private val hostContext: Context
         get() = context.applicationContext ?: context
-    private val engineRuntimeRegistry: EngineRuntimeRegistry =
-        EngineRuntimeRegistry.global.attachStateStore(
-            FileBackedEngineRuntimeStateStore(
-                File(hostContext.filesDir, EngineRuntimeStateFiles.DEFAULT_FILE_NAME)
-            )
-        )
+
+    init {
+        EngineRuntimeIpcClients.install(hostContext)
+    }
 
     override fun reusableResult(instanceId: String): EngineHostedBootstrapResult? {
         val fingerprint = bindingFingerprint(
@@ -85,12 +92,21 @@ class DefaultHostedRuntimeEngine @Inject constructor(
         providerHookEnabled: Boolean,
         processSlot: String?
     ): HostedBootstrapResult {
-        val resolvedProcessSlot = processSlot
-            ?.takeIf { it.isNotBlank() }
-            ?: engineRuntimeRegistry.runtimeState(instanceId)?.processSlot
+        val runtime = authoritativeRuntime(instanceId, processSlot)
+            ?: return authorityFailureResult(
+                instanceId,
+                processSlot,
+                "authoritative engine runtime unavailable or stale"
+            )
+        val installRecord = runtime.toInstallRecordOrNull()
+            ?: return authorityFailureResult(
+                instanceId,
+                runtime.processSlot,
+                "authoritative package snapshot is incomplete"
+            )
         return HostedRuntimeBootstrap(
-            instanceManager = instanceManager,
-            installRecordStore = installRecordStore,
+            instanceManager = ReadOnlyRuntimeInstanceManager(runtime),
+            installRecordStore = ReadOnlyRuntimeInstallRecordStore(installRecord),
             hostContext = hostContext,
             providerHookInstallEnabled = providerHookEnabled,
             applicationThreadRunner = MainLooperApplicationThreadRunner(),
@@ -107,7 +123,7 @@ class DefaultHostedRuntimeEngine @Inject constructor(
                     EngineHostedBootstrapResult.fromLoader(result)
                 )
             }
-        ).run(instanceId, resolvedProcessSlot)
+        ).run(instanceId, runtime.processSlot)
     }
 
     override fun bindApplication(
@@ -132,28 +148,150 @@ class DefaultHostedRuntimeEngine @Inject constructor(
         providerHookEnabled: Boolean,
         processSlot: String?
     ): HostedRuntimeBindingFingerprint? {
-        val instance = instanceManager.getInstance(instanceId) ?: return null
-        val installRecord = installRecordStore.load(instance.originPackageName) ?: return null
-        val engineRuntime = engineRuntimeRegistry.get(instanceId)
-        val resolvedProcessSlot = processSlot?.takeIf { it.isNotBlank() }
-            ?: engineRuntime?.processSlot?.takeIf { it.isNotBlank() }
-            ?: return null
+        val engineRuntime = authoritativeRuntime(instanceId, processSlot) ?: return null
+        val snapshot = engineRuntime.packageSnapshot
+        val sourceSha256 = snapshot.sourceSha256 ?: return null
+        if (snapshot.splitSourceDirs.size != snapshot.splitSha256s.size) return null
         return HostedRuntimeBindingFingerprint(
-            instanceId = instance.instanceId,
-            originPackageName = instance.originPackageName,
-            virtualPackageName = instance.virtualPackageName,
-            processSlot = resolvedProcessSlot,
-            dataRoot = File(instance.dataRoot).absoluteFile.normalize().path,
-            versionCode = installRecord.versionCode,
-            baseApkPath = File(installRecord.originApkPath).absoluteFile.normalize().path,
-            baseApkSha256 = installRecord.originApkSha256,
-            splitApkPaths = installRecord.splitApkPaths.map { path ->
+            instanceId = engineRuntime.instanceId,
+            originPackageName = engineRuntime.originPackageName,
+            virtualPackageName = engineRuntime.virtualPackageName,
+            processSlot = engineRuntime.processSlot,
+            dataRoot = File(engineRuntime.dataRoot).absoluteFile.normalize().path,
+            versionCode = snapshot.versionCode,
+            baseApkPath = File(snapshot.sourceDir).absoluteFile.normalize().path,
+            baseApkSha256 = sourceSha256,
+            splitApkPaths = snapshot.splitSourceDirs.map { path ->
                 File(path).absoluteFile.normalize().path
             },
-            splitApkSha256s = installRecord.splitApkSha256s.toList(),
-            applicationClassName = installRecord.applicationClassName,
-            engineProfile = engineRuntime?.profile?.name ?: "UNKNOWN",
+            splitApkSha256s = snapshot.splitSha256s,
+            applicationClassName = snapshot.applicationClassName,
+            engineProfile = engineRuntime.profile.name,
             providerHookEnabled = providerHookEnabled
         )
     }
+
+    private fun authoritativeRuntime(
+        instanceId: String,
+        expectedProcessSlot: String?
+    ): VirtualInstanceRuntime? = EngineRuntimeIpcClients.engineQueryRuntimeState(instanceId)
+        ?.takeIf { runtime ->
+            runtime.instanceId == instanceId &&
+                (expectedProcessSlot.isNullOrBlank() || runtime.processSlot == expectedProcessSlot) &&
+                runtime.state != VirtualRuntimeState.STOPPED &&
+                runtime.state != VirtualRuntimeState.DEAD
+        }
+
+    private fun authorityFailureResult(
+        instanceId: String,
+        processSlot: String?,
+        message: String
+    ): HostedBootstrapResult {
+        val failure = BootstrapResult.failed(RuntimeStage.CONFIG, message)
+        return HostedBootstrapResult(
+            instanceId = instanceId,
+            installId = null,
+            originPackageName = null,
+            processSlot = processSlot,
+            originApkPath = null,
+            guestClassLoader = null,
+            guestApplication = null,
+            stageResults = listOf(failure),
+            summary = listOf(failure).toSummary(),
+            success = false
+        )
+    }
 }
+
+private class ReadOnlyRuntimeInstanceManager(
+    runtime: VirtualInstanceRuntime
+) : InstanceManager {
+    private val record = VirtualInstanceRecord(
+        instanceId = runtime.instanceId,
+        originPackageName = runtime.originPackageName,
+        virtualPackageName = runtime.virtualPackageName,
+        displayName = runtime.packageSnapshot.applicationLabel,
+        dataRoot = runtime.dataRoot,
+        compatibilityMode = CompatibilityMode.STANDARD,
+        createdAtMs = 0L,
+        updatedAtMs = 0L
+    )
+
+    override fun createInstance(
+        originPackageName: String,
+        displayName: String,
+        compatibilityMode: CompatibilityMode
+    ): Result<VirtualInstanceRecord> = Result.failure(UnsupportedOperationException("read-only runtime snapshot"))
+
+    override fun getInstance(instanceId: String): VirtualInstanceRecord? = record.takeIf { it.instanceId == instanceId }
+    override fun getInstanceByOrigin(originPackageName: String): List<VirtualInstanceRecord> =
+        listOf(record).filter { it.originPackageName == originPackageName }
+    override fun listInstances(): List<VirtualInstanceRecord> = listOf(record)
+    override fun deleteInstance(instanceId: String): Boolean = false
+    override fun updateLaunchState(instanceId: String): VirtualInstanceRecord? = null
+    override fun getDataRoot(instanceId: String): InstanceDataRoot? =
+        record.takeIf { it.instanceId == instanceId }
+            ?.let { InstanceDataRoot.fromBaseDir(it.instanceId, File(it.dataRoot)) }
+}
+
+private class ReadOnlyRuntimeInstallRecordStore(
+    private val record: InstallRecord
+) : InstallRecordStore {
+    override fun save(record: InstallRecord): Result<String> =
+        Result.failure(UnsupportedOperationException("read-only runtime snapshot"))
+    override fun load(packageName: String): InstallRecord? = record.takeIf { it.packageName == packageName }
+    override fun listAll(): List<InstallRecord> = listOf(record)
+    override fun delete(packageName: String): Boolean = false
+}
+
+private fun VirtualInstanceRuntime.toInstallRecordOrNull(): InstallRecord? = runCatching {
+    val snapshot = packageSnapshot
+    val sourceSha256 = requireNotNull(snapshot.sourceSha256)
+    check(snapshot.splitSourceDirs.size == snapshot.splitSha256s.size)
+    InstallRecord(
+        packageName = originPackageName,
+        originApkPath = snapshot.sourceDir,
+        originApkSha256 = sourceSha256,
+        originCertSha256 = snapshot.originCertSha256.orEmpty(),
+        signerSha256Digests = snapshot.signerSha256Digests,
+        hasMultipleSigners = snapshot.hasMultipleSigners,
+        splitApkPaths = snapshot.splitSourceDirs,
+        splitPublicSourceDirs = snapshot.splitPublicSourceDirs,
+        splitNames = snapshot.splitNames,
+        splitApkSha256s = snapshot.splitSha256s,
+        isolatedSplits = snapshot.isolatedSplits,
+        versionCode = snapshot.versionCode,
+        versionName = snapshot.versionName,
+        targetSdk = snapshot.targetSdk,
+        minSdk = snapshot.minSdk,
+        nativeLibraries = snapshot.nativeLibraries,
+        abiList = snapshot.abiList,
+        applicationClassName = snapshot.applicationClassName,
+        packageLabel = snapshot.applicationLabel,
+        applicationMetaData = snapshot.typedMetaData,
+        permissions = snapshot.permissions,
+        activities = snapshot.activities.map(ResolvedComponent::toInstallComponent),
+        services = snapshot.services.map(ResolvedComponent::toInstallComponent),
+        receivers = snapshot.receivers.map(ResolvedComponent::toInstallComponent),
+        providers = snapshot.providers.map(ResolvedComponent::toInstallComponent),
+        installTimeMs = 0L,
+        updatedAtMs = 0L
+    )
+}.getOrNull()
+
+private fun ResolvedComponent.toInstallComponent(): ComponentInfo = ComponentInfo(
+    name = name,
+    exported = exported,
+    permission = permission,
+    readPermission = readPermission,
+    writePermission = writePermission,
+    grantUriPermissions = grantUriPermissions,
+    pathPermissions = pathPermissions,
+    uriPermissionPatterns = uriPermissionPatterns,
+    launchMode = launchMode,
+    processName = processName,
+    taskAffinity = taskAffinity,
+    themeId = themeId,
+    metaData = typedMetaData,
+    targetActivityName = targetActivityName
+)

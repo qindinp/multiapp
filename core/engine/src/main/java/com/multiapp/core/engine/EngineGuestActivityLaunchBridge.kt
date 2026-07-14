@@ -101,26 +101,6 @@ private fun VirtualActivityLaunchRecoveryRequest.toEngineRequest() = EngineGuest
     restoreActivityId = restoreActivityId
 )
 
-private fun VirtualActivityLaunchIdentity.toEngineIdentity() = EngineActivityLaunchIdentity(
-    capabilityToken = capabilityToken,
-    instanceId = instanceId,
-    runtimeEpoch = runtimeEpoch,
-    engineSessionId = engineSessionId,
-    processSlot = processSlot,
-    proxyActivityClassName = proxyActivityClassName,
-    guestActivityClassName = guestActivityClassName
-)
-
-private fun EngineActivityLaunchIdentity.toLoaderIdentity() = VirtualActivityLaunchIdentity(
-    capabilityToken = capabilityToken,
-    instanceId = instanceId,
-    runtimeEpoch = runtimeEpoch,
-    engineSessionId = engineSessionId,
-    processSlot = processSlot,
-    proxyActivityClassName = proxyActivityClassName,
-    guestActivityClassName = guestActivityClassName
-)
-
 private fun Intent.toEngineLaunchIdentity(proxyActivityClassName: String): EngineActivityLaunchIdentity? {
     val capabilityToken = getStringExtra(VirtualActivityManager.EXTRA_ENGINE_LAUNCH_CAPABILITY)
         ?.takeIf { it.isNotBlank() }

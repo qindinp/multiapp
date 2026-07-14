@@ -18,10 +18,13 @@ interface IEngineRuntimeService {
     Bundle abandonProcessClient(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, String reason);
     Bundle issueRecentsRestoreCapability(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, String restoreActivityId);
     Bundle queryRuntime(String instanceId);
+    Bundle queryRuntimeByProcessId(int processId);
     Bundle authorizeActivityLaunch(String capabilityToken, String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String proxyActivityClassName, String guestActivityClassName);
     Bundle acknowledgeActivityResumed(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String capabilityToken);
     Bundle queryEvidence(String instanceId);
     Bundle planActivity(String instanceId, in Bundle request);
+    Bundle allocateActivityLaunch(String instanceId, in Bundle request);
+    boolean releaseActivityLaunch(String instanceId, in Bundle allocation);
     boolean recordActivityDispatch(String instanceId, in Bundle result);
     Bundle mutateActivity(String instanceId, String operation, in Bundle request);
     Bundle consumeActivity(String instanceId, String operation, in Bundle request);

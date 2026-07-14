@@ -10,8 +10,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.multiapp.core.engine.EngineActivityLaunchRequest
-import com.multiapp.core.engine.EngineActivityProxyLauncher
 import com.multiapp.core.engine.EngineActivityTaskController
 import com.multiapp.core.engine.EngineActivityTaskControllers
 import com.multiapp.core.engine.EngineBootstrapStage
@@ -21,7 +19,6 @@ import com.multiapp.core.engine.EngineProxyActivityRecords
 import com.multiapp.core.engine.EngineProxyActivitySlots
 import com.multiapp.core.engine.HostedRuntimeEngine
 import com.multiapp.core.engine.HostedRuntimeBindOutcome
-import com.multiapp.core.engine.IpcBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineLaunchIntentContract
 import com.multiapp.core.model.engine.EngineProfile
@@ -536,30 +533,17 @@ open class ContainerActivity : Activity() {
         taskAffinity: String?,
         engineProxySlot: String?
     ): Result<com.multiapp.core.model.virtual.VirtualActivityRecord> {
-        Log.i(TAG, "Launching proxy Activity for guest: $guestActivityClassName")
-        val slotAssignmentStore = IpcBackedProxyActivitySlotAssignmentStore()
-        restoreActivityTaskState(instanceId, "before-proxy-launch")
-        pruneProxyActivityRuntimeRecords(instanceId)
-        val candidateProxyActivityClassNames = proxyActivityCandidatesFromEngineSlot(
+        val detail = "legacy ContainerActivity direct launch has no engine Activity capability; " +
+            "use VirtualizationEngine.launchInstance"
+        Log.e(TAG, "$detail: instanceId=$instanceId, guest=$guestActivityClassName")
+        writeEngineProxySlotEvidence(
             instanceId = instanceId,
-            engineProxySlot = engineProxySlot,
+            status = "FAIL",
+            detail = detail,
+            engineProxySlot = engineProxySlot.orEmpty(),
             launchMode = launchMode
-        ).getOrElse { error -> return Result.failure(error) }
-        return EngineActivityProxyLauncher().launchGuestLauncher(
-            EngineActivityLaunchRequest(
-                hostContext = applicationContext ?: this,
-                candidateProxyActivityClassNames = candidateProxyActivityClassNames,
-                proxyLaunchModeByClassName = proxyLaunchModeByClassName,
-                slotAssignmentStore = slotAssignmentStore,
-                instanceId = instanceId,
-                originPackageName = originPackageName,
-                guestActivityClassName = guestActivityClassName,
-                launchMode = launchMode,
-                taskAffinity = taskAffinity
-            )
-        ).onSuccess {
-            persistActivityTaskState(instanceId, "after-proxy-launch")
-        }
+        )
+        return Result.failure(SecurityException(detail))
     }
 
     private fun proxyActivityCandidatesFromEngineSlot(

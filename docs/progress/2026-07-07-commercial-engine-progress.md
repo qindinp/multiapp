@@ -4323,3 +4323,72 @@ Remaining gate:
   semantics, and API 28-36/HyperOS evidence remain open.
 - No new device artifact proves simultaneous recents, process-death recovery,
   GKD, AstroBox, QQ, WeChat, or QQ Reader. Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-14 Authoritative Reads, Activity Capabilities, and Package Recovery
+
+This batch closes the three local prerequisites identified after proxy-slot
+single-writer centralization: client/guest owner-file reads, same-UID Activity
+slot authorization, and crash recovery for package-generation artifacts.
+
+Implemented:
+
+- Added strict `EngineAuthoritativeRuntimeCodec` transport for the complete
+  runtime identity and `VirtualPackageSnapshot`. Runtime, PID-runtime,
+  Provider authority/index, URI-permission target PID, and Activity task state
+  are now queried through engine Binder APIs instead of reconstructing an
+  owner graph from engine persistence files in client/guest processes.
+- Added owner-file boundary and IPC tamper tests. Missing, malformed, or
+  identity-mismatched authoritative replies fail closed and cannot be repaired
+  by reading the server-owned runtime/task files directly.
+- Added `EngineActivityLaunchAllocator` and authoritative
+  `allocateActivityLaunch` / `releaseActivityLaunch` operations. Proxy-slot
+  allocation and one-time launch-capability issuance are one server operation
+  bound to `instanceId`, `processSlot`, PID, `runtimeEpoch`, and
+  `engineSessionId`.
+- Capability replay is rejected as `launch_capability_replayed`. Legacy
+  reserve/CAS Binder commands and `ContainerActivity` launches without a
+  capability fail closed. Generation/process-slot replacement invalidates the
+  old assignment without blocking a successor runtime.
+- Single and batch launch failure paths release only allocations they own;
+  batch rollback is reverse ordered and duplicate release is prevented.
+- Added `PackageGenerationJournal`, `PackageGenerationReconciler`, and
+  `PackageGenerationRecoveryProvider`. Startup recovery covers abandoned
+  `.install-*.tmp`, record `.json.tmp/.json.bak`, incomplete journals, delete
+  tombstones, and orphan content-addressed APK artifacts.
+- Recovery validates canonical containment, symlinks, and artifact digests.
+  A reconciliation failure throws before engine initialization instead of
+  starting from an ambiguous package generation. Manifest ordering runs the
+  recovery Provider at `initOrder=1100` before `EngineBinderProvider` at
+  `initOrder=1000`.
+
+Verification:
+
+- Focused engine Activity allocation/capability tests passed.
+- Package journal/reconciliation coverage passed with 98 tests and no
+  failures.
+- `EngineActivityRuntimeTest` and
+  `VirtualInstrumentationStartActivityEvidenceTest` passed after allocation
+  rollback/release hardening.
+- The required full local gate passed once in 7m18s: 511 Gradle tasks, with 64
+  executed, 8 from cache, and 439 up-to-date.
+- The eight requested module reports contain 1,933 tests, 0 failures, 0
+  errors, and 12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,808,049 bytes.
+- APK SHA-256:
+  `4B4B3C727695409DA273ACAAB6422D4BBE23EE48EFF1AF59F732E7F33C3DAABD`.
+- The existing AGP 8.7.3 warning for `compileSdk=36` remains non-fatal and is
+  still engineering debt rather than evidence of runtime compatibility.
+
+Remaining gate:
+
+- The loader's legacy `VirtualAmsComponentDispatcher` still contains local
+  reserve/CAS fallback code. No production store installs that fallback, so it
+  currently fails by exception; it should be converted to an explicit
+  structured `Blocked` result.
+- `EngineBinderProvider` still runs in the host process. Dedicated `:engine`
+  process routing, Binder death/reconnect, and rejection of stale server
+  generations remain the next architecture gate.
+- Full PMS/AMS/Provider/Service/Broadcast/storage/native semantics and API
+  28-36/HyperOS device evidence remain incomplete.
+- This batch is not device proof for GKD, AstroBox, QQ, WeChat, or QQ Reader.
+  Commercial status remains **BLOCK**.

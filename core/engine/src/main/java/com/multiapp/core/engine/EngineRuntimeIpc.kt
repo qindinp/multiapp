@@ -6,6 +6,9 @@ import android.os.Binder
 import android.os.Bundle
 import android.os.IBinder
 import com.multiapp.core.engine.ipc.IEngineRuntimeService
+import com.multiapp.core.loader.VirtualActivityLaunchAllocation
+import com.multiapp.core.loader.VirtualActivityLaunchAllocationRequest
+import com.multiapp.core.loader.VirtualActivityLaunchIdentity
 import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
@@ -157,6 +160,8 @@ object EngineRuntimeIpcContract {
     const val KEY_PENDING_NEW_INTENT = "pendingNewIntent"
     const val KEY_RESULT_CODE = "resultCode"
     const val KEY_REQUEST_CODE = "requestCode"
+    const val KEY_ACTIVITY_ALLOCATION_REQUEST = "activityAllocationRequest"
+    const val KEY_ACTIVITY_LAUNCH_IDENTITY = "activityLaunchIdentity"
     const val KEY_RESULT_WHO = "resultWho"
     const val KEY_FRAMEWORK_DISPATCH_ATTEMPTED = "frameworkDispatchAttempted"
     const val KEY_FRAMEWORK_DISPATCH_INVOKED = "frameworkDispatchInvoked"
@@ -281,6 +286,8 @@ class EngineRuntimeBinderEndpoint(
     private val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
         EngineActivityLaunchCapabilityRegistry.global,
     private val activityService: VirtualActivityService = DefaultVirtualSystemServer(registry).activityService,
+    private val activityLaunchAllocator: EngineActivityLaunchAllocator =
+        EngineActivityLaunchAllocator(registry, activityService, activityLaunchCapabilities),
     private val providerService: VirtualProviderService = DefaultVirtualSystemServer(registry).providerService,
     private val permissionService: VirtualPermissionService =
         DefaultVirtualSystemServer(registry).permissionService,
@@ -347,7 +354,7 @@ class EngineRuntimeBinderEndpoint(
     override fun engineQueryRuntimeState(instanceId: String): Bundle = authorizedBundle {
         val engine = virtualizationEngine
             ?: return@authorizedBundle engineOperationUnavailableBundle("queryRuntimeState")
-        engine.queryRuntimeState(instanceId)?.toEngineRuntimeIdentityBundle()
+        engine.queryRuntimeState(instanceId)?.toAuthoritativeRuntimeBundle()
             ?: engineMissingRuntimeBundle(instanceId)
     }
 
@@ -501,6 +508,23 @@ class EngineRuntimeBinderEndpoint(
         )
     }
 
+    override fun queryRuntimeByProcessId(processId: Int): Bundle = authorizedBundle {
+        if (processId <= 0) {
+            return@authorizedBundle missingProcessRuntimeBundle(processId, "invalid_process_id")
+        }
+        val matches = registry.list().filter { runtime -> runtime.processId == processId }
+        val runtime = matches.singleOrNull()
+            ?: return@authorizedBundle missingProcessRuntimeBundle(
+                processId,
+                if (matches.isEmpty()) "runtime_process_id_not_found" else "runtime_process_id_ambiguous"
+            )
+        val authority = processControlPlane.authorize(runtime.instanceId, processId)
+        runtime.toIpcBundle(
+            liveAuthority = authority.allowed,
+            reason = authority.reason
+        )
+    }
+
     override fun authorizeActivityLaunch(
         capabilityToken: String,
         instanceId: String,
@@ -528,12 +552,18 @@ class EngineRuntimeBinderEndpoint(
         val callerPid = callingPid()
         val runtime = registry.get(instanceId)
         val liveAuthority = processControlPlane.authorize(instanceId, callerPid)
+        val proxyProcessSlot = runtime?.let { current ->
+            EngineProxyActivitySlots.processSlotForClassName(
+                hostPackageName = current.hostPackageName,
+                className = proxyActivityClassName
+            )
+        }
         val runtimeAccepted = runtime != null &&
             liveAuthority.allowed &&
             runtime.runtimeEpoch == runtimeEpoch &&
             runtime.engineSessionId == engineSessionId &&
             runtime.processSlot == processSlot &&
-            runtime.proxySlot == proxyActivityClassName &&
+            proxyProcessSlot == runtime.processSlot &&
             runtime.processId == callerPid &&
             runtime.state in setOf(VirtualRuntimeState.PREWARMED, VirtualRuntimeState.RUNNING)
         val result = if (runtimeAccepted) {
@@ -650,7 +680,66 @@ class EngineRuntimeBinderEndpoint(
     override fun planActivity(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decodedRequest = request.toActivityPlanRequestOrNull()
             ?: return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_activity_plan_request")
-        activityService.planActivity(instanceId, decodedRequest).toIpcBundle()
+        val plan = activityService.planActivity(instanceId, decodedRequest)
+        if (plan.verdict == EngineResultStatus.FAIL || plan.targets.isEmpty()) {
+            return@runtimeAuthorizedBundle plan.toIpcBundle()
+        }
+        val target = plan.targets.singleOrNull()
+            ?: return@runtimeAuthorizedBundle plan.copy(
+                verdict = EngineResultStatus.FAIL,
+                targets = emptyList(),
+                message = "activity_allocation_requires_single_target"
+            ).toIpcBundle()
+        val allocation = activityLaunchAllocator.allocate(
+            VirtualActivityLaunchAllocationRequest(
+                instanceId = target.instanceId,
+                originPackageName = target.originPackageName,
+                guestActivityClassName = target.activityClassName,
+                processSlot = target.processSlot,
+                launchMode = target.launchMode,
+                taskAffinity = target.taskAffinity
+            ),
+            callingPid()
+        )
+        val identity = allocation.launchIdentity
+        val proxy = allocation.proxyActivityClassName
+        if (!allocation.accepted || identity == null || proxy == null) {
+            return@runtimeAuthorizedBundle plan.copy(
+                verdict = EngineResultStatus.FAIL,
+                targets = emptyList(),
+                message = allocation.reason
+            ).toIpcBundle()
+        }
+        plan.copy(
+            targets = listOf(
+                target.copy(
+                    proxyActivityClassName = proxy,
+                    launchCapabilityToken = identity.capabilityToken,
+                    runtimeEpoch = identity.runtimeEpoch,
+                    engineSessionId = identity.engineSessionId
+                )
+            ),
+            message = "${plan.message}:activity_allocation_authorized"
+        ).toIpcBundle()
+    }
+
+    override fun allocateActivityLaunch(instanceId: String, request: Bundle): Bundle =
+        runtimeAuthorizedBundle(instanceId) {
+            val decoded = request.toActivityLaunchAllocationRequestOrNull()
+                ?.takeIf { it.instanceId == instanceId }
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
+                    instanceId,
+                    "invalid_activity_allocation_request"
+                )
+            activityLaunchAllocator.allocate(decoded, callingPid()).toIpcBundle()
+        }
+
+    override fun releaseActivityLaunch(instanceId: String, allocation: Bundle): Boolean {
+        if (!isRuntimeAuthorized(instanceId)) return false
+        val decoded = allocation.toActivityLaunchAllocationOrNull()
+            ?.takeIf { it.accepted && it.request.instanceId == instanceId }
+            ?: return false
+        return activityLaunchAllocator.release(decoded, callingPid())
     }
 
     override fun recordActivityDispatch(instanceId: String, result: Bundle): Boolean {
@@ -778,8 +867,14 @@ class EngineRuntimeBinderEndpoint(
                 "invalid",
                 "invalid_proxy_activity_slot_query_request"
             )
-        activityService.queryProxyActivitySlot(key.instanceId, key)
-            .toProxyActivitySlotResultIpcBundle()
+        if (!processControlPlane.authorize(key.instanceId, callingPid()).allowed) {
+            return@authorizedBundle rejectedProxyActivitySlotOperation(
+                key,
+                PROXY_ACTIVITY_SLOT_QUERY_OPERATION,
+                "proxy_activity_slot_query_runtime_unauthorized"
+            )
+        }
+        activityService.queryProxyActivitySlot(key.instanceId, key).toProxyActivitySlotResultIpcBundle()
     }
 
     override fun reserveProxyActivitySlot(request: Bundle): Bundle = authorizedBundle {
@@ -788,11 +883,11 @@ class EngineRuntimeBinderEndpoint(
                 "invalid",
                 "invalid_proxy_activity_slot_reserve_request"
             )
-        activityService.reserveProxyActivitySlot(
-            decoded.key.instanceId,
+        rejectedProxyActivitySlotOperation(
             decoded.key,
-            decoded.candidateProxyActivityClassNames
-        ).toProxyActivitySlotResultIpcBundle()
+            PROXY_ACTIVITY_SLOT_RESERVE_OPERATION,
+            "direct_proxy_activity_slot_mutation_disabled"
+        )
     }
 
     override fun compareAndSetProxyActivitySlot(request: Bundle): Bundle = authorizedBundle {
@@ -801,13 +896,27 @@ class EngineRuntimeBinderEndpoint(
                 "invalid",
                 "invalid_proxy_activity_slot_compare_and_set_request"
             )
-        activityService.compareAndSetProxyActivitySlot(
-            decoded.key.instanceId,
+        rejectedProxyActivitySlotOperation(
             decoded.key,
-            decoded.expectedProxyActivityClassName,
-            decoded.newProxyActivityClassName
-        ).toProxyActivitySlotResultIpcBundle()
+            PROXY_ACTIVITY_SLOT_COMPARE_AND_SET_OPERATION,
+            "direct_proxy_activity_slot_mutation_disabled"
+        )
     }
+
+    private fun rejectedProxyActivitySlotOperation(
+        key: ProxyActivitySlotKey,
+        operation: String,
+        message: String
+    ): Bundle = VirtualProxyActivitySlotOperationResult(
+        instanceId = key.instanceId,
+        operation = operation,
+        verdict = EngineResultStatus.FAIL,
+        key = key,
+        proxyActivityClassName = null,
+        matched = false,
+        removedCount = 0,
+        message = message
+    ).toProxyActivitySlotResultIpcBundle()
 
     override fun planProvider(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decodedRequest = request.toProviderPlanRequestOrNull()
@@ -1034,8 +1143,18 @@ class EngineRuntimeBinderEndpoint(
         putString(EngineRuntimeIpcContract.KEY_REASON, "runtime_not_found")
     }
 
+    private fun missingProcessRuntimeBundle(processId: Int, reason: String): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
+        putBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY, false)
+        putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+        putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, "")
+        putInt(EngineRuntimeIpcContract.KEY_PROCESS_ID, processId)
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
+
     private fun invalidRequestBundle(instanceId: String, reason: String): Bundle = Bundle().apply {
         putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+        putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
         putString(EngineRuntimeIpcContract.KEY_VERDICT, EngineResultStatus.FAIL.name)
         putString(EngineRuntimeIpcContract.KEY_MESSAGE, reason)
         putString(EngineRuntimeIpcContract.KEY_REASON, reason)
@@ -1355,10 +1474,12 @@ object EngineRuntimeIpcClients {
     internal fun engineDeleteInstance(instanceId: String): EngineRemoteResult? =
         invokeEngineResult { service -> service.engineDeleteInstance(instanceId) }
 
-    internal fun engineQueryRuntimeState(instanceId: String): EngineRuntimeIdentity? {
+    fun engineQueryRuntimeState(
+        instanceId: String
+    ): com.multiapp.core.model.engine.VirtualInstanceRuntime? {
         val active = activeService() ?: return null
         val response = runCatching { active.engineQueryRuntimeState(instanceId) }.getOrNull() ?: return null
-        return response.toEngineRuntimeIdentityOrNull()
+        return response.toAuthoritativeRuntimeOrNull()
     }
 
     internal fun engineExportEvidence(
@@ -1451,25 +1572,41 @@ object EngineRuntimeIpcClients {
 
     fun queryRuntime(instanceId: String): EngineRuntimeIpcSnapshot? {
         val response = runCatching { activeService()?.queryRuntime(instanceId) }.getOrNull() ?: return null
-        return EngineRuntimeIpcSnapshot(
-            found = response.getBoolean(EngineRuntimeIpcContract.KEY_FOUND),
-            instanceId = response.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
-            processSlot = response.getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT),
-            proxySlot = response.getString(EngineRuntimeIpcContract.KEY_PROXY_SLOT),
-            runtimeEpoch = response.getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH),
-            engineSessionId = response.getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID),
-            evidenceSessionId = response.getString(EngineRuntimeIpcContract.KEY_EVIDENCE_SESSION_ID),
-            runtimeState = response.getString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE),
-            processId = if (response.containsKey(EngineRuntimeIpcContract.KEY_PROCESS_ID)) {
-                response.getInt(EngineRuntimeIpcContract.KEY_PROCESS_ID)
+        return response.toRuntimeIpcSnapshotOrNull()
+            ?.takeIf { snapshot -> snapshot.instanceId == instanceId || !snapshot.found }
+    }
+
+    fun queryRuntimeByProcessId(processId: Int): EngineRuntimeIpcSnapshot? {
+        if (processId <= 0) return null
+        val response = runCatching { activeService()?.queryRuntimeByProcessId(processId) }.getOrNull()
+            ?: return null
+        return response.toRuntimeIpcSnapshotOrNull()
+            ?.takeIf { snapshot -> snapshot.found && snapshot.processId == processId }
+    }
+
+    private fun Bundle.toRuntimeIpcSnapshotOrNull(): EngineRuntimeIpcSnapshot? = runCatching {
+        val found = getBoolean(EngineRuntimeIpcContract.KEY_FOUND)
+        val instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty()
+        check(!found || instanceId.isNotBlank())
+        EngineRuntimeIpcSnapshot(
+            found = found,
+            instanceId = instanceId,
+            processSlot = getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT),
+            proxySlot = getString(EngineRuntimeIpcContract.KEY_PROXY_SLOT),
+            runtimeEpoch = getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH),
+            engineSessionId = getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID),
+            evidenceSessionId = getString(EngineRuntimeIpcContract.KEY_EVIDENCE_SESSION_ID),
+            runtimeState = getString(EngineRuntimeIpcContract.KEY_RUNTIME_STATE),
+            processId = if (containsKey(EngineRuntimeIpcContract.KEY_PROCESS_ID)) {
+                getInt(EngineRuntimeIpcContract.KEY_PROCESS_ID).takeIf { it > 0 }
             } else {
                 null
             },
-            processName = response.getString(EngineRuntimeIpcContract.KEY_PROCESS_NAME),
-            reason = response.getString(EngineRuntimeIpcContract.KEY_REASON),
-            liveAuthority = response.getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY)
+            processName = getString(EngineRuntimeIpcContract.KEY_PROCESS_NAME),
+            reason = getString(EngineRuntimeIpcContract.KEY_REASON),
+            liveAuthority = getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY)
         )
-    }
+    }.getOrNull()
 
     fun authorizeActivityLaunch(identity: EngineActivityLaunchIdentity): EngineActivityLaunchAuthorization? {
         val response = runCatching {
@@ -1517,6 +1654,24 @@ object EngineRuntimeIpcClients {
             activeService()?.planActivity(instanceId, request.toIpcBundle())
         }.getOrNull() ?: return null
         return response.toActivityDispatchPlanOrNull()
+    }
+
+    fun allocateActivityLaunch(
+        request: VirtualActivityLaunchAllocationRequest
+    ): VirtualActivityLaunchAllocation? {
+        val response = runCatching {
+            activeService()?.allocateActivityLaunch(request.instanceId, request.toIpcBundle())
+        }.getOrNull() ?: return null
+        return response.toActivityLaunchAllocationOrNull()
+            ?.takeIf { allocation -> allocation.request == request }
+    }
+
+    fun releaseActivityLaunch(allocation: VirtualActivityLaunchAllocation): Boolean? {
+        if (!allocation.accepted) return false
+        val active = activeService() ?: return null
+        return runCatching {
+            active.releaseActivityLaunch(allocation.request.instanceId, allocation.toIpcBundle())
+        }.getOrNull()
     }
 
     fun recordActivityDispatch(instanceId: String, result: VirtualActivityDispatchResult): Boolean? {
@@ -2091,6 +2246,143 @@ private val PROXY_ACTIVITY_SLOT_KEY_FIELDS = setOf(
     EngineRuntimeIpcContract.KEY_TASK_KEY
 )
 
+private fun VirtualActivityLaunchAllocationRequest.toIpcBundle(): Bundle = Bundle().apply {
+    putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+    putString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME, originPackageName)
+    putString(EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME, guestActivityClassName)
+    putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, processSlot)
+    putString(EngineRuntimeIpcContract.KEY_LAUNCH_MODE, launchMode)
+    putString(EngineRuntimeIpcContract.KEY_TASK_AFFINITY, taskAffinity)
+}
+
+private fun Bundle.toActivityLaunchAllocationRequestOrNull(): VirtualActivityLaunchAllocationRequest? =
+    runCatching {
+        if (keySet() != ACTIVITY_ALLOCATION_REQUEST_FIELDS) return@runCatching null
+        VirtualActivityLaunchAllocationRequest(
+            instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+            originPackageName = getString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME).orEmpty(),
+            guestActivityClassName = getString(EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME).orEmpty(),
+            processSlot = getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT).orEmpty(),
+            launchMode = getString(EngineRuntimeIpcContract.KEY_LAUNCH_MODE),
+            taskAffinity = getString(EngineRuntimeIpcContract.KEY_TASK_AFFINITY)
+        )
+    }.getOrNull()
+
+private fun VirtualActivityLaunchAllocation.toIpcBundle(): Bundle = Bundle().apply {
+    putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, accepted)
+    putBundle(EngineRuntimeIpcContract.KEY_ACTIVITY_ALLOCATION_REQUEST, request.toIpcBundle())
+    putString(EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME, proxyActivityClassName)
+    putBundle(
+        EngineRuntimeIpcContract.KEY_ACTIVITY_LAUNCH_IDENTITY,
+        launchIdentity?.toIpcBundle()
+    )
+    putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+}
+
+private fun Bundle.toActivityLaunchAllocationOrNull(): VirtualActivityLaunchAllocation? = runCatching {
+    if (keySet() != ACTIVITY_ALLOCATION_FIELDS) return@runCatching null
+    val request = getBundle(EngineRuntimeIpcContract.KEY_ACTIVITY_ALLOCATION_REQUEST)
+        ?.toActivityLaunchAllocationRequestOrNull()
+        ?: return@runCatching null
+    val identityBundle = getBundle(EngineRuntimeIpcContract.KEY_ACTIVITY_LAUNCH_IDENTITY)
+    val identity = identityBundle?.toLoaderActivityLaunchIdentityOrNull()
+    if (identityBundle != null && identity == null) return@runCatching null
+    VirtualActivityLaunchAllocation(
+        accepted = getBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED),
+        request = request,
+        proxyActivityClassName = getString(EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME),
+        launchIdentity = identity,
+        reason = getString(EngineRuntimeIpcContract.KEY_REASON).orEmpty()
+    )
+}.getOrNull()
+
+private fun VirtualActivityLaunchIdentity.toIpcBundle(): Bundle = Bundle().apply {
+    putString(EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN, capabilityToken)
+    putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+    putLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH, runtimeEpoch)
+    putString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID, engineSessionId)
+    putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, processSlot)
+    putString(EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME, proxyActivityClassName)
+    putString(EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME, guestActivityClassName)
+}
+
+private fun Bundle.toLoaderActivityLaunchIdentityOrNull(): VirtualActivityLaunchIdentity? = runCatching {
+    if (keySet() != ACTIVITY_LAUNCH_IDENTITY_FIELDS) return@runCatching null
+    VirtualActivityLaunchIdentity(
+        capabilityToken = getString(EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN).orEmpty(),
+        instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+        runtimeEpoch = getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH),
+        engineSessionId = getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID).orEmpty(),
+        processSlot = getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT).orEmpty(),
+        proxyActivityClassName = getString(
+            EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME
+        ).orEmpty(),
+        guestActivityClassName = getString(EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME).orEmpty()
+    )
+}.getOrNull()
+
+private val ACTIVITY_ALLOCATION_REQUEST_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+    EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME,
+    EngineRuntimeIpcContract.KEY_PROCESS_SLOT,
+    EngineRuntimeIpcContract.KEY_LAUNCH_MODE,
+    EngineRuntimeIpcContract.KEY_TASK_AFFINITY
+)
+private val ACTIVITY_ALLOCATION_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_ACCEPTED,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_ALLOCATION_REQUEST,
+    EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_LAUNCH_IDENTITY,
+    EngineRuntimeIpcContract.KEY_REASON
+)
+private val ACTIVITY_LAUNCH_IDENTITY_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN,
+    EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+    EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH,
+    EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID,
+    EngineRuntimeIpcContract.KEY_PROCESS_SLOT,
+    EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME
+)
+private val ACTIVITY_PLAN_REQUEST_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_ACTION,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME,
+    EngineRuntimeIpcContract.KEY_TARGET_PACKAGE_NAME,
+    EngineRuntimeIpcContract.KEY_CATEGORIES,
+    EngineRuntimeIpcContract.KEY_DATA_SCHEME,
+    EngineRuntimeIpcContract.KEY_DATA_MIME_TYPE,
+    EngineRuntimeIpcContract.KEY_DATA_AUTHORITY,
+    EngineRuntimeIpcContract.KEY_DATA_PATH,
+    EngineRuntimeIpcContract.KEY_LAUNCH_FLAGS
+)
+private val ACTIVITY_PLAN_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+    EngineRuntimeIpcContract.KEY_VERDICT,
+    EngineRuntimeIpcContract.KEY_ACTION,
+    EngineRuntimeIpcContract.KEY_TARGETS,
+    EngineRuntimeIpcContract.KEY_SUPPORTED_OPERATIONS,
+    EngineRuntimeIpcContract.KEY_UNSUPPORTED_OPERATIONS,
+    EngineRuntimeIpcContract.KEY_MESSAGE
+)
+private val ACTIVITY_TARGET_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+    EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME,
+    EngineRuntimeIpcContract.KEY_VIRTUAL_PACKAGE_NAME,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME,
+    EngineRuntimeIpcContract.KEY_ACTION,
+    EngineRuntimeIpcContract.KEY_REASON,
+    EngineRuntimeIpcContract.KEY_PROCESS_SLOT,
+    EngineRuntimeIpcContract.KEY_PROCESS_NAME,
+    EngineRuntimeIpcContract.KEY_LAUNCH_MODE,
+    EngineRuntimeIpcContract.KEY_TASK_AFFINITY,
+    EngineRuntimeIpcContract.KEY_PRIORITY,
+    EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME,
+    EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN,
+    EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH,
+    EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID
+)
+
 private fun VirtualActivityDispatchPlanRequest.toIpcBundle(): Bundle = Bundle().apply {
     putString(EngineRuntimeIpcContract.KEY_ACTION, action)
     putString(EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME, activityClassName)
@@ -2104,11 +2396,21 @@ private fun VirtualActivityDispatchPlanRequest.toIpcBundle(): Bundle = Bundle().
 }
 
 private fun Bundle.toActivityPlanRequestOrNull(): VirtualActivityDispatchPlanRequest? = runCatching {
+    if (keySet() != ACTIVITY_PLAN_REQUEST_FIELDS) return@runCatching null
+    val categoryList = getStringArrayList(EngineRuntimeIpcContract.KEY_CATEGORIES)
+        ?: return@runCatching null
+    if (
+        categoryList.size > MAX_ACTIVITY_CATEGORIES ||
+        categoryList.any { it.isBlank() } ||
+        categoryList.distinct().size != categoryList.size
+    ) {
+        return@runCatching null
+    }
     VirtualActivityDispatchPlanRequest(
         action = getString(EngineRuntimeIpcContract.KEY_ACTION),
         activityClassName = getString(EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME),
         targetPackageName = getString(EngineRuntimeIpcContract.KEY_TARGET_PACKAGE_NAME),
-        categories = getStringArrayList(EngineRuntimeIpcContract.KEY_CATEGORIES).orEmpty().toSet(),
+        categories = categoryList.toSet(),
         dataScheme = getString(EngineRuntimeIpcContract.KEY_DATA_SCHEME),
         dataMimeType = getString(EngineRuntimeIpcContract.KEY_DATA_MIME_TYPE),
         dataAuthority = getString(EngineRuntimeIpcContract.KEY_DATA_AUTHORITY),
@@ -2148,27 +2450,44 @@ private fun VirtualActivityDispatchTarget.toIpcBundle(): Bundle = Bundle().apply
     putString(EngineRuntimeIpcContract.KEY_LAUNCH_MODE, launchMode)
     putString(EngineRuntimeIpcContract.KEY_TASK_AFFINITY, taskAffinity)
     putInt(EngineRuntimeIpcContract.KEY_PRIORITY, priority)
+    putString(EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME, proxyActivityClassName)
+    putString(EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN, launchCapabilityToken)
+    putLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH, runtimeEpoch ?: 0L)
+    putString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID, engineSessionId)
 }
 
 private fun Bundle.toActivityDispatchPlanOrNull(): VirtualActivityDispatchPlan? = runCatching {
+    if (keySet() != ACTIVITY_PLAN_FIELDS) return@runCatching null
+    val targetBundles = getParcelableArrayList<Bundle>(EngineRuntimeIpcContract.KEY_TARGETS)
+        ?: return@runCatching null
+    if (targetBundles.size > MAX_ACTIVITY_TARGETS) return@runCatching null
+    val targets = targetBundles.map { target ->
+        target.toActivityDispatchTargetOrNull() ?: return@runCatching null
+    }
+    val supported = getStringArrayList(EngineRuntimeIpcContract.KEY_SUPPORTED_OPERATIONS)
+        ?: return@runCatching null
+    val unsupported = getStringArrayList(EngineRuntimeIpcContract.KEY_UNSUPPORTED_OPERATIONS)
+        ?: return@runCatching null
+    if (
+        !supported.isValidActivityOperationList() ||
+        !unsupported.isValidActivityOperationList() ||
+        supported.any { it in unsupported }
+    ) {
+        return@runCatching null
+    }
     VirtualActivityDispatchPlan(
         instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
         verdict = EngineResultStatus.valueOf(getString(EngineRuntimeIpcContract.KEY_VERDICT).orEmpty()),
         action = getString(EngineRuntimeIpcContract.KEY_ACTION),
-        targets = getParcelableArrayList<Bundle>(EngineRuntimeIpcContract.KEY_TARGETS)
-            .orEmpty()
-            .mapNotNull { it.toActivityDispatchTargetOrNull() },
-        supportedOperations = getStringArrayList(EngineRuntimeIpcContract.KEY_SUPPORTED_OPERATIONS)
-            .orEmpty()
-            .toSet(),
-        unsupportedOperations = getStringArrayList(EngineRuntimeIpcContract.KEY_UNSUPPORTED_OPERATIONS)
-            .orEmpty()
-            .toSet(),
+        targets = targets,
+        supportedOperations = supported.toSet(),
+        unsupportedOperations = unsupported.toSet(),
         message = getString(EngineRuntimeIpcContract.KEY_MESSAGE).orEmpty()
     )
 }.getOrNull()
 
 private fun Bundle.toActivityDispatchTargetOrNull(): VirtualActivityDispatchTarget? = runCatching {
+    if (keySet() != ACTIVITY_TARGET_FIELDS) return@runCatching null
     VirtualActivityDispatchTarget(
         instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
         originPackageName = getString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME).orEmpty(),
@@ -2180,9 +2499,20 @@ private fun Bundle.toActivityDispatchTargetOrNull(): VirtualActivityDispatchTarg
         processName = getString(EngineRuntimeIpcContract.KEY_PROCESS_NAME),
         launchMode = getString(EngineRuntimeIpcContract.KEY_LAUNCH_MODE),
         taskAffinity = getString(EngineRuntimeIpcContract.KEY_TASK_AFFINITY),
-        priority = getInt(EngineRuntimeIpcContract.KEY_PRIORITY)
+        priority = getInt(EngineRuntimeIpcContract.KEY_PRIORITY),
+        proxyActivityClassName = getString(EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME),
+        launchCapabilityToken = getString(EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN),
+        runtimeEpoch = getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH).takeIf { it > 0L },
+        engineSessionId = getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID)
     )
 }.getOrNull()
+
+private fun List<String>.isValidActivityOperationList(): Boolean =
+    size <= MAX_ACTIVITY_OPERATIONS && all { it.isNotBlank() } && distinct().size == size
+
+private const val MAX_ACTIVITY_CATEGORIES = 64
+private const val MAX_ACTIVITY_TARGETS = 128
+private const val MAX_ACTIVITY_OPERATIONS = 128
 
 private fun VirtualActivityDispatchResult.toIpcBundle(): Bundle = Bundle().apply {
     putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)

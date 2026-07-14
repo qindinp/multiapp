@@ -4,7 +4,7 @@ import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineSubsystem
 
 class IpcBackedVirtualAppOpsService(
-    @Suppress("UNUSED_PARAMETER") fallback: VirtualAppOpsService,
+    @Suppress("UNUSED_PARAMETER") fallback: VirtualAppOpsService? = null,
     private val remoteQuery: (String, VirtualAppOpsQueryRequest) -> VirtualAppOpsQueryResult? =
         EngineRuntimeIpcClients::queryAppOp,
     private val readOnlyRuntimeStateSnapshot: (String) -> VirtualAppOpsRuntimeState? = { null },

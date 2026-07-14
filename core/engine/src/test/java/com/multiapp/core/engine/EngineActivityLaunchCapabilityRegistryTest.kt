@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
 
 class EngineActivityLaunchCapabilityRegistryTest {
     @Test
-    fun `capability binds complete launch identity and target pid`() {
+    fun `capability binds complete launch identity and target pid and rejects replay`() {
         var tokenIndex = 0
         val registry = EngineActivityLaunchCapabilityRegistry(
             clockNanos = { 100L },
@@ -28,8 +28,9 @@ class EngineActivityLaunchCapabilityRegistryTest {
         val repeated = registry.authorize(identity, PROCESS_ID)
         assertTrue(first.accepted)
         assertFalse(first.idempotent)
-        assertTrue(repeated.accepted)
-        assertTrue(repeated.idempotent)
+        assertFalse(repeated.accepted)
+        assertFalse(repeated.idempotent)
+        assertEquals("launch_capability_replayed", repeated.reason)
     }
 
     @Test

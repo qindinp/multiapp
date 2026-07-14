@@ -432,7 +432,11 @@ data class VirtualActivityDispatchTarget(
     val processName: String? = null,
     val launchMode: String? = null,
     val taskAffinity: String? = null,
-    val priority: Int = 0
+    val priority: Int = 0,
+    val proxyActivityClassName: String? = null,
+    val launchCapabilityToken: String? = null,
+    val runtimeEpoch: Long? = null,
+    val engineSessionId: String? = null
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
@@ -445,6 +449,25 @@ data class VirtualActivityDispatchTarget(
         require(processName == null || processName.isNotBlank()) { "processName must not be blank" }
         require(launchMode == null || launchMode.isNotBlank()) { "launchMode must not be blank" }
         require(taskAffinity == null || taskAffinity.isNotBlank()) { "taskAffinity must not be blank" }
+        require(proxyActivityClassName == null || proxyActivityClassName.isNotBlank()) {
+            "proxyActivityClassName must not be blank"
+        }
+        require(launchCapabilityToken == null || launchCapabilityToken.isNotBlank()) {
+            "launchCapabilityToken must not be blank"
+        }
+        require(runtimeEpoch == null || runtimeEpoch > 0L) { "runtimeEpoch must be positive" }
+        require(engineSessionId == null || engineSessionId.isNotBlank()) {
+            "engineSessionId must not be blank"
+        }
+        val allocationFieldCount = listOf(
+            proxyActivityClassName,
+            launchCapabilityToken,
+            runtimeEpoch,
+            engineSessionId
+        ).count { it != null }
+        require(allocationFieldCount == 0 || allocationFieldCount == 4) {
+            "Activity launch allocation fields must be either all absent or all present"
+        }
     }
 }
 

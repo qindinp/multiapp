@@ -2,11 +2,12 @@ package com.multiapp.core.engine
 
 import android.content.Context
 import android.content.Intent
+import com.multiapp.core.loader.VirtualActivityLaunchAllocation
+import com.multiapp.core.loader.VirtualActivityLaunchAllocationProvider
+import com.multiapp.core.loader.VirtualActivityLaunchAllocationRequest
 import com.multiapp.core.loader.VirtualActivityRecordManager
 import com.multiapp.core.loader.VirtualContextWrapper
 import com.multiapp.core.model.engine.EngineResultStatus
-import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
-import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import io.mockk.every
 import io.mockk.mockk
@@ -68,17 +69,19 @@ class EngineActivityRuntimeTest {
             every { flags } returns 0
         }
         val proxyIntent = mockk<Intent>(relaxed = true)
-        val slotStore = mockk<ProxyActivitySlotAssignmentStore>(relaxed = true) {
-            every { reserve(any(), any()) } answers { secondArg<List<String>>().firstOrNull() }
-        }
         val manager = VirtualActivityRecordManager()
         val coordinator = EngineActivityLaunchCoordinator(
             hostContext = context,
             processSlot = processSlot,
-            slotAssignmentStore = slotStore,
             activityRecordManager = manager,
+            allocationProvider = mockk(relaxed = true),
             proxyIntentFactory = { _, _, _ -> proxyIntent }
         )
+        val proxyActivityClassName = EngineProxyActivitySlots.classNamesForProcessSlot(
+            hostPackageName = hostPackageName,
+            processSlot = processSlot,
+            launchMode = "singleTop"
+        ).first()
         val plan = VirtualActivityDispatchPlan(
             instanceId = "inst-001",
             verdict = EngineResultStatus.PARTIAL,
@@ -93,7 +96,11 @@ class EngineActivityRuntimeTest {
                     reason = "implicit",
                     processSlot = processSlot,
                     launchMode = "singleTop",
-                    taskAffinity = "com.example.app:inst-001"
+                    taskAffinity = "com.example.app:inst-001",
+                    proxyActivityClassName = proxyActivityClassName,
+                    launchCapabilityToken = "capability-main",
+                    runtimeEpoch = 42L,
+                    engineSessionId = "engine-session-42"
                 )
             ),
             message = "implicit_activity_route_planned"
@@ -119,8 +126,8 @@ class EngineActivityRuntimeTest {
                 every { packageName } returns "com.multiapp.app"
             },
             processSlot = "com.multiapp.app:v1",
-            slotAssignmentStore = mockk(relaxed = true),
             activityRecordManager = manager,
+            allocationProvider = mockk(relaxed = true),
             proxyIntentFactory = { _, _, _ -> mockk(relaxed = true) }
         )
         val plan = VirtualActivityDispatchPlan(
@@ -134,7 +141,11 @@ class EngineActivityRuntimeTest {
                     activityClassName = "com.example.app.MainActivity",
                     action = null,
                     reason = "explicit",
-                    processSlot = "com.multiapp.app:v2"
+                    processSlot = "com.multiapp.app:v2",
+                    proxyActivityClassName = "com.multiapp.app.container.ProxyActivity2",
+                    launchCapabilityToken = "capability-process-mismatch",
+                    runtimeEpoch = 42L,
+                    engineSessionId = "engine-session-42"
                 )
             ),
             message = "explicit_activity_route_planned"
@@ -151,15 +162,15 @@ class EngineActivityRuntimeTest {
     fun `engine activity launch coordinator rolls back failed batch`() {
         val processSlot = "com.multiapp.app:v1"
         val manager = VirtualActivityRecordManager()
-        val slotStore = MutableSlotStore()
+        val allocationProvider = RecordingAllocationProvider()
         var proxyIntentCount = 0
         val coordinator = EngineActivityLaunchCoordinator(
             hostContext = mockk(relaxed = true) {
                 every { packageName } returns "com.multiapp.app"
             },
             processSlot = processSlot,
-            slotAssignmentStore = slotStore,
             activityRecordManager = manager,
+            allocationProvider = allocationProvider,
             proxyIntentFactory = { _, _, _ ->
                 proxyIntentCount += 1
                 if (proxyIntentCount == 2) error("proxy_intent_failure")
@@ -179,7 +190,8 @@ class EngineActivityRuntimeTest {
                 secondIntent to activityPlan(
                     processSlot = processSlot,
                     activityClassName = "com.example.app.SecondActivity",
-                    taskAffinity = "com.example.app:second"
+                    taskAffinity = "com.example.app:second",
+                    launchMode = "singleTop"
                 )
             )
         )
@@ -192,7 +204,10 @@ class EngineActivityRuntimeTest {
         )
         assertTrue(manager.list().isEmpty())
         assertTrue(manager.listTasks().isEmpty())
-        assertTrue(slotStore.assignments.isEmpty())
+        assertEquals(
+            listOf("capability-SecondActivity", "capability-FirstActivity"),
+            allocationProvider.releasedCapabilityTokens
+        )
     }
 
     @Test
@@ -212,7 +227,8 @@ class EngineActivityRuntimeTest {
     private fun activityPlan(
         processSlot: String,
         activityClassName: String,
-        taskAffinity: String
+        taskAffinity: String,
+        launchMode: String? = null
     ): VirtualActivityDispatchPlan = VirtualActivityDispatchPlan(
         instanceId = "inst-001",
         verdict = EngineResultStatus.PARTIAL,
@@ -225,35 +241,30 @@ class EngineActivityRuntimeTest {
                 action = null,
                 reason = "explicit",
                 processSlot = processSlot,
-                taskAffinity = taskAffinity
+                launchMode = launchMode,
+                taskAffinity = taskAffinity,
+                proxyActivityClassName = EngineProxyActivitySlots.classNamesForProcessSlot(
+                    hostPackageName = "com.multiapp.app",
+                    processSlot = processSlot,
+                    launchMode = launchMode
+                ).first(),
+                launchCapabilityToken = "capability-${activityClassName.substringAfterLast('.')}",
+                runtimeEpoch = 42L,
+                engineSessionId = "engine-session-42"
             )
         ),
         message = "explicit_activity_route_planned"
     )
 
-    private class MutableSlotStore : ProxyActivitySlotAssignmentStore {
-        val assignments = linkedMapOf<ProxyActivitySlotKey, String>()
+    private class RecordingAllocationProvider : VirtualActivityLaunchAllocationProvider {
+        val releasedCapabilityTokens = mutableListOf<String>()
 
-        override fun find(key: ProxyActivitySlotKey): String? = assignments[key]
+        override fun allocate(
+            request: VirtualActivityLaunchAllocationRequest
+        ): VirtualActivityLaunchAllocation = error("coordinator must consume the authoritative plan allocation")
 
-        override fun save(key: ProxyActivitySlotKey, proxyActivityClassName: String) {
-            assignments[key] = proxyActivityClassName
-        }
-
-        override fun ownerOf(proxyActivityClassName: String): ProxyActivitySlotKey? =
-            assignments.entries.firstOrNull { it.value == proxyActivityClassName }?.key
-
-        override fun compareAndSet(
-            key: ProxyActivitySlotKey,
-            expectedProxyActivityClassName: String?,
-            newProxyActivityClassName: String?
-        ): Boolean {
-            if (assignments[key] != expectedProxyActivityClassName) return false
-            if (newProxyActivityClassName == null) {
-                assignments.remove(key)
-            } else {
-                assignments[key] = newProxyActivityClassName
-            }
+        override fun release(allocation: VirtualActivityLaunchAllocation): Boolean {
+            releasedCapabilityTokens += allocation.launchIdentity?.capabilityToken.orEmpty()
             return true
         }
     }

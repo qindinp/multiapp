@@ -1,5 +1,8 @@
 package com.multiapp.core.instance
 
+import com.multiapp.core.installer.PackageGenerationJournal
+import com.multiapp.core.installer.PackageGenerationTransaction
+import com.multiapp.core.installer.PackageGenerationTransactionJournal
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EnginePackageInstallRequest
@@ -46,18 +49,22 @@ class CloneCreateUseCase internal constructor(
     private val instanceManager: InstanceManager,
     private val virtualizationEngine: VirtualizationEngine,
     private val clock: () -> Long,
-    private val creationRequestIdFactory: () -> String
+    private val creationRequestIdFactory: () -> String,
+    private val packageGenerationJournal: PackageGenerationTransactionJournal =
+        PackageGenerationTransactionJournal.NO_OP
 ) {
 
     @Inject
     constructor(
         instanceManager: InstanceManager,
-        virtualizationEngine: VirtualizationEngine
+        virtualizationEngine: VirtualizationEngine,
+        packageGenerationJournal: PackageGenerationJournal
     ) : this(
         instanceManager = instanceManager,
         virtualizationEngine = virtualizationEngine,
         clock = System::currentTimeMillis,
-        creationRequestIdFactory = { UUID.randomUUID().toString() }
+        creationRequestIdFactory = { UUID.randomUUID().toString() },
+        packageGenerationJournal = packageGenerationJournal
     )
 
     fun suggestedDisplayName(app: VirtualApp): String {
@@ -83,8 +90,16 @@ class CloneCreateUseCase internal constructor(
     fun create(app: VirtualApp, attempt: CloneCreateAttempt): Result<CloneCreateResult> {
         val startedAt = clock()
         var shouldRetainCreationRequestId = false
+        var generationTransaction: PackageGenerationTransaction? = null
+        var journalResolved = false
 
         return try {
+            val transaction = packageGenerationJournal.begin(
+                packageName = app.packageName,
+                creationRequestId = attempt.creationRequestId,
+                payloadFingerprint = attempt.payloadFingerprint
+            )
+            generationTransaction = transaction
             val request = CreateInstanceRequest(
                 creationRequestId = attempt.creationRequestId,
                 install = app.toEngineInstallRequest(),
@@ -94,9 +109,19 @@ class CloneCreateUseCase internal constructor(
             val engineResult = virtualizationEngine.createInstance(
                 request
             )
+            val resultIsUnknown = engineResult.message == ENGINE_AUTHORITY_UNKNOWN_RESULT
+            journalResolved = true
+            if (resultIsUnknown) {
+                transaction.abandon()
+            } else {
+                try {
+                    transaction.complete()
+                } catch (_: Exception) {
+                    // A stale journal is safe and will be removed by startup reconciliation.
+                }
+            }
             if (!engineResult.success) {
-                shouldRetainCreationRequestId =
-                    engineResult.message == ENGINE_AUTHORITY_UNKNOWN_RESULT
+                shouldRetainCreationRequestId = resultIsUnknown
                 throw IllegalStateException(engineResult.message ?: "engine createInstance failed")
             }
             val instanceId = engineResult.instanceId
@@ -112,8 +137,10 @@ class CloneCreateUseCase internal constructor(
                 )
             )
         } catch (e: CancellationException) {
+            if (!journalResolved) generationTransaction?.abandon()
             throw e
         } catch (e: Exception) {
+            if (!journalResolved) generationTransaction?.abandon()
             val (failureCode, userMessage, technicalReason) = e.toCreateFailure()
             Result.failure(
                 CloneCreateFailureException(

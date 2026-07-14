@@ -332,3 +332,43 @@ This closes the proxy-slot multi-writer gap locally. Direct owner-file reads,
 client file-backed read graphs, dedicated server isolation, complete component
 semantics, and device evidence remain open, so commercial status stays
 `BLOCK`.
+
+## Authority, Capability, and Recovery Comparison - 2026-07-14
+
+The next implementation step follows the server/client boundary shared by the
+VirtualApp and BlackBox families without copying their code: package,
+process, task, and stub-allocation truth belongs to the virtual system server;
+the guest client consumes a generation-specific result and cannot rebuild a
+second authority from persistence files. DroidPlugin remains useful for stub
+pool mechanics, but its package-wide plugin model is not sufficient for
+MultiApp's per-instance runtime epoch and dataRoot contract.
+
+MultiApp decisions implemented in the current tree:
+
+1. Transfer complete runtime/package snapshots through strict Binder codecs;
+   do not let client or guest processes read engine owner files as live state.
+2. Combine proxy-slot reservation and launch authorization in one server
+   allocation. Bind its one-time capability to instance, PID, process slot,
+   runtime epoch, and engine session.
+3. Make capability replay and all old slot reserve/CAS Binder APIs fail closed.
+   A stale client cannot authorize a new launch by retaining an old slot.
+4. Journal package-generation mutations and reconcile staging, record backup,
+   tombstone, and orphan artifacts before the engine authority starts.
+5. Reject ambiguous recovery rather than exposing a partially restored package
+   generation to guest processes.
+
+Current mapping:
+
+- `EngineAuthoritativeRuntimeCodec` and the new read endpoints replace the
+  production client/guest owner-file read graph.
+- `EngineActivityLaunchAllocator` is the single allocation/capability issuer;
+  app and loader launch paths consume `PreassignedProxyActivitySlotStore`.
+- `PackageGenerationRecoveryProvider` runs before `EngineBinderProvider` and
+  delegates deterministic recovery to `PackageGenerationReconciler`.
+- Focused tests and the one full gate pass: 1,933 tests, 0 failures, 0 errors,
+  12 skipped, and `:app:assembleDebug` successful in 7m18s. The debug APK
+  SHA-256 is
+  `4B4B3C727695409DA273ACAAB6422D4BBE23EE48EFF1AF59F732E7F33C3DAABD`.
+- Dedicated `:engine` process isolation, server death/reconnect, complete
+  virtual component semantics, and device evidence remain open. Commercial
+  status therefore remains `BLOCK`.

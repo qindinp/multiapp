@@ -9,20 +9,20 @@ import com.multiapp.core.loader.VirtualUriPermissionOperation
 import com.multiapp.core.loader.VirtualUriPermissionRequest
 import com.multiapp.core.loader.VirtualUriPermissionResult
 import com.multiapp.core.model.engine.EngineResultStatus
-import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.virtual.VirtualContextConfig
 
 internal data class EngineUriPermissionBackend(
     val providerService: VirtualProviderService,
-    val runtimes: () -> List<VirtualInstanceRuntime>
+    val runtimeByProcessId: (Int) -> EngineRuntimeIpcSnapshot?
 )
 
 class EngineVirtualUriPermissionDispatcherFactory internal constructor(
     private val backendFactory: (Context) -> EngineUriPermissionBackend = { context ->
-        val handle = EngineRuntimeInstallers.fileBackedSystemServer(context)
+        @Suppress("UNUSED_VARIABLE")
+        val ignored = context
         EngineUriPermissionBackend(
-            providerService = IpcBackedVirtualProviderService(handle.server.providerService),
-            runtimes = handle.server.runtimeService::list
+            providerService = IpcBackedVirtualProviderService(),
+            runtimeByProcessId = EngineRuntimeIpcClients::queryRuntimeByProcessId
         )
     },
     private val uidProvider: (Context) -> Int = { it.applicationInfo.uid },
@@ -36,7 +36,7 @@ class EngineVirtualUriPermissionDispatcherFactory internal constructor(
         return EngineVirtualUriPermissionDispatcher(
             config = request.config,
             providerService = backend.providerService,
-            runtimes = backend.runtimes,
+            runtimeByProcessId = backend.runtimeByProcessId,
             hostUid = uidProvider(request.hostContext),
             processId = pidProvider()
         )
@@ -46,7 +46,7 @@ class EngineVirtualUriPermissionDispatcherFactory internal constructor(
 internal class EngineVirtualUriPermissionDispatcher(
     private val config: VirtualContextConfig,
     private val providerService: VirtualProviderService,
-    private val runtimes: () -> List<VirtualInstanceRuntime>,
+    private val runtimeByProcessId: (Int) -> EngineRuntimeIpcSnapshot?,
     private val hostUid: Int,
     private val processId: Int
 ) : VirtualUriPermissionDispatcher {
@@ -54,11 +54,25 @@ internal class EngineVirtualUriPermissionDispatcher(
         val authority = request.uri.authority?.takeIf { it.isNotBlank() }
             ?: return VirtualUriPermissionResult.notHandled("uri_authority_missing")
         val guestOwned = authority in guestAuthorities()
-        val virtualAuthority = guestOwned || runtimes().any { runtime ->
-            runtime.packageSnapshot.providers.any { authority in it.authorities }
-        }
-        if (!virtualAuthority) {
+        val authorityResolution = if (guestOwned) null else providerService.resolveProviderAuthority(
+            config.instanceId,
+            VirtualProviderAuthorityResolveRequest(
+                guestAuthority = authority,
+                operation = request.operation.toProviderOperation(),
+                encodedPath = normalizeProviderGrantPath(request.uri.encodedPath),
+                accessMode = request.modeFlags.toProviderAccessMode()
+            )
+        )
+        if (!guestOwned && authorityResolution?.virtualAuthority != true) {
             return VirtualUriPermissionResult.notHandled("uri_authority_not_virtual")
+        }
+        if (!guestOwned && authorityResolution?.verdict == EngineResultStatus.FAIL) {
+            return VirtualUriPermissionResult(
+                handled = true,
+                success = false,
+                granted = false,
+                reason = authorityResolution.message
+            )
         }
         if (
             request.operation == VirtualUriPermissionOperation.GRANT ||
@@ -135,12 +149,13 @@ internal class EngineVirtualUriPermissionDispatcher(
         ownerInstanceId: String?
     ): VirtualProviderUriGrantResult? {
         if (request.uid != hostUid || request.pid <= 0) return null
-        val candidates = runtimes().filter { it.processId == request.pid }
-        val targetInstanceId = when {
-            candidates.size == 1 -> candidates.single().instanceId
-            candidates.isEmpty() && request.pid == processId -> config.instanceId
-            else -> return null
-        }
+        val targetRuntime = runtimeByProcessId(request.pid)
+            ?.takeIf { runtime ->
+                runtime.found && runtime.liveAuthority && runtime.processId == request.pid &&
+                    !runtime.instanceId.isBlank()
+            }
+            ?: return null
+        val targetInstanceId = targetRuntime.instanceId
         return providerService.checkUriPermission(
             targetInstanceId = targetInstanceId,
             request = request.toEngineRequest(
@@ -175,4 +190,19 @@ internal class EngineVirtualUriPermissionDispatcher(
         ?.providers
         .orEmpty()
         .flatMapTo(linkedSetOf()) { it.authorities }
+}
+
+private fun VirtualUriPermissionOperation.toProviderOperation(): EngineProviderOperation = when (this) {
+    VirtualUriPermissionOperation.REVOKE,
+    VirtualUriPermissionOperation.RELEASE_PERSISTABLE -> EngineProviderOperation.REVOKE_URI_PERMISSION
+    VirtualUriPermissionOperation.GRANT,
+    VirtualUriPermissionOperation.CHECK,
+    VirtualUriPermissionOperation.TAKE_PERSISTABLE -> EngineProviderOperation.GRANT_URI_PERMISSION
+}
+
+private fun Int.toProviderAccessMode(): String? = when (this and 0x3) {
+    0x1 -> "r"
+    0x2 -> "w"
+    0x3 -> "rw"
+    else -> null
 }
