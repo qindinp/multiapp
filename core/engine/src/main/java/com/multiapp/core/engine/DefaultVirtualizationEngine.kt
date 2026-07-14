@@ -53,6 +53,7 @@ internal class DefaultVirtualizationEngineCore(
     private val profilePolicy: CompatibilityProfilePolicy = CompatibilityProfilePolicy(),
     private val hookRuntime: EngineHookRuntime = EngineHookRuntime.NO_OP,
     private val permissionGrantSeeder: EnginePermissionGrantSeeder = EnginePermissionGrantSeeder.NO_OP,
+    private val ephemeralInstanceCleanup: (String) -> Unit = {},
     private val evidenceSessionFactory: () -> String = { UUID.randomUUID().toString() },
     private val runtimeEpochFactory: () -> Long = { System.currentTimeMillis().coerceAtLeast(1L) },
     systemServerFactory: (EngineRuntimeRegistry) -> VirtualSystemServer = { registry ->
@@ -677,6 +678,7 @@ internal class DefaultVirtualizationEngineCore(
             }
         }
         processDeathRegistry.removeInstance(instanceId)
+        ephemeralInstanceCleanup(instanceId)
         val stopped = systemServer.runtimeService.stop(instanceId)
         return if (stopped) {
             EngineResult.pass(operation = OP_STOP, instanceId = instanceId, message = "runtime stopped")
@@ -719,6 +721,7 @@ internal class DefaultVirtualizationEngineCore(
             }
         }
         processDeathRegistry.removeInstance(instanceId)
+        ephemeralInstanceCleanup(instanceId)
 
         val cleanup = runCatching {
             systemServer.instanceLifecycleService.clearInstanceState(instanceId)

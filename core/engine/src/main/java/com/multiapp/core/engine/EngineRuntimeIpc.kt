@@ -24,6 +24,7 @@ import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualTaskRecord
 import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 
 object EngineRuntimeIpcContract {
@@ -125,6 +126,7 @@ object EngineRuntimeIpcContract {
     const val KEY_SERVICE_CLASS_NAME = "serviceClassName"
     const val KEY_REQUESTED_FOREGROUND_SERVICE_TYPES = "requestedForegroundServiceTypes"
     const val KEY_STICKY_RESTART_REQUESTED = "stickyRestartRequested"
+    const val KEY_SERVICE_OPERATION_LEASE_REQUESTED = "serviceOperationLeaseRequested"
     const val KEY_FOREGROUND = "foreground"
     const val KEY_STARTED = "started"
     const val KEY_STOPPED = "stopped"
@@ -136,6 +138,10 @@ object EngineRuntimeIpcContract {
     const val KEY_ACTIVE_BIND_COUNT = "activeBindCount"
     const val KEY_SERVICE_RECORDS = "serviceRecords"
     const val KEY_SERVICE_STATE = "serviceState"
+    const val KEY_SERVICE_OPERATION_LEASE = "serviceOperationLease"
+    const val KEY_SERVICE_LEASE_TOKEN = "serviceLeaseToken"
+    const val KEY_ISSUED_AT_NANOS = "issuedAtNanos"
+    const val KEY_EXPIRES_AT_NANOS = "expiresAtNanos"
     const val KEY_RECORD_COUNT = "recordCount"
     const val KEY_RECEIVER_CLASS_NAME = "receiverClassName"
     const val KEY_ORDERED = "ordered"
@@ -302,6 +308,8 @@ class EngineRuntimeBinderEndpoint(
     private val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
         EngineActivityLaunchCapabilityRegistry.global,
     private val activityService: VirtualActivityService = DefaultVirtualSystemServer(registry).activityService,
+    private val activityOperationTransactions: EngineActivityOperationTransactionCoordinator =
+        EngineActivityOperationTransactionCoordinator(),
     private val activityLaunchAllocator: EngineActivityLaunchAllocator =
         EngineActivityLaunchAllocator(registry, activityService, activityLaunchCapabilities),
     private val providerService: VirtualProviderService = DefaultVirtualSystemServer(registry).providerService,
@@ -309,6 +317,8 @@ class EngineRuntimeBinderEndpoint(
         DefaultVirtualSystemServer(registry).permissionService,
     private val appOpsService: VirtualAppOpsService = DefaultVirtualSystemServer(registry).appOpsService,
     private val serviceService: VirtualServiceService = DefaultVirtualSystemServer(registry).serviceService,
+    private val serviceOperationLeases: EngineServiceOperationLeaseCoordinator =
+        EngineServiceOperationLeaseCoordinator(registry),
     private val broadcastService: VirtualBroadcastService = DefaultVirtualSystemServer(registry).broadcastService,
     private val packageService: VirtualPackageService = DefaultVirtualPackageService,
     private val virtualizationEngine: VirtualizationEngine? = null,
@@ -836,49 +846,28 @@ class EngineRuntimeBinderEndpoint(
                     instanceId,
                     "invalid_activity_mutation_request:$operation"
                 )
-            val result = when (decodedRequest.operation) {
-                EngineActivityIpcOperation.MARK_STATE -> activityService.markActivityState(
-                    instanceId = instanceId,
-                    token = decodedRequest.token,
-                    state = decodedRequest.state ?: return@runtimeAuthorizedBundle invalidRequestBundle(
-                        instanceId,
-                        "missing_activity_state"
-                    )
-                )
-                EngineActivityIpcOperation.FINISH -> activityService.finishActivity(
-                    instanceId = instanceId,
-                    token = decodedRequest.token
-                )
-                EngineActivityIpcOperation.RECORD_FINISH_RESULT ->
-                    activityService.recordActivityResultForFinish(
-                        instanceId = instanceId,
-                        token = decodedRequest.token,
-                        resultCode = decodedRequest.resultCode,
-                        dataIntent = decodedRequest.dataIntent
-                    )
-                EngineActivityIpcOperation.SET_RESULT -> activityService.setActivityResult(
-                    instanceId = instanceId,
-                    token = decodedRequest.token,
-                    resultCode = decodedRequest.resultCode,
-                    dataIntent = decodedRequest.dataIntent,
-                    requestCode = decodedRequest.requestCode,
-                    resultWho = decodedRequest.resultWho,
-                    frameworkDispatchAttempted = decodedRequest.frameworkDispatchAttempted,
-                    frameworkDispatchInvoked = decodedRequest.frameworkDispatchInvoked
-                )
-                EngineActivityIpcOperation.MARK_RESULT_DISPATCH ->
-                    activityService.markActivityResultDispatchState(
-                        instanceId = instanceId,
-                        token = decodedRequest.token,
-                        frameworkDispatchAttempted = decodedRequest.frameworkDispatchAttempted,
-                        frameworkDispatchInvoked = decodedRequest.frameworkDispatchInvoked
-                    )
-                else -> return@runtimeAuthorizedBundle invalidRequestBundle(
+            val transaction = issueActivityOperationTransaction(
+                instanceId = instanceId,
+                operation = decodedRequest.operation.wireName,
+                targetActivityToken = decodedRequest.token,
+                payloadFingerprint = decodedRequest.payloadFingerprint()
+            ) ?: return@runtimeAuthorizedBundle invalidRequestBundle(
+                instanceId,
+                "activity_operation_transaction_issue_failed:$operation"
+            )
+            var result: VirtualActivityOperationResult? = null
+            val commit = activityOperationTransactions.commit(transaction, callingPid()) {
+                result = executeActivityMutation(instanceId, decodedRequest)
+                result != null
+            }
+            if (!commit.accepted) {
+                return@runtimeAuthorizedBundle invalidRequestBundle(
                     instanceId,
-                    "unsupported_activity_mutation:$operation"
+                    "activity_operation_transaction_failed:${commit.reason}"
                 )
             }
-            result.toIpcBundle()
+            recordActivityTransactionEvidence(transaction, commit, "mutation")
+            checkNotNull(result).toIpcBundle()
         }
 
     override fun consumeActivity(instanceId: String, operation: String, request: Bundle): Bundle =
@@ -894,29 +883,28 @@ class EngineRuntimeBinderEndpoint(
                     instanceId,
                     "invalid_activity_consume_token"
                 )
-            when (decodedOperation) {
-                EngineActivityIpcOperation.CONSUME_RESULT -> EngineActivityIpcConsumeResponse(
-                    operation = decodedOperation,
-                    found = true,
-                    activityResult = activityService.consumeActivityResult(instanceId, token)
-                ).normalizeFound().toIpcBundle()
-                EngineActivityIpcOperation.CONSUME_RESULT_RESUME_FALLBACK ->
-                    EngineActivityIpcConsumeResponse(
-                        operation = decodedOperation,
-                        found = true,
-                        activityResult = activityService.consumeActivityResultForResumeFallback(instanceId, token)
-                    ).normalizeFound().toIpcBundle()
-                EngineActivityIpcOperation.CONSUME_PENDING_NEW_INTENT ->
-                    EngineActivityIpcConsumeResponse(
-                        operation = decodedOperation,
-                        found = true,
-                        pendingNewIntent = activityService.consumePendingNewIntent(instanceId, token)
-                    ).normalizeFound().toIpcBundle()
-                else -> invalidRequestBundle(
+            val transaction = issueActivityOperationTransaction(
+                instanceId = instanceId,
+                operation = decodedOperation.wireName,
+                targetActivityToken = token,
+                payloadFingerprint = fingerprintActivityPayload(decodedOperation.wireName, token)
+            ) ?: return@runtimeAuthorizedBundle invalidRequestBundle(
+                instanceId,
+                "activity_operation_transaction_issue_failed:$operation"
+            )
+            var response: EngineActivityIpcConsumeResponse? = null
+            val commit = activityOperationTransactions.commit(transaction, callingPid()) {
+                response = executeActivityConsume(instanceId, decodedOperation, token)
+                response != null
+            }
+            if (!commit.accepted) {
+                return@runtimeAuthorizedBundle invalidRequestBundle(
                     instanceId,
-                    "unsupported_activity_consume:$operation"
+                    "activity_operation_transaction_failed:${commit.reason}"
                 )
             }
+            recordActivityTransactionEvidence(transaction, commit, "consume")
+            checkNotNull(response).normalizeFound().toIpcBundle()
         }
 
     override fun queryActivityTaskState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
@@ -928,17 +916,152 @@ class EngineRuntimeBinderEndpoint(
         reason: String,
         snapshot: Bundle
     ): Bundle = runtimeAuthorizedBundle(instanceId) {
-        val decoded = snapshot.toActivityTaskStateOrNull()
-            ?.takeIf { it.instanceId == instanceId && reason.isNotBlank() }
-            ?: return@runtimeAuthorizedBundle invalidRequestBundle(
-                instanceId,
-                "invalid_activity_task_sync_request"
+        invalidRequestBundle(instanceId, "direct_activity_task_snapshot_sync_disabled")
+    }
+
+    private fun issueActivityOperationTransaction(
+        instanceId: String,
+        operation: String,
+        targetActivityToken: String,
+        payloadFingerprint: String
+    ): EngineActivityOperationTransaction? {
+        val identity = processControlPlane.authorize(instanceId, callingPid()).identity ?: return null
+        return runCatching {
+            activityOperationTransactions.issue(
+                instanceId = identity.instanceId,
+                runtimeEpoch = identity.runtimeEpoch,
+                engineSessionId = identity.engineSessionId,
+                processSlot = identity.processSlot,
+                processId = identity.processId,
+                operation = operation,
+                targetActivityToken = targetActivityToken,
+                payloadFingerprint = payloadFingerprint
             )
-        activityService.syncActivityTaskState(
-            instanceId = instanceId,
-            reason = reason,
-            tasks = decoded.tasks
-        ).toIpcBundle()
+        }.getOrNull()
+    }
+
+    private fun executeActivityMutation(
+        instanceId: String,
+        request: EngineActivityIpcMutationRequest
+    ): VirtualActivityOperationResult? = when (request.operation) {
+        EngineActivityIpcOperation.MARK_STATE -> request.state?.let { state ->
+            activityService.markActivityState(instanceId, request.token, state)
+        }
+        EngineActivityIpcOperation.FINISH -> activityService.finishActivity(instanceId, request.token)
+        EngineActivityIpcOperation.RECORD_FINISH_RESULT ->
+            activityService.recordActivityResultForFinish(
+                instanceId,
+                request.token,
+                request.resultCode,
+                request.dataIntent
+            )
+        EngineActivityIpcOperation.SET_RESULT -> activityService.setActivityResult(
+            instanceId,
+            request.token,
+            request.resultCode,
+            request.dataIntent,
+            request.requestCode,
+            request.resultWho,
+            request.frameworkDispatchAttempted,
+            request.frameworkDispatchInvoked
+        )
+        EngineActivityIpcOperation.MARK_RESULT_DISPATCH ->
+            activityService.markActivityResultDispatchState(
+                instanceId,
+                request.token,
+                request.frameworkDispatchAttempted,
+                request.frameworkDispatchInvoked
+            )
+        else -> null
+    }
+
+    private fun executeActivityConsume(
+        instanceId: String,
+        operation: EngineActivityIpcOperation,
+        token: String
+    ): EngineActivityIpcConsumeResponse? = when (operation) {
+        EngineActivityIpcOperation.CONSUME_RESULT -> EngineActivityIpcConsumeResponse(
+            operation = operation,
+            found = true,
+            activityResult = activityService.consumeActivityResult(instanceId, token)
+        )
+        EngineActivityIpcOperation.CONSUME_RESULT_RESUME_FALLBACK -> EngineActivityIpcConsumeResponse(
+            operation = operation,
+            found = true,
+            activityResult = activityService.consumeActivityResultForResumeFallback(instanceId, token)
+        )
+        EngineActivityIpcOperation.CONSUME_PENDING_NEW_INTENT -> EngineActivityIpcConsumeResponse(
+            operation = operation,
+            found = true,
+            pendingNewIntent = activityService.consumePendingNewIntent(instanceId, token)
+        )
+        else -> null
+    }
+
+    private fun EngineActivityIpcMutationRequest.payloadFingerprint(): String =
+        fingerprintActivityPayload(
+            operation.wireName,
+            token,
+            state?.name.orEmpty(),
+            resultCode.toString(),
+            dataIntent.canonicalActivityIntentPayload(),
+            requestCode.toString(),
+            resultWho.orEmpty(),
+            frameworkDispatchAttempted.toString(),
+            frameworkDispatchInvoked.toString()
+        )
+
+    private fun VirtualIntentSnapshot?.canonicalActivityIntentPayload(): String {
+        val intent = this ?: return "null"
+        val categories = intent.categories.sorted().joinToString(separator = "") { value ->
+            "${value.length}:$value"
+        }
+        val extras = intent.extras.toSortedMap().entries.joinToString(separator = "") { (key, value) ->
+            "${key.length}:$key${value.length}:$value"
+        }
+        return listOf(
+            intent.flags.toString(),
+            intent.action.orEmpty(),
+            intent.dataUri.orEmpty(),
+            categories,
+            extras
+        ).joinToString(separator = "") { value -> "${value.length}:$value" }
+    }
+
+    private fun fingerprintActivityPayload(vararg fields: String): String {
+        val canonical = fields.joinToString(separator = "") { value -> "${value.length}:$value" }
+        return MessageDigest.getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    private fun recordActivityTransactionEvidence(
+        transaction: EngineActivityOperationTransaction,
+        decision: EngineActivityOperationTransactionDecision,
+        phase: String
+    ) {
+        registry.registerOperationEvidence(
+            transaction.instanceId,
+            EngineOperationEvidence(
+                component = "activity-transaction",
+                operation = transaction.operation,
+                verdict = if (decision.accepted) EngineResultStatus.PASS else EngineResultStatus.FAIL,
+                entries = mapOf(
+                    "phase" to phase,
+                    "runtimeEpoch" to transaction.runtimeEpoch.toString(),
+                    "engineSessionId" to transaction.engineSessionId,
+                    "processSlot" to transaction.processSlot,
+                    "processId" to transaction.processId.toString(),
+                    "targetActivityTokenHash" to fingerprintActivityPayload(
+                        transaction.targetActivityToken
+                    ),
+                    "payloadFingerprint" to transaction.payloadFingerprint,
+                    "transactionState" to decision.state.name,
+                    "idempotent" to decision.idempotent.toString(),
+                    "reason" to decision.reason
+                )
+            )
+        )
     }
 
     override fun queryProxyActivitySlot(request: Bundle): Bundle = authorizedBundle {
@@ -1128,14 +1251,111 @@ class EngineRuntimeBinderEndpoint(
     override fun planService(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
         val decodedRequest = request.toServicePlanRequestOrNull()
             ?: return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_service_plan_request")
-        serviceService.planService(instanceId, decodedRequest).toIpcBundle()
+        attachServiceOperationLease(
+            instanceId = instanceId,
+            plan = serviceService.planService(instanceId, decodedRequest),
+            callerPid = callingPid(),
+            leaseRequested = decodedRequest.operationLeaseRequested
+        ).toIpcBundle()
     }
 
     override fun recordServiceDispatch(instanceId: String, result: Bundle): Boolean {
         if (!isRuntimeAuthorized(instanceId)) return false
         val decodedResult = result.toServiceOperationResultOrNull() ?: return false
         if (decodedResult.instanceId != instanceId) return false
-        return serviceService.recordServiceDispatch(instanceId, decodedResult)
+        val lease = decodedResult.operationLease ?: return false
+        if (!decodedResult.matches(lease)) {
+            serviceOperationLeases.abort(lease, callingPid())
+            return false
+        }
+        val decision = serviceOperationLeases.commit(lease, callingPid()) {
+            serviceService.recordServiceDispatch(instanceId, decodedResult)
+        }
+        recordServiceLeaseEvidence(lease, decision, "dispatch-result")
+        return decision.accepted
+    }
+
+    private fun attachServiceOperationLease(
+        instanceId: String,
+        plan: VirtualServiceDispatchPlan,
+        callerPid: Int,
+        leaseRequested: Boolean
+    ): VirtualServiceDispatchPlan {
+        if (!leaseRequested) return plan
+        if (plan.verdict == EngineResultStatus.FAIL || plan.verdict == EngineResultStatus.UNSUPPORTED) {
+            return plan
+        }
+        val target = plan.targets.singleOrNull()
+            ?: return plan.copy(
+                verdict = EngineResultStatus.FAIL,
+                targets = emptyList(),
+                message = "service_operation_lease_requires_exactly_one_target"
+            )
+        val runtime = registry.get(instanceId)
+            ?: return plan.copy(
+                verdict = EngineResultStatus.FAIL,
+                targets = emptyList(),
+                message = "service_operation_lease_runtime_not_found"
+            )
+        val lease = runCatching {
+            serviceOperationLeases.issue(
+                runtime = runtime,
+                callingPid = callerPid,
+                operation = plan.operation,
+                component = target.serviceClassName,
+                processSlot = target.processSlot
+            )
+        }.getOrElse { error ->
+            return plan.copy(
+                verdict = EngineResultStatus.FAIL,
+                targets = emptyList(),
+                message = "service_operation_lease_issue_failed:${error.javaClass.simpleName}"
+            )
+        }
+        val authorization = serviceOperationLeases.authorize(lease, callerPid)
+        if (!authorization.accepted) {
+            serviceOperationLeases.abort(lease, callerPid)
+            return plan.copy(
+                verdict = EngineResultStatus.FAIL,
+                targets = emptyList(),
+                message = "service_operation_lease_authorization_failed:${authorization.reason}"
+            )
+        }
+        recordServiceLeaseEvidence(lease, authorization, "plan-authorized")
+        return plan.copy(targets = listOf(target.copy(operationLease = lease)))
+    }
+
+    private fun VirtualServiceOperationResult.matches(
+        lease: EngineServiceOperationLeaseIdentity
+    ): Boolean = instanceId == lease.instanceId &&
+        operation == lease.operationType &&
+        serviceClassName == lease.component &&
+        processSlot == lease.processSlot
+
+    private fun recordServiceLeaseEvidence(
+        lease: EngineServiceOperationLeaseIdentity,
+        decision: EngineServiceOperationLeaseDecision,
+        phase: String
+    ) {
+        registry.registerOperationEvidence(
+            lease.instanceId,
+            EngineOperationEvidence(
+                component = "service-lease",
+                operation = lease.operation.lowercase().replace('_', '-'),
+                verdict = if (decision.accepted) EngineResultStatus.PASS else EngineResultStatus.FAIL,
+                entries = mapOf(
+                    "phase" to phase,
+                    "runtimeEpoch" to lease.runtimeEpoch.toString(),
+                    "engineSessionId" to lease.engineSessionId,
+                    "processSlot" to lease.processSlot,
+                    "processId" to lease.processId.toString(),
+                    "serviceClassName" to lease.component,
+                    "leaseState" to decision.state.name,
+                    "idempotent" to decision.idempotent.toString(),
+                    "reason" to decision.reason
+                )
+            )
+        )
     }
 
     override fun queryServiceRuntimeState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
@@ -2006,20 +2226,12 @@ object EngineRuntimeIpcClients {
         instanceId: String,
         reason: String,
         tasks: List<VirtualTaskRecord>
-    ): VirtualActivityOperationResult? {
-        val snapshot = VirtualActivityTaskState(
-            instanceId = instanceId,
-            verdict = EngineResultStatus.PARTIAL,
-            taskCount = tasks.size,
-            activityCount = tasks.sumOf { it.activities.size },
-            tasks = tasks,
-            message = "activity_task_sync_request"
-        )
-        val response = runCatching {
-            activeService()?.syncActivityTaskState(instanceId, reason, snapshot.toIpcBundle())
-        }.getOrNull() ?: return null
-        return response.toActivityOperationResultOrNull()
-    }
+    ): VirtualActivityOperationResult = VirtualActivityOperationResult(
+        instanceId = instanceId.ifBlank { "invalid" },
+        operation = "sync-task-state",
+        verdict = EngineResultStatus.FAIL,
+        message = "direct_activity_task_snapshot_sync_disabled"
+    )
 
     internal fun queryProxyActivitySlot(
         key: ProxyActivitySlotKey
@@ -3600,6 +3812,10 @@ private fun VirtualServiceDispatchPlanRequest.toIpcBundle(): Bundle = Bundle().a
         ArrayList(requestedForegroundServiceTypes.sorted())
     )
     putBoolean(EngineRuntimeIpcContract.KEY_STICKY_RESTART_REQUESTED, stickyRestartRequested)
+    putBoolean(
+        EngineRuntimeIpcContract.KEY_SERVICE_OPERATION_LEASE_REQUESTED,
+        operationLeaseRequested
+    )
 }
 
 private fun Bundle.toServicePlanRequestOrNull(): VirtualServiceDispatchPlanRequest? = runCatching {
@@ -3618,7 +3834,10 @@ private fun Bundle.toServicePlanRequestOrNull(): VirtualServiceDispatchPlanReque
         requestedForegroundServiceTypes = getStringArrayList(
             EngineRuntimeIpcContract.KEY_REQUESTED_FOREGROUND_SERVICE_TYPES
         ).orEmpty().toSet(),
-        stickyRestartRequested = getBoolean(EngineRuntimeIpcContract.KEY_STICKY_RESTART_REQUESTED)
+        stickyRestartRequested = getBoolean(EngineRuntimeIpcContract.KEY_STICKY_RESTART_REQUESTED),
+        operationLeaseRequested = getBoolean(
+            EngineRuntimeIpcContract.KEY_SERVICE_OPERATION_LEASE_REQUESTED
+        )
     )
 }.getOrNull()
 
@@ -3655,6 +3874,9 @@ private fun VirtualServiceDispatchTarget.toIpcBundle(): Bundle = Bundle().apply 
     putBoolean(EngineRuntimeIpcContract.KEY_SAME_PROCESS, sameProcess)
     putBoolean(EngineRuntimeIpcContract.KEY_FOREGROUND, foreground)
     putInt(EngineRuntimeIpcContract.KEY_PRIORITY, priority)
+    operationLease?.let {
+        putBundle(EngineRuntimeIpcContract.KEY_SERVICE_OPERATION_LEASE, it.toIpcBundle())
+    }
 }
 
 private fun Bundle.toServiceDispatchPlanOrNull(): VirtualServiceDispatchPlan? = runCatching {
@@ -3693,7 +3915,9 @@ private fun Bundle.toServiceDispatchTargetOrNull(): VirtualServiceDispatchTarget
         processName = getString(EngineRuntimeIpcContract.KEY_PROCESS_NAME),
         sameProcess = getBoolean(EngineRuntimeIpcContract.KEY_SAME_PROCESS, true),
         foreground = getBoolean(EngineRuntimeIpcContract.KEY_FOREGROUND),
-        priority = getInt(EngineRuntimeIpcContract.KEY_PRIORITY)
+        priority = getInt(EngineRuntimeIpcContract.KEY_PRIORITY),
+        operationLease = getBundle(EngineRuntimeIpcContract.KEY_SERVICE_OPERATION_LEASE)
+            ?.toServiceOperationLeaseIdentityOrNull()
     )
 }.getOrNull()
 
@@ -3715,6 +3939,9 @@ private fun VirtualServiceOperationResult.toIpcBundle(): Bundle = Bundle().apply
     putInt(EngineRuntimeIpcContract.KEY_ACTIVE_START_COUNT, activeStartCount)
     putInt(EngineRuntimeIpcContract.KEY_ACTIVE_BIND_COUNT, activeBindCount)
     putBoolean(EngineRuntimeIpcContract.KEY_CACHED, cached)
+    operationLease?.let {
+        putBundle(EngineRuntimeIpcContract.KEY_SERVICE_OPERATION_LEASE, it.toIpcBundle())
+    }
     putString(EngineRuntimeIpcContract.KEY_MESSAGE, message)
 }
 
@@ -3743,7 +3970,37 @@ private fun Bundle.toServiceOperationResultOrNull(): VirtualServiceOperationResu
         activeStartCount = getInt(EngineRuntimeIpcContract.KEY_ACTIVE_START_COUNT),
         activeBindCount = getInt(EngineRuntimeIpcContract.KEY_ACTIVE_BIND_COUNT),
         cached = getBoolean(EngineRuntimeIpcContract.KEY_CACHED),
+        operationLease = getBundle(EngineRuntimeIpcContract.KEY_SERVICE_OPERATION_LEASE)
+            ?.toServiceOperationLeaseIdentityOrNull(),
         message = getString(EngineRuntimeIpcContract.KEY_MESSAGE).orEmpty()
+    )
+}.getOrNull()
+
+private fun EngineServiceOperationLeaseIdentity.toIpcBundle(): Bundle = Bundle().apply {
+    putString(EngineRuntimeIpcContract.KEY_SERVICE_LEASE_TOKEN, leaseToken)
+    putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+    putLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH, runtimeEpoch)
+    putString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID, engineSessionId)
+    putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, processSlot)
+    putInt(EngineRuntimeIpcContract.KEY_PROCESS_ID, processId)
+    putString(EngineRuntimeIpcContract.KEY_SERVICE_OPERATION, operation)
+    putString(EngineRuntimeIpcContract.KEY_COMPONENT, component)
+    putLong(EngineRuntimeIpcContract.KEY_ISSUED_AT_NANOS, issuedAtNanos)
+    putLong(EngineRuntimeIpcContract.KEY_EXPIRES_AT_NANOS, expiresAtNanos)
+}
+
+private fun Bundle.toServiceOperationLeaseIdentityOrNull(): EngineServiceOperationLeaseIdentity? = runCatching {
+    EngineServiceOperationLeaseIdentity(
+        leaseToken = getString(EngineRuntimeIpcContract.KEY_SERVICE_LEASE_TOKEN).orEmpty(),
+        instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
+        runtimeEpoch = getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH),
+        engineSessionId = getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID).orEmpty(),
+        processSlot = getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT).orEmpty(),
+        processId = getInt(EngineRuntimeIpcContract.KEY_PROCESS_ID),
+        operation = getString(EngineRuntimeIpcContract.KEY_SERVICE_OPERATION).orEmpty(),
+        component = getString(EngineRuntimeIpcContract.KEY_COMPONENT).orEmpty(),
+        issuedAtNanos = getLong(EngineRuntimeIpcContract.KEY_ISSUED_AT_NANOS),
+        expiresAtNanos = getLong(EngineRuntimeIpcContract.KEY_EXPIRES_AT_NANOS)
     )
 }.getOrNull()
 

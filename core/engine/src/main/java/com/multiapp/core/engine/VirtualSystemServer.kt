@@ -764,7 +764,8 @@ data class VirtualServiceDispatchPlanRequest(
     val dataAuthority: String? = null,
     val dataPath: String? = null,
     val requestedForegroundServiceTypes: Set<String> = emptySet(),
-    val stickyRestartRequested: Boolean = false
+    val stickyRestartRequested: Boolean = false,
+    val operationLeaseRequested: Boolean = false
 ) {
     init {
         require(action == null || action.isNotBlank()) { "action must not be blank" }
@@ -797,7 +798,8 @@ data class VirtualServiceDispatchTarget(
     val processName: String? = null,
     val sameProcess: Boolean = true,
     val foreground: Boolean = false,
-    val priority: Int = 0
+    val priority: Int = 0,
+    val operationLease: EngineServiceOperationLeaseIdentity? = null
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
@@ -848,6 +850,7 @@ data class VirtualServiceOperationResult(
     val activeStartCount: Int = 0,
     val activeBindCount: Int = 0,
     val cached: Boolean = false,
+    val operationLease: EngineServiceOperationLeaseIdentity? = null,
     val message: String
 ) {
     init {
@@ -3713,13 +3716,34 @@ internal class RegistryBackedVirtualServiceService(
             request.serviceClassName == null &&
             request.action == null
         ) {
+            val boundServiceClassNames = stateStore.list(runtime.instanceId)
+                .asSequence()
+                .filter { record ->
+                    record.runtimeEpoch == runtime.runtimeEpoch && record.activeBindCount > 0
+                }
+                .map { it.serviceClassName }
+                .distinct()
+                .toList()
+            val targets = boundServiceClassNames.singleOrNull()?.let { serviceClassName ->
+                runtime.packageSnapshot.services
+                    .singleOrNull { it.name == serviceClassName }
+                    ?.let { component ->
+                        listOf(component.toServiceTarget(runtime, request, "connectionUnbind"))
+                    }
+            }.orEmpty()
             val plan = VirtualServiceDispatchPlan(
                 instanceId = runtime.instanceId,
                 operation = request.operation,
-                verdict = EngineResultStatus.PARTIAL,
+                verdict = if (targets.size == 1) EngineResultStatus.PARTIAL else EngineResultStatus.FAIL,
+                targets = targets,
                 supportedOperations = supportedServiceOperations,
                 unsupportedOperations = unsupportedServiceOperations,
-                message = "service_unbind_connection_route_planned"
+                message = when {
+                    targets.size == 1 -> "service_unbind_connection_route_planned"
+                    boundServiceClassNames.isEmpty() -> "service_unbind_connection_not_found"
+                    boundServiceClassNames.size > 1 -> "service_unbind_connection_ambiguous"
+                    else -> "service_unbind_component_not_found"
+                }
             )
             recordPlanEvidence(plan, runtime, request)
             return plan

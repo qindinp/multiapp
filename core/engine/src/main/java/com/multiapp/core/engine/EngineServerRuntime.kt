@@ -1,6 +1,7 @@
 package com.multiapp.core.engine
 
 import android.content.Context
+import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.installer.VirtualInstallService
@@ -47,6 +48,11 @@ class EngineServerRuntime private constructor(
     val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
         graph.activityLaunchCapabilities
     val processDeathRegistry: EngineProcessDeathRegistry = graph.processDeathRegistry
+    val serviceOperationLeases: EngineServiceOperationLeaseCoordinator = graph.serviceOperationLeases
+    val activityOperationTransactions: EngineActivityOperationTransactionCoordinator =
+        graph.activityOperationTransactions
+    val providerProcessEndpoints: EngineProviderProcessEndpointControlPlane =
+        graph.providerProcessEndpoints
     val processControlPlane: EngineProcessControlPlane = graph.processControlPlane
     val virtualizationEngine: VirtualizationEngine = graph.virtualizationEngine
 
@@ -67,8 +73,8 @@ class EngineServerRuntime private constructor(
                 EngineActivityLaunchCapabilityRegistry(),
             processDeathRegistry: EngineProcessDeathRegistry = EngineProcessDeathRegistry(),
             processControlPlaneFactory: EngineProcessControlPlaneFactory =
-                EngineProcessControlPlaneFactory { registry, deathRegistry, capabilities ->
-                    EngineProcessControlPlane(registry, deathRegistry, capabilities)
+                EngineProcessControlPlaneFactory { registry, deathRegistry, capabilities, cleanup ->
+                    EngineProcessControlPlane(registry, deathRegistry, capabilities, cleanup)
                 }
         ): EngineServerRuntime = EngineServerRuntime(
             createEngineServerRuntimeGraph(
@@ -94,7 +100,8 @@ internal fun interface EngineProcessControlPlaneFactory {
     fun create(
         runtimeRegistry: EngineRuntimeRegistry,
         processDeathRegistry: EngineProcessDeathRegistry,
-        activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry
+        activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry,
+        generationCleanup: (EngineProcessClientIdentity) -> Unit
     ): EngineProcessControlPlane
 }
 
@@ -103,6 +110,9 @@ private class EngineServerRuntimeGraph(
     val systemServer: VirtualSystemServer,
     val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry,
     val processDeathRegistry: EngineProcessDeathRegistry,
+    val serviceOperationLeases: EngineServiceOperationLeaseCoordinator,
+    val activityOperationTransactions: EngineActivityOperationTransactionCoordinator,
+    val providerProcessEndpoints: EngineProviderProcessEndpointControlPlane,
     val processControlPlane: EngineProcessControlPlane,
     val virtualizationEngine: DefaultVirtualizationEngineCore
 )
@@ -121,12 +131,24 @@ private fun createEngineServerRuntimeGraph(
     activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry,
     processDeathRegistry: EngineProcessDeathRegistry,
     processControlPlaneFactory: EngineProcessControlPlaneFactory =
-        EngineProcessControlPlaneFactory { registry, deathRegistry, capabilities ->
-            EngineProcessControlPlane(registry, deathRegistry, capabilities)
+        EngineProcessControlPlaneFactory { registry, deathRegistry, capabilities, generationCleanup ->
+            EngineProcessControlPlane(
+                registry,
+                deathRegistry,
+                capabilities,
+                generationCleanup
+            )
         }
 ): EngineServerRuntimeGraph {
     val runtimeRegistry = systemServerHandle.registry
     val systemServer = systemServerHandle.server
+    val serviceOperationLeases = EngineServiceOperationLeaseCoordinator(runtimeRegistry)
+    val activityOperationTransactions = EngineActivityOperationTransactionCoordinator()
+    val providerEndpointRegistry = EngineProviderProcessEndpointRegistry()
+    val providerProcessEndpoints = EngineProviderProcessEndpointControlPlane(
+        runtimeAuthority = providerEndpointRuntimeAuthority(runtimeRegistry),
+        registry = providerEndpointRegistry
+    )
     if (systemServer is DefaultVirtualSystemServer) {
         val validInstanceIds = instanceManager.listInstances()
             .mapTo(linkedSetOf()) { instance -> instance.instanceId }
@@ -136,10 +158,28 @@ private fun createEngineServerRuntimeGraph(
         )
         systemServer.reconcilePackageEnabledStates(validInstanceIds)
     }
+    val generationCleanup: (EngineProcessClientIdentity) -> Unit = { identity ->
+        serviceOperationLeases.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
+        providerProcessEndpoints.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
+        activityOperationTransactions.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
+    }
     val processControlPlane = processControlPlaneFactory.create(
         runtimeRegistry,
         processDeathRegistry,
-        activityLaunchCapabilities
+        activityLaunchCapabilities,
+        generationCleanup
     )
     val virtualizationEngine = DefaultVirtualizationEngineCore(
         hostPackageName = hostPackageName,
@@ -155,6 +195,11 @@ private fun createEngineServerRuntimeGraph(
         profilePolicy = CompatibilityProfilePolicy(),
         hookRuntime = hookRuntime,
         permissionGrantSeeder = permissionGrantSeeder,
+        ephemeralInstanceCleanup = { instanceId ->
+            serviceOperationLeases.revokeInstance(instanceId)
+            providerProcessEndpoints.revokeInstance(instanceId)
+            activityOperationTransactions.revokeInstance(instanceId)
+        },
         evidenceSessionFactory = { UUID.randomUUID().toString() },
         systemServerFactory = { requestedRegistry ->
             check(requestedRegistry === runtimeRegistry) {
@@ -168,7 +213,90 @@ private fun createEngineServerRuntimeGraph(
         systemServer = systemServer,
         activityLaunchCapabilities = activityLaunchCapabilities,
         processDeathRegistry = processDeathRegistry,
+        serviceOperationLeases = serviceOperationLeases,
+        activityOperationTransactions = activityOperationTransactions,
+        providerProcessEndpoints = providerProcessEndpoints,
         processControlPlane = processControlPlane,
         virtualizationEngine = virtualizationEngine
     )
 }
+
+private fun providerEndpointRuntimeAuthority(
+    runtimeRegistry: EngineRuntimeRegistry
+): EngineProviderProcessEndpointRuntimeAuthority = EngineProviderProcessEndpointRuntimeAuthority { candidate ->
+    val runtime = runtimeRegistry.get(candidate.instanceId)
+        ?: return@EngineProviderProcessEndpointRuntimeAuthority EngineProviderProcessEndpointAuthorityDecision(
+            allowed = false,
+            expectedIdentity = null,
+            reason = "provider_endpoint_runtime_not_found"
+        )
+    if (runtime.state !in LIVE_PROVIDER_ENDPOINT_RUNTIME_STATES) {
+        return@EngineProviderProcessEndpointRuntimeAuthority EngineProviderProcessEndpointAuthorityDecision(
+            allowed = false,
+            expectedIdentity = null,
+            reason = "provider_endpoint_runtime_not_live"
+        )
+    }
+    if (runtime.processName != runtime.processSlot) {
+        return@EngineProviderProcessEndpointRuntimeAuthority EngineProviderProcessEndpointAuthorityDecision(
+            allowed = false,
+            expectedIdentity = null,
+            reason = "provider_endpoint_runtime_process_slot_mismatch"
+        )
+    }
+    val provider = runtime.packageSnapshot.providers.singleOrNull { component ->
+        candidate.guestAuthority in component.authorities
+    } ?: return@EngineProviderProcessEndpointRuntimeAuthority EngineProviderProcessEndpointAuthorityDecision(
+        allowed = false,
+        expectedIdentity = null,
+        reason = "provider_endpoint_component_not_found"
+    )
+    val applicationProcessName = runtime.packageSnapshot.processName
+        ?.toEffectiveGuestProcessName(runtime.originPackageName)
+        ?: runtime.originPackageName
+    val providerProcessName = provider.processName
+        ?.toEffectiveGuestProcessName(runtime.originPackageName)
+        ?: applicationProcessName
+    if (providerProcessName != applicationProcessName) {
+        return@EngineProviderProcessEndpointRuntimeAuthority EngineProviderProcessEndpointAuthorityDecision(
+            allowed = false,
+            expectedIdentity = null,
+            reason = "provider_component_process_slot_not_allocated"
+        )
+    }
+    val processId = runtime.processId
+        ?: return@EngineProviderProcessEndpointRuntimeAuthority EngineProviderProcessEndpointAuthorityDecision(
+            allowed = false,
+            expectedIdentity = null,
+            reason = "provider_endpoint_runtime_process_not_bound"
+        )
+    val expected = EngineProviderProcessEndpointIdentity(
+        instanceId = runtime.instanceId,
+        guestAuthority = candidate.guestAuthority,
+        providerClassName = provider.name,
+        declaredProcessName = provider.processName,
+        effectiveProcessName = providerProcessName,
+        processSlot = runtime.processSlot,
+        runtimeEpoch = runtime.runtimeEpoch,
+        engineSessionId = runtime.engineSessionId,
+        processId = processId
+    )
+    EngineProviderProcessEndpointAuthorityDecision(
+        allowed = candidate == expected,
+        expectedIdentity = expected.takeIf { candidate == expected },
+        reason = if (candidate == expected) {
+            "provider_endpoint_runtime_authority_confirmed"
+        } else {
+            "provider_endpoint_runtime_identity_mismatch"
+        }
+    )
+}
+
+private fun String.toEffectiveGuestProcessName(originPackageName: String): String =
+    if (startsWith(':')) originPackageName + this else this
+
+private val LIVE_PROVIDER_ENDPOINT_RUNTIME_STATES = setOf(
+    VirtualRuntimeState.CREATED,
+    VirtualRuntimeState.PREWARMED,
+    VirtualRuntimeState.RUNNING
+)

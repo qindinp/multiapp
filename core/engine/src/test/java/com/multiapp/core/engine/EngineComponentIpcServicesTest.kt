@@ -46,6 +46,50 @@ class EngineComponentIpcServicesTest {
     }
 
     @Test
+    fun `Service execution plan requires exactly one engine lease`() {
+        val request = serviceRequest().copy(operationLeaseRequested = true)
+        val missingLease = IpcBackedVirtualServiceService(
+            remotePlan = { _, _ -> servicePlan("missing_lease") },
+            authorityConnected = { true }
+        ).planService("instance-1", request)
+        val lease = EngineServiceOperationLeaseIdentity(
+            leaseToken = "service-lease",
+            instanceId = "instance-1",
+            runtimeEpoch = 1L,
+            engineSessionId = "engine-session-1",
+            processSlot = "com.multiapp.app:v0",
+            processId = 4200,
+            operation = VirtualServiceOperation.START.name,
+            component = "com.example.SyncService",
+            issuedAtNanos = 1L,
+            expiresAtNanos = 2L
+        )
+        val leasedPlan = servicePlan("leased").copy(
+            targets = listOf(
+                VirtualServiceDispatchTarget(
+                    instanceId = "instance-1",
+                    originPackageName = "com.example",
+                    virtualPackageName = "com.multiapp.instance.example",
+                    serviceClassName = lease.component,
+                    action = "test.SYNC",
+                    reason = "explicit",
+                    operation = VirtualServiceOperation.START,
+                    processSlot = lease.processSlot,
+                    operationLease = lease
+                )
+            )
+        )
+        val accepted = IpcBackedVirtualServiceService(
+            remotePlan = { _, _ -> leasedPlan },
+            authorityConnected = { true }
+        ).planService("instance-1", request)
+
+        assertEquals(EngineResultStatus.FAIL, missingLease.verdict)
+        assertEquals("engine_service_ipc_plan_invalid", missingLease.message)
+        assertSame(leasedPlan, accepted)
+    }
+
+    @Test
     fun `unavailable authority fails closed without Service fallback`() {
         val fallback = mockk<VirtualServiceService>(relaxed = true)
         val request = serviceRequest()

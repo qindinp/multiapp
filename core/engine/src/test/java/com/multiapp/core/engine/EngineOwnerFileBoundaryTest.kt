@@ -48,6 +48,22 @@ class EngineOwnerFileBoundaryTest {
         )
     }
 
+    @Test
+    fun `production callers cannot upload loader Activity task snapshots`() {
+        val repoRoot = repoRoot()
+        val sources = productionSources(repoRoot).toList()
+
+        assertEquals(
+            emptyList<String>(),
+            callSites(
+                sources,
+                repoRoot,
+                Regex("""(?:\.|\?\.)syncActivityTaskState\s*\(""")
+            ),
+            "Activity task state must be mutated through engine transactions, not snapshot replacement"
+        )
+    }
+
     private fun callSites(
         sources: List<File>,
         repoRoot: File,

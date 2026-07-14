@@ -25,7 +25,14 @@ class IpcBackedVirtualServiceService(
             ?.takeIf {
                 it.instanceId == instanceId &&
                     it.operation == request.operation &&
-                    it.targets.all { target -> target.instanceId == instanceId }
+                    it.targets.all { target -> target.instanceId == instanceId } &&
+                    when (it.verdict) {
+                        EngineResultStatus.PASS,
+                        EngineResultStatus.PARTIAL -> !request.operationLeaseRequested ||
+                            it.targets.size == 1 && it.targets.single().operationLease != null
+                        EngineResultStatus.FAIL,
+                        EngineResultStatus.UNSUPPORTED -> true
+                    }
             }
             ?.let { return it }
         return VirtualServiceDispatchPlan(

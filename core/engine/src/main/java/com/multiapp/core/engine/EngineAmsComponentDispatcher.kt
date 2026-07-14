@@ -42,9 +42,6 @@ class DefaultEngineAmsComponentDispatcher(
         }
         val result = activityLaunchCoordinator?.remap(intent, plan)
             ?: fallback.resolveStartActivityIntent(intent)
-        if (result is VirtualContextWrapper.StartActivityMappingResult.Remapped) {
-            activityService.syncActivityTaskState(instanceId, "start-activity-remapped")
-        }
         activityService.recordActivityDispatchIfPossible(
             result.toActivityDispatchResult(
                 fallbackInstanceId = instanceId,
@@ -83,9 +80,6 @@ class DefaultEngineAmsComponentDispatcher(
                 planned.map { entry -> entry.intent to entry.plan }
             )
         }
-        if (results.any { it is VirtualContextWrapper.StartActivityMappingResult.Remapped }) {
-            activityService.syncActivityTaskState(instanceId, "start-activities-remapped")
-        }
         results.forEachIndexed { index, result ->
             val entry = planned.getOrNull(index) ?: return@forEachIndexed
             activityService.recordActivityDispatchIfPossible(
@@ -113,23 +107,25 @@ class DefaultEngineAmsComponentDispatcher(
         val plan = serviceService.planService(instanceId, planRequest)
         val blocked = plan.toBlockedStartServiceResult(intent, foreground)
         if (blocked != null) {
-            serviceService.recordServiceDispatchIfPossible(plan.toServiceOperationResult(planRequest))
             return blocked
         }
         return fallback.resolveStartServiceIntent(intent, foreground)
     }
 
     override fun dispatchStopService(intent: Intent): VirtualServiceStopDispatchResult? {
-        val planRequest = intent.toServicePlanRequest(VirtualServiceOperation.STOP)
+        val planRequest = intent.toServicePlanRequest(
+            VirtualServiceOperation.STOP,
+            operationLeaseRequested = true
+        )
         val plan = serviceService.planService(instanceId, planRequest)
         if (plan.shouldBlockLoaderDispatch()) {
-            serviceService.recordServiceDispatchIfPossible(plan.toServiceOperationResult(planRequest))
             return null
         }
         val result = fallback.dispatchStopService(intent)
         serviceService.recordServiceDispatchIfPossible(
             result?.toServiceOperationResult(instanceId, planRequest)
-                ?: plan.toUnsupportedFallbackStopResult(planRequest)
+                ?: plan.toUnsupportedFallbackStopResult(planRequest),
+            plan
         )
         return result
     }
@@ -142,30 +138,36 @@ class DefaultEngineAmsComponentDispatcher(
         flags: Int,
         executor: Executor?
     ): VirtualServiceBindDispatchResult {
-        val planRequest = intent.toServicePlanRequest(VirtualServiceOperation.BIND)
+        val planRequest = intent.toServicePlanRequest(
+            VirtualServiceOperation.BIND,
+            operationLeaseRequested = true
+        )
         val plan = serviceService.planService(instanceId, planRequest)
         val blocked = plan.toBlockedBindServiceResult(intent, flags)
         if (blocked != null) {
-            serviceService.recordServiceDispatchIfPossible(plan.toServiceOperationResult(planRequest))
             return blocked
         }
         val result = fallback.dispatchBindService(intent, virtualContext, guestClassLoader, connection, flags, executor)
         serviceService.recordServiceDispatchIfPossible(
-            result.toServiceOperationResult(instanceId, intent)
+            result.toServiceOperationResult(instanceId, intent),
+            plan
         )
         return result
     }
 
     override fun dispatchUnbindService(connection: ServiceConnection): VirtualServiceUnbindDispatchResult {
-        val planRequest = VirtualServiceDispatchPlanRequest(operation = VirtualServiceOperation.UNBIND)
+        val planRequest = VirtualServiceDispatchPlanRequest(
+            operation = VirtualServiceOperation.UNBIND,
+            operationLeaseRequested = true
+        )
         val plan = serviceService.planService(instanceId, planRequest)
         if (plan.shouldBlockLoaderDispatch()) {
-            serviceService.recordServiceDispatchIfPossible(plan.toServiceOperationResult(planRequest))
             return VirtualServiceUnbindDispatchResult.NotFound
         }
         val result = fallback.dispatchUnbindService(connection)
         serviceService.recordServiceDispatchIfPossible(
-            result.toServiceOperationResult(instanceId)
+            result.toServiceOperationResult(instanceId),
+            plan
         )
         return result
     }
@@ -246,7 +248,8 @@ class DefaultEngineAmsComponentDispatcher(
     }
 
     private fun Intent.toServicePlanRequest(
-        operation: VirtualServiceOperation
+        operation: VirtualServiceOperation,
+        operationLeaseRequested: Boolean = false
     ): VirtualServiceDispatchPlanRequest {
         val component = runCatching { component }.getOrNull()
         val data = runCatching { data }.getOrNull()
@@ -260,7 +263,8 @@ class DefaultEngineAmsComponentDispatcher(
             dataScheme = data?.scheme?.takeIf { it.isNotBlank() },
             dataMimeType = runCatching { type }.getOrNull()?.takeIf { it.isNotBlank() },
             dataAuthority = data.toEngineIntentAuthority(),
-            dataPath = data?.path?.takeIf { it.isNotBlank() }
+            dataPath = data?.path?.takeIf { it.isNotBlank() },
+            operationLeaseRequested = operationLeaseRequested
         )
     }
 
@@ -602,9 +606,18 @@ class DefaultEngineAmsComponentDispatcher(
     }
 
     private fun VirtualServiceService.recordServiceDispatchIfPossible(
-        result: VirtualServiceOperationResult
+        result: VirtualServiceOperationResult,
+        plan: VirtualServiceDispatchPlan
     ) {
-        recordServiceDispatch(result.instanceId, result)
+        val lease = plan.targets.singleOrNull()?.operationLease ?: return
+        recordServiceDispatch(
+            result.instanceId,
+            result.copy(
+                serviceClassName = result.serviceClassName ?: lease.component,
+                processSlot = lease.processSlot,
+                operationLease = lease
+            )
+        )
     }
 }
 

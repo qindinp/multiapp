@@ -560,17 +560,12 @@ class EngineActivityTaskController(
 
     fun persist(instanceId: String): EngineActivityTaskControlResult {
         requireValidInstanceId(instanceId)
-        val snapshot = taskRecords.snapshot()
-        val operation = activityService.syncActivityTaskState(
-            instanceId = instanceId,
-            reason = "activity-task-controller-persist",
-            tasks = snapshot.tasks
-        )
+        val state = activityService.queryTaskState(instanceId)
         return EngineActivityTaskControlResult(
-            status = operation.toTaskControlStatus(),
-            activityCount = snapshot.activityCount,
-            taskCount = snapshot.tasks.size,
-            detail = if (operation.verdict == EngineResultStatus.PASS) "" else operation.message
+            status = if (state.verdict == EngineResultStatus.FAIL) "FAIL" else "ENGINE_OWNED",
+            activityCount = state.activityCount,
+            taskCount = state.taskCount,
+            detail = state.message
         )
     }
 

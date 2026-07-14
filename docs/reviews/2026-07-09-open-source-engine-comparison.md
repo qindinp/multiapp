@@ -509,3 +509,47 @@ Current verdict:
   cross-process Provider/Service endpoints, complete Activity transactions,
   Broadcast semantics, and device proof remain open. Commercial status stays
   `BLOCK`.
+
+## 2026-07-14 Activity, Service, and Provider Authority Follow-up
+
+Pinned source checks:
+
+- [AOSP ActiveServices](https://github.com/aosp-mirror/platform_frameworks_base/blob/android-15.0.0_r1/services/core/java/com/android/server/am/ActiveServices.java)
+  keeps a global `IBinder -> ConnectionRecord` map and makes the system server
+  the owner of bind/unbind identity and process cleanup.
+- [VirtualApp VActivityManagerService](https://github.com/asLody/VirtualApp/blob/7d739c85ffc4b2303a4c711b6f9472431089a42e/VirtualApp/lib/src/main/java/com/lody/virtual/server/am/VActivityManagerService.java)
+  finds the server `ServiceRecord` by `IServiceConnection`, while
+  [VirtualApp ServiceRecord](https://github.com/asLody/VirtualApp/blob/7d739c85ffc4b2303a4c711b6f9472431089a42e/VirtualApp/lib/src/main/java/com/lody/virtual/server/am/ServiceRecord.java)
+  compares connection Binders and links a death recipient.
+- [BlackBox ActiveServices](https://github.com/FBlackBox/BlackBox/blob/ffe950f7d15dae671cd8e95b58c83b35aab8f141/Bcore/src/main/java/top/niunaijun/blackbox/core/system/am/ActiveServices.java)
+  keeps `IBinder -> ConnectedServiceRecord` and running-Service maps, but lacks
+  MultiApp's explicit epoch/session lease identity.
+- [DroidPlugin MyActivityManagerService](https://github.com/DroidPluginTeam/DroidPlugin/blob/c6ebf652e0f73aa0e5746766e117e51efaf41dbd/project/Libraries/DroidPlugin/src/main/java/com/morgoo/droidplugin/am/MyActivityManagerService.java)
+  relies more heavily on Android AMS and host stubs. That is useful for stub
+  lifecycle mechanics but not sufficient as a multi-instance engine truth
+  source.
+
+Adopted without copying source:
+
+1. Keep Activity/Service/Provider operation identity in the engine server, not
+   in guest process globals.
+2. Bind every ephemeral authority to runtime generation, engine session,
+   process slot, PID, target component, and one-time token.
+3. Execute the state write as the atomic commit action so replay is idempotent
+   and concurrent Binder calls cannot both mutate state.
+4. Resolve unbind from engine-owned bound state and fail closed when ownership
+   is absent or ambiguous. The next complete step is an AOSP/VirtualApp-shaped
+   connection Binder index with death cleanup.
+5. Publish Provider endpoints only after a real component process slot exists.
+   Endpoint registry code alone does not make custom-process Provider `PASS`.
+
+Current verdict:
+
+- Activity transaction, Service lease, and Provider endpoint control planes are
+  now owned and generation-cleaned by `EngineServerRuntime`.
+- The final nine-module gate and `:app:assembleDebug` pass 2,181 tests with no
+  failures or errors and 12 skipped. The debug APK is 100,023,533 bytes with
+  SHA-256
+  `EEA63AD64F25E933FF1011AEA75C5C36749ED2A5201A896C39B7C3EFD7497A90`.
+- Custom-process Provider/Service data planes, complete connection semantics,
+  and device evidence remain open. Commercial status stays `BLOCK`.

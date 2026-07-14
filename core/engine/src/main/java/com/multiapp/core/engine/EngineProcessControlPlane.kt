@@ -86,6 +86,7 @@ class EngineProcessControlPlane(
     private val deathRegistry: EngineProcessDeathRegistry = EngineProcessDeathRegistry(),
     private val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
         EngineActivityLaunchCapabilityRegistry.global,
+    private val generationCleanup: (EngineProcessClientIdentity) -> Unit = {},
     private val engineSessionFactory: () -> String = { UUID.randomUUID().toString() },
     private val evidenceSessionFactory: () -> String = { UUID.randomUUID().toString() }
 ) {
@@ -167,6 +168,7 @@ class EngineProcessControlPlane(
         if (!authority.allowed || authority.identity != successorIdentity) {
             deathRegistry.rollback(successorIdentity, clientToken)
             runtimeRegistry.markDeadIfCurrent(successorIdentity)
+            generationCleanup(successorIdentity)
             return rejected(operation, successorIdentity, authority.reason, binding.state)
         }
         recordEvidence(
@@ -297,6 +299,7 @@ class EngineProcessControlPlane(
                 current.engineSessionId == identity.engineSessionId &&
                 current.processSlot == identity.processSlot
             ) {
+                generationCleanup(identity)
                 EngineProcessAbandonResult(
                     accepted = true,
                     idempotent = true,
@@ -319,6 +322,7 @@ class EngineProcessControlPlane(
             identity.runtimeEpoch,
             identity.engineSessionId
         )
+        generationCleanup(identity)
         return EngineProcessAbandonResult(
             accepted = true,
             idempotent = !markedDead,
@@ -416,6 +420,7 @@ class EngineProcessControlPlane(
             runtimeEpoch = identity.runtimeEpoch,
             engineSessionId = identity.engineSessionId
         )
+        generationCleanup(identity)
         runtimeRegistry.registerOperationEvidence(
             identity.instanceId,
             EngineOperationEvidence(

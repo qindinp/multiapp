@@ -324,11 +324,13 @@ class DefaultEngineServiceDispatcher private constructor(
     )
 
     override fun dispatch(request: EngineServiceDispatchRequest): EngineServiceDispatchResult {
+        var operationLease: EngineServiceOperationLeaseIdentity? = null
         val planResult = request.route?.let { route ->
             val plan = serviceService.planService(
                 instanceId = route.instanceId,
                 request = route.toServicePlanRequest()
             )
+            operationLease = plan.targets.singleOrNull()?.operationLease
             when (plan.verdict) {
                 EngineResultStatus.PASS,
                 EngineResultStatus.PARTIAL -> null
@@ -349,12 +351,11 @@ class DefaultEngineServiceDispatcher private constructor(
             }
         }
         if (planResult != null) {
-            serviceService.recordDispatchIfPossible(planResult)
             return planResult
         }
         val injectedResult = loaderDispatch?.invoke(request)
         if (injectedResult != null) {
-            serviceService.recordDispatchIfPossible(injectedResult)
+            serviceService.recordDispatchIfPossible(injectedResult, operationLease)
             return injectedResult
         }
         val dispatcher = VirtualServiceDispatcher(
@@ -366,7 +367,9 @@ class DefaultEngineServiceDispatcher private constructor(
             dispatcher.dispatch(startRequest, request.flags, request.startId)
         } ?: dispatcher.dispatch(request.proxyIntent, request.flags, request.startId)
         return EngineServiceDispatchResult.fromLoader(result)
-            .also { engineResult -> serviceService.recordDispatchIfPossible(engineResult) }
+            .also { engineResult ->
+                serviceService.recordDispatchIfPossible(engineResult, operationLease)
+            }
     }
 
     private fun EngineServiceStartRoute.toServicePlanRequest(): VirtualServiceDispatchPlanRequest {
@@ -385,12 +388,20 @@ class DefaultEngineServiceDispatcher private constructor(
             dataScheme = data?.scheme?.takeIf { it.isNotBlank() },
             dataMimeType = runCatching { sourceIntent.type }.getOrNull()?.takeIf { it.isNotBlank() },
             dataAuthority = data.toEngineIntentAuthority(),
-            dataPath = data?.path?.takeIf { it.isNotBlank() }
+            dataPath = data?.path?.takeIf { it.isNotBlank() },
+            operationLeaseRequested = true
         )
     }
 
-    private fun VirtualServiceService.recordDispatchIfPossible(result: EngineServiceDispatchResult) {
-        val dispatchResult = result.toVirtualServiceOperationResult() ?: return
+    private fun VirtualServiceService.recordDispatchIfPossible(
+        result: EngineServiceDispatchResult,
+        operationLease: EngineServiceOperationLeaseIdentity?
+    ) {
+        val lease = operationLease ?: return
+        val dispatchResult = result.toVirtualServiceOperationResult()?.copy(
+            processSlot = lease.processSlot,
+            operationLease = lease
+        ) ?: return
         recordServiceDispatch(dispatchResult.instanceId, dispatchResult)
     }
 }

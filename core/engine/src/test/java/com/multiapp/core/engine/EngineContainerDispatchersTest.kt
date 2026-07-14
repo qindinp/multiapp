@@ -278,7 +278,7 @@ class EngineContainerDispatchersTest {
         assertEquals("true", dispatchEvidence?.entries?.get("remapped"))
         assertEquals("loader_activity_remapped", dispatchEvidence?.entries?.get("message"))
         verify(exactly = 1) { fallback.resolveStartActivityIntent(intent) }
-        verify(exactly = 1) {
+        verify(exactly = 0) {
             activityService.syncActivityTaskState(runtime.instanceId, "start-activity-remapped")
         }
     }
@@ -319,7 +319,7 @@ class EngineContainerDispatchersTest {
         val dispatcher = DefaultEngineAmsComponentDispatcher(
             fallback = fallback,
             instanceId = runtime.instanceId,
-            serviceService = server.serviceService,
+            serviceService = leaseAwareService(server, runtime),
             broadcastService = server.broadcastService
         )
 
@@ -374,7 +374,7 @@ class EngineContainerDispatchersTest {
         val dispatcher = DefaultEngineAmsComponentDispatcher(
             fallback = fallback,
             instanceId = runtime.instanceId,
-            serviceService = server.serviceService,
+            serviceService = leaseAwareService(server, runtime),
             broadcastService = server.broadcastService
         )
 
@@ -388,7 +388,7 @@ class EngineContainerDispatchersTest {
         )
         val dispatchEvidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("service", "dispatch")
-            ?.single()
+            ?.last()
 
         assertTrue(result is VirtualServiceBindDispatchResult.Bound)
         assertEquals(EngineResultStatus.PASS, dispatchEvidence?.verdict)
@@ -431,7 +431,7 @@ class EngineContainerDispatchersTest {
         val dispatcher = DefaultEngineAmsComponentDispatcher(
             fallback = fallback,
             instanceId = runtime.instanceId,
-            serviceService = server.serviceService,
+            serviceService = leaseAwareService(server, runtime),
             broadcastService = server.broadcastService
         )
 
@@ -496,17 +496,34 @@ class EngineContainerDispatchersTest {
                 activeConnectionCount = 0,
                 activeBindCount = 0
             )
+        assertTrue(
+            server.serviceService.recordServiceDispatch(
+                runtime.instanceId,
+                VirtualServiceOperationResult(
+                    instanceId = runtime.instanceId,
+                    operation = VirtualServiceOperation.BIND,
+                    serviceClassName = startRequest.guestServiceClassName,
+                    action = "test.SYNC",
+                    verdict = EngineResultStatus.PASS,
+                    reason = "seed-bound-connection",
+                    bound = true,
+                    processSlot = runtime.processSlot,
+                    activeBindCount = 1,
+                    message = "seed_bound_connection"
+                )
+            )
+        )
         val dispatcher = DefaultEngineAmsComponentDispatcher(
             fallback = fallback,
             instanceId = runtime.instanceId,
-            serviceService = server.serviceService,
+            serviceService = leaseAwareService(server, runtime),
             broadcastService = server.broadcastService
         )
 
         val result = dispatcher.dispatchUnbindService(connection)
         val dispatchEvidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("service", "dispatch")
-            ?.single()
+            ?.last()
 
         assertTrue(result is VirtualServiceUnbindDispatchResult.Unbound)
         assertEquals(EngineResultStatus.PASS, dispatchEvidence?.verdict)
@@ -836,7 +853,7 @@ class EngineContainerDispatchersTest {
             processSlot = runtime.processSlot
         )
         val dispatcher = DefaultEngineServiceDispatcher(
-            serviceService = server.serviceService,
+            serviceService = leaseAwareService(server, runtime),
             loaderDispatch = {
                 EngineServiceDispatchResult.ServiceStarted(
                     startRequest = EngineServiceStartRequestSnapshot.fromLoader(route.startRequest),
@@ -986,6 +1003,36 @@ class EngineContainerDispatchersTest {
         processName = "com.multiapp.app:v1",
         state = VirtualRuntimeState.RUNNING
     )
+
+    private fun leaseAwareService(
+        server: VirtualSystemServer,
+        runtime: VirtualInstanceRuntime
+    ): VirtualServiceService = object : VirtualServiceService by server.serviceService {
+        private var leaseIndex = 0
+
+        override fun planService(
+            instanceId: String,
+            request: VirtualServiceDispatchPlanRequest
+        ): VirtualServiceDispatchPlan {
+            val plan = server.serviceService.planService(instanceId, request)
+            if (!request.operationLeaseRequested) return plan
+            val target = plan.targets.singleOrNull() ?: return plan
+            leaseIndex += 1
+            val lease = EngineServiceOperationLeaseIdentity(
+                leaseToken = "test-service-lease-$leaseIndex",
+                instanceId = runtime.instanceId,
+                runtimeEpoch = runtime.runtimeEpoch,
+                engineSessionId = runtime.engineSessionId,
+                processSlot = runtime.processSlot,
+                processId = runtime.processId ?: 4200,
+                operation = request.operation.name,
+                component = target.serviceClassName,
+                issuedAtNanos = leaseIndex.toLong(),
+                expiresAtNanos = leaseIndex.toLong() + 1L
+            )
+            return plan.copy(targets = listOf(target.copy(operationLease = lease)))
+        }
+    }
 
     private fun serviceSourceIntent(action: String): Intent {
         val intent = mockk<Intent>(relaxed = true)

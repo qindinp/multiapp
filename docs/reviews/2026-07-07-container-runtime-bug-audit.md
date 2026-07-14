@@ -2882,6 +2882,62 @@ process attribute change.
 - No new artifact proves GKD, AstroBox, QQ, WeChat, or QQ Reader compatibility.
   Review decision remains **BLOCK**.
 
+## Review Update - 2026-07-14 Component Operation Authority
+
+The previous review found that Activity state could still be replaced by a
+loader snapshot, Service lifecycle serialization had no engine-issued
+operation identity, and custom-process Provider publication had no
+generation/PID endpoint authority. This batch closes the local authority
+bypasses without claiming the unsupported data planes are complete.
+
+### Findings closed in the current tree
+
+- Activity mutation/consume is wrapped in an engine-owned transaction with a
+  server-generated one-time token, expiry, generation/process identity, target
+  Activity token, and canonical payload fingerprint. The actual state mutation
+  is the transaction commit action, preventing two Binder threads from both
+  applying one transaction.
+- App/loader production callers no longer upload their whole Activity task
+  snapshot. The old Binder entry is retained only as a fail-closed compatibility
+  surface and always rejects the write.
+- Service execution crosses Binder with an engine-issued lease. Plans used only
+  for intent remapping do not allocate a lease; plans that execute loader code
+  require one exact target and the result must echo the same lease identity.
+- Engine-owned Service state is used to resolve target-less unbind only when one
+  bound Service is authoritative. No record or multiple records is a hard
+  failure rather than a guessed component.
+- Provider endpoint registry/control-plane state is owned by the dedicated
+  engine graph and is revoked on Binder death, runtime generation death, stop,
+  and delete. A manifest custom process is still rejected until a real host
+  component process slot is allocated.
+
+### Verification
+
+- The final nine-module unit-test gate and APK assembly passed once in about
+  7m: 2,181 tests, 0 failures, 0 errors, and 12 skipped. Engine reports 399,
+  loader 722, and app 132 tests.
+- Debug APK: 100,023,533 bytes; SHA-256
+  `EEA63AD64F25E933FF1011AEA75C5C36749ED2A5201A896C39B7C3EFD7497A90`.
+- The known AGP 8.7.3 / `compileSdk=36` warning remains non-fatal and does not
+  change the device-evidence requirement.
+- The repeated unbind regression was checked against AOSP `ActiveServices`,
+  VirtualApp `ServiceRecord`/`VActivityManagerService`, BlackBox
+  `ActiveServices`, and DroidPlugin's host-AMS/stub model. The selected shape is
+  server-owned connection identity with fail-closed lookup; the full Binder
+  connection index is explicitly deferred, not faked.
+
+### Still BLOCK
+
+- This is not a durable Service restart journal. Connection Binder indexing,
+  sticky/foreground/rebind semantics, and custom-process Service hosting remain
+  incomplete.
+- Provider endpoint publication has no allocated custom component process or
+  cross-process Provider data plane yet. Observer/notify and transient grant
+  lifecycle remain incomplete.
+- Full AMS/window/task equivalence, Broadcast, permissions, storage/native,
+  linker, API 28-36/HyperOS recovery, and named-app device evidence remain open.
+- Review decision remains **BLOCK**.
+
 ## Review Update - 2026-07-14 Authoritative PMS Semantics
 
 The prior HIGH findings for incomplete intent-filter data, duplicated matcher

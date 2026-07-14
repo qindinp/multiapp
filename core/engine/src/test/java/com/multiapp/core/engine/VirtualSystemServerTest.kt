@@ -1436,6 +1436,23 @@ class VirtualSystemServerTest {
                 action = "test.SYNC"
             )
         )
+        assertTrue(
+            server.serviceService.recordServiceDispatch(
+                runtime.instanceId,
+                VirtualServiceOperationResult(
+                    instanceId = runtime.instanceId,
+                    operation = VirtualServiceOperation.BIND,
+                    serviceClassName = bindPlan.targets.single().serviceClassName,
+                    action = "test.SYNC",
+                    verdict = EngineResultStatus.PASS,
+                    reason = "implicitBind",
+                    bound = true,
+                    processSlot = runtime.processSlot,
+                    activeBindCount = 1,
+                    message = "service_bound"
+                )
+            )
+        )
         val unbindPlan = server.serviceService.planService(
             instanceId = runtime.instanceId,
             request = VirtualServiceDispatchPlanRequest(operation = VirtualServiceOperation.UNBIND)
@@ -1447,6 +1464,7 @@ class VirtualSystemServerTest {
         assertEquals("implicitBind", bindPlan.targets.single().reason)
         assertEquals(EngineResultStatus.PARTIAL, unbindPlan.verdict)
         assertEquals("service_unbind_connection_route_planned", unbindPlan.message)
+        assertEquals("com.test.app.SyncService", unbindPlan.targets.single().serviceClassName)
     }
 
     @Test

@@ -4582,3 +4582,60 @@ Remaining gate:
   behavior, and API 28-36/HyperOS device evidence remain open.
 - This batch is not compatibility proof for GKD, AstroBox, QQ, WeChat, or QQ
   Reader. Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-14 Engine-Owned Component Operations
+
+This batch replaces three process-local component decisions with
+generation-bound engine authority. It is a control-plane hardening slice, not
+proof that custom-process components or named commercial apps are compatible.
+
+Implemented:
+
+- Activity mutation and consume calls now execute inside an engine-owned,
+  one-time transaction bound to `instanceId + runtimeEpoch + engineSessionId +
+  processSlot + PID + operation + Activity token + SHA-256 payload`.
+  Commit actions run once under the transaction lock; stale, expired, replayed,
+  mismatched, stopped, and dead generations fail closed.
+- Loader task snapshots are no longer accepted as an authoritative whole-state
+  replacement. `EngineActivityTaskController.persist()` is read-only and the
+  Binder `syncActivityTaskState` entry returns
+  `direct_activity_task_snapshot_sync_disabled`.
+- Service execution plans can explicitly request an engine-owned operation
+  lease. Executable plans must contain exactly one lease-bound target, and the
+  dispatch result must echo the exact operation/component/process identity
+  before the engine atomically records state and commits the lease.
+- Target-less `UNBIND` now resolves only from a unique engine-owned bound
+  Service record. Missing or ambiguous connection ownership fails closed; a
+  complete `connection Binder -> ServiceRecord` index remains open.
+- Provider endpoint registration now has an engine-owned registry and control
+  plane with generation/PID/process/component identity, Binder death cleanup,
+  tombstones, and instance/generation revoke. A custom guest process without a
+  real allocated component slot is still rejected as
+  `provider_component_process_slot_not_allocated`.
+- `EngineServerRuntime` owns Activity transactions, Service leases, and
+  Provider endpoints. Process death/abandon and instance stop/delete revoke
+  their ephemeral authority together with Activity launch capabilities.
+
+Verification:
+
+- The final nine-module unit-test gate and `:app:assembleDebug` passed once in
+  about 7m: 2,181 tests, 0 failures, 0 errors, and 12 skipped.
+- Final module counts include engine 399, loader 722, and app 132 tests.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 100,023,533 bytes.
+- APK SHA-256:
+  `EEA63AD64F25E933FF1011AEA75C5C36749ED2A5201A896C39B7C3EFD7497A90`.
+- `git diff --check` passes apart from existing LF/CRLF conversion warnings.
+  AGP 8.7.3 still emits its known `compileSdk=36` compatibility warning; this
+  does not replace device evidence.
+
+Remaining gate:
+
+- Activity launch planning is engine-owned, and mutation/consume is now
+  transactional, but full Android task/window transaction equivalence and
+  `singleInstance` variants remain open.
+- Service connection Binder indexing, sticky restart, foreground-service type
+  mapping, rebind/death callbacks, and custom-process hosting remain open.
+- Provider endpoint authority is wired into engine ownership, but no extra
+  component process slot or cross-process data plane has been implemented.
+- Broadcast, runtime permission, storage/native/linker, device recovery, and
+  compatibility evidence remain open. Commercial status remains **BLOCK**.

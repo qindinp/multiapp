@@ -116,9 +116,11 @@ class EngineProcessControlPlaneTest {
         val registry = EngineRuntimeRegistry()
         registry.register(runtime())
         val capabilities = EngineActivityLaunchCapabilityRegistry(tokenFactory = { "abandon-capability" })
+        val cleanedGenerations = mutableListOf<EngineProcessClientIdentity>()
         val controlPlane = EngineProcessControlPlane(
             runtimeRegistry = registry,
-            activityLaunchCapabilities = capabilities
+            activityLaunchCapabilities = capabilities,
+            generationCleanup = { identity -> cleanedGenerations += identity }
         )
         val token = liveToken()
         val identity = identity()
@@ -159,13 +161,18 @@ class EngineProcessControlPlaneTest {
         assertTrue(repeated.accepted)
         assertTrue(repeated.idempotent)
         assertFalse(wrongSlot.accepted)
+        assertEquals(listOf(identity, identity), cleanedGenerations)
     }
 
     @Test
     fun `binder death revokes authority and only marks exact pid generation dead`() {
         val registry = EngineRuntimeRegistry()
         registry.register(runtime())
-        val controlPlane = EngineProcessControlPlane(registry)
+        val cleanedGenerations = mutableListOf<EngineProcessClientIdentity>()
+        val controlPlane = EngineProcessControlPlane(
+            runtimeRegistry = registry,
+            generationCleanup = { identity -> cleanedGenerations += identity }
+        )
         val token = liveToken()
         val identity = identity()
         assertTrue(controlPlane.attachClient(identity, token.binder, PROCESS_ID).accepted)
@@ -176,6 +183,7 @@ class EngineProcessControlPlaneTest {
         assertEquals(VirtualRuntimeState.DEAD, registry.get(INSTANCE_ID)?.state)
         assertNull(registry.get(INSTANCE_ID)?.processId)
         assertNull(registry.get(INSTANCE_ID)?.processName)
+        assertEquals(listOf(identity), cleanedGenerations)
     }
 
     @Test

@@ -30,31 +30,22 @@ class EngineActivityRuntimeTest {
             stateStore = InMemoryEngineActivityTaskStateStore()
         )
         val service = mockk<VirtualActivityService>()
-        every {
-            service.syncActivityTaskState(
-                "inst-001",
-                "activity-task-controller-persist",
-                any()
-            )
-        } returns VirtualActivityOperationResult(
+        every { service.queryTaskState("inst-001") } returns VirtualActivityTaskState(
             instanceId = "inst-001",
-            operation = "sync-task-state",
             verdict = EngineResultStatus.PASS,
-            message = "activity_task_state_synced"
+            taskCount = 1,
+            activityCount = 1,
+            tasks = records.snapshot().tasks,
+            message = "engine_owned_activity_task_state"
         )
         val controller = EngineActivityTaskController(service, records)
 
         val result = controller.persist("inst-001")
 
-        assertEquals("PERSISTED", result.status)
+        assertEquals("ENGINE_OWNED", result.status)
         assertEquals(1, result.activityCount)
-        verify(exactly = 1) {
-            service.syncActivityTaskState(
-                "inst-001",
-                "activity-task-controller-persist",
-                match { tasks -> tasks.flatMap { it.activities }.single().token == "token-persist" }
-            )
-        }
+        verify(exactly = 1) { service.queryTaskState("inst-001") }
+        verify(exactly = 0) { service.syncActivityTaskState(any(), any(), any()) }
     }
 
     @Test
