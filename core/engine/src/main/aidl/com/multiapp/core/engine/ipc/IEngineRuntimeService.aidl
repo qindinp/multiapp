@@ -4,6 +4,7 @@ import android.os.Bundle;
 import android.os.IBinder;
 
 interface IEngineRuntimeService {
+    String getServerGenerationId();
     Bundle engineInstallOrRefreshPackage(String originPackageName);
     Bundle engineCreateInstance(String originPackageName);
     Bundle engineCreateInstanceWithMetadata(in Bundle request);

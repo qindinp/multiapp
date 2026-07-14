@@ -7,6 +7,8 @@ import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -23,12 +25,32 @@ class ProxyActivitySlotAssignmentStoreProviderTest {
     }
 
     @Test
-    fun `uninstalled provider blocks allocation instead of selecting first candidate`() {
+    fun `uninstalled provider backed store fails closed instead of throwing`() {
+        val key = ProxyActivitySlotKey("inst-001", null, "com.test.minimal:inst-001")
+        val proxy = "com.multiapp.app.container.ProxyActivity0"
+
+        assertNull(ProviderBackedProxyActivitySlotAssignmentStore.find(key))
+        assertNull(ProviderBackedProxyActivitySlotAssignmentStore.reserve(key, listOf(proxy)))
+        assertFalse(ProviderBackedProxyActivitySlotAssignmentStore.compareAndSet(key, null, proxy))
+        assertNull(ProviderBackedProxyActivitySlotAssignmentStore.ownerOf(proxy))
+        assertEquals(0, ProviderBackedProxyActivitySlotAssignmentStore.removeInstance(key.instanceId))
+        assertEquals(
+            0,
+            ProviderBackedProxyActivitySlotAssignmentStore.pruneStaleAssignments(
+                validInstanceIds = setOf(key.instanceId),
+                liveProxyActivityClassNames = emptySet(),
+                knownProxyActivityClassNames = setOf(proxy)
+            )
+        )
+    }
+
+    @Test
+    fun `uninstalled provider registry reports slot exhaustion instead of provider exception`() {
         val registry = DefaultVirtualAmsComponentDispatcher.defaultProxyActivityRegistry(
             hostPackageName = "com.multiapp.app"
         )
 
-        val error = assertFailsWith<ProxyActivitySlotAssignmentStoreProviderNotInstalledException> {
+        val error = assertFailsWith<com.multiapp.core.model.virtual.ProxyActivitySlotExhaustedException> {
             registry.allocate(
                 instanceId = "inst-001",
                 originPackageName = "com.test.minimal",
@@ -37,7 +59,7 @@ class ProxyActivitySlotAssignmentStoreProviderTest {
             )
         }
 
-        assertTrue(error.message.orEmpty().contains("production proxy Activity slot authority"))
+        assertTrue(error.message.orEmpty().contains("No free proxy Activity slot"))
     }
 
     @Test

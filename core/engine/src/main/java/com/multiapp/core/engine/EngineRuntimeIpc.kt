@@ -5,6 +5,8 @@ import android.net.Uri
 import android.os.Binder
 import android.os.Bundle
 import android.os.IBinder
+import android.os.Process
+import android.os.SystemClock
 import com.multiapp.core.engine.ipc.IEngineRuntimeService
 import com.multiapp.core.loader.VirtualActivityLaunchAllocation
 import com.multiapp.core.loader.VirtualActivityLaunchAllocationRequest
@@ -22,11 +24,16 @@ import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualTaskRecord
 import java.io.File
+import java.util.UUID
 
 object EngineRuntimeIpcContract {
+    const val ENGINE_PROCESS_SUFFIX = ":engine"
     const val AUTHORITY_SUFFIX = ".multiapp.engine.server"
     const val METHOD_GET_BINDER = "getEngineRuntimeBinder"
     const val KEY_BINDER = "engineRuntimeBinder"
+    const val KEY_SERVER_GENERATION_ID = "serverGenerationId"
+    const val KEY_SERVER_PROCESS_ID = "serverProcessId"
+    const val KEY_SERVER_PROCESS_NAME = "serverProcessName"
     const val KEY_FOUND = "found"
     const val KEY_ACCEPTED = "accepted"
     const val KEY_IDEMPOTENT = "idempotent"
@@ -204,6 +211,8 @@ object EngineRuntimeIpcContract {
     const val MAX_PROXY_ACTIVITY_SLOT_TASK_KEY_LENGTH = 1_024
 
     fun authority(hostPackageName: String): String = hostPackageName + AUTHORITY_SUFFIX
+
+    fun engineProcessName(hostPackageName: String): String = hostPackageName + ENGINE_PROCESS_SUFFIX
 }
 
 data class EngineRuntimeIpcSnapshot(
@@ -283,6 +292,7 @@ object EngineRuntimeAuthorityValidator {
 class EngineRuntimeBinderEndpoint(
     private val registry: EngineRuntimeRegistry,
     private val hostUid: Int,
+    private val serverGenerationId: String = UUID.randomUUID().toString(),
     private val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
         EngineActivityLaunchCapabilityRegistry.global,
     private val activityService: VirtualActivityService = DefaultVirtualSystemServer(registry).activityService,
@@ -310,6 +320,13 @@ class EngineRuntimeBinderEndpoint(
     private val callingPid: () -> Int = Binder::getCallingPid,
     private val callingProcessName: (Int) -> String? = ::readAndroidProcessName
 ) : IEngineRuntimeService.Stub() {
+
+    init {
+        require(serverGenerationId.isNotBlank()) { "serverGenerationId must not be blank" }
+    }
+
+    override fun getServerGenerationId(): String =
+        serverGenerationId.takeIf { callingUid() == hostUid }.orEmpty()
 
     override fun engineInstallOrRefreshPackage(originPackageName: String): Bundle = authorizedBundle {
         val engine = virtualizationEngine
@@ -1349,31 +1366,86 @@ class EngineRuntimeBinderEndpoint(
     }
 }
 
+internal data class EngineRuntimeServiceCandidate(
+    val service: IEngineRuntimeService,
+    val serverGenerationId: String,
+    val serverProcessId: Int,
+    val serverProcessName: String
+)
+
 class EngineRuntimeIpcClient(
     private val context: Context
 ) {
-    fun connect(): IEngineRuntimeService? {
+    internal fun connect(): EngineRuntimeServiceCandidate? {
         val hostContext = context.applicationContext ?: context
         val authority = EngineRuntimeIpcContract.authority(hostContext.packageName)
-        val response = runCatching {
-            hostContext.contentResolver.call(
-                Uri.Builder().scheme("content").authority(authority).build(),
-                EngineRuntimeIpcContract.METHOD_GET_BINDER,
-                null,
-                null
+        val uri = Uri.Builder().scheme("content").authority(authority).build()
+        repeat(CONNECT_ATTEMPTS) { attempt ->
+            val response = callProvider(hostContext, uri)
+            val candidate = response?.toEngineRuntimeServiceCandidateOrNull(
+                expectedProcessName = EngineRuntimeIpcContract.engineProcessName(hostContext.packageName),
+                clientProcessId = Process.myPid()
             )
-        }.getOrNull()
-        return IEngineRuntimeService.Stub.asInterface(
-            response?.getBinder(EngineRuntimeIpcContract.KEY_BINDER)
-        )
+            if (candidate != null) return candidate
+            if (attempt + 1 < CONNECT_ATTEMPTS) SystemClock.sleep(CONNECT_RETRY_DELAY_MS)
+        }
+        return null
+    }
+
+    private fun callProvider(hostContext: Context, uri: Uri): Bundle? {
+        val client = runCatching {
+            hostContext.contentResolver.acquireUnstableContentProviderClient(uri)
+        }.getOrNull() ?: return null
+        return try {
+            runCatching {
+                client.call(EngineRuntimeIpcContract.METHOD_GET_BINDER, null, null)
+            }.getOrNull()
+        } finally {
+            runCatching { client.close() }
+        }
+    }
+
+    private companion object {
+        const val CONNECT_ATTEMPTS = 3
+        const val CONNECT_RETRY_DELAY_MS = 50L
     }
 }
 
+internal fun Bundle.toEngineRuntimeServiceCandidateOrNull(
+    expectedProcessName: String,
+    clientProcessId: Int? = null
+): EngineRuntimeServiceCandidate? = runCatching {
+    require(expectedProcessName.isNotBlank())
+    val generationId = getString(EngineRuntimeIpcContract.KEY_SERVER_GENERATION_ID)
+        ?.takeIf { it.isNotBlank() }
+        ?: return null
+    val processId = getInt(EngineRuntimeIpcContract.KEY_SERVER_PROCESS_ID).takeIf { it > 0 }
+        ?: return null
+    if (clientProcessId != null && processId == clientProcessId) return null
+    val processName = getString(EngineRuntimeIpcContract.KEY_SERVER_PROCESS_NAME)
+        ?.takeIf { it == expectedProcessName }
+        ?: return null
+    val binder = getBinder(EngineRuntimeIpcContract.KEY_BINDER)
+        ?.takeIf(IBinder::isBinderAlive)
+        ?: return null
+    val service = IEngineRuntimeService.Stub.asInterface(binder) ?: return null
+    val endpointGeneration = service.getServerGenerationId().takeIf { it.isNotBlank() }
+        ?: return null
+    require(endpointGeneration == generationId) { "engine server generation handshake mismatch" }
+    EngineRuntimeServiceCandidate(
+        service = service,
+        serverGenerationId = generationId,
+        serverProcessId = processId,
+        serverProcessName = processName
+    )
+}.getOrNull()
+
 internal class EngineRuntimeServiceConnection(
-    private val connector: () -> IEngineRuntimeService?
+    private val connector: () -> EngineRuntimeServiceCandidate?
 ) {
     private data class LinkedService(
         val generation: Long,
+        val serverGenerationId: String,
         val service: IEngineRuntimeService,
         val binder: IBinder,
         val deathRecipient: IBinder.DeathRecipient
@@ -1398,14 +1470,16 @@ internal class EngineRuntimeServiceConnection(
         snapshot?.let(::unlink)
 
         val connected = connector() ?: return null
-        val binder = connected.asBinder()
+        val binder = connected.service.asBinder()
+        if (!binder.isBinderAlive || connected.serverGenerationId.isBlank()) return null
         val generation = ++nextGeneration
         val recipient = IBinder.DeathRecipient {
             clearIfCurrent(generation, binder)
         }
         val candidate = LinkedService(
             generation = generation,
-            service = connected,
+            serverGenerationId = connected.serverGenerationId,
+            service = connected.service,
             binder = binder,
             deathRecipient = recipient
         )
@@ -1422,7 +1496,13 @@ internal class EngineRuntimeServiceConnection(
             if (linked) unlink(candidate)
             return null
         }
-        return connected
+        return connected.service
+    }
+
+    @Synchronized
+    internal fun activeServerGenerationId(): String? {
+        active() ?: return null
+        return current?.serverGenerationId
     }
 
     @Synchronized

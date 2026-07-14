@@ -45,6 +45,12 @@ class EngineVirtualizationEndpointContractTest {
     }
 
     @Test
+    fun `server generation is visible only to the host uid`() {
+        assertEquals("server-generation-test", endpoint(null).getServerGenerationId())
+        assertEquals("", endpoint(null, callerUid = HOST_UID + 1).getServerGenerationId())
+    }
+
+    @Test
     fun `install endpoint returns the authoritative engine result`() {
         val engine = mockk<VirtualizationEngine>()
         val expected = EngineResult.pass(
@@ -448,6 +454,7 @@ class EngineVirtualizationEndpointContractTest {
         val endpoint = unsafeClass.getMethod("allocateInstance", Class::class.java)
             .invoke(unsafe, EngineRuntimeBinderEndpoint::class.java) as EngineRuntimeBinderEndpoint
         setEndpointField(endpoint, "hostUid", HOST_UID)
+        setEndpointField(endpoint, "serverGenerationId", "server-generation-test")
         setEndpointField(endpoint, "virtualizationEngine", virtualizationEngine)
         setEndpointField(endpoint, "callingUid", { callerUid })
         setEndpointField(endpoint, "callingPid", { CALLING_PID })

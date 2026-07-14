@@ -372,3 +372,56 @@ Current mapping:
 - Dedicated `:engine` process isolation, server death/reconnect, complete
   virtual component semantics, and device evidence remain open. Commercial
   status therefore remains `BLOCK`.
+
+## Dedicated Server Process Comparison - 2026-07-14
+
+Pinned-source findings:
+
+- VirtualApp `7d739c85`,
+  [`BinderProvider`](https://github.com/asLody/VirtualApp/blob/7d739c85/VirtualApp/lib/src/main/java/com/lody/virtual/server/BinderProvider.java),
+  initializes package/activity/user/notification/storage services before
+  publishing an `IServiceFetcher` Binder.
+  [`ServiceManagerNative`](https://github.com/asLody/VirtualApp/blob/7d739c85/VirtualApp/lib/src/main/java/com/lody/virtual/client/ipc/ServiceManagerNative.java)
+  re-fetches when the cached Binder is not alive, while
+  [`ContentProviderCompat`](https://github.com/asLody/VirtualApp/blob/7d739c85/VirtualApp/lib/src/main/java/com/lody/virtual/helper/compat/ContentProviderCompat.java)
+  uses an unstable Provider client and bounded acquisition retries.
+- BlackBox `ffe950f7` declares
+  [`SystemCallProvider`](https://github.com/FBlackBox/BlackBox/blob/ffe950f7/Bcore/src/main/java/top/niunaijun/blackbox/core/system/SystemCallProvider.java)
+  in its service process. It starts `BlackBoxSystem` before serving Binders;
+  `BlackBoxCore` explicitly separates main, server, and guest roles and only
+  reuses live cached Binders. `ProviderCall` supplies a bounded retry path.
+- DroidPlugin `c6ebf652` uses
+  [`PluginManagerService`](https://github.com/DroidPluginTeam/DroidPlugin/blob/c6ebf652/project/Libraries/DroidPlugin/src/main/java/com/morgoo/droidplugin/PluginManagerService.java)
+  and
+  [`PluginServiceProvider`](https://github.com/DroidPluginTeam/DroidPlugin/blob/c6ebf652/project/Libraries/DroidPlugin/src/main/java/com/morgoo/droidplugin/PluginServiceProvider.java)
+  to publish one package-manager owner. It has useful service-connection and
+  readiness mechanics but no per-instance runtime epoch/session contract.
+
+MultiApp decisions implemented in the current tree:
+
+1. Place both package recovery and the virtual-system Binder owner in
+   `${applicationId}:engine`; recovery must finish before Binder publication.
+2. Route Application startup by exact process role. The server cannot install
+   its own client or guest hooks, and the host no longer installs guest
+   Instrumentation/system-service adapters.
+3. Use a bounded unstable-Provider acquisition path, but reject any handshake
+   without a live Binder, exact server process name, different PID, and
+   matching random server generation ID.
+4. Keep generation-aware `DeathRecipient` replacement so an old death callback
+   cannot clear a newer server connection.
+5. On server restart, invalidate persisted live guest state and start with no
+   launch capabilities. Do not copy daemon/foreground keep-alive behavior from
+   older projects.
+6. Keep loader local slot behavior fail-closed and structured; no client may
+   become a reserve/CAS authority while the server is unavailable.
+
+Current verdict:
+
+- Local focused tests, merged-manifest inspection, and the final full gate
+  pass: 1,945 tests, 0 failures, 0 errors, 12 skipped, and
+  `:app:assembleDebug` successful in 4m53s. The debug APK SHA-256 is
+  `313DD2618C044499EB3E49DB366A3DAD274AFAEDB349BB4606C6C49954E80E18`.
+- Distinct-process startup, independent server kill/reconnect, recents
+  continuity, and stale generation rejection still need device evidence.
+- Complete virtual component/native semantics remain open, so commercial
+  status stays `BLOCK`.

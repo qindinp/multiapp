@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test
 
 class EngineBinderProviderManifestTest {
     @Test
-    fun `engine Binder provider stays private in host main process`() {
+    fun `engine Binder provider stays private in dedicated engine process`() {
         val manifest = File(repoRoot(), "app/src/main/AndroidManifest.xml")
         val document = DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = true
@@ -33,9 +33,45 @@ class EngineBinderProviderManifestTest {
             requiredProvider.attributes.getNamedItemNS(ANDROID_NAMESPACE, "exported")?.nodeValue
         )
         assertEquals(
-            null,
+            ":engine",
             requiredProvider.attributes.getNamedItemNS(ANDROID_NAMESPACE, "process")?.nodeValue
         )
+    }
+
+    @Test
+    fun `package recovery runs before Binder publication in the dedicated engine process`() {
+        val manifest = File(repoRoot(), "app/src/main/AndroidManifest.xml")
+        val document = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+        }.newDocumentBuilder().parse(manifest)
+        val providers = document.getElementsByTagName("provider")
+        val byName = (0 until providers.length)
+            .map { providers.item(it) }
+            .associateBy { node ->
+                node.attributes.getNamedItemNS(ANDROID_NAMESPACE, "name")?.nodeValue.orEmpty()
+            }
+        val recovery = requireNotNull(
+            byName["com.multiapp.core.installer.PackageGenerationRecoveryProvider"]
+        )
+        val engine = requireNotNull(byName[".container.EngineBinderProvider"])
+
+        assertEquals(
+            ":engine",
+            recovery.attributes.getNamedItemNS(ANDROID_NAMESPACE, "process")?.nodeValue
+        )
+        assertEquals(
+            ":engine",
+            engine.attributes.getNamedItemNS(ANDROID_NAMESPACE, "process")?.nodeValue
+        )
+        val recoveryOrder = recovery.attributes
+            .getNamedItemNS(ANDROID_NAMESPACE, "initOrder")
+            ?.nodeValue
+            ?.toIntOrNull()
+        val engineOrder = engine.attributes
+            .getNamedItemNS(ANDROID_NAMESPACE, "initOrder")
+            ?.nodeValue
+            ?.toIntOrNull()
+        assertEquals(true, requireNotNull(recoveryOrder) > requireNotNull(engineOrder))
     }
 
     @Test

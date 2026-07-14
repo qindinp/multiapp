@@ -22,14 +22,16 @@ class EngineRuntimeServiceConnectionTest {
     fun `old binder death cannot clear a newer connection`() {
         val first = serviceHandle()
         val second = serviceHandle()
-        val services = ArrayDeque(listOf(first.service, second.service))
+        val services = ArrayDeque(listOf(first.candidate, second.candidate))
         val connection = EngineRuntimeServiceConnection {
             if (services.isEmpty()) null else services.removeFirst()
         }
 
         assertSame(first.service, connection.active())
+        assertEquals(first.serverGenerationId, connection.activeServerGenerationId())
         first.alive.value = false
         assertSame(second.service, connection.active())
+        assertEquals(second.serverGenerationId, connection.activeServerGenerationId())
 
         first.recipient.captured.binderDied()
 
@@ -51,9 +53,27 @@ class EngineRuntimeServiceConnectionTest {
         val service = mockk<IEngineRuntimeService> {
             every { asBinder() } returns binder
         }
-        val connection = EngineRuntimeServiceConnection { service }
+        val connection = EngineRuntimeServiceConnection {
+            candidate(service, binder, "server-sync-death")
+        }
 
         assertNull(connection.active())
+    }
+
+    @Test
+    fun `binder death callback clears current generation and reconnects to successor`() {
+        val first = serviceHandle()
+        val second = serviceHandle()
+        val services = ArrayDeque(listOf(first.candidate, second.candidate))
+        val connection = EngineRuntimeServiceConnection {
+            if (services.isEmpty()) null else services.removeFirst()
+        }
+
+        assertSame(first.service, connection.active())
+        first.recipient.captured.binderDied()
+
+        assertSame(second.service, connection.active())
+        assertEquals(second.serverGenerationId, connection.activeServerGenerationId())
     }
 
     @Test
@@ -62,7 +82,7 @@ class EngineRuntimeServiceConnectionTest {
         val connectorCalls = AtomicInteger(0)
         val connection = EngineRuntimeServiceConnection {
             connectorCalls.incrementAndGet()
-            handle.service
+            handle.candidate
         }
         val callerCount = 8
         val ready = CountDownLatch(callerCount)
@@ -100,13 +120,35 @@ class EngineRuntimeServiceConnectionTest {
         val service = mockk<IEngineRuntimeService> {
             every { asBinder() } returns binder
         }
-        return ServiceHandle(service, recipient, alive)
+        val serverGenerationId = "server-generation-${System.identityHashCode(service)}"
+        return ServiceHandle(
+            service = service,
+            candidate = candidate(service, binder, serverGenerationId),
+            recipient = recipient,
+            alive = alive,
+            serverGenerationId = serverGenerationId
+        )
+    }
+
+    private fun candidate(
+        service: IEngineRuntimeService,
+        binder: IBinder,
+        serverGenerationId: String
+    ) = EngineRuntimeServiceCandidate(
+        service = service,
+        serverGenerationId = serverGenerationId,
+        serverProcessId = 1234,
+        serverProcessName = "com.multiapp.app:engine"
+    ).also {
+        assertSame(binder, it.service.asBinder())
     }
 
     private data class ServiceHandle(
         val service: IEngineRuntimeService,
+        val candidate: EngineRuntimeServiceCandidate,
         val recipient: io.mockk.CapturingSlot<IBinder.DeathRecipient>,
-        val alive: MutableBoolean
+        val alive: MutableBoolean,
+        val serverGenerationId: String
     )
 
     private data class MutableBoolean(var value: Boolean)

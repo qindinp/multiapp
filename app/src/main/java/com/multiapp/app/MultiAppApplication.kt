@@ -18,8 +18,22 @@ class MultiAppApplication : Application() {
             Timber.plant(Timber.DebugTree())
         }
 
+        val processName = MultiAppProcessRoles.currentProcessName()
+        val role = MultiAppProcessRoles.resolve(packageName, processName)
+        val startup = MultiAppProcessRoles.startupPolicy(role)
+
+        if (!startup.connectEngineClient) {
+            Timber.d("MultiApp process initialized without engine client: role=%s process=%s", role, processName)
+            return
+        }
+
         if (!EngineRuntimeInstallers.installSystemServerClient(this)) {
             Timber.e("Engine system-server Binder unavailable; live runtime authority is fail-closed")
+        }
+
+        if (!startup.installGuestRuntime) {
+            Timber.d("MultiApp host client initialized: process=%s", processName)
+            return
         }
 
         EngineGuestRecentsRecoveryCoordinator.install(this)
@@ -36,6 +50,6 @@ class MultiAppApplication : Application() {
         EngineRuntimeInstallers.installBroadcastRecorder(ContainerBroadcastEvidenceRecorder(this))
         EngineRuntimeInstallers.installAmsApiEvidenceRecorder(ContainerAmsApiEvidenceRecorder(this))
 
-        Timber.d("MultiApp initialized")
+        Timber.d("MultiApp guest runtime initialized: process=%s", processName)
     }
 }

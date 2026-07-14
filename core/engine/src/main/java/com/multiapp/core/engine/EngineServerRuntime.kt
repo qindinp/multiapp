@@ -13,6 +13,8 @@ import javax.inject.Singleton
 class EngineServerRuntime private constructor(
     graph: EngineServerRuntimeGraph
 ) {
+    val serverGenerationId: String = UUID.randomUUID().toString()
+
     @Inject
     constructor(
         @ApplicationContext context: Context,

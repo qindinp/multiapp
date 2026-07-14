@@ -7,6 +7,7 @@ import android.os.Handler
 import android.os.Looper
 import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.ProxyActivitySlotExhaustedException
 import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
@@ -105,8 +106,23 @@ class DefaultVirtualAmsComponentDispatcher(
         return when (val plan = planStartActivityIntent(intent)) {
             is ActivityStartPlan.Blocked -> plan.result
             is ActivityStartPlan.Resolved -> {
+                if (
+                    activityProxyIntentFactory == null &&
+                    proxyActivitySlotAssignmentStore == null &&
+                    ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull() == null
+                ) {
+                    return blockedProxyActivitySlot(intent)
+                }
                 proxyActivityRegistry.registerExisting(activityRecordManager.list())
-                remapStartActivityRequest(plan.request)
+                try {
+                    remapStartActivityRequest(plan.request)
+                } catch (error: Throwable) {
+                    if (error.isProxyActivitySlotUnavailable()) {
+                        blockedProxyActivitySlot(intent)
+                    } else {
+                        throw error
+                    }
+                }
             }
         }
     }
@@ -118,7 +134,8 @@ class DefaultVirtualAmsComponentDispatcher(
 
         proxyActivityRegistry.registerExisting(activityRecordManager.list())
         val assignmentStore = proxyActivitySlotAssignmentStore
-            ?: ProxyActivitySlotAssignmentStoreProvider.requireStore()
+            ?: ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull()
+            ?: return intents.map(::blockedProxyActivitySlot)
         val assignmentRollback = ProxyActivitySlotAssignmentRollback(assignmentStore)
         val activityStateSnapshot = activityRecordManager.snapshotState()
         val registryTokensBeforeBatch = proxyActivityRegistry.listRecords().mapTo(hashSetOf()) { it.token }
@@ -135,7 +152,11 @@ class DefaultVirtualAmsComponentDispatcher(
                 .forEach { proxyActivityRegistry.consume(it.token) }
             activityRecordManager.restoreState(activityStateSnapshot)
             assignmentRollback.restore()
-            throw error
+            if (error.isProxyActivitySlotUnavailable()) {
+                intents.map(::blockedProxyActivitySlot)
+            } else {
+                throw error
+            }
         }
     }
 
@@ -192,6 +213,18 @@ class DefaultVirtualAmsComponentDispatcher(
             dataIntent = request.sourceIntent.toVirtualIntentSnapshot()
         ).activity
     }
+
+    private fun blockedProxyActivitySlot(
+        sourceIntent: Intent
+    ): VirtualContextWrapper.StartActivityMappingResult.Blocked =
+        VirtualContextWrapper.StartActivityMappingResult.Blocked(
+            sourceIntent = sourceIntent,
+            reason = PROXY_ACTIVITY_SLOT_UNAVAILABLE_REASON
+        )
+
+    private fun Throwable.isProxyActivitySlotUnavailable(): Boolean =
+        this is ProxyActivitySlotExhaustedException ||
+            this is ProxyActivitySlotAssignmentStoreProviderNotInstalledException
 
     private sealed class ActivityStartPlan {
         data class Resolved(val request: VirtualActivityLaunchRequest) : ActivityStartPlan()
@@ -523,6 +556,8 @@ class DefaultVirtualAmsComponentDispatcher(
     }
 
     companion object {
+        internal const val PROXY_ACTIVITY_SLOT_UNAVAILABLE_REASON = "proxyActivitySlotUnavailable"
+
         fun defaultProxyActivityRegistry(
             hostPackageName: String,
             processSlot: String? = null

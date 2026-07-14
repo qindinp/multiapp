@@ -22,7 +22,14 @@
             android:name=".container.EngineBinderProvider"
             android:authorities="${applicationId}.multiapp.engine.server"
             android:exported="false"
-            android:initOrder="1000" />
+            android:initOrder="1000"
+            android:process=":engine" />
+        <provider
+            android:name="com.multiapp.core.installer.PackageGenerationRecoveryProvider"
+            android:authorities="${applicationId}.multiapp.package-generation-recovery"
+            android:exported="false"
+            android:initOrder="1100"
+            android:process=":engine" />
         <provider
             android:name=".container.EngineProcessBootstrapProviderV0"
             android:authorities="${applicationId}.multiapp.bootstrap.v0"

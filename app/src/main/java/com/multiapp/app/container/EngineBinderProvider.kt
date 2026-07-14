@@ -4,7 +4,11 @@ import android.content.ContentProvider
 import android.content.ContentValues
 import android.database.Cursor
 import android.net.Uri
+import android.os.Binder
 import android.os.Bundle
+import android.os.Process
+import com.multiapp.app.MultiAppProcessRole
+import com.multiapp.app.MultiAppProcessRoles
 import com.multiapp.core.engine.EngineRuntimeBinderEndpoint
 import com.multiapp.core.engine.EngineRuntimeIpcContract
 import com.multiapp.core.engine.EngineServerRuntime
@@ -18,6 +22,14 @@ class EngineBinderProvider : ContentProvider() {
 
     override fun onCreate(): Boolean {
         val hostContext = context?.applicationContext ?: context ?: return false
+        val processName = MultiAppProcessRoles.currentProcessName()
+        check(
+            MultiAppProcessRoles.resolve(hostContext.packageName, processName) ==
+                MultiAppProcessRole.ENGINE_SERVER
+        ) {
+            "EngineBinderProvider must run in ${EngineRuntimeIpcContract.engineProcessName(hostContext.packageName)}, " +
+                "actual=$processName"
+        }
         val owner = EntryPointAccessors.fromApplication(
             hostContext,
             EngineServerRuntimeEntryPoint::class.java
@@ -26,6 +38,7 @@ class EngineBinderProvider : ContentProvider() {
         endpoint = EngineRuntimeBinderEndpoint(
             registry = owner.runtimeRegistry,
             hostUid = hostContext.applicationInfo.uid,
+            serverGenerationId = owner.serverGenerationId,
             activityLaunchCapabilities = owner.activityLaunchCapabilities,
             activityService = owner.systemServer.activityService,
             providerService = owner.systemServer.providerService,
@@ -40,11 +53,25 @@ class EngineBinderProvider : ContentProvider() {
     }
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
-        if (method != EngineRuntimeIpcContract.METHOD_GET_BINDER || !::endpoint.isInitialized) {
+        val hostContext = context?.applicationContext ?: context ?: return Bundle.EMPTY
+        if (
+            method != EngineRuntimeIpcContract.METHOD_GET_BINDER ||
+            !::endpoint.isInitialized ||
+            Binder.getCallingUid() != hostContext.applicationInfo.uid
+        ) {
             return Bundle.EMPTY
         }
         return Bundle().apply {
             putBinder(EngineRuntimeIpcContract.KEY_BINDER, endpoint)
+            putString(
+                EngineRuntimeIpcContract.KEY_SERVER_GENERATION_ID,
+                endpoint.getServerGenerationId()
+            )
+            putInt(EngineRuntimeIpcContract.KEY_SERVER_PROCESS_ID, Process.myPid())
+            putString(
+                EngineRuntimeIpcContract.KEY_SERVER_PROCESS_NAME,
+                MultiAppProcessRoles.currentProcessName()
+            )
         }
     }
 

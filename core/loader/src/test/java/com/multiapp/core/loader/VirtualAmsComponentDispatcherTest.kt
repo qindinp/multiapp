@@ -19,7 +19,6 @@ import io.mockk.verify
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
@@ -33,6 +32,7 @@ class VirtualAmsComponentDispatcherTest {
     fun tearDown() {
         VirtualActivityIntentStore.clearAll()
         VirtualActivityIntentStore.resetIntentCopierForTest()
+        ProxyActivitySlotAssignmentStoreProvider.clearForTests()
     }
 
     @Test
@@ -74,7 +74,7 @@ class VirtualAmsComponentDispatcherTest {
     }
 
     @Test
-    fun `resolveStartActivityIntents rolls back partial slot allocation through find and CAS`() {
+    fun `resolveStartActivityIntents blocks and rolls back partial slot allocation when reserve fails closed`() {
         val recordManager = VirtualActivityRecordManager()
         val store = FailSecondReserveStore()
         val proxyClassName = "com.multiapp.app.container.ProxyActivity0"
@@ -89,11 +89,18 @@ class VirtualAmsComponentDispatcherTest {
             explicitIntent("com.test.minimal", "com.test.minimal.MainActivity")
         )
 
-        assertFailsWith<IllegalStateException> {
-            dispatcher.resolveStartActivityIntents(intents)
-        }
+        val results = dispatcher.resolveStartActivityIntents(intents)
 
         val key = ProxyActivitySlotKey("inst-001", null, "com.test.minimal:inst-001")
+        assertEquals(2, results.size)
+        results.forEachIndexed { index, result ->
+            val blocked = assertIs<VirtualContextWrapper.StartActivityMappingResult.Blocked>(result)
+            assertSame(intents[index], blocked.sourceIntent)
+            assertEquals(
+                DefaultVirtualAmsComponentDispatcher.PROXY_ACTIVITY_SLOT_UNAVAILABLE_REASON,
+                blocked.reason
+            )
+        }
         assertTrue(recordManager.list().isEmpty())
         assertTrue(registry.listRecords().isEmpty())
         assertNull(store.find(key))
@@ -104,6 +111,56 @@ class VirtualAmsComponentDispatcherTest {
             ),
             store.compareAndSetCalls
         )
+    }
+
+    @Test
+    fun `resolveStartActivityIntent blocks before local allocation when loader slot authority is not installed`() {
+        ProxyActivitySlotAssignmentStoreProvider.clearForTests()
+        val recordManager = VirtualActivityRecordManager()
+        val dispatcher = DefaultVirtualAmsComponentDispatcher(
+            hostPackageName = "com.multiapp.app",
+            packageSnapshot = snapshot(),
+            activityRecordManager = recordManager
+        )
+        val intent = explicitIntent("com.test.minimal", "com.test.minimal.MainActivity")
+
+        val result = dispatcher.resolveStartActivityIntent(intent)
+
+        val blocked = assertIs<VirtualContextWrapper.StartActivityMappingResult.Blocked>(result)
+        assertSame(intent, blocked.sourceIntent)
+        assertEquals(
+            DefaultVirtualAmsComponentDispatcher.PROXY_ACTIVITY_SLOT_UNAVAILABLE_REASON,
+            blocked.reason
+        )
+        assertTrue(recordManager.list().isEmpty())
+    }
+
+    @Test
+    fun `resolveStartActivityIntents blocks whole batch when loader proxy slot authority is not installed`() {
+        ProxyActivitySlotAssignmentStoreProvider.clearForTests()
+        val recordManager = VirtualActivityRecordManager()
+        val dispatcher = DefaultVirtualAmsComponentDispatcher(
+            hostPackageName = "com.multiapp.app",
+            packageSnapshot = snapshot(),
+            activityRecordManager = recordManager
+        )
+        val intents = listOf(
+            explicitIntent("com.test.minimal", "com.test.minimal.MainActivity"),
+            explicitIntent("com.test.minimal", "com.test.minimal.MainActivity")
+        )
+
+        val results = dispatcher.resolveStartActivityIntents(intents)
+
+        assertEquals(2, results.size)
+        results.forEachIndexed { index, result ->
+            val blocked = assertIs<VirtualContextWrapper.StartActivityMappingResult.Blocked>(result)
+            assertSame(intents[index], blocked.sourceIntent)
+            assertEquals(
+                DefaultVirtualAmsComponentDispatcher.PROXY_ACTIVITY_SLOT_UNAVAILABLE_REASON,
+                blocked.reason
+            )
+        }
+        assertTrue(recordManager.list().isEmpty())
     }
 
     @Test
@@ -502,7 +559,7 @@ class VirtualAmsComponentDispatcherTest {
             candidateProxyActivityClassNames: List<String>
         ): String? {
             reserveCalls += 1
-            if (reserveCalls == 2) error("forced second reserve failure")
+            if (reserveCalls == 2) return null
             return super.reserve(key, candidateProxyActivityClassNames)
         }
 

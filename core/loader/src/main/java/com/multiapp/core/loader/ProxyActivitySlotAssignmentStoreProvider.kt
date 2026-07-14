@@ -19,6 +19,8 @@ object ProxyActivitySlotAssignmentStoreProvider {
     fun requireStore(): ProxyActivitySlotAssignmentStore =
         store ?: throw ProxyActivitySlotAssignmentStoreProviderNotInstalledException()
 
+    internal fun currentStoreOrNull(): ProxyActivitySlotAssignmentStore? = store
+
     internal fun clearForTests() {
         store = null
     }
@@ -31,45 +33,50 @@ class ProxyActivitySlotAssignmentStoreProviderNotInstalledException : IllegalSta
 
 internal object ProviderBackedProxyActivitySlotAssignmentStore : ProxyActivitySlotAssignmentStore {
     override fun find(key: ProxyActivitySlotKey): String? =
-        ProxyActivitySlotAssignmentStoreProvider.requireStore().find(key)
+        ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull()?.find(key)
 
     override fun save(key: ProxyActivitySlotKey, proxyActivityClassName: String) {
-        ProxyActivitySlotAssignmentStoreProvider.requireStore().save(key, proxyActivityClassName)
+        ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull()?.save(key, proxyActivityClassName)
     }
 
     override fun compareAndSet(
         key: ProxyActivitySlotKey,
         expectedProxyActivityClassName: String?,
         newProxyActivityClassName: String?
-    ): Boolean = ProxyActivitySlotAssignmentStoreProvider.requireStore().compareAndSet(
-        key,
-        expectedProxyActivityClassName,
-        newProxyActivityClassName
-    )
+    ): Boolean = ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull()
+        ?.compareAndSet(
+            key,
+            expectedProxyActivityClassName,
+            newProxyActivityClassName
+        )
+        ?: false
 
     override fun reserve(
         key: ProxyActivitySlotKey,
         candidateProxyActivityClassNames: List<String>
-    ): String? = ProxyActivitySlotAssignmentStoreProvider.requireStore().reserve(
-        key,
-        candidateProxyActivityClassNames
-    )
+    ): String? = ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull()
+        ?.reserve(
+            key,
+            candidateProxyActivityClassNames
+        )
 
     override fun ownerOf(proxyActivityClassName: String): ProxyActivitySlotKey? =
-        ProxyActivitySlotAssignmentStoreProvider.requireStore().ownerOf(proxyActivityClassName)
+        ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull()?.ownerOf(proxyActivityClassName)
 
     override fun removeInstance(instanceId: String): Int =
-        ProxyActivitySlotAssignmentStoreProvider.requireStore().removeInstance(instanceId)
+        ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull()?.removeInstance(instanceId) ?: 0
 
     override fun pruneStaleAssignments(
         validInstanceIds: Set<String>,
         liveProxyActivityClassNames: Set<String>,
         knownProxyActivityClassNames: Set<String>
-    ): Int = ProxyActivitySlotAssignmentStoreProvider.requireStore().pruneStaleAssignments(
-        validInstanceIds,
-        liveProxyActivityClassNames,
-        knownProxyActivityClassNames
-    )
+    ): Int = ProxyActivitySlotAssignmentStoreProvider.currentStoreOrNull()
+        ?.pruneStaleAssignments(
+            validInstanceIds,
+            liveProxyActivityClassNames,
+            knownProxyActivityClassNames
+        )
+        ?: 0
 }
 
 internal class ProxyActivitySlotAssignmentRollback(

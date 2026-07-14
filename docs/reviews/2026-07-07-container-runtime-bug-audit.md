@@ -2820,3 +2820,64 @@ package-generation startup recovery is journaled and fail-closed.
   storage/native behavior and API 28-36/HyperOS device artifacts remain open.
 - No device evidence from this batch proves GKD, AstroBox, QQ, WeChat, or QQ
   Reader compatibility. Review decision remains **BLOCK**.
+
+## Review Update - 2026-07-14 Dedicated Engine Process
+
+The prior finding that `EngineBinderProvider` remained in the host main process
+is closed in the current local tree. The migration includes process-role
+startup and a generation-bound Binder handshake; it is not a manifest-only
+process attribute change.
+
+### Findings closed in the current tree
+
+- The merged manifest places package recovery and Binder publication in the
+  dedicated `:engine` process, with recovery ordered first.
+- The engine process cannot recursively install `EngineRuntimeIpcClients`,
+  Instrumentation, AMS adapters, ContentResolver hooks, recents recovery, or
+  guest evidence recorders. Host and guest startup policies are separate and
+  unknown processes install neither authority nor hooks.
+- Binder acquisition accepts only the expected `host:engine` process, a
+  different positive PID, a live endpoint, and matching Provider/endpoint
+  server generation IDs. Host-UID checks remain enforced by both Provider and
+  endpoint.
+- Unstable Provider clients are closed and retried within a bounded 100 ms
+  total backoff. Binder death clears only the matching local connection
+  generation; synchronous death is never published as active.
+- A restarted server marks persisted live process generations `DEAD`, clears
+  their PID, and cannot authorize an old in-memory Activity capability.
+- Loader legacy slot fallback is now structured fail-closed behavior. Missing
+  authority no longer relies on an exception to prevent local reserve/CAS.
+
+### Open-source evidence used
+
+- VirtualApp `BinderProvider`, `ServiceManagerNative`, and
+  `ContentProviderCompat` at `7d739c85` establish the dedicated Provider,
+  binder-alive cache, and unstable-client retry precedent.
+- BlackBox `SystemCallProvider`, `BlackBoxSystem`, `BlackBoxCore`, and
+  `ProviderCall` at `ffe950f7` establish server-first `systemReady`, explicit
+  process-role routing, and bounded Provider reacquisition.
+- DroidPlugin `PluginManagerService`, `PluginServiceProvider`, and
+  `PluginManager` at `c6ebf652` confirm central package-manager publication,
+  but do not provide a per-instance generation or task/dataRoot authority.
+
+### Verification before the final gate
+
+- Focused loader/engine/app reports: 1,173 tests, 0 failures, 0 errors.
+- Merged-manifest inspection confirms `:engine` placement and recovery-before-
+  Binder ordering.
+- The final multi-module gate and APK assembly passed once in 4m53s: 511
+  Gradle tasks, 1,945 tests, 0 failures, 0 errors, and 12 skipped.
+- Debug APK: 99,817,125 bytes; SHA-256
+  `313DD2618C044499EB3E49DB366A3DAD274AFAEDB349BB4606C6C49954E80E18`.
+- The known AGP 8.7.3 / `compileSdk=36` warning remains non-fatal and does not
+  change the device-evidence requirement.
+
+### Still BLOCK
+
+- Dedicated-process behavior is not device-proven: distinct PID, independent
+  kill, Provider restart, reconnect, stale generation/capability rejection,
+  and recents continuity still require artifacts.
+- Android-grade virtual PMS/AMS/task/Provider/Service/Broadcast/permission/
+  storage/native behavior remains open.
+- No new artifact proves GKD, AstroBox, QQ, WeChat, or QQ Reader compatibility.
+  Review decision remains **BLOCK**.

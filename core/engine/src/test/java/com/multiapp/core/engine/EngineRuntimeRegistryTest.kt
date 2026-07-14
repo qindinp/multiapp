@@ -4,6 +4,7 @@ import com.multiapp.core.model.engine.EngineOperationEvidence
 import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
+import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
 import kotlin.test.Test
@@ -276,6 +277,44 @@ class EngineRuntimeRegistryTest {
         assertEquals("durable", restoredReport.entries["runtimeStateSource"])
         assertEquals(runtime.processSlot, restoredReport.entries["processSlot"])
         assertEquals(EngineResultStatus.PASS, restoredReport.status)
+    }
+
+    @Test
+    fun `new server generation invalidates live pid and cannot reuse old launch capability`(
+        @TempDir tempDir: File
+    ) {
+        val stateFile = File(tempDir, "engine_runtime_state.properties")
+        val firstServerRegistry = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(stateFile))
+        val running = runtime(runtimeEpoch = 9L).copy(
+            engineSessionId = "runtime-session-9",
+            processId = 4209,
+            processName = "com.multiapp.app:v0",
+            state = VirtualRuntimeState.RUNNING
+        )
+        firstServerRegistry.register(running)
+        val firstServerCapabilities = EngineActivityLaunchCapabilityRegistry(
+            tokenFactory = { "old-server-capability" }
+        )
+        val oldIdentity = firstServerCapabilities.issue(
+            runtime = running,
+            processId = 4209,
+            proxyActivityClassName = "com.multiapp.app.container.ProxyActivity0",
+            guestActivityClassName = "com.test.app.MainActivity"
+        )
+
+        val restartedServerRegistry = EngineRuntimeRegistry(FileBackedEngineRuntimeStateStore(stateFile))
+        val invalidated = restartedServerRegistry.invalidateEphemeralProcessStates(
+            "engine_server_process_started"
+        )
+        val restored = restartedServerRegistry.get(running.instanceId)
+        val restartedServerCapabilities = EngineActivityLaunchCapabilityRegistry()
+
+        assertEquals(1, invalidated)
+        assertEquals(VirtualRuntimeState.DEAD, restored?.state)
+        assertNull(restored?.processId)
+        assertEquals(running.runtimeEpoch, restored?.runtimeEpoch)
+        assertEquals(running.engineSessionId, restored?.engineSessionId)
+        assertFalse(restartedServerCapabilities.authorize(oldIdentity, 4209).accepted)
     }
 
     @Test

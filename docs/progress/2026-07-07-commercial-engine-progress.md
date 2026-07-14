@@ -4392,3 +4392,78 @@ Remaining gate:
   28-36/HyperOS device evidence remain incomplete.
 - This batch is not device proof for GKD, AstroBox, QQ, WeChat, or QQ Reader.
   Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-14 Dedicated Engine Process and Generation Handshake
+
+This batch moves the Binder owner out of the host UI process after the prior
+authority, capability, and package-recovery prerequisites were closed. The
+runtime now has an explicit server/client process boundary instead of relying
+only on process-local Hilt singleton ownership.
+
+Implemented:
+
+- `EngineBinderProvider` now runs in `${applicationId}:engine`. The package
+  generation recovery Provider is merged into the same process with
+  `initOrder=1100`, ahead of Binder publication at `initOrder=1000`.
+- `MultiAppApplication` resolves exact `HOST`, `ENGINE_SERVER`, `GUEST`, and
+  `UNKNOWN` roles. The engine process installs neither its own IPC client nor
+  guest Instrumentation/system-service hooks; the host installs only the
+  engine client; only declared `:v0..:v7` processes install guest runtime
+  adapters. Unknown process names fail closed.
+- Each `EngineServerRuntime` owns a random server generation ID. Binder lookup
+  returns and cross-checks generation ID, server PID, exact `:engine` process
+  name, and a live Binder. A client rejects a same-PID server claim.
+- Binder acquisition uses an unstable `ContentProviderClient`, closes it after
+  each call, and performs at most three 50 ms retries. The cached service is
+  still generation-bound by `DeathRecipient`; an old death callback cannot
+  clear a successor connection.
+- Engine restart continues to invalidate persisted `PREWARMED/RUNNING`
+  process state to `DEAD`, clears the PID, and creates an empty in-memory
+  launch-capability registry. An old runtime generation or capability cannot
+  authorize the restarted server.
+- The loader's legacy Provider-backed proxy-slot adapter now returns null/
+  false/zero when no authority is installed. Single and batch Activity paths
+  return structured `proxyActivitySlotUnavailable` results and roll back
+  partial state instead of depending on a provider-not-installed exception.
+
+Reference comparison:
+
+- VirtualApp `7d739c85` uses a dedicated `BinderProvider` to initialize virtual
+  services, returns an `IServiceFetcher`, checks `isBinderAlive()`, and retries
+  unstable Provider acquisition.
+- BlackBox `ffe950f7` declares `SystemCallProvider` in its server process,
+  starts `BlackBoxSystem` before returning service Binders, classifies main/
+  server/guest roles, and reacquires dead cached services through a bounded
+  Provider call.
+- DroidPlugin `c6ebf652` exposes its package manager through both
+  `PluginManagerService` and `PluginServiceProvider`; it is useful for the
+  client/server handoff but lacks MultiApp's per-instance runtime generation.
+- MultiApp follows the ownership semantics, not their code, and adds exact
+  process/PID/generation validation instead of copying a daemon/foreground
+  service keep-alive model.
+
+Verification before the final gate:
+
+- Affected loader, engine, and app tests passed once after the first migration
+  pass: 1,173 tests, 0 failures, 0 errors, 0 skipped.
+- The merged debug manifest contains exactly one engine Binder Provider and
+  one package recovery Provider in `:engine`, ordered 1000 and 1100.
+- The required full local gate passed once in 4m53s: 511 Gradle tasks, with 37
+  executed, 10 from cache, and 464 up-to-date.
+- The eight requested module reports contain 1,945 tests, 0 failures, 0
+  errors, and 12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,817,125 bytes.
+- APK SHA-256:
+  `313DD2618C044499EB3E49DB366A3DAD274AFAEDB349BB4606C6C49954E80E18`.
+- AGP 8.7.3 still emits its known `compileSdk=36` support warning; it did not
+  fail the gate and is not device/runtime evidence.
+
+Remaining gate:
+
+- No device artifact yet proves that Android starts a distinct `:engine` PID,
+  kills/restarts it independently, reconnects host and guest clients, and
+  rejects old runtime/capability state across API 28-36 and HyperOS.
+- Full PMS/AMS/task/Provider/Service/Broadcast/runtime-permission/storage/
+  native semantics remain incomplete.
+- This migration is not compatibility proof for GKD, AstroBox, QQ, WeChat, or
+  QQ Reader. Commercial status remains **BLOCK**.

@@ -101,6 +101,7 @@ class EngineDependencyInjectionBoundaryTest {
 
         val ownerBackedEndpointArguments = listOf(
             "registry = owner.runtimeRegistry",
+            "serverGenerationId = owner.serverGenerationId",
             "activityLaunchCapabilities = owner.activityLaunchCapabilities",
             "activityService = owner.systemServer.activityService",
             "providerService = owner.systemServer.providerService",
