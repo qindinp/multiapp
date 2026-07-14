@@ -9,9 +9,13 @@ class VirtualActivityStack {
     fun launch(
         record: VirtualActivityRecord,
         intentFlags: Int = record.intentFlags,
-        dataIntent: VirtualIntentSnapshot? = null
+        dataIntent: VirtualIntentSnapshot? = null,
+        sourceTaskId: Int? = null
     ): LaunchResult {
         val normalizedLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(record.launchMode)
+        if (!ProxyActivityRegistry.isSupportedLaunchMode(normalizedLaunchMode)) {
+            throw UnsupportedVirtualActivityLaunchModeException(requireNotNull(normalizedLaunchMode))
+        }
         val requested = record.copy(
             launchMode = normalizedLaunchMode,
             intentFlags = intentFlags,
@@ -41,9 +45,11 @@ class VirtualActivityStack {
             }
         }
 
-        val targetTask = selectTaskFor(requested, intentFlags)
+        val targetTask = selectTaskFor(requested, intentFlags, sourceTaskId)
         val top = targetTask.activities.lastOrNull()
-        if (normalizedLaunchMode == LAUNCH_MODE_SINGLE_TOP && top != null && top.sameComponent(requested)) {
+        val singleTopRequested = normalizedLaunchMode == LAUNCH_MODE_SINGLE_TOP ||
+            intentFlags.hasFlag(FLAG_ACTIVITY_SINGLE_TOP)
+        if (singleTopRequested && top != null && top.sameComponent(requested)) {
             val pendingNewIntent = pendingNewIntentFor(requested, intentFlags, dataIntent)
             val reused = top.copy(
                 intentFlags = intentFlags,
@@ -62,27 +68,31 @@ class VirtualActivityStack {
             )
         }
 
+        var clearedForNewInstance = emptyList<VirtualActivityRecord>()
         if (intentFlags.hasFlag(FLAG_ACTIVITY_CLEAR_TOP)) {
-            val index = targetTask.activities.indexOfFirst { it.sameComponent(requested) }
+            val index = targetTask.activities.indexOfLast { it.sameComponent(requested) }
             if (index >= 0) {
-                val cleared = clearAbove(targetTask, index)
-                val pendingNewIntent = pendingNewIntentFor(requested, intentFlags, dataIntent)
-                val reused = targetTask.activities[index].copy(
-                    intentFlags = intentFlags,
-                    state = VirtualActivityState.RESUMED,
-                    resultToToken = requested.resultToToken,
-                    resultRequestCode = requested.resultRequestCode,
-                    pendingNewIntents = targetTask.activities[index].pendingNewIntents + pendingNewIntent
-                )
-                targetTask.activities[index] = reused
-                moveToTop(targetTask.taskId)
-                return LaunchResult(
-                    activity = reused,
-                    task = targetTask.toRecord(),
-                    reused = true,
-                    clearedActivities = cleared,
-                    pendingNewIntent = pendingNewIntent
-                )
+                if (singleTopRequested || normalizedLaunchMode == LAUNCH_MODE_SINGLE_TASK) {
+                    val cleared = clearAbove(targetTask, index)
+                    val pendingNewIntent = pendingNewIntentFor(requested, intentFlags, dataIntent)
+                    val reused = targetTask.activities[index].copy(
+                        intentFlags = intentFlags,
+                        state = VirtualActivityState.RESUMED,
+                        resultToToken = requested.resultToToken,
+                        resultRequestCode = requested.resultRequestCode,
+                        pendingNewIntents = targetTask.activities[index].pendingNewIntents + pendingNewIntent
+                    )
+                    targetTask.activities[index] = reused
+                    moveToTop(targetTask.taskId)
+                    return LaunchResult(
+                        activity = reused,
+                        task = targetTask.toRecord(),
+                        reused = true,
+                        clearedActivities = cleared,
+                        pendingNewIntent = pendingNewIntent
+                    )
+                }
+                clearedForNewInstance = clearFrom(targetTask, index)
             }
         }
 
@@ -93,7 +103,12 @@ class VirtualActivityStack {
         )
         targetTask.activities += launched
         moveToTop(targetTask.taskId)
-        return LaunchResult(launched, targetTask.toRecord(), reused = false)
+        return LaunchResult(
+            activity = launched,
+            task = targetTask.toRecord(),
+            reused = false,
+            clearedActivities = clearedForNewInstance
+        )
     }
 
     @Synchronized
@@ -296,10 +311,21 @@ class VirtualActivityStack {
         nextEventId = 1L
     }
 
-    private fun selectTaskFor(record: VirtualActivityRecord, intentFlags: Int): MutableTaskRecord {
+    private fun selectTaskFor(
+        record: VirtualActivityRecord,
+        intentFlags: Int,
+        sourceTaskId: Int?
+    ): MutableTaskRecord {
         val affinity = record.taskAffinity ?: record.instanceScopedAffinity()
-        if (intentFlags.hasFlag(FLAG_ACTIVITY_NEW_TASK)) {
+        val usesNewTaskSemantics = intentFlags.hasFlag(FLAG_ACTIVITY_NEW_TASK) ||
+            record.launchMode == LAUNCH_MODE_SINGLE_TASK
+        if (usesNewTaskSemantics) {
             return tasks.values.lastOrNull { it.affinity == affinity } ?: createTask(affinity)
+        }
+        if (sourceTaskId != null) {
+            return requireNotNull(tasks[sourceTaskId]) {
+                "source task does not exist: taskId=$sourceTaskId"
+            }
         }
         return tasks.values.lastOrNull { it.affinity == affinity } ?: createTask(affinity)
     }
@@ -327,6 +353,13 @@ class VirtualActivityStack {
         val cleared = task.activities.subList(index + 1, task.activities.size)
             .map { it.copy(state = VirtualActivityState.FINISHED) }
         task.activities.subList(index + 1, task.activities.size).clear()
+        return cleared
+    }
+
+    private fun clearFrom(task: MutableTaskRecord, index: Int): List<VirtualActivityRecord> {
+        val cleared = task.activities.subList(index, task.activities.size)
+            .map { it.copy(state = VirtualActivityState.FINISHED) }
+        task.activities.subList(index, task.activities.size).clear()
         return cleared
     }
 
@@ -447,6 +480,7 @@ class VirtualActivityStack {
     }
 
     companion object {
+        const val FLAG_ACTIVITY_SINGLE_TOP: Int = 0x20000000
         const val FLAG_ACTIVITY_NEW_TASK: Int = 0x10000000.toInt()
         const val FLAG_ACTIVITY_CLEAR_TOP: Int = 0x04000000
 

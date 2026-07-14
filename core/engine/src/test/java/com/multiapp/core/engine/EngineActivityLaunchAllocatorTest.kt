@@ -80,6 +80,80 @@ class EngineActivityLaunchAllocatorTest {
     }
 
     @Test
+    fun `unsupported launch mode is rejected before slot reservation`() {
+        val fixture = fixture(runtime())
+
+        val allocation = fixture.allocator.allocate(
+            request(launchMode = "singleInstance"),
+            PROCESS_ID
+        )
+
+        assertFalse(allocation.accepted)
+        assertEquals(
+            "activity_allocation_launch_mode_unsupported:singleInstance",
+            allocation.reason
+        )
+        assertEquals(0, fixture.capabilities.size())
+    }
+
+    @Test
+    fun `guest cannot downgrade authoritative launch mode`() {
+        val fixture = fixture(
+            runtime(
+                activities = listOf(
+                    ResolvedComponent(
+                        name = GUEST_ACTIVITY,
+                        exported = true,
+                        launchMode = "singleTop"
+                    )
+                )
+            )
+        )
+
+        val allocation = fixture.allocator.allocate(request(launchMode = null), PROCESS_ID)
+
+        assertFalse(allocation.accepted)
+        assertEquals(
+            "activity_allocation_launch_mode_mismatch:requested=,authoritative=singleTop",
+            allocation.reason
+        )
+        assertEquals(0, fixture.capabilities.size())
+    }
+
+    @Test
+    fun `alias cannot hide unsupported target launch mode`() {
+        val aliasActivity = "$ORIGIN_PACKAGE.LauncherAlias"
+        val fixture = fixture(
+            runtime(
+                activities = listOf(
+                    ResolvedComponent(
+                        name = aliasActivity,
+                        exported = true,
+                        targetActivityName = GUEST_ACTIVITY
+                    ),
+                    ResolvedComponent(
+                        name = GUEST_ACTIVITY,
+                        exported = false,
+                        launchMode = "singleInstance"
+                    )
+                )
+            )
+        )
+
+        val allocation = fixture.allocator.allocate(
+            request(guestActivityClassName = aliasActivity),
+            PROCESS_ID
+        )
+
+        assertFalse(allocation.accepted)
+        assertEquals(
+            "activity_allocation_launch_mode_unsupported:singleInstance",
+            allocation.reason
+        )
+        assertEquals(0, fixture.capabilities.size())
+    }
+
+    @Test
     fun `stale generation release cannot clear successor allocation`() {
         val initialRuntime = runtime()
         val registry = EngineRuntimeRegistry().apply { register(initialRuntime) }
@@ -172,15 +246,24 @@ class EngineActivityLaunchAllocatorTest {
         )
     }
 
-    private fun request(processSlot: String = PROCESS_SLOT) = VirtualActivityLaunchAllocationRequest(
+    private fun request(
+        processSlot: String = PROCESS_SLOT,
+        launchMode: String? = null,
+        guestActivityClassName: String = GUEST_ACTIVITY
+    ) = VirtualActivityLaunchAllocationRequest(
         instanceId = INSTANCE_ID,
         originPackageName = ORIGIN_PACKAGE,
-        guestActivityClassName = GUEST_ACTIVITY,
+        guestActivityClassName = guestActivityClassName,
         processSlot = processSlot,
+        launchMode = launchMode,
         taskAffinity = TASK_AFFINITY
     )
 
-    private fun runtime() = VirtualInstanceRuntime(
+    private fun runtime(
+        activities: List<ResolvedComponent> = listOf(
+            ResolvedComponent(name = GUEST_ACTIVITY, exported = true)
+        )
+    ) = VirtualInstanceRuntime(
         instanceId = INSTANCE_ID,
         hostPackageName = HOST_PACKAGE,
         originPackageName = ORIGIN_PACKAGE,
@@ -197,7 +280,7 @@ class EngineActivityLaunchAllocatorTest {
             minSdk = 28,
             sourceDir = "build/tmp/test.apk",
             dataDir = "build/tmp/$INSTANCE_ID",
-            activities = listOf(ResolvedComponent(name = GUEST_ACTIVITY, exported = true))
+            activities = activities
         ),
         profile = EngineProfile.BASELINE,
         processSlot = PROCESS_SLOT,

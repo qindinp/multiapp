@@ -124,6 +124,32 @@ data class ResolvedComponent(
     val targetActivityName: String? = null
 )
 
+/** Resolves Activity-alias runtime attributes from its authoritative target Activity. */
+fun VirtualPackageSnapshot.resolveActivityRuntimeComponent(
+    component: ResolvedComponent
+): ResolvedComponent? {
+    val targetName = component.targetActivityName ?: return component
+    val target = activities.firstOrNull { candidate ->
+        candidate.name == targetName && candidate.targetActivityName == null
+    } ?: return null
+    return component.copy(
+        launchMode = target.launchMode,
+        processName = target.processName,
+        taskAffinity = target.taskAffinity,
+        themeId = target.themeId,
+        screenOrientation = target.screenOrientation,
+        configChanges = target.configChanges
+    )
+}
+
+/** Finds a declared Activity or alias target and returns target-owned runtime attributes. */
+fun VirtualPackageSnapshot.findActivityRuntimeComponent(className: String): ResolvedComponent? {
+    val declared = activities.firstOrNull { it.name == className }
+        ?: activities.firstOrNull { it.targetActivityName == className }
+        ?: return null
+    return resolveActivityRuntimeComponent(declared)
+}
+
 /**
  * Resolves package metadata from an APK path.
  *

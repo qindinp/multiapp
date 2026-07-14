@@ -235,7 +235,7 @@ class VirtualActivityManagerTest {
     }
 
     @Test
-    fun `clearTop launch reuses existing activity and unregisters cleared records`() {
+    fun `standard clearTop launch recreates target and unregisters cleared records`() {
         val context = mockk<Context>(relaxed = true)
         every { context.packageName } returns "com.multiapp.app"
         val registry = ProxyActivityRegistry(listOf("com.multiapp.app.container.ProxyActivity0"))
@@ -253,15 +253,22 @@ class VirtualActivityManagerTest {
         )
         val evidence = recordManager.lastLaunchResult()
 
-        assertEquals(detail.token, relaunched.token)
-        assertTrue(evidence?.reused == true)
-        assertEquals(listOf(settings.token), evidence?.clearedActivities?.map { it.token })
+        assertNotEquals(detail.token, relaunched.token)
+        assertFalse(evidence?.reused == true)
+        assertEquals(
+            listOf(detail.token, settings.token),
+            evidence?.clearedActivities?.map { it.token }
+        )
         assertEquals(VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP, relaunched.intentFlags)
         assertEquals(root.token, recordManager.resolve(root.token)?.token)
-        assertEquals(detail.token, recordManager.resolve(detail.token)?.token)
+        assertEquals(VirtualActivityState.FINISHED, recordManager.resolve(detail.token)?.state)
         assertEquals(VirtualActivityState.FINISHED, recordManager.resolve(settings.token)?.state)
         assertTrue(recordManager.resolveByProxy(settings.proxyActivityClassName)?.token != settings.token)
-        assertEquals(listOf(root.token, detail.token), recordManager.listTasks().single().activities.map { it.token })
+        assertEquals(
+            listOf(root.token, relaunched.token),
+            recordManager.listTasks().single().activities.map { it.token }
+        )
+        assertNull(evidence?.pendingNewIntent)
     }
 
     @Test

@@ -8,6 +8,8 @@ import android.os.IBinder
 class VirtualServiceRecordManager {
     private val records = linkedMapOf<String, VirtualServiceRecord>()
 
+    inline fun <T> withLifecycleLock(block: () -> T): T = synchronized(this, block)
+
     @Synchronized
     fun get(instanceId: String, guestServiceClassName: String): VirtualServiceRecord? =
         records[key(instanceId, guestServiceClassName)]
@@ -94,10 +96,10 @@ class VirtualServiceRecordManager {
         val key = key(instanceId, guestServiceClassName)
         val existing = records[key] ?: return null
         val existingBinding = existing.bindings[bindKey]
-        val nextActiveConnections = ((existingBinding?.activeConnectionCount ?: 1) - 1).coerceAtLeast(0)
-        val updatedBindings = if (existingBinding == null) {
-            existing.bindings
-        } else if (nextActiveConnections == 0 && !lastUnbindReturned) {
+            ?.takeIf { it.activeConnectionCount > 0 }
+            ?: return existing
+        val nextActiveConnections = existingBinding.activeConnectionCount - 1
+        val updatedBindings = if (nextActiveConnections == 0 && !lastUnbindReturned) {
             existing.bindings - bindKey
         } else {
             existing.bindings + (
@@ -165,12 +167,22 @@ class VirtualServiceRecordManager {
     fun list(): List<VirtualServiceRecord> = records.values.toList()
 
     @Synchronized
+    fun hasActiveRecordsForProxyStub(processSlot: String?): Boolean {
+        val proxyStubKey = processSlot.toProxyStubKey()
+        return records.values.any { record ->
+            record.processSlot.toProxyStubKey() == proxyStubKey && record.hasActiveLifecycle
+        }
+    }
+
+    @Synchronized
     fun clear() {
         records.clear()
     }
 
     private fun key(instanceId: String, guestServiceClassName: String): String =
         "$instanceId:$guestServiceClassName"
+
+    private fun String?.toProxyStubKey(): String = this?.trim().orEmpty()
 
     companion object {
         val global: VirtualServiceRecordManager = VirtualServiceRecordManager()
@@ -183,6 +195,7 @@ data class VirtualServiceRecord(
     val guestServiceClassName: String,
     val service: Service,
     val createdAtMs: Long,
+    val processSlot: String? = null,
     val token: IBinder = Binder(),
     val started: Boolean = false,
     val lastStartId: Int? = null,
@@ -198,6 +211,10 @@ data class VirtualServiceRecord(
 ) {
     val activeStartCount: Int
         get() = if (started) 1 else 0
+
+    val hasActiveLifecycle: Boolean
+        get() = started || foreground || activeBindCount > 0 ||
+            bindings.values.any { it.activeConnectionCount > 0 }
 }
 
 data class VirtualServiceBindingRecord(

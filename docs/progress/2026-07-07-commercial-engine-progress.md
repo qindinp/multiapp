@@ -4524,3 +4524,61 @@ Remaining gate:
   storage/native semantics and API 28-36/HyperOS device evidence remain open.
 - No device artifact in this batch proves GKD, AstroBox, QQ, WeChat, or QQ
   Reader. Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-14 Component Runtime Determinism
+
+This batch closes three local correctness gaps found after the authoritative
+PMS merge. It aligns Provider creation, shared-stub Service lifetime, and
+Activity task/launch-mode decisions with one package snapshot and one runtime
+record instead of allowing caller-provided metadata to become authoritative.
+
+Implemented:
+
+- Provider `processName` now survives XML and `PackageInfo` parsing into
+  `ResolvedComponent` and `VirtualPackageSnapshot`. Application preinstall
+  attaches only same-process Providers; custom-process Providers report
+  `CUSTOM_PROCESS_NOT_BOUND` and make the bootstrap verdict `PARTIAL`.
+- Multi-authority Providers are created and attached once per component. A
+  `CompletableFuture` single-flight cache prevents concurrent aliases from
+  constructing duplicate instances, while evidence keeps all authorities and
+  counts Provider components rather than alias lookups.
+- Provider cache generations now include base and split code/resource paths,
+  split names, split hashes, version code, and isolated-split state. A package
+  refresh cannot reuse a Provider from an older split layout.
+- Shared-stub Service records serialize lifecycle mutations. Stopping one
+  guest Service no longer stops a StubService that still owns another started,
+  bound, or foreground guest record; repeated unbind is idempotent.
+- Activity task selection now distinguishes the source task from
+  `FLAG_ACTIVITY_NEW_TASK` affinity routing. `standard + CLEAR_TOP` destroys
+  the matching Activity and everything above it before creating a new
+  instance; reuse and `onNewIntent` remain limited to the supported
+  `singleTop`/`singleTask` paths.
+- Unknown launch modes and `singleInstance` variants are fail-closed. Activity
+  aliases inherit target-owned runtime attributes, and the engine allocator
+  compares the guest request with the authoritative target launch mode before
+  reserving a proxy slot or issuing a capability.
+
+Verification:
+
+- Focused model, loader, and engine reports contain 1,336 tests, 0 failures,
+  0 errors, and 0 skipped.
+- The required full nine-module gate and `:app:assembleDebug` passed in about
+  5m34s: 2,139 tests, 0 failures, 0 errors, and 12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 100,019,381 bytes.
+- APK SHA-256:
+  `DA4378DF57E889B231004CE18DABA43BE30C41FF3D06B72E74E2BD710CAF62AF`.
+- `git diff --check` passes apart from the repository's existing LF/CRLF
+  conversion warnings. AGP 8.7.3 still emits its known `compileSdk=36`
+  warning; neither warning is device/runtime evidence.
+
+Remaining gate:
+
+- Service serialization is still process-local and is not the planned
+  engine-owned `ServiceOperationLease` or process-death restart model.
+- Custom-process Provider endpoints, observers/notify, transient URI grants,
+  ordered/sticky Broadcast, and `singleInstance` task semantics remain
+  unsupported rather than emulated.
+- Engine-owned Activity launch/finish/result transactions, full storage/native
+  behavior, and API 28-36/HyperOS device evidence remain open.
+- This batch is not compatibility proof for GKD, AstroBox, QQ, WeChat, or QQ
+  Reader. Commercial status remains **BLOCK**.

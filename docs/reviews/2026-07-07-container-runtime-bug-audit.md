@@ -2935,3 +2935,55 @@ batch, not proof that the complete virtual Android service layer is finished.
   incomplete.
 - This local batch is not GKD/AstroBox/QQ/WeChat/QQ Reader compatibility
   evidence. Review decision remains **BLOCK**.
+
+## Review Update - 2026-07-14 Component Runtime Determinism
+
+The post-PMS review found four production-path bypasses despite green focused
+tests: split paths were absent from the Provider generation key, Provider
+preinstall counted aliases as components, unknown launch-mode strings became
+`standard`, and Activity aliases could hide the target Activity launch mode.
+All four are closed in the current local tree.
+
+### Findings closed in the current tree
+
+- Provider runtime construction is single-flight per instance, package,
+  component, and package generation. Base/split path and digest changes produce
+  a distinct generation; multi-authority aliases share one attached Provider.
+- Provider preinstall uses the manifest process identity and installs only the
+  Application process set. Unsupported custom-process Providers are explicit
+  `PARTIAL`/`CUSTOM_PROCESS_NOT_BOUND` evidence, not silent success.
+- Shared StubService lifetime is computed across all guest records in the same
+  process slot. stop/unbind mutations are serialized, duplicate unbind cannot
+  decrement twice, and the host stub stops only after its final active record.
+- `normalizeLaunchMode()` preserves unknown values so they are rejected. The
+  engine plan, direct allocation IPC, loader resolver, local registry/stack,
+  and foreground launcher all use the same fail-closed rule.
+- Activity aliases resolve runtime fields from their declared target. The
+  allocator verifies the requested mode against the authoritative snapshot
+  before slot reservation and capability issuance, preventing a guest from
+  downgrading `singleTop`, `singleTask`, or an unsupported mode to `standard`.
+- `CLEAR_TOP`, source-task routing, and `onNewIntent` behavior now have focused
+  regression coverage for standard, singleTop, and singleTask modes.
+
+### Verification
+
+- Model 257; loader 722; engine 357: 1,336 focused tests, 0 failures, 0 errors.
+- Full nine-module gate and APK assembly: 2,139 tests, 0 failures, 0 errors,
+  12 skipped, completed in about 5m34s.
+- Debug APK: 100,019,381 bytes; SHA-256
+  `DA4378DF57E889B231004CE18DABA43BE30C41FF3D06B72E74E2BD710CAF62AF`.
+- The known AGP 8.7.3 / `compileSdk=36` warning remains non-fatal and does not
+  change the device-evidence requirement.
+
+### Still BLOCK
+
+- The current Service lock is process-local; durable engine-owned operation
+  leases, sticky restart, Binder death/rebind, and foreground-service mapping
+  are not complete.
+- Custom-process/cross-process Providers, observer/notify and transient grant
+  lifecycles are not complete. `singleInstance` and `singleInstancePerTask`
+  remain intentionally `UNSUPPORTED`.
+- Full AMS transaction ownership, ordered/sticky Broadcast, runtime permission,
+  storage/native behavior, and device recovery evidence remain open.
+- No new artifact proves GKD, AstroBox, QQ, WeChat, or QQ Reader compatibility.
+  Review decision remains **BLOCK**.

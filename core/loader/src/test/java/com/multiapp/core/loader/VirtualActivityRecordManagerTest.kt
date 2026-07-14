@@ -172,7 +172,7 @@ class VirtualActivityRecordManagerTest {
     }
 
     @Test
-    fun `clearTop relaunch marks cleared records finished and records pending new intent`() {
+    fun `standard clearTop relaunch finishes target and above then creates new record`() {
         val manager = VirtualActivityRecordManager()
         val root = manager.registerLaunch(record(token = "token-root", activity = "RootActivity", proxyActivityClassName = "ProxyActivity0")).activity
         val detail = manager.registerLaunch(record(token = "token-detail", activity = "DetailActivity", proxyActivityClassName = "ProxyActivity1")).activity
@@ -183,14 +183,17 @@ class VirtualActivityRecordManagerTest {
             intentFlags = VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP
         )
 
-        assertTrue(result.reused)
-        assertEquals(detail.token, result.activity.token)
-        assertEquals(listOf(settings.token), result.clearedActivities.map { it.token })
+        assertEquals(false, result.reused)
+        assertEquals("token-new-detail", result.activity.token)
+        assertEquals(listOf(detail.token, settings.token), result.clearedActivities.map { it.token })
         assertEquals(root.token, manager.resolve(root.token)?.token)
-        assertEquals(detail.token, manager.resolve(detail.token)?.token)
+        assertEquals(VirtualActivityState.FINISHED, manager.resolve(detail.token)?.state)
         assertEquals(VirtualActivityState.FINISHED, manager.resolve(settings.token)?.state)
-        assertEquals(listOf(root.token, detail.token), manager.listTasks().single().activities.map { it.token })
-        assertEquals("token-new-detail", result.pendingNewIntent?.sourceToken)
+        assertEquals(
+            listOf(root.token, "token-new-detail"),
+            manager.listTasks().single().activities.map { it.token }
+        )
+        assertNull(result.pendingNewIntent)
     }
 
     @Test

@@ -25,6 +25,9 @@ class ProxyActivityRegistry(
         nowMs: Long = System.currentTimeMillis()
     ): VirtualActivityRecord {
         val normalizedLaunchMode = normalizeLaunchMode(launchMode)
+        if (!isSupportedLaunchMode(normalizedLaunchMode)) {
+            throw UnsupportedVirtualActivityLaunchModeException(requireNotNull(normalizedLaunchMode))
+        }
         val proxyClassName = selectProxyActivity(
             launchMode = normalizedLaunchMode,
             instanceId = instanceId,
@@ -106,12 +109,16 @@ class ProxyActivityRegistry(
             taskAffinity == key.taskKey
 
     companion object {
-        fun normalizeLaunchMode(launchMode: String?): String? = when (launchMode) {
-            null, "", "standard" -> null
-            "singleTop" -> "singleTop"
-            "singleTask", "singleInstance", "singleInstancePerTask" -> "singleTask"
-            else -> null
+        fun normalizeLaunchMode(launchMode: String?): String? {
+            val normalized = launchMode?.trim()
+            return when (normalized) {
+                null, "", "standard" -> null
+                else -> normalized
+            }
         }
+
+        fun isSupportedLaunchMode(launchMode: String?): Boolean =
+            normalizeLaunchMode(launchMode) in setOf(null, "singleTop", "singleTask")
 
         internal fun stableSlotIndex(instanceId: String, slotCount: Int): Int {
             require(slotCount > 0) { "slotCount must be positive" }
@@ -124,6 +131,12 @@ class ProxyActivityRegistry(
         }
     }
 }
+
+class UnsupportedVirtualActivityLaunchModeException(
+    val launchMode: String
+) : UnsupportedOperationException(
+    "Virtual Activity launchMode=$launchMode is not supported"
+)
 
 class ProxyActivitySlotExhaustedException(
     val instanceId: String,

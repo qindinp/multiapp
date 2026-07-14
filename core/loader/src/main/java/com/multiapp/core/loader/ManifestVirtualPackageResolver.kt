@@ -144,6 +144,10 @@ class ManifestVirtualPackageResolver(
                         ResolvedComponent(
                             name = name,
                             exported = provider.exported,
+                            processName = normalizeProcessName(
+                                manifest.packageName,
+                                provider.processName
+                            ),
                             authorities = provider.authorities
                                 .split(';')
                                 .map { it.trim() }
@@ -173,6 +177,11 @@ class ManifestVirtualPackageResolver(
                 '.' !in name -> "$packageName.$name"
                 else -> name
             }
+        }
+
+        internal fun normalizeProcessName(packageName: String, processName: String?): String? {
+            val normalized = processName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            return if (normalized.startsWith(":")) packageName + normalized else normalized
         }
     }
 }

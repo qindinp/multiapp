@@ -11,6 +11,7 @@ import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.loader.VirtualActivityRecordManager
 import com.multiapp.core.model.virtual.InMemoryProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.IntentFilterMatchRequest
+import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.ResolvedComponent
@@ -21,6 +22,7 @@ import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
+import com.multiapp.core.model.virtual.resolveActivityRuntimeComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.VirtualProviderPathPattern
 import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
@@ -1815,6 +1817,24 @@ internal class RegistryBackedVirtualActivityService(
         } else {
             implicitTargets(runtime, request)
         }
+        val unsupportedLaunchModes = targets
+            .mapNotNull(VirtualActivityDispatchTarget::launchMode)
+            .filterNot(ProxyActivityRegistry::isSupportedLaunchMode)
+            .toSet()
+        if (unsupportedLaunchModes.isNotEmpty()) {
+            val binding = queryRuntimeBinding(instanceId)
+            val plan = VirtualActivityDispatchPlan(
+                instanceId = runtime.instanceId,
+                verdict = EngineResultStatus.UNSUPPORTED,
+                action = request.action,
+                supportedOperations = binding.supportedOperations,
+                unsupportedOperations = binding.unsupportedOperations +
+                    unsupportedLaunchModes.map { mode -> "launch-mode:$mode" },
+                message = "activity_launch_mode_unsupported:${unsupportedLaunchModes.sorted().joinToString(",")}"
+            )
+            recordActivityPlan(plan, runtime, request)
+            return plan
+        }
         val plan = VirtualActivityDispatchPlan(
             instanceId = runtime.instanceId,
             verdict = if (targets.isEmpty()) EngineResultStatus.FAIL else EngineResultStatus.PARTIAL,
@@ -1978,7 +1998,7 @@ internal class RegistryBackedVirtualActivityService(
             type = VirtualPackageComponentType.ACTIVITY,
             className = activityClassName
         ) ?: return emptyList()
-        return listOf(activity.toActivityTarget(runtime, request, reason = "explicit"))
+        return listOfNotNull(activity.toActivityTarget(runtime, request, reason = "explicit"))
     }
 
     private fun implicitTargets(
@@ -1996,7 +2016,7 @@ internal class RegistryBackedVirtualActivityService(
             dataMimeType = request.dataMimeType,
             dataAuthority = request.dataAuthority,
             dataPath = request.dataPath
-        ).take(1).map { activity ->
+        ).take(1).mapNotNull { activity ->
             activity.toActivityTarget(runtime, request, reason = "implicit")
         }
     }
@@ -2038,20 +2058,22 @@ internal class RegistryBackedVirtualActivityService(
         runtime: VirtualInstanceRuntime,
         request: VirtualActivityDispatchPlanRequest,
         reason: String
-    ): VirtualActivityDispatchTarget =
-        VirtualActivityDispatchTarget(
+    ): VirtualActivityDispatchTarget? {
+        val runtimeComponent = runtime.packageSnapshot.resolveActivityRuntimeComponent(this) ?: return null
+        return VirtualActivityDispatchTarget(
             instanceId = runtime.instanceId,
             originPackageName = runtime.originPackageName,
             virtualPackageName = runtime.virtualPackageName,
-            activityClassName = targetActivityName ?: name,
+            activityClassName = runtimeComponent.targetActivityName ?: runtimeComponent.name,
             action = request.action,
             reason = reason,
             processSlot = runtime.processSlot,
-            processName = processName ?: runtime.processName,
-            launchMode = launchMode,
-            taskAffinity = taskAffinity,
+            processName = runtimeComponent.processName ?: runtime.processName,
+            launchMode = runtimeComponent.launchMode,
+            taskAffinity = runtimeComponent.taskAffinity,
             priority = resolvedIntentFilters.maxOfOrNull { it.priority } ?: 0
         )
+    }
 
     override fun markActivityState(
         instanceId: String,

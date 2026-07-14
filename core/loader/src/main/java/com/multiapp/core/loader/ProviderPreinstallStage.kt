@@ -26,13 +26,24 @@ class GuestProviderPreinstaller(
         }
 
         val sameProcessProviders = providers.filter { it.runsInApplicationProcess(request.snapshot) }
-        val skippedProcessProviders = providers.size - sameProcessProviders.size
+        val skippedProviders = providers
+            .filterNot { it.runsInApplicationProcess(request.snapshot) }
+            .map { provider ->
+                GuestProviderPreinstallSkippedProvider(
+                    providerClassName = provider.name,
+                    authorities = provider.authorities,
+                    declaredProcessName = provider.processName,
+                    effectiveProcessName = provider.effectiveProcessName(request.snapshot),
+                    reason = GuestProviderPreinstallSkipReason.CUSTOM_PROCESS_NOT_BOUND
+                )
+            }
         if (sameProcessProviders.isEmpty()) {
             return GuestProviderPreinstallResult(
                 status = GuestProviderPreinstallStatus.SKIPPED,
                 totalProviderCount = providers.size,
-                skippedProviderCount = skippedProcessProviders,
-                skippedReasons = listOf("NO_SAME_PROCESS_PROVIDERS")
+                skippedProviderCount = skippedProviders.size,
+                skippedReasons = skippedProviders.map { it.reason.name }.distinct(),
+                skippedProviders = skippedProviders
             )
         }
 
@@ -42,64 +53,88 @@ class GuestProviderPreinstaller(
         val failed = mutableListOf<String>()
         val failedReasons = mutableListOf<String>()
         var attempted = 0
+        var installedProviderCount = 0
+        var cachedProviderCount = 0
+        var failedProviderCount = 0
 
         sameProcessProviders.forEach { provider ->
-            provider.authorities.forEach { authority ->
-                attempted += 1
-                val resolution = manager.resolve(request.snapshot, authority)
-                if (resolution == null) {
-                    failed += authority
-                    failedReasons += "$authority:RESOLUTION_NOT_FOUND"
-                    return@forEach
+            attempted += 1
+            val authorities = provider.authorities.filter { it.isNotBlank() }
+            val primaryAuthority = authorities.firstOrNull()
+            val resolution = primaryAuthority?.let { manager.resolve(request.snapshot, it) }
+            if (resolution == null) {
+                failedProviderCount += 1
+                failed += authorities
+                failedReasons += "${primaryAuthority.orEmpty()}:RESOLUTION_NOT_FOUND"
+                return@forEach
+            }
+            when (val result = providerRuntime.getOrCreate(
+                VirtualProviderCreateRequest(
+                    resolution = resolution,
+                    guestContext = request.application,
+                    guestClassLoader = request.guestClassLoader,
+                    config = request.config
+                )
+            )) {
+                is VirtualProviderRuntimeResult.Created -> {
+                    installedProviderCount += 1
+                    installed += authorities
                 }
-                when (val result = providerRuntime.getOrCreate(
-                    VirtualProviderCreateRequest(
-                        resolution = resolution,
-                        guestContext = request.application,
-                        guestClassLoader = request.guestClassLoader,
-                        config = request.config
-                    )
-                )) {
-                    is VirtualProviderRuntimeResult.Created -> installed += result.resolution.guestAuthority
-                    is VirtualProviderRuntimeResult.Cached -> cached += result.resolution.guestAuthority
-                    is VirtualProviderRuntimeResult.CreateFailed -> {
-                        failed += result.resolution.guestAuthority
-                        failedReasons += result.resolution.guestAuthority + ":" +
-                            (result.error.message ?: result.error.javaClass.name)
-                    }
-                    is VirtualProviderRuntimeResult.AttachFailed -> {
-                        failed += result.resolution.guestAuthority
-                        failedReasons += result.resolution.guestAuthority + ":" +
-                            (result.error.message ?: result.error.javaClass.name)
-                    }
+                is VirtualProviderRuntimeResult.Cached -> {
+                    cachedProviderCount += 1
+                    cached += authorities
+                }
+                is VirtualProviderRuntimeResult.CreateFailed -> {
+                    failedProviderCount += 1
+                    failed += authorities
+                    failedReasons += result.resolution.guestAuthority + ":" +
+                        (result.error.message ?: result.error.javaClass.name)
+                }
+                is VirtualProviderRuntimeResult.AttachFailed -> {
+                    failedProviderCount += 1
+                    failed += authorities
+                    failedReasons += result.resolution.guestAuthority + ":" +
+                        (result.error.message ?: result.error.javaClass.name)
                 }
             }
         }
 
         val status = when {
-            failed.isEmpty() -> GuestProviderPreinstallStatus.PASS
-            installed.isEmpty() && cached.isEmpty() -> GuestProviderPreinstallStatus.FAILED
+            failedProviderCount == 0 && skippedProviders.isEmpty() -> GuestProviderPreinstallStatus.PASS
+            failedProviderCount == 0 -> GuestProviderPreinstallStatus.PARTIAL
+            installedProviderCount == 0 && cachedProviderCount == 0 -> GuestProviderPreinstallStatus.FAILED
             else -> GuestProviderPreinstallStatus.PARTIAL
         }
         return GuestProviderPreinstallResult(
             status = status,
             totalProviderCount = providers.size,
             attemptedProviderCount = attempted,
-            installedProviderCount = installed.size,
-            cachedProviderCount = cached.size,
-            failedProviderCount = failed.size,
-            skippedProviderCount = skippedProcessProviders,
+            installedProviderCount = installedProviderCount,
+            cachedProviderCount = cachedProviderCount,
+            failedProviderCount = failedProviderCount,
+            skippedProviderCount = skippedProviders.size,
             installedAuthorities = installed,
             cachedAuthorities = cached,
             failedAuthorities = failed,
-            failedReasons = failedReasons
+            failedReasons = failedReasons,
+            skippedReasons = skippedProviders.map { it.reason.name }.distinct(),
+            skippedProviders = skippedProviders
         )
     }
 
     private fun ResolvedComponent.runsInApplicationProcess(snapshot: VirtualPackageSnapshot): Boolean {
-        val providerProcess = processName?.takeIf { it.isNotBlank() } ?: return true
-        val appProcess = snapshot.processName?.takeIf { it.isNotBlank() } ?: snapshot.originPackageName
-        return providerProcess == appProcess
+        return effectiveProcessName(snapshot) == snapshot.applicationProcessName()
+    }
+
+    private fun ResolvedComponent.effectiveProcessName(snapshot: VirtualPackageSnapshot): String =
+        normalizeGuestProcessName(processName, snapshot.originPackageName)
+
+    private fun VirtualPackageSnapshot.applicationProcessName(): String =
+        normalizeGuestProcessName(processName, originPackageName)
+
+    private fun normalizeGuestProcessName(processName: String?, packageName: String): String {
+        val normalized = processName?.trim()?.takeIf { it.isNotEmpty() } ?: return packageName
+        return if (normalized.startsWith(":")) packageName + normalized else normalized
     }
 }
 
@@ -123,7 +158,8 @@ data class GuestProviderPreinstallResult(
     val cachedAuthorities: List<String> = emptyList(),
     val failedAuthorities: List<String> = emptyList(),
     val failedReasons: List<String> = emptyList(),
-    val skippedReasons: List<String> = emptyList()
+    val skippedReasons: List<String> = emptyList(),
+    val skippedProviders: List<GuestProviderPreinstallSkippedProvider> = emptyList()
 ) {
     fun toEvidence(): List<BootstrapEvidence> = listOf(
         BootstrapEvidence("providerPreinstallStatus", status.name),
@@ -137,8 +173,27 @@ data class GuestProviderPreinstallResult(
         BootstrapEvidence("providerPreinstallCachedAuthorities", cachedAuthorities.joinToString(",")),
         BootstrapEvidence("providerPreinstallFailedAuthorities", failedAuthorities.joinToString(",")),
         BootstrapEvidence("providerPreinstallFailedReasons", failedReasons.joinToString(",")),
-        BootstrapEvidence("providerPreinstallSkippedReasons", skippedReasons.joinToString(","))
+        BootstrapEvidence("providerPreinstallSkippedReasons", skippedReasons.joinToString(",")),
+        BootstrapEvidence(
+            "providerPreinstallSkippedProviders",
+            skippedProviders.joinToString(";") { skipped ->
+                "${skipped.providerClassName}@${skipped.effectiveProcessName}:" +
+                    "${skipped.reason.name}[${skipped.authorities.joinToString("|")}]"
+            }
+        )
     )
+}
+
+data class GuestProviderPreinstallSkippedProvider(
+    val providerClassName: String,
+    val authorities: List<String>,
+    val declaredProcessName: String?,
+    val effectiveProcessName: String,
+    val reason: GuestProviderPreinstallSkipReason
+)
+
+enum class GuestProviderPreinstallSkipReason {
+    CUSTOM_PROCESS_NOT_BOUND
 }
 
 enum class GuestProviderPreinstallStatus {

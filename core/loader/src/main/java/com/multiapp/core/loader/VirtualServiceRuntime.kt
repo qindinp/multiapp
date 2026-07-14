@@ -20,7 +20,8 @@ class VirtualServiceRuntime(
     private val hostServiceIdleStopper: HostServiceIdleStopper = HostServiceIdleStopper.NoOp,
     private val clock: () -> Long = System::currentTimeMillis
 ) {
-    fun start(request: VirtualServiceRuntimeStartRequest): VirtualServiceRuntimeResult {
+    fun start(request: VirtualServiceRuntimeStartRequest): VirtualServiceRuntimeResult =
+        recordManager.withLifecycleLock {
         val existing = recordManager.get(request.startRequest.instanceId, request.startRequest.guestServiceClassName)
         if (existing != null) {
             return startExisting(request, existing, cached = true)
@@ -46,7 +47,8 @@ class VirtualServiceRuntime(
         return startExisting(request, record, cached = false)
     }
 
-    fun bind(request: VirtualServiceRuntimeBindRequest): VirtualServiceRuntimeBindResult {
+    fun bind(request: VirtualServiceRuntimeBindRequest): VirtualServiceRuntimeBindResult =
+        recordManager.withLifecycleLock {
         val existing = recordManager.get(request.startRequest.instanceId, request.startRequest.guestServiceClassName)
         val autoCreate = request.flags and Context.BIND_AUTO_CREATE != 0
         if (existing == null && !autoCreate) {
@@ -179,7 +181,8 @@ class VirtualServiceRuntime(
     fun get(instanceId: String, guestServiceClassName: String): Service? =
         recordManager.get(instanceId, guestServiceClassName)?.service
 
-    fun unbind(request: VirtualServiceRuntimeUnbindRequest): VirtualServiceRuntimeUnbindResult {
+    fun unbind(request: VirtualServiceRuntimeUnbindRequest): VirtualServiceRuntimeUnbindResult =
+        recordManager.withLifecycleLock {
         val record = recordManager.get(
             request.startRequest.instanceId,
             request.startRequest.guestServiceClassName
@@ -187,7 +190,19 @@ class VirtualServiceRuntime(
 
         val bindKey = request.startRequest.sourceIntent.toBindKey()
         val binding = record.bindings[bindKey]
-        val shouldCallOnUnbind = binding == null || binding.activeConnectionCount <= 1
+        if (binding == null || binding.activeConnectionCount <= 0) {
+            return VirtualServiceRuntimeUnbindResult.Unbound(
+                startRequest = request.startRequest,
+                service = record.service,
+                bindKey = bindKey,
+                onUnbindResult = false,
+                onUnbindCalled = false,
+                destroyed = false,
+                activeConnectionCount = binding?.activeConnectionCount ?: 0,
+                activeBindCount = record.activeBindCount
+            )
+        }
+        val shouldCallOnUnbind = binding.activeConnectionCount <= 1
         val unbindResult = if (shouldCallOnUnbind) {
             runCatching { record.service.onUnbind(request.startRequest.sourceIntent) }
         } else {
@@ -224,7 +239,7 @@ class VirtualServiceRuntime(
                 )
             }
             recordManager.remove(request.startRequest.instanceId, request.startRequest.guestServiceClassName)
-            val idleStop = requestHostIdleStop(request.startRequest, "unbindDestroyed")
+            val idleStop = requestHostIdleStop(updated.toStartRequest(), "unbindDestroyed")
             return VirtualServiceRuntimeUnbindResult.Unbound(
                 startRequest = request.startRequest,
                 service = updated.service,
@@ -250,7 +265,8 @@ class VirtualServiceRuntime(
         )
     }
 
-    fun stop(request: VirtualServiceStopRequest): VirtualServiceRuntimeStopResult {
+    fun stop(request: VirtualServiceStopRequest): VirtualServiceRuntimeStopResult =
+        recordManager.withLifecycleLock {
         val record = recordManager.get(request.instanceId, request.guestServiceClassName)
             ?: return VirtualServiceRuntimeStopResult.NotFound(request)
         val updated = recordManager.markStartedStopped(request.instanceId, request.guestServiceClassName)
@@ -275,7 +291,7 @@ class VirtualServiceRuntime(
         }
 
         recordManager.remove(request.instanceId, request.guestServiceClassName)
-        val idleStop = requestHostIdleStop(request.toStartRequest(), "stopServiceDestroyed")
+        val idleStop = requestHostIdleStop(updated.toStartRequest(), "stopServiceDestroyed")
         return VirtualServiceRuntimeStopResult.Stopped(
             stopRequest = request,
             service = updated.service,
@@ -285,7 +301,8 @@ class VirtualServiceRuntime(
         )
     }
 
-    internal fun stopServiceToken(token: IBinder, startId: Int): Boolean {
+    internal fun stopServiceToken(token: IBinder, startId: Int): Boolean =
+        recordManager.withLifecycleLock {
         val record = recordManager.getByToken(token) ?: return false
         val latestStartId = record.lastStartId
         val stopMatches = startId < 0 || latestStartId == null || latestStartId == startId
@@ -304,7 +321,7 @@ class VirtualServiceRuntime(
         notificationId: Int,
         notification: Notification?,
         foregroundServiceType: Int
-    ) {
+    ) = recordManager.withLifecycleLock {
         val foreground = notificationId > 0 && notification != null
         recordManager.updateForeground(
             token = token,
@@ -424,6 +441,7 @@ class VirtualServiceRuntime(
                 guestServiceClassName = request.startRequest.guestServiceClassName,
                 service = service,
                 createdAtMs = clock(),
+                processSlot = request.processSlot,
                 token = token
             )
         )
@@ -452,7 +470,17 @@ class VirtualServiceRuntime(
     private fun requestHostIdleStop(
         startRequest: VirtualServiceStartRequest,
         reason: String
-    ): HostServiceIdleStopResult = hostServiceIdleStopper.requestIdleStop(startRequest, reason)
+    ): HostServiceIdleStopResult {
+        if (recordManager.hasActiveRecordsForProxyStub(startRequest.processSlot)) {
+            return HostServiceIdleStopResult(
+                idleStopRequested = false,
+                idleStopReason = reason,
+                hostStopServiceReturnValue = null,
+                detail = "proxyStubStillActive"
+            )
+        }
+        return hostServiceIdleStopper.requestIdleStop(startRequest, reason)
+    }
 }
 
 fun interface HostServiceIdleStopper {
@@ -516,7 +544,8 @@ private data class VirtualServiceRuntimeCreateRequest(
     val startRequest: VirtualServiceStartRequest,
     val guestContext: Context,
     val guestClassLoader: ClassLoader,
-    val guestApplication: Application?
+    val guestApplication: Application?,
+    val processSlot: String?
 )
 
 private fun VirtualServiceRuntimeStartRequest.toCreateRequest(): VirtualServiceRuntimeCreateRequest =
@@ -524,7 +553,9 @@ private fun VirtualServiceRuntimeStartRequest.toCreateRequest(): VirtualServiceR
         startRequest = startRequest,
         guestContext = guestContext,
         guestClassLoader = guestClassLoader,
-        guestApplication = guestApplication
+        guestApplication = guestApplication,
+        processSlot = startRequest.processSlot?.takeIf { it.isNotBlank() }
+            ?: config.processSlot?.takeIf { it.isNotBlank() }
     )
 
 private fun VirtualServiceRuntimeBindRequest.toCreateRequest(): VirtualServiceRuntimeCreateRequest =
@@ -532,16 +563,9 @@ private fun VirtualServiceRuntimeBindRequest.toCreateRequest(): VirtualServiceRu
         startRequest = startRequest,
         guestContext = guestContext,
         guestClassLoader = guestClassLoader,
-        guestApplication = guestApplication
-    )
-
-private fun VirtualServiceStopRequest.toStartRequest(): VirtualServiceStartRequest =
-    VirtualServiceStartRequest(
-        instanceId = instanceId,
-        originPackageName = originPackageName,
-        guestServiceClassName = guestServiceClassName,
-        sourceIntent = sourceIntent,
-        reason = reason
+        guestApplication = guestApplication,
+        processSlot = startRequest.processSlot?.takeIf { it.isNotBlank() }
+            ?: config.processSlot?.takeIf { it.isNotBlank() }
     )
 
 private fun VirtualServiceRecord.toStartRequest(): VirtualServiceStartRequest =
@@ -550,7 +574,8 @@ private fun VirtualServiceRecord.toStartRequest(): VirtualServiceStartRequest =
         originPackageName = originPackageName,
         guestServiceClassName = guestServiceClassName,
         sourceIntent = Intent(),
-        reason = "serviceRecord"
+        reason = "serviceRecord",
+        processSlot = processSlot
     )
 
 private sealed class ServiceCreateRecordResult {

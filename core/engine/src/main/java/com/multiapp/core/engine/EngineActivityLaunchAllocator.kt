@@ -6,7 +6,9 @@ import com.multiapp.core.loader.VirtualActivityLaunchAllocationRequest
 import com.multiapp.core.loader.VirtualActivityLaunchIdentity
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualRuntimeState
+import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
+import com.multiapp.core.model.virtual.findActivityRuntimeComponent
 
 class EngineActivityLaunchAllocator(
     private val runtimeRegistry: EngineRuntimeRegistry,
@@ -27,12 +29,34 @@ class EngineActivityLaunchAllocator(
         ) {
             return rejected(request, "activity_allocation_runtime_identity_mismatch")
         }
-        if (runtime.packageSnapshot.activities.none { component ->
-                component.name == request.guestActivityClassName ||
-                    component.targetActivityName == request.guestActivityClassName
-            }
-        ) {
+        if (!ProxyActivityRegistry.isSupportedLaunchMode(request.launchMode)) {
+            return rejected(
+                request,
+                "activity_allocation_launch_mode_unsupported:${request.launchMode.orEmpty()}"
+            )
+        }
+        val activityComponent = runtime.packageSnapshot.findActivityRuntimeComponent(
+            request.guestActivityClassName
+        )
+        if (activityComponent == null) {
             return rejected(request, "activity_allocation_component_not_in_snapshot")
+        }
+        if (!ProxyActivityRegistry.isSupportedLaunchMode(activityComponent.launchMode)) {
+            return rejected(
+                request,
+                "activity_allocation_launch_mode_unsupported:${activityComponent.launchMode.orEmpty()}"
+            )
+        }
+        if (
+            ProxyActivityRegistry.normalizeLaunchMode(request.launchMode) !=
+            ProxyActivityRegistry.normalizeLaunchMode(activityComponent.launchMode)
+        ) {
+            return rejected(
+                request,
+                "activity_allocation_launch_mode_mismatch:" +
+                    "requested=${request.launchMode.orEmpty()}," +
+                    "authoritative=${activityComponent.launchMode.orEmpty()}"
+            )
         }
         val key = request.slotKey()
         val candidates = EngineProxyActivitySlots.classNamesForProcessSlot(

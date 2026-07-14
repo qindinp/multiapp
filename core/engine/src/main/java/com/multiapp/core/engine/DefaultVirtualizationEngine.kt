@@ -21,6 +21,7 @@ import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.VirtualInstallService
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
+import com.multiapp.core.model.virtual.findActivityRuntimeComponent
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.toLegacyMetaDataMap
@@ -530,10 +531,9 @@ internal class DefaultVirtualizationEngineCore(
                 originPackageName = instance.originPackageName,
                 message = "Process bootstrap completed without a launcher Activity"
             )
-        val launcherComponent = runtime.packageSnapshot.activities.firstOrNull { component ->
-            component.name == launcherActivityClassName ||
-                component.targetActivityName == launcherActivityClassName
-        }
+        val launcherComponent = runtime.packageSnapshot.findActivityRuntimeComponent(
+            launcherActivityClassName
+        )
         val processId = bootstrap.processId ?: return EngineResult.fail(
             operation = OP_LAUNCH,
             instanceId = instance.instanceId,
@@ -1010,6 +1010,7 @@ internal class DefaultVirtualizationEngineCore(
         }
 
     private fun proxySlotCandidatesForLaunchMode(launchMode: String?): List<String> {
+        if (!ProxyActivityRegistry.isSupportedLaunchMode(launchMode)) return emptyList()
         val normalizedLaunchMode = ProxyActivityRegistry.normalizeLaunchMode(launchMode)
         val launchModesByClassName = ProxyActivitySlots.launchModeByClassName(hostPackageName)
         return ProxyActivitySlots.classNames(hostPackageName)

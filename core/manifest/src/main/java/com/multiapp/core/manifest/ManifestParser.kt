@@ -87,7 +87,8 @@ class ManifestParser @Inject constructor(
         val readPermission: String? = null,
         val writePermission: String? = null,
         val pathPermissions: List<VirtualProviderPathPermission> = emptyList(),
-        val uriPermissionPatterns: List<VirtualProviderPathPattern> = emptyList()
+        val uriPermissionPatterns: List<VirtualProviderPathPattern> = emptyList(),
+        val processName: String? = null
     )
 
     data class MetaDataInfo(
@@ -206,6 +207,11 @@ class ManifestParser @Inject constructor(
             }
             if (value and 0x100 != 0) flags.add("isForwardNavigation")
             return flags.joinToString("|").takeIf { it.isNotEmpty() }
+        }
+
+        internal fun normalizeProcessName(packageName: String, processName: String?): String? {
+            val normalized = processName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            return if (normalized.startsWith(":")) packageName + normalized else normalized
         }
 
         private fun getDefaultContext(): android.content.Context {
@@ -352,6 +358,7 @@ class ManifestParser @Inject constructor(
             ProviderInfo(
                 name = prv.name ?: "",
                 authorities = prv.authority ?: "",
+                processName = normalizeProcessName(info.packageName, prv.processName),
                 exported = prv.exported,
                 grantUriPermissions = prv.grantUriPermissions && uriPermissionPatterns.isEmpty(),
                 permission = providerCommonPermission(prv),
@@ -683,7 +690,7 @@ class ManifestParser @Inject constructor(
             extractComponents(applicationEl, "activity-alias")
         val services = extractComponents(applicationEl, "service")
         val receivers = extractComponents(applicationEl, "receiver")
-        val (providers, providerMetaData) = extractProviders(applicationEl)
+        val (providers, providerMetaData) = extractProviders(applicationEl, packageName)
 
         // 提取 SDK 版本
         val usesSdk = findFirstChild(manifestEl, "uses-sdk")
@@ -774,7 +781,10 @@ class ManifestParser @Inject constructor(
         return components
     }
 
-    private fun extractProviders(applicationEl: Element?): Pair<List<ProviderInfo>, Map<String, List<MetaDataInfo>>> {
+    private fun extractProviders(
+        applicationEl: Element?,
+        packageName: String
+    ): Pair<List<ProviderInfo>, Map<String, List<MetaDataInfo>>> {
         if (applicationEl == null) return emptyList<ProviderInfo>() to emptyMap()
         val providers = mutableListOf<ProviderInfo>()
         val metaDataMap = mutableMapOf<String, List<MetaDataInfo>>()
@@ -786,6 +796,10 @@ class ManifestParser @Inject constructor(
                     ProviderInfo(
                         name = name,
                         authorities = el.getAttributeNS(ANDROID_NS, "authorities"),
+                        processName = normalizeProcessName(
+                            packageName,
+                            el.getAttributeNS(ANDROID_NS, "process")
+                        ),
                         exported = el.getAttributeNS(ANDROID_NS, "exported") == "true",
                         grantUriPermissions = el.getAttributeNS(ANDROID_NS, "grantUriPermissions") == "true",
                         permission = permission,

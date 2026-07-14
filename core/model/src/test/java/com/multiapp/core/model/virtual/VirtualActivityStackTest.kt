@@ -2,6 +2,7 @@ package com.multiapp.core.model.virtual
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
@@ -14,7 +15,10 @@ class VirtualActivityStackTest {
         val stack = VirtualActivityStack()
 
         val first = stack.launch(record(token = "token-1", activity = "MainActivity"))
-        val second = stack.launch(record(token = "token-2", activity = "MainActivity"))
+        val second = stack.launch(
+            record(token = "token-2", activity = "MainActivity"),
+            sourceTaskId = first.task.taskId
+        )
 
         assertFalse(first.reused)
         assertFalse(second.reused)
@@ -32,7 +36,7 @@ class VirtualActivityStackTest {
 
         val second = stack.launch(
             record(token = "token-2", activity = "MainActivity", launchMode = "singleTop"),
-            intentFlags = 7,
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK,
             dataIntent = dataIntent
         )
 
@@ -40,7 +44,7 @@ class VirtualActivityStackTest {
         assertEquals(first.activity.token, second.activity.token)
         assertEquals(1, stack.topTask()?.activities?.size)
         assertEquals("token-2", second.pendingNewIntent?.sourceToken)
-        assertEquals(7, second.pendingNewIntent?.intentFlags)
+        assertEquals(VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK, second.pendingNewIntent?.intentFlags)
         assertEquals(dataIntent, second.pendingNewIntent?.dataIntent)
         assertEquals(listOf(second.pendingNewIntent), second.activity.pendingNewIntents)
     }
@@ -52,7 +56,11 @@ class VirtualActivityStackTest {
         stack.launch(record(token = "token-detail", activity = "DetailActivity"))
         stack.launch(record(token = "token-settings", activity = "SettingsActivity"))
 
-        val relaunched = stack.launch(record(token = "token-new-root", activity = "RootActivity", launchMode = "singleTask"))
+        val relaunched = stack.launch(
+            record(token = "token-new-root", activity = "RootActivity", launchMode = "singleTask"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK or
+                VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP
+        )
 
         assertTrue(relaunched.reused)
         assertEquals(root.activity.token, relaunched.activity.token)
@@ -64,25 +72,68 @@ class VirtualActivityStackTest {
     }
 
     @Test
-    fun `clearTop reuses existing component in selected task clears above it and records pending new intent`() {
+    fun `standard clearTop finishes target and activities above then creates a new instance`() {
         val stack = VirtualActivityStack()
-        stack.launch(record(token = "token-root", activity = "RootActivity"))
+        val root = stack.launch(record(token = "token-root", activity = "RootActivity"))
         stack.launch(record(token = "token-detail", activity = "DetailActivity"))
         stack.launch(record(token = "token-settings", activity = "SettingsActivity"))
 
         val result = stack.launch(
             record(token = "token-new-detail", activity = "DetailActivity"),
-            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP,
+            sourceTaskId = root.task.taskId
+        )
+
+        assertFalse(result.reused)
+        assertEquals("token-new-detail", result.activity.token)
+        assertEquals(listOf("token-detail", "token-settings"), result.clearedActivities.map { it.token })
+        assertEquals(listOf("token-root", "token-new-detail"), stack.topTask()?.activities?.map { it.token })
+        assertEquals(VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP, result.activity.intentFlags)
+        assertTrue(result.clearedActivities.all { it.state == VirtualActivityState.FINISHED })
+        assertNull(result.pendingNewIntent)
+        assertEquals(emptyList(), result.activity.pendingNewIntents)
+    }
+
+    @Test
+    fun `standard clearTop with singleTop flag reuses target and delivers new intent`() {
+        val stack = VirtualActivityStack()
+        val root = stack.launch(record(token = "token-root", activity = "RootActivity"))
+        stack.launch(record(token = "token-detail", activity = "DetailActivity"))
+        stack.launch(record(token = "token-settings", activity = "SettingsActivity"))
+        val flags = VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP or
+            VirtualActivityStack.FLAG_ACTIVITY_SINGLE_TOP
+
+        val result = stack.launch(
+            record(token = "token-new-detail", activity = "DetailActivity"),
+            intentFlags = flags,
+            sourceTaskId = root.task.taskId
         )
 
         assertTrue(result.reused)
         assertEquals("token-detail", result.activity.token)
         assertEquals(listOf("token-settings"), result.clearedActivities.map { it.token })
-        assertEquals(listOf("token-root", "token-detail"), stack.topTask()?.activities?.map { it.token })
-        assertEquals(VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP, result.activity.intentFlags)
-        assertEquals(VirtualActivityState.FINISHED, result.clearedActivities.single().state)
+        assertEquals(listOf("token-root", "token-detail"), result.task.activities.map { it.token })
         assertEquals("token-new-detail", result.pendingNewIntent?.sourceToken)
-        assertEquals(listOf(result.pendingNewIntent), result.activity.pendingNewIntents)
+    }
+
+    @Test
+    fun `singleTop clearTop reuses non-top target and clears activities above`() {
+        val stack = VirtualActivityStack()
+        val root = stack.launch(record(token = "token-root", activity = "RootActivity"))
+        stack.launch(record(token = "token-top", activity = "TopActivity", launchMode = "singleTop"))
+        stack.launch(record(token = "token-detail", activity = "DetailActivity"))
+
+        val result = stack.launch(
+            record(token = "token-new-top", activity = "TopActivity", launchMode = "singleTop"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_CLEAR_TOP,
+            sourceTaskId = root.task.taskId
+        )
+
+        assertTrue(result.reused)
+        assertEquals("token-top", result.activity.token)
+        assertEquals(listOf("token-detail"), result.clearedActivities.map { it.token })
+        assertEquals(listOf("token-root", "token-top"), result.task.activities.map { it.token })
+        assertEquals("token-new-top", result.pendingNewIntent?.sourceToken)
     }
 
     @Test
@@ -234,6 +285,33 @@ class VirtualActivityStackTest {
     }
 
     @Test
+    fun `newTask ignores source task and selects target affinity task`() {
+        val stack = VirtualActivityStack()
+        val source = stack.launch(
+            record(token = "token-source", activity = "SourceActivity", affinity = "affinity-source"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK
+        )
+        val affinityTask = stack.launch(
+            record(token = "token-affinity-root", activity = "AffinityRootActivity", affinity = "affinity-target"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK
+        )
+
+        val sourceLaunch = stack.launch(
+            record(token = "token-source-child", activity = "TargetActivity", affinity = "affinity-target"),
+            sourceTaskId = source.task.taskId
+        )
+        val newTaskLaunch = stack.launch(
+            record(token = "token-new-task", activity = "TargetActivity", affinity = "affinity-target"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK,
+            sourceTaskId = source.task.taskId
+        )
+
+        assertEquals(source.task.taskId, sourceLaunch.task.taskId)
+        assertEquals(affinityTask.task.taskId, newTaskLaunch.task.taskId)
+        assertNotEquals(sourceLaunch.task.taskId, newTaskLaunch.task.taskId)
+    }
+
+    @Test
     fun `newTask separates same origin package by instance id when affinity is absent`() {
         val stack = VirtualActivityStack()
 
@@ -253,12 +331,18 @@ class VirtualActivityStackTest {
     }
 
     @Test
-    fun `standard launch uses latest task for same instance instead of global top task`() {
+    fun `standard launch uses explicit source task instead of global top task`() {
         val stack = VirtualActivityStack()
         val firstRoot = stack.launch(record(token = "token-a1", activity = "MainActivity", instanceId = "inst-001"))
-        stack.launch(record(token = "token-b1", activity = "MainActivity", instanceId = "inst-002"))
+        stack.launch(
+            record(token = "token-b1", activity = "MainActivity", instanceId = "inst-002"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK
+        )
 
-        val firstDetail = stack.launch(record(token = "token-a2", activity = "DetailActivity", instanceId = "inst-001"))
+        val firstDetail = stack.launch(
+            record(token = "token-a2", activity = "DetailActivity", instanceId = "inst-001"),
+            sourceTaskId = firstRoot.task.taskId
+        )
 
         assertEquals(firstRoot.task.taskId, firstDetail.task.taskId)
         assertEquals("com.test.minimal:inst-001", firstDetail.task.affinity)
@@ -267,6 +351,40 @@ class VirtualActivityStackTest {
             firstDetail.task.activities.map { it.token }
         )
         assertEquals(2, stack.listTasks().size)
+    }
+
+    @Test
+    fun `standard launch without source task cannot join another instance affinity`() {
+        val stack = VirtualActivityStack()
+        val first = stack.launch(
+            record(token = "token-a", activity = "MainActivity", instanceId = "inst-001")
+        )
+        stack.launch(
+            record(token = "token-b", activity = "MainActivity", instanceId = "inst-002"),
+            intentFlags = VirtualActivityStack.FLAG_ACTIVITY_NEW_TASK
+        )
+
+        val fallback = stack.launch(
+            record(token = "token-a2", activity = "DetailActivity", instanceId = "inst-001")
+        )
+
+        assertEquals(first.task.taskId, fallback.task.taskId)
+        assertEquals("com.test.minimal:inst-001", fallback.task.affinity)
+        assertEquals(listOf("token-a", "token-a2"), fallback.task.activities.map { it.token })
+    }
+
+    @Test
+    fun `unsupported singleInstance modes fail before mutating the stack`() {
+        val stack = VirtualActivityStack()
+
+        listOf("singleInstance", "singleInstancePerTask").forEach { launchMode ->
+            val error = assertFailsWith<UnsupportedVirtualActivityLaunchModeException> {
+                stack.launch(record(token = "token-$launchMode", activity = "MainActivity", launchMode = launchMode))
+            }
+            assertEquals(launchMode, error.launchMode)
+        }
+
+        assertEquals(emptyList(), stack.listTasks())
     }
 
     @Test

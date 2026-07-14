@@ -10,11 +10,17 @@ import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.mockk
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class VirtualProviderRuntimeTest {
 
@@ -94,9 +100,147 @@ class VirtualProviderRuntimeTest {
         assertEquals("com.test.minimal.probe", second.resolution.guestAuthority)
     }
 
-    private fun request(snapshot: VirtualPackageSnapshot = snapshot()): VirtualProviderCreateRequest {
+    @Test
+    fun `concurrent aliases share one provider creation and attach flight`() {
+        val createEntered = CountDownLatch(1)
+        val releaseCreate = CountDownLatch(1)
+        val createCount = AtomicInteger()
+        val attachCount = AtomicInteger()
+        val onCreateCount = AtomicInteger()
+        val attachedAuthority = AtomicReference<String>()
+        val provider = FakeProvider { onCreateCount.incrementAndGet() }
+        val runtime = VirtualProviderRuntime(
+            providerFactory = ProviderFactory { _, _ ->
+                createCount.incrementAndGet()
+                createEntered.countDown()
+                check(releaseCreate.await(5, TimeUnit.SECONDS)) { "provider creation was not released" }
+                provider
+            },
+            providerAttacher = ProviderAttacher { attachedProvider, _, info ->
+                attachCount.incrementAndGet()
+                attachedAuthority.set(info.authority)
+                attachedProvider.onCreate()
+            }
+        )
+        val snapshot = snapshot(
+            authorities = listOf("com.test.minimal.probe", "com.test.minimal.probe.alias")
+        )
+        val primaryRequest = request(snapshot, "com.test.minimal.probe")
+        val aliasRequest = request(snapshot, "com.test.minimal.probe.alias")
+        val executor = Executors.newFixedThreadPool(2)
+
+        try {
+            val primaryFuture = executor.submit<VirtualProviderRuntimeResult> {
+                runtime.getOrCreate(primaryRequest)
+            }
+            assertTrue(createEntered.await(5, TimeUnit.SECONDS))
+            val aliasFuture = executor.submit<VirtualProviderRuntimeResult> {
+                runtime.getOrCreate(aliasRequest)
+            }
+
+            releaseCreate.countDown()
+
+            val created = assertIs<VirtualProviderRuntimeResult.Created>(
+                primaryFuture.get(5, TimeUnit.SECONDS)
+            )
+            val cached = assertIs<VirtualProviderRuntimeResult.Cached>(
+                aliasFuture.get(5, TimeUnit.SECONDS)
+            )
+            assertSame(provider, created.provider)
+            assertSame(provider, cached.provider)
+            assertSame(provider, runtime.get(aliasRequest.resolution))
+            assertEquals("com.test.minimal.probe.alias", cached.resolution.guestAuthority)
+            assertEquals(1, createCount.get())
+            assertEquals(1, attachCount.get())
+            assertEquals(1, onCreateCount.get())
+            assertEquals(
+                "com.test.minimal.probe;com.test.minimal.probe.alias",
+                attachedAuthority.get()
+            )
+        } finally {
+            releaseCreate.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `same instance package refresh creates a new provider generation`() {
+        val createdProviders = mutableListOf<FakeProvider>()
+        val runtime = VirtualProviderRuntime(
+            providerFactory = ProviderFactory { _, _ ->
+                FakeProvider().also { createdProviders += it }
+            },
+            providerAttacher = ProviderAttacher { _, _, _ -> }
+        )
+        val oldRequest = request(
+            snapshot(
+                sourceSha256 = "sha256-old",
+                versionCode = 42
+            )
+        )
+        val refreshedRequest = request(
+            snapshot(
+                sourceSha256 = "sha256-refreshed",
+                versionCode = 43
+            )
+        )
+
+        val oldProvider = assertIs<VirtualProviderRuntimeResult.Created>(
+            runtime.getOrCreate(oldRequest)
+        ).provider
+        val refreshedProvider = assertIs<VirtualProviderRuntimeResult.Created>(
+            runtime.getOrCreate(refreshedRequest)
+        ).provider
+
+        assertEquals(2, createdProviders.size)
+        assertNotSame(oldProvider, refreshedProvider)
+        assertSame(oldProvider, runtime.get(oldRequest))
+        assertSame(refreshedProvider, runtime.get(refreshedRequest))
+        assertIs<VirtualProviderRuntimeResult.Cached>(runtime.getOrCreate(oldRequest))
+        assertIs<VirtualProviderRuntimeResult.Cached>(runtime.getOrCreate(refreshedRequest))
+    }
+
+    @Test
+    fun `split path change creates a new provider generation without split digests`() {
+        val createdProviders = mutableListOf<FakeProvider>()
+        val runtime = VirtualProviderRuntime(
+            providerFactory = ProviderFactory { _, _ ->
+                FakeProvider().also { createdProviders += it }
+            },
+            providerAttacher = ProviderAttacher { _, _, _ -> }
+        )
+        val oldRequest = request(
+            snapshot(
+                sourceSha256 = "same-base-digest",
+                splitSourceDirs = listOf("/data/apks/feature-old.apk")
+            )
+        )
+        val refreshedRequest = request(
+            snapshot(
+                sourceSha256 = "same-base-digest",
+                splitSourceDirs = listOf("/data/apks/feature-new.apk")
+            )
+        )
+
+        val oldProvider = assertIs<VirtualProviderRuntimeResult.Created>(
+            runtime.getOrCreate(oldRequest)
+        ).provider
+        val refreshedProvider = assertIs<VirtualProviderRuntimeResult.Created>(
+            runtime.getOrCreate(refreshedRequest)
+        ).provider
+
+        assertEquals(2, createdProviders.size)
+        assertNotSame(oldProvider, refreshedProvider)
+        assertSame(oldProvider, runtime.get(oldRequest))
+        assertSame(refreshedProvider, runtime.get(refreshedRequest))
+    }
+
+    private fun request(
+        snapshot: VirtualPackageSnapshot = snapshot(),
+        authority: String = "com.test.minimal.probe"
+    ): VirtualProviderCreateRequest {
         val resolution = VirtualProviderManager("com.multiapp.app", runtimeUidProvider = { RUNTIME_UID })
-            .resolve(snapshot, "com.test.minimal.probe")!!
+            .resolve(snapshot, authority)!!
         val config = VirtualContextConfig(
             instanceId = snapshot.instanceId,
             originPackageName = snapshot.originPackageName,
@@ -118,29 +262,41 @@ class VirtualProviderRuntimeTest {
 
     private fun snapshot(
         instanceId: String = "inst-001",
-        dataDir: String = "/data/inst"
+        dataDir: String = "/data/inst",
+        authorities: List<String> = listOf("com.test.minimal.probe"),
+        sourceSha256: String? = null,
+        versionCode: Long = 42,
+        splitSourceDirs: List<String> = emptyList()
     ) = VirtualPackageSnapshot(
         instanceId = instanceId,
         originPackageName = "com.test.minimal",
         virtualPackageName = "com.multiapp.instance.$instanceId",
         applicationLabel = "MinimalTest",
-        versionCode = 42,
+        versionCode = versionCode,
         versionName = "4.2",
         targetSdk = 36,
         minSdk = 28,
         sourceDir = "/data/apks/minimal.apk",
+        sourceSha256 = sourceSha256,
+        splitSourceDirs = splitSourceDirs,
+        splitPublicSourceDirs = splitSourceDirs,
         dataDir = dataDir,
         providers = listOf(
             ResolvedComponent(
                 name = "com.test.minimal.ProbeProvider",
                 exported = false,
-                authorities = listOf("com.test.minimal.probe")
+                authorities = authorities
             )
         )
     )
 
-    private class FakeProvider : ContentProvider() {
-        override fun onCreate(): Boolean = true
+    private class FakeProvider(
+        private val onCreateCallback: () -> Unit = {}
+    ) : ContentProvider() {
+        override fun onCreate(): Boolean {
+            onCreateCallback()
+            return true
+        }
         override fun query(
             uri: Uri,
             projection: Array<out String>?,

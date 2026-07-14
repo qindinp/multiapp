@@ -472,3 +472,40 @@ Current verdict:
   `B267A1A6478158EBA7432B59DE63B97A53C0AF0DCEF651E841DBAE4750334F41`.
 - This closes a local VPMS semantics batch, not full PMS/AMS/component/native
   equivalence or device compatibility. Commercial status remains `BLOCK`.
+
+## Component Runtime Determinism Comparison - 2026-07-14
+
+The VirtualApp/BlackBox family keeps component metadata and lifecycle records
+under a virtual package/activity/service authority. DroidPlugin likewise maps
+stub components from parsed plugin metadata instead of accepting a plugin's
+requested launch mode as the allocation truth. The common useful rule is that
+the server resolves a component first, then allocates its carrier; aliases and
+caller arguments do not redefine target runtime semantics.
+
+MultiApp decisions implemented in the current tree:
+
+1. Bind Provider creation to instance, package component, and complete
+   base/split generation input. Install one Provider object for all of a
+   component's authorities and keep concurrent construction single-flight.
+2. Respect the manifest process boundary during Application Provider
+   preinstall. Report custom-process work as unsupported until an engine-owned
+   endpoint exists; do not attach it incorrectly in the main guest process.
+3. Keep shared StubService lifetime separate from an individual guest Service
+   lifetime. Only the final inactive guest record may request host-stub stop.
+4. Resolve Activity-alias runtime attributes from the target Activity. Reject
+   unknown and unsupported launch modes before task mutation, proxy-slot
+   reservation, or capability issuance.
+5. Treat guest launch metadata as a claim to validate against the immutable
+   package snapshot, not as an authority. This is stricter than older plugin
+   implementations that normalize unknown values or rely on a fixed stub mode.
+
+Current verdict:
+
+- Model/loader/engine focused suites pass 1,336 tests with no failures or
+  errors. The full gate and `:app:assembleDebug` pass 2,139 tests with 12
+  skipped; the debug APK SHA-256 is
+  `DA4378DF57E889B231004CE18DABA43BE30C41FF3D06B72E74E2BD710CAF62AF`.
+- The local component decisions now follow the central-authority shape, but
+  cross-process Provider/Service endpoints, complete Activity transactions,
+  Broadcast semantics, and device proof remain open. Commercial status stays
+  `BLOCK`.

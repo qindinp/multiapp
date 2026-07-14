@@ -2,6 +2,7 @@ package com.multiapp.core.model.virtual
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
@@ -138,13 +139,35 @@ class ProxyActivityRegistryTest {
 
         val standard = registry.allocate("inst-001", "com.test", "com.test.StandardActivity")
         val singleTop = registry.allocate("inst-001", "com.test", "com.test.TopActivity", launchMode = "singleTop")
-        val singleTask = registry.allocate("inst-001", "com.test", "com.test.TaskActivity", launchMode = "singleInstance")
+        val singleTask = registry.allocate("inst-001", "com.test", "com.test.TaskActivity", launchMode = "singleTask")
 
         assertEquals("ProxyStandard0", standard.proxyActivityClassName)
         assertEquals("ProxySingleTop0", singleTop.proxyActivityClassName)
         assertEquals("singleTop", singleTop.launchMode)
         assertEquals("ProxySingleTask0", singleTask.proxyActivityClassName)
         assertEquals("singleTask", singleTask.launchMode)
+    }
+
+    @Test
+    fun `registry rejects unsupported and unknown launch modes`() {
+        val registry = ProxyActivityRegistry(listOf("ProxyActivity0"))
+
+        listOf("singleInstance", "singleInstancePerTask", "futureLaunchMode").forEach { launchMode ->
+            assertEquals(launchMode, ProxyActivityRegistry.normalizeLaunchMode(launchMode))
+            assertFalse(ProxyActivityRegistry.isSupportedLaunchMode(launchMode))
+            val error = assertFailsWith<UnsupportedVirtualActivityLaunchModeException> {
+                registry.allocate(
+                    instanceId = "inst-001",
+                    originPackageName = "com.test",
+                    guestActivityClassName = "com.test.MainActivity",
+                    launchMode = launchMode
+                )
+            }
+            assertEquals(launchMode, error.launchMode)
+        }
+
+        assertEquals("futureLaunchMode", ProxyActivityRegistry.normalizeLaunchMode(" futureLaunchMode "))
+        assertEquals(emptyList(), registry.listRecords())
     }
 
     @Test

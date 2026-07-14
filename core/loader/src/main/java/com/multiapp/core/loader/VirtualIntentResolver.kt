@@ -4,6 +4,7 @@ import android.content.ComponentName
 import android.content.Intent
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import com.multiapp.core.model.virtual.resolveActivityRuntimeComponent
 
 data class VirtualActivityLaunchRequest(
     val instanceId: String,
@@ -32,12 +33,13 @@ class VirtualIntentResolver(
             VirtualIntentFilterMatcher.matches(intent, component)
         }
         if (matched != null) {
+            val runtimeComponent = snapshot.resolveActivityRuntimeComponent(matched) ?: return null
             return request(
-                guestActivityClassName = matched.effectiveActivityClassName(),
+                guestActivityClassName = runtimeComponent.effectiveActivityClassName(),
                 sourceIntent = intent,
                 reason = if (isLauncherIntent(intent)) "launcher" else "implicit",
-                launchMode = matched.launchMode,
-                taskAffinity = taskAffinityFor(matched)
+                launchMode = runtimeComponent.launchMode,
+                taskAffinity = taskAffinityFor(runtimeComponent)
             )
         }
 
@@ -46,12 +48,13 @@ class VirtualIntentResolver(
                 ?.let(::findActivityByNameOrTarget)
                 ?: snapshot.activities.firstOrNull { it.hasLauncherIntentFilter() }
             if (launcherComponent != null) {
+                val runtimeComponent = snapshot.resolveActivityRuntimeComponent(launcherComponent) ?: return null
                 return request(
-                    guestActivityClassName = launcherComponent.effectiveActivityClassName(),
+                    guestActivityClassName = runtimeComponent.effectiveActivityClassName(),
                     sourceIntent = intent,
                     reason = "launcher",
-                    launchMode = launcherComponent.launchMode,
-                    taskAffinity = taskAffinityFor(launcherComponent)
+                    launchMode = runtimeComponent.launchMode,
+                    taskAffinity = taskAffinityFor(runtimeComponent)
                 )
             }
             val launcher = snapshot.launcherActivityName
@@ -75,12 +78,14 @@ class VirtualIntentResolver(
         if (component == null && snapshot.launcherActivityName != normalizedClassName) {
             return null
         }
+        val runtimeComponent = component?.let(snapshot::resolveActivityRuntimeComponent)
+        if (component != null && runtimeComponent == null) return null
         return request(
-            guestActivityClassName = component?.effectiveActivityClassName() ?: normalizedClassName,
+            guestActivityClassName = runtimeComponent?.effectiveActivityClassName() ?: normalizedClassName,
             sourceIntent = sourceIntent,
             reason = "explicit",
-            launchMode = component?.launchMode,
-            taskAffinity = taskAffinityFor(component)
+            launchMode = runtimeComponent?.launchMode,
+            taskAffinity = taskAffinityFor(runtimeComponent)
         )
     }
 

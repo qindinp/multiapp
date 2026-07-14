@@ -140,6 +140,67 @@ class VirtualSystemServerTest {
     }
 
     @Test
+    fun `activity service rejects unsupported launch modes before proxy allocation`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(
+            runtime(
+                activities = listOf(
+                    ResolvedComponent(
+                        name = "com.test.app.IsolatedActivity",
+                        launchMode = "singleInstance"
+                    )
+                )
+            )
+        )
+
+        val plan = server.activityService.planActivity(
+            runtime.instanceId,
+            VirtualActivityDispatchPlanRequest(
+                activityClassName = "com.test.app.IsolatedActivity",
+                targetPackageName = runtime.originPackageName
+            )
+        )
+
+        assertEquals(EngineResultStatus.UNSUPPORTED, plan.verdict)
+        assertTrue(plan.targets.isEmpty())
+        assertTrue("launch-mode:singleInstance" in plan.unsupportedOperations)
+        assertEquals("activity_launch_mode_unsupported:singleInstance", plan.message)
+    }
+
+    @Test
+    fun `activity service inherits alias target launch mode before planning`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(
+            runtime(
+                activities = listOf(
+                    ResolvedComponent(
+                        name = "com.test.app.LauncherAlias",
+                        exported = true,
+                        targetActivityName = "com.test.app.IsolatedActivity"
+                    ),
+                    ResolvedComponent(
+                        name = "com.test.app.IsolatedActivity",
+                        launchMode = "singleInstance"
+                    )
+                )
+            )
+        )
+
+        val plan = server.activityService.planActivity(
+            runtime.instanceId,
+            VirtualActivityDispatchPlanRequest(
+                activityClassName = "com.test.app.LauncherAlias",
+                targetPackageName = runtime.originPackageName
+            )
+        )
+
+        assertEquals(EngineResultStatus.UNSUPPORTED, plan.verdict)
+        assertTrue(plan.targets.isEmpty())
+        assertTrue("launch-mode:singleInstance" in plan.unsupportedOperations)
+        assertEquals("activity_launch_mode_unsupported:singleInstance", plan.message)
+    }
+
+    @Test
     fun `activity service syncs hot loader records into engine task store`() {
         val taskStore = InMemoryEngineActivityTaskStateStore()
         val recordManager = VirtualActivityRecordManager()
@@ -1875,6 +1936,7 @@ class VirtualSystemServerTest {
     private fun runtime(
         instanceId: String = "instance-1",
         processId: Int? = null,
+        activities: List<ResolvedComponent> = emptyList(),
         services: List<ResolvedComponent> = emptyList(),
         receivers: List<ResolvedComponent> = emptyList(),
         providers: List<ResolvedComponent> = emptyList(),
@@ -1896,6 +1958,7 @@ class VirtualSystemServerTest {
             minSdk = 28,
             sourceDir = "build/tmp/test.apk",
             dataDir = "build/tmp/$instanceId",
+            activities = activities,
             services = services,
             receivers = receivers,
             providers = providers,

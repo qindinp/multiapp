@@ -39,6 +39,19 @@ class ManifestVirtualPackageResolverTest {
     }
 
     @Test
+    fun `normalizeProcessName expands private process names`() {
+        assertEquals(
+            "com.example.app:provider",
+            ManifestVirtualPackageResolver.normalizeProcessName("com.example.app", ":provider")
+        )
+        assertEquals(
+            "com.shared.provider",
+            ManifestVirtualPackageResolver.normalizeProcessName("com.example.app", "com.shared.provider")
+        )
+        assertNull(ManifestVirtualPackageResolver.normalizeProcessName("com.example.app", null))
+    }
+
+    @Test
     fun `resolver preserves component filters and Provider permissions`(@TempDir tempDir: File) {
         val apk = File(tempDir, "guest.apk").apply { writeText("stub") }
         val context = mockk<Context>(relaxed = true)
@@ -83,6 +96,7 @@ class ManifestVirtualPackageResolverTest {
                 ManifestParser.ProviderInfo(
                     name = ".DataProvider",
                     authorities = "com.example.data",
+                    processName = ":provider",
                     exported = true,
                     permission = "com.example.ACCESS_DATA",
                     readPermission = "com.example.READ_DATA",
@@ -122,6 +136,7 @@ class ManifestVirtualPackageResolverTest {
         assertEquals(listOf("com.example.BOOT"), receiverFilter.actions)
         val provider = resolved.providers.single()
         assertEquals("com.example.app.DataProvider", provider.name)
+        assertEquals("com.example.app:provider", provider.processName)
         assertEquals("com.example.ACCESS_DATA", provider.permission)
         assertEquals("com.example.READ_DATA", provider.readPermission)
         assertEquals("com.example.WRITE_DATA", provider.writePermission)

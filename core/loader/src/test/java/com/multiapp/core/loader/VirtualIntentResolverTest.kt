@@ -60,6 +60,8 @@ class VirtualIntentResolverTest {
 
         assertEquals("com.test.minimal.MainActivity", request?.guestActivityClassName)
         assertEquals("launcher", request?.reason)
+        assertEquals("singleTask", request?.launchMode)
+        assertEquals("com.test.minimal.target:inst-001", request?.taskAffinity)
     }
 
     @Test
@@ -93,6 +95,8 @@ class VirtualIntentResolverTest {
 
         assertEquals("com.test.minimal.MainActivity", request?.guestActivityClassName)
         assertEquals("explicit", request?.reason)
+        assertEquals("singleTask", request?.launchMode)
+        assertEquals("com.test.minimal.target:inst-001", request?.taskAffinity)
     }
 
     @Test
@@ -226,7 +230,12 @@ class VirtualIntentResolverTest {
                 ),
                 targetActivityName = "com.test.minimal.MainActivity"
             ),
-            ResolvedComponent("com.test.minimal.MainActivity", exported = false)
+            ResolvedComponent(
+                "com.test.minimal.MainActivity",
+                exported = false,
+                launchMode = "singleTask",
+                taskAffinity = "com.test.minimal.target"
+            )
         )
     )
 }

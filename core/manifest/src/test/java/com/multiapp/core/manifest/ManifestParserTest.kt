@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.os.Bundle
 import com.multiapp.core.model.virtual.VirtualMetaDataValueType
 import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
@@ -160,6 +161,15 @@ class ManifestParserTest {
 
                 <activity android:name=".IsolatedActivity"
                     android:process=":isolated"
+                    android:exported="false"/>
+
+                <provider android:name=".RemoteProvider"
+                    android:authorities="com.example.process.remote"
+                    android:process=":provider"
+                    android:exported="false"/>
+
+                <provider android:name=".MainProvider"
+                    android:authorities="com.example.process.main"
                     android:exported="false"/>
             </application>
         </manifest>
@@ -537,6 +547,38 @@ class ManifestParserTest {
             val result = parser.parseFromXml(processManifestXml())
             val bgService = result.services.find { it.process == "com.example.process:bg" }
             assertNotNull(bgService, "应保留全限定进程名")
+        }
+
+        @Test
+        fun `provider relative process is normalized to package process name`() {
+            val result = parser.parseFromXml(processManifestXml())
+
+            assertEquals(
+                "com.example.process:provider",
+                result.providers.single { it.name == ".RemoteProvider" }.processName
+            )
+            assertNull(result.providers.single { it.name == ".MainProvider" }.processName)
+        }
+
+        @Test
+        fun `PackageInfo fallback preserves provider process name`() {
+            val packageInfo = PackageInfo().apply {
+                packageName = "com.example.process"
+                providers = arrayOf(
+                    android.content.pm.ProviderInfo().apply {
+                        name = "com.example.process.FrameworkProvider"
+                        authority = "com.example.process.framework"
+                        processName = "com.example.process:framework"
+                    }
+                )
+            }
+
+            val result = parser.parseFromPackageInfo(
+                packageInfo,
+                mockk<PackageManager>(relaxed = true)
+            )
+
+            assertEquals("com.example.process:framework", result.providers.single().processName)
         }
     }
 }
