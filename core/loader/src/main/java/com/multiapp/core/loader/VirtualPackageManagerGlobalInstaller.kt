@@ -20,8 +20,13 @@ class VirtualPackageManagerGlobalInstaller(
         snapshot: VirtualPackageSnapshot,
         runtimeUid: Int
     ): VirtualPackageManagerGlobalInstallResult {
+        require(runtimeUid > 0) { "runtimeUid must be a positive Android application UID" }
         val readResult = bridge.readCurrentPackageManager()
-        VirtualPackageManagerServiceRegistry.register(snapshot, hostContext?.packageManager)
+        VirtualPackageManagerServiceRegistry.register(
+            snapshot = snapshot,
+            runtimeUid = runtimeUid,
+            packageManager = hostContext?.packageManager
+        )
         val original = readResult.packageManager
         if (original == null) {
             return baseResult(
@@ -172,7 +177,8 @@ data class VirtualPackageManagerGlobalInstallResult(
             "getPackageInfo,getPackageInfoVersioned,getApplicationInfo,getActivityInfo,getServiceInfo," +
                 "getReceiverInfo,getProviderInfo,resolveContentProvider,queryIntentActivities,resolveIntent," +
                 "resolveActivity,queryIntentServices,resolveService,queryIntentReceivers," +
-                "queryIntentContentProviders,getComponentEnabledSetting,setComponentEnabledSetting," +
+                "queryIntentContentProviders,getApplicationEnabledSetting,setApplicationEnabledSetting," +
+                "getComponentEnabledSetting,setComponentEnabledSetting," +
                 "getInstalledPackages,getInstalledApplications,checkPermission," +
                 "getPackagesHoldingPermissions,getPackageUid,getPackagesForUid,getNameForUid," +
                 "queryContentProviders,isInstantApp"

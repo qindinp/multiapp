@@ -2,6 +2,7 @@ package com.multiapp.core.loader
 
 import android.content.pm.ProviderInfo
 import android.net.Uri
+import android.os.Process
 import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.model.engine.ProviderRouteContract
 import com.multiapp.core.model.virtual.ResolvedComponent
@@ -18,7 +19,8 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 class VirtualProviderManager(
     private val hostPackageName: String,
     private val stubAuthorityPrefix: String = "$hostPackageName.multiapp.provider.stub",
-    private val processSlot: String? = null
+    private val processSlot: String? = null,
+    private val runtimeUidProvider: () -> Int = { RuntimeUidCompat.resolve() }
 ) {
     fun resolve(snapshot: VirtualPackageSnapshot, authority: String): VirtualProviderResolution? {
         val provider = snapshot.providers.firstOrNull { authority in it.authorities } ?: return null
@@ -96,20 +98,37 @@ class VirtualProviderManager(
         snapshot: VirtualPackageSnapshot,
         provider: ResolvedComponent,
         authority: String
-    ): ProviderInfo = VirtualPackageInfoFactory.providerInfo(snapshot, provider)?.apply {
-        this.authority = authority
+    ): ProviderInfo {
+        val runtimeUid = runtimeUidProvider()
+        require(runtimeUid > 0) { "runtimeUid must be a positive Android application UID" }
+        return VirtualPackageInfoFactory.providerInfo(
+            snapshot,
+            provider,
+            runtimeUid,
+            VirtualPackageQueryFlags.INTERNAL_FULL
+        )?.apply {
         this.packageName = snapshot.originPackageName
         this.name = provider.name
-        this.applicationInfo = VirtualPackageInfoFactory.applicationInfo(snapshot)
+        this.applicationInfo = VirtualPackageInfoFactory.applicationInfo(
+            snapshot,
+            runtimeUid,
+            VirtualPackageQueryFlags.INTERNAL_FULL
+        )
     } ?: ProviderInfo().apply {
         this.packageName = snapshot.originPackageName
         this.name = provider.name
-        this.authority = authority
+        this.authority = provider.authorities.filter { it.isNotBlank() }.joinToString(";")
+            .ifBlank { authority }
         this.exported = provider.exported
         this.readPermission = provider.readPermission ?: provider.permission
         this.writePermission = provider.writePermission ?: provider.permission
         this.grantUriPermissions = provider.grantUriPermissions || provider.uriPermissionPatterns.isNotEmpty()
-        this.applicationInfo = VirtualPackageInfoFactory.applicationInfo(snapshot)
+        this.applicationInfo = VirtualPackageInfoFactory.applicationInfo(
+            snapshot,
+            runtimeUid,
+            VirtualPackageQueryFlags.INTERNAL_FULL
+        )
+    }
     }
 }
 

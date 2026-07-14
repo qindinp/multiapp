@@ -47,6 +47,19 @@ import kotlin.test.assertTrue
 class EngineContainerDispatchersTest {
 
     @Test
+    fun `engine intent authority preserves ports and IPv6 hosts`() {
+        val authority = mockk<Uri>()
+        every { authority.host } returns "api.example.com"
+        every { authority.port } returns 8443
+        val ipv6Authority = mockk<Uri>()
+        every { ipv6Authority.host } returns "2001:db8::1"
+        every { ipv6Authority.port } returns 9443
+
+        assertEquals("api.example.com:8443", authority.toEngineIntentAuthority())
+        assertEquals("[2001:db8::1]:9443", ipv6Authority.toEngineIntentAuthority())
+    }
+
+    @Test
     fun `provider dispatch request rejects blank host package`() {
         assertFailsWith<IllegalArgumentException> {
             EngineProviderDispatchRequest(

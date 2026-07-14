@@ -4,7 +4,10 @@ import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentAuthority
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
+import com.multiapp.core.model.virtual.ResolvedIntentPathPattern
+import com.multiapp.core.model.virtual.ResolvedIntentPathPatternType
 import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import com.multiapp.core.model.virtual.VirtualMetaDataValueType
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
@@ -64,7 +67,9 @@ data class EngineRuntimeStateRecord(
     val permissions: List<String>,
     val originCertSha256: String?,
     val signerSha256Digests: List<String> = emptyList(),
-    val hasMultipleSigners: Boolean = false
+    val hasMultipleSigners: Boolean = false,
+    val sourceSha256: String? = null,
+    val splitSha256s: List<String> = emptyList()
 ) {
     fun toRuntime(): VirtualInstanceRuntime {
         val snapshot = VirtualPackageSnapshot(
@@ -77,8 +82,10 @@ data class EngineRuntimeStateRecord(
             targetSdk = targetSdk,
             minSdk = minSdk,
             sourceDir = sourceDir,
+            sourceSha256 = sourceSha256,
             publicSourceDir = publicSourceDir,
             splitSourceDirs = splitSourceDirs,
+            splitSha256s = splitSha256s,
             splitPublicSourceDirs = splitPublicSourceDirs,
             splitNames = splitNames,
             isolatedSplits = isolatedSplits,
@@ -164,7 +171,9 @@ data class EngineRuntimeStateRecord(
                 permissions = snapshot.permissions,
                 originCertSha256 = snapshot.originCertSha256,
                 signerSha256Digests = snapshot.signerSha256Digests,
-                hasMultipleSigners = snapshot.hasMultipleSigners
+                hasMultipleSigners = snapshot.hasMultipleSigners,
+                sourceSha256 = snapshot.sourceSha256,
+                splitSha256s = snapshot.splitSha256s
             )
         }
     }
@@ -354,8 +363,10 @@ class FileBackedEngineRuntimeStateStore(
             properties.setProperty(prefix + TARGET_SDK, record.targetSdk.toString())
             properties.setProperty(prefix + MIN_SDK, record.minSdk.toString())
             properties.setProperty(prefix + SOURCE_DIR, record.sourceDir)
+            record.sourceSha256?.let { properties.setProperty(prefix + SOURCE_SHA256, it) }
             properties.setProperty(prefix + PUBLIC_SOURCE_DIR, record.publicSourceDir)
             properties.setProperty(prefix + SPLIT_SOURCE_DIRS, record.splitSourceDirs.encodeStringList())
+            properties.setProperty(prefix + SPLIT_SHA256S, record.splitSha256s.encodeStringList())
             properties.setProperty(prefix + SPLIT_PUBLIC_SOURCE_DIRS, record.splitPublicSourceDirs.encodeStringList())
             properties.setProperty(prefix + SPLIT_NAMES, record.splitNames.encodeStringList())
             properties.setProperty(prefix + ISOLATED_SPLITS, record.isolatedSplits.toString())
@@ -478,8 +489,10 @@ class FileBackedEngineRuntimeStateStore(
                 targetSdk = properties.required(prefix + TARGET_SDK).toInt(),
                 minSdk = properties.required(prefix + MIN_SDK).toInt(),
                 sourceDir = properties.required(prefix + SOURCE_DIR),
+                sourceSha256 = properties.getProperty(prefix + SOURCE_SHA256),
                 publicSourceDir = properties.required(prefix + PUBLIC_SOURCE_DIR),
                 splitSourceDirs = properties.getProperty(prefix + SPLIT_SOURCE_DIRS).decodeStringList(),
+                splitSha256s = properties.getProperty(prefix + SPLIT_SHA256S).decodeStringList(),
                 splitPublicSourceDirs = properties.getProperty(prefix + SPLIT_PUBLIC_SOURCE_DIRS).decodeStringList(),
                 splitNames = properties.getProperty(prefix + SPLIT_NAMES).decodeStringList(),
                 isolatedSplits = properties.getProperty(prefix + ISOLATED_SPLITS).toBoolean(),
@@ -693,6 +706,8 @@ class FileBackedEngineRuntimeStateStore(
             setProperty(itemPrefix + FILTER_DATA_MIME_TYPES, filter.dataMimeTypes.encodeStringList())
             setProperty(itemPrefix + FILTER_DATA_AUTHORITIES, filter.dataAuthorities.encodeStringList())
             setProperty(itemPrefix + FILTER_DATA_PATHS, filter.dataPaths.encodeStringList())
+            storeIntentAuthorities(itemPrefix + FILTER_AUTHORITY_ENTRIES, filter.authorityEntries)
+            storeIntentPathPatterns(itemPrefix + FILTER_PATH_PATTERNS, filter.pathPatterns)
             setProperty(itemPrefix + FILTER_PRIORITY, filter.priority.toString())
         }
     }
@@ -708,8 +723,73 @@ class FileBackedEngineRuntimeStateStore(
                 dataMimeTypes = getProperty(itemPrefix + FILTER_DATA_MIME_TYPES).decodeStringList(),
                 dataAuthorities = getProperty(itemPrefix + FILTER_DATA_AUTHORITIES).decodeStringList(),
                 dataPaths = getProperty(itemPrefix + FILTER_DATA_PATHS).decodeStringList(),
-                priority = getProperty(itemPrefix + FILTER_PRIORITY).orEmpty().toIntOrNull() ?: 0
+                priority = getProperty(itemPrefix + FILTER_PRIORITY).orEmpty().toIntOrNull() ?: 0,
+                authorityEntries = decodeIntentAuthorities(itemPrefix + FILTER_AUTHORITY_ENTRIES),
+                pathPatterns = decodeIntentPathPatterns(itemPrefix + FILTER_PATH_PATTERNS)
             )
+        }
+    }
+
+    private fun Properties.storeIntentAuthorities(
+        prefix: String,
+        authorities: List<ResolvedIntentAuthority>
+    ) {
+        setProperty(prefix + COUNT, authorities.size.toString())
+        authorities.forEachIndexed { index, authority ->
+            val itemPrefix = "$prefix.$index."
+            setProperty(itemPrefix + FILTER_AUTHORITY_HOST, authority.host)
+            setProperty(
+                itemPrefix + FILTER_AUTHORITY_PORT,
+                (authority.port ?: NO_AUTHORITY_PORT).toString()
+            )
+        }
+    }
+
+    private fun Properties.decodeIntentAuthorities(prefix: String): List<ResolvedIntentAuthority> {
+        val encodedCount = getProperty(prefix + COUNT) ?: return emptyList()
+        val count = encodedCount.toIntOrNull()
+            ?.takeIf { it in 0..MAX_PERSISTED_FILTER_VALUES }
+            ?: error("Invalid persisted intent-filter authority count")
+        return (0 until count).map { index ->
+            val itemPrefix = "$prefix.$index."
+            val host = required(itemPrefix + FILTER_AUTHORITY_HOST)
+            val encodedPort = getProperty(itemPrefix + FILTER_AUTHORITY_PORT)
+                ?.toIntOrNull()
+                ?.takeIf { it == NO_AUTHORITY_PORT || it >= 0 }
+                ?: error("Invalid persisted intent-filter authority port")
+            ResolvedIntentAuthority(
+                host = host,
+                port = encodedPort.takeUnless { it == NO_AUTHORITY_PORT }
+            )
+        }
+    }
+
+    private fun Properties.storeIntentPathPatterns(
+        prefix: String,
+        patterns: List<ResolvedIntentPathPattern>
+    ) {
+        setProperty(prefix + COUNT, patterns.size.toString())
+        patterns.forEachIndexed { index, pattern ->
+            val itemPrefix = "$prefix.$index."
+            setProperty(itemPrefix + FILTER_PATH_PATTERN_VALUE, pattern.path)
+            setProperty(itemPrefix + FILTER_PATH_PATTERN_TYPE, pattern.type.name)
+        }
+    }
+
+    private fun Properties.decodeIntentPathPatterns(prefix: String): List<ResolvedIntentPathPattern> {
+        val encodedCount = getProperty(prefix + COUNT) ?: return emptyList()
+        val count = encodedCount.toIntOrNull()
+            ?.takeIf { it in 0..MAX_PERSISTED_FILTER_VALUES }
+            ?: error("Invalid persisted intent-filter path count")
+        return (0 until count).map { index ->
+            val itemPrefix = "$prefix.$index."
+            val path = getProperty(itemPrefix + FILTER_PATH_PATTERN_VALUE)
+                ?.takeIf { it.isNotEmpty() }
+                ?: error("Invalid persisted intent-filter path")
+            val type = getProperty(itemPrefix + FILTER_PATH_PATTERN_TYPE)
+                ?.let { encoded -> enumValueOf<ResolvedIntentPathPatternType>(encoded) }
+                ?: error("Missing persisted intent-filter path type")
+            ResolvedIntentPathPattern(path, type)
         }
     }
 
@@ -737,8 +817,10 @@ class FileBackedEngineRuntimeStateStore(
         private const val TARGET_SDK = "targetSdk"
         private const val MIN_SDK = "minSdk"
         private const val SOURCE_DIR = "sourceDir"
+        private const val SOURCE_SHA256 = "sourceSha256"
         private const val PUBLIC_SOURCE_DIR = "publicSourceDir"
         private const val SPLIT_SOURCE_DIRS = "splitSourceDirs"
+        private const val SPLIT_SHA256S = "splitSha256s"
         private const val SPLIT_PUBLIC_SOURCE_DIRS = "splitPublicSourceDirs"
         private const val SPLIT_NAMES = "splitNames"
         private const val ISOLATED_SPLITS = "isolatedSplits"
@@ -789,12 +871,20 @@ class FileBackedEngineRuntimeStateStore(
         private const val FILTER_DATA_MIME_TYPES = "dataMimeTypes"
         private const val FILTER_DATA_AUTHORITIES = "dataAuthorities"
         private const val FILTER_DATA_PATHS = "dataPaths"
+        private const val FILTER_AUTHORITY_ENTRIES = "authorityEntries"
+        private const val FILTER_AUTHORITY_HOST = "host"
+        private const val FILTER_AUTHORITY_PORT = "port"
+        private const val FILTER_PATH_PATTERNS = "pathPatterns"
+        private const val FILTER_PATH_PATTERN_VALUE = "value"
+        private const val FILTER_PATH_PATTERN_TYPE = "type"
         private const val FILTER_PRIORITY = "priority"
         private const val PATH_PATTERN_PATH = "path"
         private const val PATH_PATTERN_TYPE = "type"
         private const val PATH_READ_PERMISSION = "readPermission"
         private const val PATH_WRITE_PERMISSION = "writePermission"
         private const val LIST_SEPARATOR = ","
+        private const val NO_AUTHORITY_PORT = -1
+        private const val MAX_PERSISTED_FILTER_VALUES = 256
     }
 }
 

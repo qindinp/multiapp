@@ -55,7 +55,11 @@ class VirtualPackageManagerProxyStage(
         },
     private val uriGrantsServiceManagerProxyInstaller: UriGrantsServiceManagerProxyInstallAction =
         UriGrantsServiceManagerProxyInstallAction(VirtualUriGrantsServiceProxy::install),
-    private val runtimeUidProvider: () -> Int = { runCatching { Process.myUid() }.getOrDefault(0) },
+    private val runtimeUidProvider: () -> Int = {
+        RuntimeUidCompat.resolve(
+            runCatching { hostContext?.applicationInfo?.uid }.getOrNull()
+        )
+    },
     private val clock: () -> Long = System::currentTimeMillis
 ) {
     fun execute(input: BootstrapStageInput): BootstrapStageOutput {

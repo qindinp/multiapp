@@ -331,6 +331,55 @@ class EngineVirtualizationEndpointContractTest {
     }
 
     @Test
+    fun `package enabled-state endpoint enforces strict fields and runtime identity`() {
+        val identity = EngineProcessClientIdentity(
+            instanceId = INSTANCE_ID,
+            runtimeEpoch = 9L,
+            engineSessionId = "engine-package-state",
+            processSlot = "com.multiapp.app:v2",
+            processId = CALLING_PID
+        )
+        val packageService = mockk<VirtualPackageService>()
+        every { packageService.queryApplicationEnabledState(INSTANCE_ID) } returns
+            VirtualPackageEnabledStateResult(
+                instanceId = INSTANCE_ID,
+                target = EnginePackageEnabledStateTarget.APPLICATION,
+                enabledState = EnginePackageEnabledStates.DISABLED_USER,
+                verdict = EngineResultStatus.PASS,
+                found = true,
+                message = "application_enabled_state_queried"
+            )
+        val endpoint = endpoint(
+            virtualizationEngine = null,
+            packageService = packageService,
+            processIdentity = identity
+        )
+
+        val valid = endpoint.queryApplicationEnabledState(
+            INSTANCE_ID,
+            identity.toPackageEnabledStateRequestBundle(
+                target = EnginePackageEnabledStateTarget.APPLICATION,
+                bundleFactory = bundles::create
+            )
+        ).toPackageEnabledStateResultOrNull()
+        val malformedRequest = identity.toPackageEnabledStateRequestBundle(
+            target = EnginePackageEnabledStateTarget.APPLICATION,
+            bundleFactory = bundles::create
+        ).apply {
+            putString("unexpected", "value")
+        }
+        val malformed = endpoint.queryApplicationEnabledState(INSTANCE_ID, malformedRequest)
+
+        assertEquals(EnginePackageEnabledStates.DISABLED_USER, valid?.enabledState)
+        assertEquals(identity, valid?.authorityIdentity)
+        assertEquals(
+            "invalid_package_enabled_state_query_application_request",
+            malformed.getString(EngineRuntimeIpcContract.KEY_MESSAGE)
+        )
+        verify(exactly = 1) { packageService.queryApplicationEnabledState(INSTANCE_ID) }
+    }
+
+    @Test
     fun `query and export reject a caller outside the host uid`() {
         val engine = mockk<VirtualizationEngine>(relaxed = true)
         val endpoint = endpoint(engine, callerUid = HOST_UID + 1)
@@ -441,7 +490,9 @@ class EngineVirtualizationEndpointContractTest {
     private fun endpoint(
         virtualizationEngine: VirtualizationEngine?,
         callerUid: Int = HOST_UID,
-        activityService: VirtualActivityService? = null
+        activityService: VirtualActivityService? = null,
+        packageService: VirtualPackageService? = null,
+        processIdentity: EngineProcessClientIdentity? = null
     ): EngineRuntimeBinderEndpoint {
         // Local JVM tests have no Android Binder implementation. Allocate the concrete
         // endpoint without running Stub.attachInterface; these contract methods only
@@ -464,12 +515,13 @@ class EngineVirtualizationEndpointContractTest {
             mockk<EngineProcessControlPlane> {
                 every { authorize(any(), CALLING_PID) } returns EngineProcessAuthorityDecision(
                     allowed = true,
-                    identity = null,
+                    identity = processIdentity,
                     reason = "test_runtime_authorized"
                 )
             }
         )
         activityService?.let { setEndpointField(endpoint, "activityService", it) }
+        packageService?.let { setEndpointField(endpoint, "packageService", it) }
         return endpoint
     }
 
@@ -621,6 +673,9 @@ class EngineVirtualizationEndpointContractTest {
             every { anyConstructed<Bundle>().containsKey(any()) } answers {
                 valuesFor(self as Bundle).containsKey(firstArg())
             }
+            every { anyConstructed<Bundle>().get(any()) } answers {
+                valuesFor(self as Bundle)[firstArg()]
+            }
             every { anyConstructed<Bundle>().keySet() } answers {
                 valuesFor(self as Bundle).keys
             }
@@ -668,6 +723,7 @@ class EngineVirtualizationEndpointContractTest {
             every { bundle.containsKey(any()) } answers {
                 valuesFor(bundle).containsKey(firstArg())
             }
+            every { bundle.get(any()) } answers { valuesFor(bundle)[firstArg()] }
             every { bundle.keySet() } answers { valuesFor(bundle).keys }
             return bundle
         }

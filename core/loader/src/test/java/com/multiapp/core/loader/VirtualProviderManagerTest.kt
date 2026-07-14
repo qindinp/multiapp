@@ -24,7 +24,7 @@ class VirtualProviderManagerTest {
 
     @Test
     fun `resolve maps guest authority to stable proxy authority`() {
-        val manager = VirtualProviderManager("com.multiapp.app")
+        val manager = VirtualProviderManager("com.multiapp.app", runtimeUidProvider = { RUNTIME_UID })
 
         val resolution = manager.resolve(snapshot(), "com.test.minimal.probe")
 
@@ -50,7 +50,7 @@ class VirtualProviderManagerTest {
 
     @Test
     fun `resolve produces deterministic proxy authority for same snapshot and authority`() {
-        val manager = VirtualProviderManager("com.multiapp.app")
+        val manager = VirtualProviderManager("com.multiapp.app", runtimeUidProvider = { RUNTIME_UID })
 
         val first = manager.resolve(snapshot(), "com.test.minimal.probe")
         val second = manager.resolve(snapshot(), "com.test.minimal.probe")
@@ -95,7 +95,10 @@ class VirtualProviderManagerTest {
         val snapshot = snapshot(instanceId = "provider-manager-slot-inst")
         ProviderRouteTokenRegistry.rememberProcessSlot(snapshot.instanceId, "com.multiapp.app:v3")
 
-        val resolution = VirtualProviderManager("com.multiapp.app").resolve(snapshot, "com.test.minimal.probe")
+        val resolution = VirtualProviderManager(
+            "com.multiapp.app",
+            runtimeUidProvider = { RUNTIME_UID }
+        ).resolve(snapshot, "com.test.minimal.probe")
 
         assertNotNull(resolution)
         assertEquals("com.multiapp.app.multiapp.provider.stub.v3", resolution.proxyAuthority)
@@ -103,7 +106,7 @@ class VirtualProviderManagerTest {
 
     @Test
     fun `unknown authority does not resolve or rewrite authority`() {
-        val manager = VirtualProviderManager("com.multiapp.app")
+        val manager = VirtualProviderManager("com.multiapp.app", runtimeUidProvider = { RUNTIME_UID })
 
         assertNull(manager.resolve(snapshot(), "missing.authority"))
         assertIs<VirtualProviderOpenResult.NotFound>(manager.openProvider(snapshot(), "missing.authority"))
@@ -112,7 +115,7 @@ class VirtualProviderManagerTest {
 
     @Test
     fun `provider acquisition evidence records resolved and not found paths`() {
-        val manager = VirtualProviderManager("com.multiapp.app")
+        val manager = VirtualProviderManager("com.multiapp.app", runtimeUidProvider = { RUNTIME_UID })
 
         val resolved = VirtualProviderEvidence.acquisition(
             manager.openProvider(snapshot(), "com.test.minimal.probe")
@@ -185,4 +188,8 @@ class VirtualProviderManagerTest {
             )
         )
     )
+
+    private companion object {
+        const val RUNTIME_UID = 42420
+    }
 }

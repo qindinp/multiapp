@@ -44,8 +44,59 @@ data class ResolvedIntentFilter(
     val dataMimeTypes: List<String> = emptyList(),
     val dataAuthorities: List<String> = emptyList(),
     val dataPaths: List<String> = emptyList(),
-    val priority: Int = 0
-)
+    val priority: Int = 0,
+    val authorityEntries: List<ResolvedIntentAuthority> = emptyList(),
+    val pathPatterns: List<ResolvedIntentPathPattern> = emptyList()
+) {
+    /** Structured authorities, falling back to legacy host-only values. */
+    val resolvedAuthorities: List<ResolvedIntentAuthority>
+        get() = authorityEntries.ifEmpty {
+            dataAuthorities.map { host -> ResolvedIntentAuthority(host = host) }
+        }
+
+    /** Structured paths, treating legacy values as literal paths. */
+    val resolvedPathPatterns: List<ResolvedIntentPathPattern>
+        get() = pathPatterns.ifEmpty {
+            dataPaths.map { path ->
+                ResolvedIntentPathPattern(path, ResolvedIntentPathPatternType.LITERAL)
+            }
+        }
+
+    /** Host-only compatibility view for consumers that still use dataAuthorities. */
+    val legacyDataAuthorities: List<String>
+        get() = dataAuthorities.ifEmpty { authorityEntries.map { entry -> entry.host } }
+
+    /** Pattern-text compatibility view for consumers that still use dataPaths. */
+    val legacyDataPaths: List<String>
+        get() = dataPaths.ifEmpty { pathPatterns.map { pattern -> pattern.path } }
+}
+
+data class ResolvedIntentAuthority(
+    val host: String,
+    val port: Int? = null
+) {
+    init {
+        require(host.isNotBlank()) { "intent-filter authority host must not be blank" }
+        require(port == null || port >= 0) { "intent-filter authority port must not be negative" }
+    }
+}
+
+enum class ResolvedIntentPathPatternType {
+    LITERAL,
+    PREFIX,
+    SIMPLE_GLOB,
+    ADVANCED_GLOB,
+    SUFFIX
+}
+
+data class ResolvedIntentPathPattern(
+    val path: String,
+    val type: ResolvedIntentPathPatternType
+) {
+    init {
+        require(path.isNotEmpty()) { "intent-filter path pattern must not be empty" }
+    }
+}
 
 /**
  * A single component (activity, service, receiver, provider) declared in the manifest.

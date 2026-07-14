@@ -384,7 +384,7 @@ class DefaultEngineServiceDispatcher private constructor(
             categories = runCatching { sourceIntent.categories.orEmpty() }.getOrDefault(emptySet()),
             dataScheme = data?.scheme?.takeIf { it.isNotBlank() },
             dataMimeType = runCatching { sourceIntent.type }.getOrNull()?.takeIf { it.isNotBlank() },
-            dataAuthority = data?.host?.takeIf { it.isNotBlank() },
+            dataAuthority = data.toEngineIntentAuthority(),
             dataPath = data?.path?.takeIf { it.isNotBlank() }
         )
     }

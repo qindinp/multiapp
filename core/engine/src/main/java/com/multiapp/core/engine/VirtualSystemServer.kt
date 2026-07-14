@@ -10,10 +10,12 @@ import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.loader.VirtualActivityRecordManager
 import com.multiapp.core.model.virtual.InMemoryProxyActivitySlotAssignmentStore
+import com.multiapp.core.model.virtual.IntentFilterMatchRequest
 import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
+import com.multiapp.core.model.virtual.ResolvedIntentFilterMatcher
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
@@ -72,6 +74,26 @@ interface VirtualPackageService : VirtualEngineSubsystemService {
         dataAuthority: String? = null,
         dataPath: String? = null
     ): List<ResolvedComponent>
+
+    fun queryApplicationEnabledState(instanceId: String): VirtualPackageEnabledStateResult
+
+    fun setApplicationEnabledState(
+        instanceId: String,
+        newState: Int
+    ): VirtualPackageEnabledStateResult
+
+    fun queryComponentEnabledState(
+        instanceId: String,
+        type: VirtualPackageComponentType,
+        className: String
+    ): VirtualPackageEnabledStateResult
+
+    fun setComponentEnabledState(
+        instanceId: String,
+        type: VirtualPackageComponentType,
+        className: String,
+        newState: Int
+    ): VirtualPackageEnabledStateResult
 }
 
 interface VirtualRuntimeBoundSubsystemService : VirtualEngineSubsystemService {
@@ -260,12 +282,13 @@ data class VirtualInstanceCleanupResult(
     val broadcastRecordCount: Int,
     val uriGrantCount: Int,
     val permissionGrantCount: Int,
-    val appOpCount: Int
+    val appOpCount: Int,
+    val packageEnabledStateCount: Int
 ) {
     val totalRemoved: Int
         get() = activityRecordCount + activityTaskRecordCount + serviceRecordCount +
             providerRecordCount + broadcastRecordCount + uriGrantCount +
-            permissionGrantCount + appOpCount
+            permissionGrantCount + appOpCount + packageEnabledStateCount
 }
 
 interface VirtualInstanceLifecycleService {
@@ -984,9 +1007,12 @@ class RegistryBackedVirtualRuntimeService(
 }
 
 class RegistryBackedVirtualPackageService(
-    private val runtimeService: VirtualRuntimeService
+    private val runtimeService: VirtualRuntimeService,
+    private val enabledStateStore: EnginePackageEnabledStateStore =
+        InMemoryEnginePackageEnabledStateStore()
 ) : VirtualPackageService {
     override val subsystem: EngineSubsystem = EngineSubsystem.PACKAGE
+    private val operationLocks = Array(PACKAGE_STATE_LOCK_COUNT) { Any() }
 
     override fun queryPackageSnapshot(instanceId: String): VirtualPackageSnapshot? =
         runtimeService.get(instanceId)?.packageSnapshot
@@ -1002,11 +1028,18 @@ class RegistryBackedVirtualPackageService(
         type: VirtualPackageComponentType,
         className: String
     ): ResolvedComponent? {
-        if (className.isBlank()) return null
-        return queryPackageSnapshot(instanceId)
-            ?.components(type)
+        val snapshot = queryPackageSnapshot(instanceId) ?: return null
+        val normalizedClassName = normalizeVirtualComponentClassName(
+            snapshot.originPackageName,
+            className
+        ) ?: return null
+        return snapshot.components(type)
             ?.firstOrNull { component ->
-                component.name == className || component.targetActivityName == className
+                normalizeVirtualComponentClassName(snapshot.originPackageName, component.name) ==
+                    normalizedClassName ||
+                    component.targetActivityName?.let { target ->
+                        normalizeVirtualComponentClassName(snapshot.originPackageName, target)
+                    } == normalizedClassName
             }
     }
 
@@ -1033,7 +1066,7 @@ class RegistryBackedVirtualPackageService(
             ?.mapNotNull { component ->
                 val matchingPriority = component.resolvedIntentFilters
                     .filter { filter ->
-                        filter.matches(
+                        filter.matchesEngineQuery(
                             action = action,
                             categories = categories,
                             dataScheme = dataScheme,
@@ -1050,6 +1083,252 @@ class RegistryBackedVirtualPackageService(
             ?.map { (component, _) -> component }
             .orEmpty()
     }
+
+    override fun queryApplicationEnabledState(
+        instanceId: String
+    ): VirtualPackageEnabledStateResult = synchronized(operationLock(instanceId)) {
+        val context = packageStateContext(instanceId)
+            ?: return@synchronized failedPackageStateResult(
+                instanceId = instanceId,
+                target = EnginePackageEnabledStateTarget.APPLICATION,
+                message = "runtime_or_package_generation_not_found"
+            )
+        val state = enabledStateStore.read(context.generation)?.applicationState
+            ?: EnginePackageEnabledStates.DEFAULT
+        if (!context.isStillCurrent()) {
+            return@synchronized failedPackageStateResult(
+                instanceId = instanceId,
+                target = EnginePackageEnabledStateTarget.APPLICATION,
+                message = "package_generation_changed_during_query"
+            )
+        }
+        successfulPackageStateResult(
+            context = context,
+            target = EnginePackageEnabledStateTarget.APPLICATION,
+            enabledState = state,
+            changed = false,
+            message = "application_enabled_state_queried"
+        )
+    }
+
+    override fun setApplicationEnabledState(
+        instanceId: String,
+        newState: Int
+    ): VirtualPackageEnabledStateResult = synchronized(operationLock(instanceId)) {
+        val context = packageStateContext(instanceId)
+            ?: return@synchronized failedPackageStateResult(
+                instanceId = instanceId,
+                target = EnginePackageEnabledStateTarget.APPLICATION,
+                message = "runtime_or_package_generation_not_found"
+            )
+        if (!EnginePackageEnabledStates.isValidApplicationState(newState)) {
+            return@synchronized failedPackageStateResult(
+                instanceId = instanceId,
+                target = EnginePackageEnabledStateTarget.APPLICATION,
+                found = true,
+                message = "invalid_application_enabled_state:$newState"
+            )
+        }
+        val mutation = enabledStateStore.setApplicationState(context.generation, newState)
+        if (!context.isStillCurrent()) {
+            enabledStateStore.clearGeneration(context.generation)
+            return@synchronized failedPackageStateResult(
+                instanceId = instanceId,
+                target = EnginePackageEnabledStateTarget.APPLICATION,
+                message = "package_generation_changed_during_set"
+            )
+        }
+        successfulPackageStateResult(
+            context = context,
+            target = EnginePackageEnabledStateTarget.APPLICATION,
+            enabledState = mutation.currentState,
+            changed = mutation.changed,
+            message = if (mutation.changed) {
+                "application_enabled_state_updated"
+            } else {
+                "application_enabled_state_unchanged"
+            }
+        )
+    }
+
+    override fun queryComponentEnabledState(
+        instanceId: String,
+        type: VirtualPackageComponentType,
+        className: String
+    ): VirtualPackageEnabledStateResult = synchronized(operationLock(instanceId)) {
+        val context = packageStateContext(instanceId)
+            ?: return@synchronized failedPackageStateResult(
+                instanceId = instanceId,
+                target = EnginePackageEnabledStateTarget.COMPONENT,
+                message = "runtime_or_package_generation_not_found"
+            )
+        val key = context.componentKeyOrNull(type, className)
+            ?: return@synchronized failedComponentStateResult(
+                instanceId = instanceId,
+                type = type,
+                className = context.normalizeClassName(className),
+                message = if (context.normalizeClassName(className) == null) {
+                    "invalid_component_class_name"
+                } else {
+                    "component_not_found"
+                }
+            )
+        val state = enabledStateStore.read(context.generation)?.componentStates?.get(key)
+            ?: EnginePackageEnabledStates.DEFAULT
+        if (!context.isStillCurrent()) {
+            return@synchronized failedComponentStateResult(
+                instanceId = instanceId,
+                type = type,
+                className = key.className,
+                message = "package_generation_changed_during_query"
+            )
+        }
+        successfulPackageStateResult(
+            context = context,
+            target = EnginePackageEnabledStateTarget.COMPONENT,
+            componentType = type,
+            className = key.className,
+            enabledState = state,
+            changed = false,
+            message = "component_enabled_state_queried"
+        )
+    }
+
+    override fun setComponentEnabledState(
+        instanceId: String,
+        type: VirtualPackageComponentType,
+        className: String,
+        newState: Int
+    ): VirtualPackageEnabledStateResult = synchronized(operationLock(instanceId)) {
+        val context = packageStateContext(instanceId)
+            ?: return@synchronized failedPackageStateResult(
+                instanceId = instanceId,
+                target = EnginePackageEnabledStateTarget.COMPONENT,
+                message = "runtime_or_package_generation_not_found"
+            )
+        if (!EnginePackageEnabledStates.isValidComponentState(newState)) {
+            return@synchronized failedComponentStateResult(
+                instanceId = instanceId,
+                type = type,
+                className = context.normalizeClassName(className),
+                found = true,
+                message = "invalid_component_enabled_state:$newState"
+            )
+        }
+        val key = context.componentKeyOrNull(type, className)
+            ?: return@synchronized failedComponentStateResult(
+                instanceId = instanceId,
+                type = type,
+                className = context.normalizeClassName(className),
+                message = if (context.normalizeClassName(className) == null) {
+                    "invalid_component_class_name"
+                } else {
+                    "component_not_found"
+                }
+            )
+        val mutation = enabledStateStore.setComponentState(context.generation, key, newState)
+        if (!context.isStillCurrent()) {
+            enabledStateStore.clearGeneration(context.generation)
+            return@synchronized failedComponentStateResult(
+                instanceId = instanceId,
+                type = type,
+                className = key.className,
+                message = "package_generation_changed_during_set"
+            )
+        }
+        successfulPackageStateResult(
+            context = context,
+            target = EnginePackageEnabledStateTarget.COMPONENT,
+            componentType = type,
+            className = key.className,
+            enabledState = mutation.currentState,
+            changed = mutation.changed,
+            message = if (mutation.changed) {
+                "component_enabled_state_updated"
+            } else {
+                "component_enabled_state_unchanged"
+            }
+        )
+    }
+
+    internal fun reconcileEnabledStates(validInstanceIds: Set<String>): Int {
+        val generations = runtimeService.list().mapNotNull { runtime ->
+            runtime.toPackageGenerationIdentityOrNull()?.let { identity ->
+                identity.instanceId to identity
+            }
+        }.toMap()
+        return enabledStateStore.reconcile(validInstanceIds, generations)
+    }
+
+    private fun packageStateContext(instanceId: String): PackageStateContext? {
+        if (instanceId.isBlank()) return null
+        val runtime = runtimeService.get(instanceId) ?: return null
+        val generation = runtime.toPackageGenerationIdentityOrNull() ?: return null
+        return PackageStateContext(runtime, generation)
+    }
+
+    private fun PackageStateContext.componentKeyOrNull(
+        type: VirtualPackageComponentType,
+        className: String
+    ): EnginePackageComponentKey? {
+        val normalized = normalizeClassName(className) ?: return null
+        val matches = runtime.packageSnapshot.componentsForEnabledState(type).filter { component ->
+            normalizeVirtualComponentClassName(runtime.originPackageName, component.name) == normalized
+        }
+        if (matches.size != 1) return null
+        return EnginePackageComponentKey(type, normalized)
+    }
+
+    private fun PackageStateContext.normalizeClassName(className: String): String? =
+        normalizeVirtualComponentClassName(runtime.originPackageName, className)
+
+    private fun PackageStateContext.isStillCurrent(): Boolean =
+        runtimeService.get(runtime.instanceId)?.toPackageGenerationIdentityOrNull() == generation
+
+    private fun successfulPackageStateResult(
+        context: PackageStateContext,
+        target: EnginePackageEnabledStateTarget,
+        enabledState: Int,
+        changed: Boolean,
+        message: String,
+        componentType: VirtualPackageComponentType? = null,
+        className: String? = null
+    ): VirtualPackageEnabledStateResult = VirtualPackageEnabledStateResult(
+        instanceId = context.runtime.instanceId,
+        target = target,
+        componentType = componentType,
+        className = className,
+        enabledState = enabledState,
+        verdict = EngineResultStatus.PASS,
+        found = true,
+        changed = changed,
+        authorityIdentity = context.runtime.processId?.let { processId ->
+            runCatching {
+                EngineProcessClientIdentity(
+                    instanceId = context.runtime.instanceId,
+                    runtimeEpoch = context.runtime.runtimeEpoch,
+                    engineSessionId = context.runtime.engineSessionId,
+                    processSlot = context.runtime.processSlot,
+                    processId = processId
+                )
+            }.getOrNull()
+        },
+        message = message
+    )
+
+    private fun operationLock(instanceId: String): Any {
+        val hash = instanceId.hashCode()
+        return operationLocks[(hash xor (hash ushr 16)) and (operationLocks.size - 1)]
+    }
+
+    private data class PackageStateContext(
+        val runtime: VirtualInstanceRuntime,
+        val generation: EnginePackageGenerationIdentity
+    )
+
+    private companion object {
+        const val PACKAGE_STATE_LOCK_COUNT = 64
+    }
 }
 
 class DefaultVirtualSystemServer(
@@ -1063,11 +1342,17 @@ class DefaultVirtualSystemServer(
     appOpsStateStore: EngineAppOpsStateStore = InMemoryEngineAppOpsStateStore(),
     broadcastRuntimeStateStore: EngineBroadcastRuntimeStateStore = InMemoryEngineBroadcastRuntimeStateStore(),
     proxyActivitySlotAssignmentStore: ProxyActivitySlotAssignmentStore =
-        InMemoryProxyActivitySlotAssignmentStore()
+        InMemoryProxyActivitySlotAssignmentStore(),
+    packageEnabledStateStore: EnginePackageEnabledStateStore =
+        InMemoryEnginePackageEnabledStateStore()
 ) : VirtualSystemServer {
     private val authoritativeProxyActivitySlotAssignmentStore = proxyActivitySlotAssignmentStore
     override val runtimeService: VirtualRuntimeService = RegistryBackedVirtualRuntimeService(registry)
-    override val packageService: VirtualPackageService = RegistryBackedVirtualPackageService(runtimeService)
+    private val registryBackedPackageService = RegistryBackedVirtualPackageService(
+        runtimeService,
+        packageEnabledStateStore
+    )
+    override val packageService: VirtualPackageService = registryBackedPackageService
     private val registryBackedActivityService = RegistryBackedVirtualActivityService(
         runtimeService,
         packageService,
@@ -1122,7 +1407,8 @@ class DefaultVirtualSystemServer(
             permissionGrantStore = permissionGrantStore,
             appOpsStateStore = appOpsStateStore,
             broadcastRuntimeStateStore = broadcastRuntimeStateStore,
-            proxyActivitySlotReleaser = registryBackedActivityService::releaseProxyActivitySlots
+            proxyActivitySlotReleaser = registryBackedActivityService::releaseProxyActivitySlots,
+            packageEnabledStateStore = packageEnabledStateStore
         )
 
     internal fun reconcileProxyActivitySlots(
@@ -1132,6 +1418,9 @@ class DefaultVirtualSystemServer(
         validInstanceIds = validInstanceIds,
         knownProxyActivityClassNames = knownProxyActivityClassNames
     )
+
+    internal fun reconcilePackageEnabledStates(validInstanceIds: Set<String>): Int =
+        registryBackedPackageService.reconcileEnabledStates(validInstanceIds)
 }
 
 class RegistryBackedVirtualInstanceLifecycleService(
@@ -1143,7 +1432,9 @@ class RegistryBackedVirtualInstanceLifecycleService(
     private val permissionGrantStore: EnginePermissionGrantStore,
     private val appOpsStateStore: EngineAppOpsStateStore,
     private val broadcastRuntimeStateStore: EngineBroadcastRuntimeStateStore,
-    private val proxyActivitySlotReleaser: (String) -> Int = { 0 }
+    private val proxyActivitySlotReleaser: (String) -> Int = { 0 },
+    private val packageEnabledStateStore: EnginePackageEnabledStateStore =
+        InMemoryEnginePackageEnabledStateStore()
 ) : VirtualInstanceLifecycleService {
     override fun clearInstanceState(instanceId: String): VirtualInstanceCleanupResult {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
@@ -1159,6 +1450,7 @@ class RegistryBackedVirtualInstanceLifecycleService(
         val appOpCount = appOpsStateStore.reset(instanceId)
         val broadcastRecordCount = broadcastRuntimeStateStore.list(instanceId).size
         broadcastRuntimeStateStore.clear(instanceId)
+        val packageEnabledStateCount = packageEnabledStateStore.clearInstance(instanceId)
         return VirtualInstanceCleanupResult(
             instanceId = instanceId,
             activityRecordCount = activityRecordCount,
@@ -1168,7 +1460,8 @@ class RegistryBackedVirtualInstanceLifecycleService(
             broadcastRecordCount = broadcastRecordCount,
             uriGrantCount = uriGrantCount,
             permissionGrantCount = permissionGrantCount,
-            appOpCount = appOpCount
+            appOpCount = appOpCount,
+            packageEnabledStateCount = packageEnabledStateCount
         )
     }
 
@@ -1204,6 +1497,45 @@ object DefaultVirtualPackageService : VirtualPackageService {
         dataAuthority: String?,
         dataPath: String?
     ): List<ResolvedComponent> = emptyList()
+
+    override fun queryApplicationEnabledState(instanceId: String): VirtualPackageEnabledStateResult =
+        failedPackageStateResult(
+            instanceId = instanceId,
+            target = EnginePackageEnabledStateTarget.APPLICATION,
+            message = "engine_package_authority_unavailable:query-application-enabled-state"
+        )
+
+    override fun setApplicationEnabledState(
+        instanceId: String,
+        newState: Int
+    ): VirtualPackageEnabledStateResult = failedPackageStateResult(
+        instanceId = instanceId,
+        target = EnginePackageEnabledStateTarget.APPLICATION,
+        message = "engine_package_authority_unavailable:set-application-enabled-state"
+    )
+
+    override fun queryComponentEnabledState(
+        instanceId: String,
+        type: VirtualPackageComponentType,
+        className: String
+    ): VirtualPackageEnabledStateResult = failedComponentStateResult(
+        instanceId = instanceId,
+        type = type,
+        className = className.takeIf { it.isNotBlank() },
+        message = "engine_package_authority_unavailable:query-component-enabled-state"
+    )
+
+    override fun setComponentEnabledState(
+        instanceId: String,
+        type: VirtualPackageComponentType,
+        className: String,
+        newState: Int
+    ): VirtualPackageEnabledStateResult = failedComponentStateResult(
+        instanceId = instanceId,
+        type = type,
+        className = className.takeIf { it.isNotBlank() },
+        message = "engine_package_authority_unavailable:set-component-enabled-state"
+    )
 }
 
 internal class RegistryBackedVirtualActivityService(
@@ -4203,7 +4535,36 @@ private fun VirtualPackageSnapshot.components(type: VirtualPackageComponentType)
         VirtualPackageComponentType.PROVIDER -> providers
     }
 
-private fun ResolvedIntentFilter.matches(
+private fun failedPackageStateResult(
+    instanceId: String,
+    target: EnginePackageEnabledStateTarget,
+    message: String,
+    found: Boolean = false
+): VirtualPackageEnabledStateResult = VirtualPackageEnabledStateResult(
+    instanceId = instanceId.takeIf { it.isNotBlank() } ?: "invalid",
+    target = target,
+    verdict = EngineResultStatus.FAIL,
+    found = found,
+    message = message
+)
+
+private fun failedComponentStateResult(
+    instanceId: String,
+    type: VirtualPackageComponentType,
+    className: String?,
+    message: String,
+    found: Boolean = false
+): VirtualPackageEnabledStateResult = VirtualPackageEnabledStateResult(
+    instanceId = instanceId.takeIf { it.isNotBlank() } ?: "invalid",
+    target = EnginePackageEnabledStateTarget.COMPONENT,
+    componentType = type.takeIf { className != null },
+    className = className,
+    verdict = EngineResultStatus.FAIL,
+    found = found,
+    message = message
+)
+
+internal fun ResolvedIntentFilter.matchesEngineQuery(
     action: String,
     categories: Set<String>,
     dataScheme: String?,
@@ -4211,26 +4572,61 @@ private fun ResolvedIntentFilter.matches(
     dataAuthority: String?,
     dataPath: String?
 ): Boolean {
-    val actionMatches = actions.isEmpty() || action in actions
-    if (!actionMatches) return false
-
-    val categoriesMatch = categories.all { category -> category in this.categories }
-    if (!categoriesMatch) return false
-
-    val schemeMatches = dataScheme == null || dataSchemes.isEmpty() || dataScheme in dataSchemes
-    if (!schemeMatches) return false
-
-    val mimeMatches = dataMimeType == null ||
-        dataMimeTypes.isEmpty() ||
-        dataMimeType in dataMimeTypes ||
-        dataMimeTypes.any { filterType -> filterType.endsWith("/*") && dataMimeType.startsWith(filterType.removeSuffix("*")) }
-    if (!mimeMatches) return false
-
-    val authorityMatches = dataAuthority == null || dataAuthorities.isEmpty() || dataAuthority in dataAuthorities
-    if (!authorityMatches) return false
-
-    return dataPath == null || dataPaths.isEmpty() || dataPath in dataPaths
+    val authority = when (dataAuthority) {
+        null -> null
+        else -> dataAuthority.toEngineIntentAuthorityOrNull() ?: return false
+    }
+    return runCatching {
+        ResolvedIntentFilterMatcher.matches(
+            this,
+            IntentFilterMatchRequest(
+                action = action,
+                categories = categories,
+                scheme = dataScheme,
+                mimeType = dataMimeType,
+                host = authority?.host,
+                port = authority?.port,
+                path = dataPath,
+                hasData = dataScheme != null || dataAuthority != null || dataPath != null
+            )
+        )
+    }.getOrDefault(false)
 }
+
+private fun String.toEngineIntentAuthorityOrNull(): EngineIntentAuthorityQuery? {
+    if (isBlank()) return null
+    if (startsWith('[')) {
+        val closingBracket = indexOf(']')
+        if (closingBracket <= 1) return null
+        val host = substring(1, closingBracket)
+        val suffix = substring(closingBracket + 1)
+        val port = when {
+            suffix.isEmpty() -> null
+            suffix.startsWith(':') && suffix.length > 1 -> suffix.substring(1).toNonNegativeIntOrNull()
+                ?: return null
+            else -> return null
+        }
+        return EngineIntentAuthorityQuery(host, port)
+    }
+
+    val firstColon = indexOf(':')
+    if (firstColon < 0 || firstColon != lastIndexOf(':')) {
+        return EngineIntentAuthorityQuery(this, null)
+    }
+    val host = substring(0, firstColon).takeIf { it.isNotBlank() } ?: return null
+    val port = substring(firstColon + 1).toNonNegativeIntOrNull() ?: return null
+    return EngineIntentAuthorityQuery(host, port)
+}
+
+private fun String.toNonNegativeIntOrNull(): Int? =
+    takeIf { it.isNotEmpty() && all(Char::isDigit) }
+        ?.toIntOrNull()
+        ?.takeIf { it >= 0 }
+
+private data class EngineIntentAuthorityQuery(
+    val host: String,
+    val port: Int?
+)
 
 private fun normalizeComponentClassName(packageName: String, className: String): String =
     when {

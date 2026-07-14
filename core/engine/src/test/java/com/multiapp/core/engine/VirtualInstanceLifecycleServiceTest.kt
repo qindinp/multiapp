@@ -23,6 +23,7 @@ class VirtualInstanceLifecycleServiceTest {
         val permissionStore = InMemoryEnginePermissionGrantStore()
         val appOpsStore = InMemoryEngineAppOpsStateStore()
         val broadcastStore = InMemoryEngineBroadcastRuntimeStateStore()
+        val packageStateStore = InMemoryEnginePackageEnabledStateStore()
         val proxySlotStore = FileBackedProxyActivitySlotAssignmentStore(File(tempDir, "proxy-slots.properties"))
         val targetProxySlot = ProxyActivitySlotKey(INSTANCE_ID, null, "target-task")
         val siblingProxySlot = ProxyActivitySlotKey(OTHER_INSTANCE_ID, null, "other-task")
@@ -102,6 +103,24 @@ class VirtualInstanceLifecycleServiceTest {
                 updatedAtMs = 100L
             )
         )
+        val targetGeneration = EnginePackageGenerationIdentity(INSTANCE_ID, "a".repeat(64))
+        val siblingGeneration = EnginePackageGenerationIdentity(OTHER_INSTANCE_ID, "b".repeat(64))
+        packageStateStore.setApplicationState(
+            targetGeneration,
+            EnginePackageEnabledStates.DISABLED_USER
+        )
+        packageStateStore.setComponentState(
+            targetGeneration,
+            EnginePackageComponentKey(
+                VirtualPackageComponentType.ACTIVITY,
+                "com.test.MainActivity"
+            ),
+            EnginePackageEnabledStates.DISABLED
+        )
+        packageStateStore.setApplicationState(
+            siblingGeneration,
+            EnginePackageEnabledStates.ENABLED
+        )
         val lifecycle = RegistryBackedVirtualInstanceLifecycleService(
             taskStore,
             activityRecords,
@@ -111,12 +130,14 @@ class VirtualInstanceLifecycleServiceTest {
             permissionStore,
             appOpsStore,
             broadcastStore,
-            proxySlotStore::removeInstance
+            proxySlotStore::removeInstance,
+            packageStateStore
         )
 
         val result = lifecycle.clearInstanceState(INSTANCE_ID)
 
-        assertEquals(8, result.totalRemoved)
+        assertEquals(10, result.totalRemoved)
+        assertEquals(2, result.packageEnabledStateCount)
         assertEquals(1, result.activityRecordCount)
         assertEquals(1, result.activityTaskRecordCount)
         assertTrue(serviceStore.list(INSTANCE_ID).isEmpty())
@@ -125,6 +146,11 @@ class VirtualInstanceLifecycleServiceTest {
         assertTrue(permissionStore.list(INSTANCE_ID).isEmpty())
         assertTrue(appOpsStore.list(INSTANCE_ID).isEmpty())
         assertTrue(broadcastStore.list(INSTANCE_ID).isEmpty())
+        assertEquals(null, packageStateStore.read(targetGeneration))
+        assertEquals(
+            EnginePackageEnabledStates.ENABLED,
+            packageStateStore.read(siblingGeneration)?.applicationState
+        )
         assertEquals(listOf(OTHER_INSTANCE_ID), activityRecords.list().map { it.instanceId })
         assertEquals(listOf(OTHER_INSTANCE_ID), taskStore.load().tasks.flatMap { it.activities }.map { it.instanceId })
         assertEquals("com.multiapp.app.container.ProxyActivity0", proxySlotStore.find(targetProxySlot))

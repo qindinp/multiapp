@@ -131,9 +131,13 @@ class VirtualServiceManager(
         sourceIntent: Intent,
         foreground: Boolean = false
     ): VirtualServiceStartRequest? {
-        val serviceInfo = VirtualPackageService(snapshot).resolveService(sourceIntent)?.serviceInfo
+        val packageName = sourceIntent.safePackageName()
+        if (packageName != null && !snapshot.matchesPackageName(packageName)) return null
+        val serviceName = snapshot.services
+            .firstOrNull { component -> VirtualIntentFilterMatcher.matches(sourceIntent, component) }
+            ?.name
+            ?.takeIf { it.isNotBlank() }
             ?: return null
-        val serviceName = serviceInfo.name?.takeIf { it.isNotBlank() } ?: return null
         return VirtualServiceStartRequest(
             instanceId = snapshot.instanceId,
             originPackageName = snapshot.originPackageName,

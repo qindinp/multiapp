@@ -14,6 +14,7 @@ import com.multiapp.core.loader.VirtualContentServiceOperationRecorders
 import com.multiapp.core.loader.VirtualContentServiceProxyInstaller
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
 import com.multiapp.core.loader.VirtualPermissionCheckDispatchers
+import com.multiapp.core.loader.VirtualPackageEnabledStateDispatchers
 import com.multiapp.core.loader.VirtualUriPermissionDispatcherFactories
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxySlotContract
@@ -38,6 +39,11 @@ object EngineRuntimeInstallers {
         rememberProcessHostContext(context)
         VirtualActivityLaunchAllocationProviders.install(
             IpcVirtualActivityLaunchAllocationProvider()
+        )
+        VirtualPackageEnabledStateDispatchers.install(
+            EngineVirtualPackageEnabledStateDispatcher(
+                IpcBackedVirtualPackageService()
+            )
         )
         val connected = EngineRuntimeIpcClients.install(context)
         if (connected) {
@@ -173,6 +179,9 @@ object EngineRuntimeInstallers {
             ),
             proxyActivitySlotAssignmentStore = FileBackedProxyActivitySlotAssignmentStore(
                 File(filesDir, ProxySlotContract.SLOT_ASSIGNMENT_FILE)
+            ),
+            packageEnabledStateStore = FileBackedEnginePackageEnabledStateStore(
+                File(filesDir, EnginePackageEnabledStateFiles.DEFAULT_FILE_NAME)
             )
         )
         return EngineSystemServerHandle(registry = registry, server = server)

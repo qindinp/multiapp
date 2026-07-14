@@ -12,7 +12,29 @@ data class VirtualPackageSigningInfo(
     val legacySignatures: Array<Signature>,
     val signingInfo: SigningInfo?,
     val signerSha256Digests: List<String>
-)
+) {
+    fun matches(other: VirtualPackageSigningInfo?): Boolean {
+        if (other == null) return false
+        val ownDigests = normalizedDigests()
+        val otherDigests = other.normalizedDigests()
+        return ownDigests.isNotEmpty() && ownDigests == otherDigests
+    }
+
+    fun hasCertificate(certificate: ByteArray, type: Int): Boolean {
+        val digest = when (type) {
+            PackageManager.CERT_INPUT_RAW_X509 -> certificate.sha256()
+            PackageManager.CERT_INPUT_SHA256 -> certificate.toHex()
+            else -> return false
+        }
+        return normalizedDigests().any { it == digest }
+    }
+
+    private fun normalizedDigests(): List<String> = signerSha256Digests
+        .filter { it.isNotBlank() }
+        .map { it.lowercase() }
+        .distinct()
+        .sorted()
+}
 
 internal object VirtualPackageArchiveSigningResolver {
     fun resolve(packageManager: PackageManager?, snapshot: VirtualPackageSnapshot): VirtualPackageSigningInfo? {
@@ -27,21 +49,24 @@ internal object VirtualPackageArchiveSigningResolver {
             }
         }.getOrNull() ?: return null
 
+        val resolved = fromPackageInfo(packageInfo) ?: return null
+        val signingInfo = resolved.signingInfo
+        val actualDigests = resolved.signerSha256Digests
+        if (!snapshot.matchesSignerIdentity(actualDigests, signingInfo?.hasMultipleSigners() == true)) return null
+        return resolved
+    }
+
+    @Suppress("DEPRECATION")
+    fun fromPackageInfo(packageInfo: PackageInfo): VirtualPackageSigningInfo? {
         val signingInfo = packageInfo.signingInfo?.let(::SigningInfo)
         val identitySignatures = signingInfo?.identitySignatures()
             ?: packageInfo.signatures?.toList().orEmpty()
         if (identitySignatures.isEmpty()) return null
-
-        val actualDigests = identitySignatures.map { signature -> signature.sha256() }
-        if (!snapshot.matchesSignerIdentity(actualDigests, signingInfo?.hasMultipleSigners() == true)) return null
-
-        @Suppress("DEPRECATION")
-        val legacySignatures = packageInfo.signatures?.copyOf()
-            ?: identitySignatures.take(1).toTypedArray()
         return VirtualPackageSigningInfo(
-            legacySignatures = legacySignatures,
+            legacySignatures = packageInfo.signatures?.copyOf()
+                ?: identitySignatures.take(1).toTypedArray(),
             signingInfo = signingInfo,
-            signerSha256Digests = actualDigests
+            signerSha256Digests = identitySignatures.map { signature -> signature.sha256() }
         )
     }
 
@@ -64,7 +89,7 @@ internal object VirtualPackageArchiveSigningResolver {
                 signerSha256Digests == actualDigests
             }
         }
-        val expectedCurrent = originCertSha256?.takeIf { it.isNotBlank() } ?: return true
+        val expectedCurrent = originCertSha256?.takeIf { it.isNotBlank() } ?: return false
         return actualDigests.lastOrNull()?.equals(expectedCurrent, ignoreCase = true) == true
     }
 
@@ -73,3 +98,7 @@ internal object VirtualPackageArchiveSigningResolver {
             .digest(toByteArray())
             .joinToString("") { byte -> "%02x".format(byte) }
 }
+
+private fun ByteArray.sha256(): String = MessageDigest.getInstance("SHA-256").digest(this).toHex()
+
+private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte) }

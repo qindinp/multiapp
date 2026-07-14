@@ -18,7 +18,10 @@ import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentAuthority
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
+import com.multiapp.core.model.virtual.ResolvedIntentPathPattern
+import com.multiapp.core.model.virtual.ResolvedIntentPathPatternType
 import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.VirtualProviderPathPattern
@@ -188,7 +191,14 @@ class EngineVirtualizationIpcTest {
                     dataSchemes = listOf("content"),
                     dataAuthorities = listOf("com.test.provider"),
                     dataPaths = listOf("/books"),
-                    priority = 9
+                    priority = 9,
+                    authorityEntries = listOf(
+                        ResolvedIntentAuthority("com.test.provider", 8443),
+                        ResolvedIntentAuthority("*.trusted.test")
+                    ),
+                    pathPatterns = ResolvedIntentPathPatternType.entries.map { type ->
+                        ResolvedIntentPathPattern("/books/$type", type)
+                    }
                 )
             ),
             authorities = listOf("com.test.provider"),

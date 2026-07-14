@@ -22,7 +22,6 @@ import android.content.res.Resources
 import android.content.res.XmlResourceParser
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
-import android.os.Process
 import android.os.UserHandle
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
@@ -30,85 +29,153 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 class VirtualPackageManagerWrapper(
     private val base: PackageManager,
     snapshot: VirtualPackageSnapshot,
-    private val runtimeUid: Int = runCatching { Process.myUid() }.getOrDefault(0),
+    private val runtimeUid: Int,
+    packageSigningInfo: VirtualPackageSigningInfo? = VirtualPackageArchiveSigningResolver.resolve(base, snapshot),
     permissionCheckDispatcher: VirtualPermissionCheckDispatcher =
-        VirtualPermissionCheckDispatcher(VirtualPermissionCheckDispatchers::dispatch)
+        VirtualPermissionCheckDispatcher(VirtualPermissionCheckDispatchers::dispatch),
+    enabledStateDispatcher: VirtualPackageEnabledStateDispatcher =
+        VirtualPackageEnabledStateDispatcher(VirtualPackageEnabledStateDispatchers::dispatch)
 ) : PackageManager() {
 
     private val service = VirtualPackageService(
         snapshot = snapshot,
-        packageSigningInfo = VirtualPackageArchiveSigningResolver.resolve(base, snapshot),
-        permissionCheckDispatcher = permissionCheckDispatcher
+        runtimeUid = runtimeUid,
+        packageSigningInfo = packageSigningInfo,
+        permissionCheckDispatcher = permissionCheckDispatcher,
+        enabledStateDispatcher = enabledStateDispatcher
     )
 
+    init {
+        require(runtimeUid > 0) { "runtimeUid must be a positive Android application UID" }
+    }
+
     override fun getPackageInfo(packageName: String, flags: Int): PackageInfo {
-        return service.getPackageInfo(packageName) ?: base.getPackageInfo(packageName, flags)
+        if (service.handlesPackage(packageName)) {
+            return service.getPackageInfo(packageName, VirtualPackageQueryFlags.fromInt(flags))
+                ?: throw NameNotFoundException(packageName)
+        }
+        return base.getPackageInfo(packageName, flags)
     }
 
     override fun getPackageInfo(versionedPackage: VersionedPackage, flags: Int): PackageInfo {
-        return service.getPackageInfo(versionedPackage.packageName) ?: base.getPackageInfo(versionedPackage, flags)
+        if (service.handlesPackage(versionedPackage.packageName)) {
+            return service.getPackageInfo(versionedPackage.packageName, VirtualPackageQueryFlags.fromInt(flags))
+                ?: throw NameNotFoundException(versionedPackage.packageName)
+        }
+        return base.getPackageInfo(versionedPackage, flags)
     }
 
-    override fun getPackageInfo(packageName: String, flags: PackageInfoFlags): PackageInfo =
-        getPackageInfo(packageName, flags.value.toInt())
+    override fun getPackageInfo(packageName: String, flags: PackageInfoFlags): PackageInfo {
+        if (service.handlesPackage(packageName)) {
+            return service.getPackageInfo(packageName, flags.value) ?: throw NameNotFoundException(packageName)
+        }
+        return base.getPackageInfo(packageName, flags)
+    }
+
+    override fun getPackageInfo(versionedPackage: VersionedPackage, flags: PackageInfoFlags): PackageInfo {
+        if (service.handlesPackage(versionedPackage.packageName)) {
+            return service.getPackageInfo(versionedPackage.packageName, flags.value)
+                ?: throw NameNotFoundException(versionedPackage.packageName)
+        }
+        return base.getPackageInfo(versionedPackage, flags)
+    }
 
     override fun getApplicationInfo(packageName: String, flags: Int): ApplicationInfo {
-        return service.getApplicationInfo(packageName) ?: base.getApplicationInfo(packageName, flags)
+        if (service.handlesPackage(packageName)) {
+            return service.getApplicationInfo(packageName, VirtualPackageQueryFlags.fromInt(flags))
+                ?: throw NameNotFoundException(packageName)
+        }
+        return base.getApplicationInfo(packageName, flags)
     }
 
-    override fun getApplicationInfo(packageName: String, flags: ApplicationInfoFlags): ApplicationInfo =
-        getApplicationInfo(packageName, flags.value.toInt())
+    override fun getApplicationInfo(packageName: String, flags: ApplicationInfoFlags): ApplicationInfo {
+        if (service.handlesPackage(packageName)) {
+            return service.getApplicationInfo(packageName, flags.value) ?: throw NameNotFoundException(packageName)
+        }
+        return base.getApplicationInfo(packageName, flags)
+    }
 
     override fun getActivityInfo(component: ComponentName, flags: Int): ActivityInfo {
-        return service.getActivityInfo(component) ?: base.getActivityInfo(component, flags)
+        return virtualComponentInfo(component) {
+            service.getActivityInfo(component, VirtualPackageQueryFlags.fromInt(flags))
+        } ?: base.getActivityInfo(component, flags)
     }
 
-    override fun getActivityInfo(component: ComponentName, flags: ComponentInfoFlags): ActivityInfo =
-        getActivityInfo(component, flags.value.toInt())
+    override fun getActivityInfo(component: ComponentName, flags: ComponentInfoFlags): ActivityInfo {
+        return virtualComponentInfo(component) { service.getActivityInfo(component, flags.value) }
+            ?: base.getActivityInfo(component, flags)
+    }
 
     override fun getServiceInfo(component: ComponentName, flags: Int): ServiceInfo {
-        return service.getServiceInfo(component) ?: base.getServiceInfo(component, flags)
+        return virtualComponentInfo(component) {
+            service.getServiceInfo(component, VirtualPackageQueryFlags.fromInt(flags))
+        } ?: base.getServiceInfo(component, flags)
+    }
+
+    override fun getServiceInfo(component: ComponentName, flags: ComponentInfoFlags): ServiceInfo {
+        return virtualComponentInfo(component) { service.getServiceInfo(component, flags.value) }
+            ?: base.getServiceInfo(component, flags)
     }
 
     override fun getReceiverInfo(component: ComponentName, flags: Int): ActivityInfo {
-        return service.getReceiverInfo(component) ?: base.getReceiverInfo(component, flags)
+        return virtualComponentInfo(component) {
+            service.getReceiverInfo(component, VirtualPackageQueryFlags.fromInt(flags))
+        } ?: base.getReceiverInfo(component, flags)
+    }
+
+    override fun getReceiverInfo(component: ComponentName, flags: ComponentInfoFlags): ActivityInfo {
+        return virtualComponentInfo(component) { service.getReceiverInfo(component, flags.value) }
+            ?: base.getReceiverInfo(component, flags)
     }
 
     override fun getProviderInfo(component: ComponentName, flags: Int): ProviderInfo {
-        return service.getProviderInfo(component) ?: base.getProviderInfo(component, flags)
+        return virtualComponentInfo(component) {
+            service.getProviderInfo(component, VirtualPackageQueryFlags.fromInt(flags))
+        } ?: base.getProviderInfo(component, flags)
+    }
+
+    override fun getProviderInfo(component: ComponentName, flags: ComponentInfoFlags): ProviderInfo {
+        return virtualComponentInfo(component) { service.getProviderInfo(component, flags.value) }
+            ?: base.getProviderInfo(component, flags)
     }
 
     override fun resolveContentProvider(authority: String, flags: Int): ProviderInfo? {
-        return service.resolveContentProvider(authority) ?: base.resolveContentProvider(authority, flags)
+        return service.resolveContentProvider(authority, VirtualPackageQueryFlags.fromInt(flags))
+            ?: base.resolveContentProvider(authority, flags)
     }
 
     override fun resolveContentProvider(authority: String, flags: ComponentInfoFlags): ProviderInfo? =
-        resolveContentProvider(authority, flags.value.toInt())
+        service.resolveContentProvider(authority, flags.value) ?: base.resolveContentProvider(authority, flags)
 
     override fun queryIntentActivities(intent: Intent, flags: Int): List<ResolveInfo> {
-        service.queryIntentActivities(intent).takeIf { it.isNotEmpty() }?.let { return it }
+        service.queryIntentActivities(intent, VirtualPackageQueryFlags.fromInt(flags))
+            .takeIf { it.isNotEmpty() }
+            ?.let { return it }
         return base.queryIntentActivities(intent, flags)
     }
 
-    override fun queryIntentActivities(intent: Intent, flags: ResolveInfoFlags): List<ResolveInfo> =
-        queryIntentActivities(intent, flags.value.toInt())
+    override fun queryIntentActivities(intent: Intent, flags: ResolveInfoFlags): List<ResolveInfo> {
+        service.queryIntentActivities(intent, flags.value).takeIf { it.isNotEmpty() }?.let { return it }
+        return base.queryIntentActivities(intent, flags)
+    }
 
     override fun resolveActivity(intent: Intent, flags: Int): ResolveInfo? {
-        return service.resolveActivity(intent) ?: base.resolveActivity(intent, flags)
+        return service.resolveActivity(intent, VirtualPackageQueryFlags.fromInt(flags))
+            ?: base.resolveActivity(intent, flags)
     }
 
     override fun resolveActivity(intent: Intent, flags: ResolveInfoFlags): ResolveInfo? =
-        resolveActivity(intent, flags.value.toInt())
+        service.resolveActivity(intent, flags.value) ?: base.resolveActivity(intent, flags)
 
     override fun getLaunchIntentForPackage(packageName: String): Intent? {
         return service.getLaunchIntentForPackage(packageName) ?: base.getLaunchIntentForPackage(packageName)
     }
 
     override fun getInstalledPackages(flags: Int): List<PackageInfo> =
-        service.getInstalledPackages() + base.getInstalledPackages(flags)
+        service.getInstalledPackages(VirtualPackageQueryFlags.fromInt(flags)) + base.getInstalledPackages(flags)
 
     override fun getInstalledApplications(flags: Int): List<ApplicationInfo> =
-        service.getInstalledApplications() + base.getInstalledApplications(flags)
+        service.getInstalledApplications(VirtualPackageQueryFlags.fromInt(flags)) + base.getInstalledApplications(flags)
 
     override fun getApplicationLabel(info: ApplicationInfo): CharSequence {
         return service.getApplicationLabel(info) ?: base.getApplicationLabel(info)
@@ -169,8 +236,31 @@ class VirtualPackageManagerWrapper(
     ) = base.addPreferredActivity(filter, match, set, activity)
     override fun canRequestPackageInstalls(): Boolean = base.canRequestPackageInstalls()
     override fun canonicalToCurrentPackageNames(names: Array<String>): Array<String> = base.canonicalToCurrentPackageNames(names)
-    override fun checkSignatures(uid1: Int, uid2: Int): Int = base.checkSignatures(uid1, uid2)
-    override fun checkSignatures(packageName1: String, packageName2: String): Int = base.checkSignatures(packageName1, packageName2)
+    override fun checkSignatures(uid1: Int, uid2: Int): Int {
+        if (uid1 != runtimeUid && uid2 != runtimeUid) return base.checkSignatures(uid1, uid2)
+        val first = signingInfoForUid(uid1)
+        val second = signingInfoForUid(uid2)
+        return signatureComparison(first, second)
+    }
+
+    override fun checkSignatures(packageName1: String, packageName2: String): Int {
+        val firstVirtual = service.handlesPackage(packageName1)
+        val secondVirtual = service.handlesPackage(packageName2)
+        if (!firstVirtual && !secondVirtual) return base.checkSignatures(packageName1, packageName2)
+        val first = signingInfoForPackage(packageName1, firstVirtual)
+        val second = signingInfoForPackage(packageName2, secondVirtual)
+        return signatureComparison(first, second)
+    }
+
+    override fun hasSigningCertificate(packageName: String, signingCertificate: ByteArray, flags: Int): Boolean {
+        return service.hasSigningCertificate(packageName, signingCertificate, flags)
+            ?: base.hasSigningCertificate(packageName, signingCertificate, flags)
+    }
+
+    override fun hasSigningCertificate(uid: Int, signingCertificate: ByteArray, flags: Int): Boolean {
+        return service.hasRuntimeUidSigningCertificate(uid, signingCertificate, flags)
+            ?: base.hasSigningCertificate(uid, signingCertificate, flags)
+    }
     override fun clearInstantAppCookie() = base.clearInstantAppCookie()
     override fun clearPackagePreferredActivities(packageName: String) = base.clearPackagePreferredActivities(packageName)
     override fun currentToCanonicalPackageNames(names: Array<String>): Array<String> = base.currentToCanonicalPackageNames(names)
@@ -193,11 +283,8 @@ class VirtualPackageManagerWrapper(
         } ?: base.getApplicationBanner(packageName) ?: defaultActivityIcon
 
     override fun getApplicationEnabledSetting(packageName: String): Int =
-        if (virtualApplicationInfo(packageName) != null) {
-            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
-        } else {
-            base.getApplicationEnabledSetting(packageName)
-        }
+        service.getApplicationEnabledSetting(packageName)
+            ?: base.getApplicationEnabledSetting(packageName)
 
     override fun getApplicationIcon(info: ApplicationInfo): Drawable =
         virtualApplicationInfo(info)?.let { virtualInfo ->
@@ -244,7 +331,10 @@ class VirtualPackageManagerWrapper(
     override fun getPackageUid(packageName: String, flags: Int): Int = service.getPackageUid(packageName, runtimeUid) ?: base.getPackageUid(packageName, flags)
     override fun getPackagesForUid(uid: Int): Array<String>? = service.getPackagesForUid(uid, runtimeUid) ?: base.getPackagesForUid(uid)
     override fun getPackagesHoldingPermissions(permissions: Array<String>, flags: Int): List<PackageInfo> {
-        val virtualPackages = service.getPackagesHoldingPermissions(permissions)
+        val virtualPackages = service.getPackagesHoldingPermissions(
+            permissions,
+            VirtualPackageQueryFlags.fromInt(flags)
+        )
         val basePackages = base.getPackagesHoldingPermissions(permissions, flags)
         return (virtualPackages + basePackages).distinctBy { it.packageName }
     }
@@ -282,24 +372,38 @@ class VirtualPackageManagerWrapper(
     override fun isPermissionRevokedByPolicy(permission: String, packageName: String): Boolean =
         if (virtualApplicationInfo(packageName) != null) false else base.isPermissionRevokedByPolicy(permission, packageName)
     override fun isSafeMode(): Boolean = base.isSafeMode
-    override fun queryBroadcastReceivers(intent: Intent, flags: Int): List<ResolveInfo> = service.queryBroadcastReceivers(intent).ifEmpty { base.queryBroadcastReceivers(intent, flags) }
+    override fun queryBroadcastReceivers(intent: Intent, flags: Int): List<ResolveInfo> =
+        service.queryBroadcastReceivers(intent, VirtualPackageQueryFlags.fromInt(flags))
+            .ifEmpty { base.queryBroadcastReceivers(intent, flags) }
+
     override fun queryContentProviders(processName: String?, uid: Int, flags: Int): List<ProviderInfo> {
-        val providers = service.queryContentProviders(processName, uid, runtimeUid)
+        val providers = service.queryContentProviders(
+            processName,
+            uid,
+            runtimeUid,
+            VirtualPackageQueryFlags.fromInt(flags)
+        )
         if (uid == runtimeUid) return providers
         val baseProviders = base.queryContentProviders(processName, uid, flags)
         return (providers + baseProviders).distinctBy { "${it.authority}:${it.name}" }
     }
     override fun queryInstrumentation(targetPackage: String, flags: Int): List<InstrumentationInfo> = base.queryInstrumentation(targetPackage, flags)
     override fun queryIntentActivityOptions(caller: ComponentName?, specifics: Array<Intent>?, intent: Intent, flags: Int): List<ResolveInfo> = base.queryIntentActivityOptions(caller, specifics, intent, flags)
-    override fun queryIntentContentProviders(intent: Intent, flags: Int): List<ResolveInfo> = service.queryIntentContentProviders(intent).ifEmpty { base.queryIntentContentProviders(intent, flags) }
-    override fun queryIntentServices(intent: Intent, flags: Int): List<ResolveInfo> = service.queryIntentServices(intent).ifEmpty { base.queryIntentServices(intent, flags) }
+    override fun queryIntentContentProviders(intent: Intent, flags: Int): List<ResolveInfo> =
+        service.queryIntentContentProviders(intent, VirtualPackageQueryFlags.fromInt(flags))
+            .ifEmpty { base.queryIntentContentProviders(intent, flags) }
+
+    override fun queryIntentServices(intent: Intent, flags: Int): List<ResolveInfo> =
+        service.queryIntentServices(intent, VirtualPackageQueryFlags.fromInt(flags))
+            .ifEmpty { base.queryIntentServices(intent, flags) }
     override fun queryPermissionsByGroup(group: String?, flags: Int): List<PermissionInfo> = base.queryPermissionsByGroup(group, flags)
     override fun removePackageFromPreferred(packageName: String) = base.removePackageFromPreferred(packageName)
     override fun removePermission(name: String) = base.removePermission(name)
-    override fun resolveService(intent: Intent, flags: Int): ResolveInfo? = service.resolveService(intent) ?: base.resolveService(intent, flags)
+    override fun resolveService(intent: Intent, flags: Int): ResolveInfo? =
+        service.resolveService(intent, VirtualPackageQueryFlags.fromInt(flags)) ?: base.resolveService(intent, flags)
     override fun setApplicationCategoryHint(packageName: String, categoryHint: Int) = base.setApplicationCategoryHint(packageName, categoryHint)
     override fun setApplicationEnabledSetting(packageName: String, newState: Int, flags: Int) {
-        if (virtualApplicationInfo(packageName) != null) return
+        if (service.setApplicationEnabledSetting(packageName, newState, flags)) return
         base.setApplicationEnabledSetting(packageName, newState, flags)
     }
     override fun setComponentEnabledSetting(componentName: ComponentName, newState: Int, flags: Int) {
@@ -331,6 +435,49 @@ class VirtualPackageManagerWrapper(
             ?: virtualApplicationInfo(packageName)
             ?: return null
         return runCatching { base.getResourcesForApplication(virtualInfo) }.getOrNull()
+    }
+
+    private inline fun <T> virtualComponentInfo(component: ComponentName, query: () -> T?): T? {
+        if (!service.handlesPackage(component.packageName)) return null
+        return query() ?: throw NameNotFoundException(component.flattenToShortString())
+    }
+
+    private fun signingInfoForPackage(
+        packageName: String,
+        virtualPackage: Boolean
+    ): VirtualPackageSigningInfo? = if (virtualPackage) {
+        service.signingInfoForPackage(packageName)
+    } else {
+        hostPackageSigningInfo(packageName)
+    }
+
+    private fun signingInfoForUid(uid: Int): VirtualPackageSigningInfo? {
+        if (uid == runtimeUid) return service.signingInfoForRuntimeUid(uid)
+        val packages = runCatching { base.getPackagesForUid(uid)?.toList().orEmpty() }.getOrNull()
+            ?.takeIf { it.isNotEmpty() }
+            ?: return null
+        val signingInfos = packages.map { packageName ->
+            hostPackageSigningInfo(packageName) ?: return null
+        }
+        val first = signingInfos.firstOrNull() ?: return null
+        return first.takeIf { candidate -> signingInfos.all(candidate::matches) }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun hostPackageSigningInfo(packageName: String): VirtualPackageSigningInfo? = runCatching {
+        base.getPackageInfo(
+            packageName,
+            PackageManager.GET_SIGNATURES or PackageManager.GET_SIGNING_CERTIFICATES
+        )
+    }.getOrNull()?.let(VirtualPackageArchiveSigningResolver::fromPackageInfo)
+
+    private fun signatureComparison(
+        first: VirtualPackageSigningInfo?,
+        second: VirtualPackageSigningInfo?
+    ): Int = if (first?.matches(second) == true) {
+        PackageManager.SIGNATURE_MATCH
+    } else {
+        PackageManager.SIGNATURE_NO_MATCH
     }
 
     private fun invokeBasePackageManagerMethod(

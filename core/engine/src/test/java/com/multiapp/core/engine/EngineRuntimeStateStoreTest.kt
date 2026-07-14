@@ -4,13 +4,17 @@ import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentAuthority
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
+import com.multiapp.core.model.virtual.ResolvedIntentPathPattern
+import com.multiapp.core.model.virtual.ResolvedIntentPathPatternType
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import com.multiapp.core.model.virtual.VirtualProviderPathPattern
 import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
 import com.multiapp.core.model.virtual.VirtualProviderPathPermission
 import java.io.File
+import java.util.Properties
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import kotlin.test.Test
@@ -54,6 +58,49 @@ class EngineRuntimeStateStoreTest {
         assertEquals(runtime.packageSnapshot.services, restored?.packageSnapshot?.services)
         assertEquals(runtime.packageSnapshot.receivers, restored?.packageSnapshot?.receivers)
         assertEquals(runtime.packageSnapshot.providers, restored?.packageSnapshot?.providers)
+    }
+
+    @Test
+    fun `file backed runtime state reads legacy filters without structured authority fields`(
+        @TempDir tempDir: File
+    ) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val runtime = runtime()
+        FileBackedEngineRuntimeStateStore(file).put(EngineRuntimeStateRecord.from(runtime))
+        val properties = Properties().apply {
+            file.inputStream().use(::load)
+            stringPropertyNames()
+                .filter { key -> ".authorityEntries" in key || ".pathPatterns" in key }
+                .forEach(::remove)
+        }
+        file.outputStream().use { output -> properties.store(output, "legacy runtime state") }
+
+        val restoredFilter = FileBackedEngineRuntimeStateStore(file)
+            .get(runtime.instanceId)
+            ?.toRuntime()
+            ?.packageSnapshot
+            ?.activities
+            ?.first()
+            ?.resolvedIntentFilters
+            ?.first()
+
+        assertEquals(listOf("legacy.example.com"), restoredFilter?.dataAuthorities)
+        assertEquals(listOf("/legacy"), restoredFilter?.dataPaths)
+        assertTrue(restoredFilter?.authorityEntries.orEmpty().isEmpty())
+        assertTrue(restoredFilter?.pathPatterns.orEmpty().isEmpty())
+        assertEquals(
+            listOf(ResolvedIntentAuthority("legacy.example.com")),
+            restoredFilter?.resolvedAuthorities
+        )
+        assertEquals(
+            listOf(
+                ResolvedIntentPathPattern(
+                    "/legacy",
+                    ResolvedIntentPathPatternType.LITERAL
+                )
+            ),
+            restoredFilter?.resolvedPathPatterns
+        )
     }
 
     @Test
@@ -195,7 +242,18 @@ class EngineRuntimeStateStoreTest {
                         ResolvedIntentFilter(
                             actions = listOf("android.intent.action.MAIN"),
                             categories = listOf("android.intent.category.LAUNCHER"),
-                            dataSchemes = listOf("app")
+                            dataSchemes = listOf("app"),
+                            dataAuthorities = listOf("legacy.example.com"),
+                            dataPaths = listOf("/legacy"),
+                            authorityEntries = listOf(
+                                ResolvedIntentAuthority("app.example.com", 7443)
+                            ),
+                            pathPatterns = listOf(
+                                ResolvedIntentPathPattern(
+                                    "/launch",
+                                    ResolvedIntentPathPatternType.PREFIX
+                                )
+                            )
                         )
                     ),
                     launchMode = "singleTask",

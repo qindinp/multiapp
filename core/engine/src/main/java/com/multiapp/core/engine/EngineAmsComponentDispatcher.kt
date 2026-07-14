@@ -3,6 +3,7 @@ package com.multiapp.core.engine
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.net.Uri
 import com.multiapp.core.loader.VirtualAmsComponentDispatcher
 import com.multiapp.core.loader.VirtualBroadcastDispatchOptions
 import com.multiapp.core.loader.VirtualBroadcastRecord
@@ -214,7 +215,7 @@ class DefaultEngineAmsComponentDispatcher(
             categories = runCatching { categories.orEmpty() }.getOrDefault(emptySet()),
             dataScheme = data?.scheme?.takeIf { it.isNotBlank() },
             dataMimeType = runCatching { type }.getOrNull()?.takeIf { it.isNotBlank() },
-            dataAuthority = data?.host?.takeIf { it.isNotBlank() },
+            dataAuthority = data.toEngineIntentAuthority(),
             dataPath = data?.path?.takeIf { it.isNotBlank() },
             ordered = options.ordered,
             sticky = options.sticky,
@@ -238,7 +239,7 @@ class DefaultEngineAmsComponentDispatcher(
             categories = runCatching { categories.orEmpty() }.getOrDefault(emptySet()),
             dataScheme = data?.scheme?.takeIf { it.isNotBlank() },
             dataMimeType = runCatching { type }.getOrNull()?.takeIf { it.isNotBlank() },
-            dataAuthority = data?.host?.takeIf { it.isNotBlank() },
+            dataAuthority = data.toEngineIntentAuthority(),
             dataPath = data?.path?.takeIf { it.isNotBlank() },
             launchFlags = runCatching { flags }.getOrDefault(0)
         )
@@ -258,7 +259,7 @@ class DefaultEngineAmsComponentDispatcher(
             categories = runCatching { categories.orEmpty() }.getOrDefault(emptySet()),
             dataScheme = data?.scheme?.takeIf { it.isNotBlank() },
             dataMimeType = runCatching { type }.getOrNull()?.takeIf { it.isNotBlank() },
-            dataAuthority = data?.host?.takeIf { it.isNotBlank() },
+            dataAuthority = data.toEngineIntentAuthority(),
             dataPath = data?.path?.takeIf { it.isNotBlank() }
         )
     }
@@ -605,6 +606,17 @@ class DefaultEngineAmsComponentDispatcher(
     ) {
         recordServiceDispatch(result.instanceId, result)
     }
+}
+
+internal fun Uri?.toEngineIntentAuthority(): String? {
+    val uri = this ?: return null
+    val host = runCatching { uri.host }
+        .getOrNull()
+        ?.takeIf { it.isNotBlank() }
+        ?: return null
+    val port = runCatching { uri.port }.getOrDefault(-1)
+    if (port < 0) return host
+    return if (':' in host) "[$host]:$port" else "$host:$port"
 }
 
 fun VirtualBroadcastResult.toVirtualBroadcastOperationResults(

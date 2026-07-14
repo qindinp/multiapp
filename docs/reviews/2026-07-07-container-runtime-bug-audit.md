@@ -2881,3 +2881,57 @@ process attribute change.
   storage/native behavior remains open.
 - No new artifact proves GKD, AstroBox, QQ, WeChat, or QQ Reader compatibility.
   Review decision remains **BLOCK**.
+
+## Review Update - 2026-07-14 Authoritative PMS Semantics
+
+The prior HIGH findings for incomplete intent-filter data, duplicated matcher
+logic, missing runtime UID/flag projection, and no per-instance enabled-state
+authority are closed for the current local PMS path. This is a VPMS semantics
+batch, not proof that the complete virtual Android service layer is finished.
+
+### Findings closed in the current tree
+
+- XML parsing retains MIME, authority host/port, five path pattern types, and
+  priority for Activity, Service, and Receiver filters. These fields survive
+  snapshot creation, Binder transport, and process-death persistence.
+- Engine and loader query paths use the same Android-free matcher. Hidden
+  query/resolve overloads pass `resolvedType`; authority ports are preserved
+  from the source `Uri` through engine planning.
+- Package/component queries project flags and the real host runtime UID.
+  Signing and provider authority results are snapshot-backed rather than
+  delegated under the guest package name to the system PMS.
+- Application and component enabled state is owned by the engine per instance
+  and package generation, exposed through strict identity-bound IPC, cleaned
+  during instance deletion, and reconciled on startup.
+- `EngineBinderProvider` supplies the package service to the production
+  endpoint. Loader queries fail closed when that authority is missing or
+  malformed; virtual package state is never written to the real PMS.
+- Integration failures were reduced from 55 to zero by fixing four root
+  causes: runtime UID sourcing, relaxed-Intent data normalization, legacy flat
+  filter compatibility, and JVM Bundle test support.
+
+### Verification
+
+- Four-module PMS gate: 1,393 tests, 0 failures, 0 errors.
+- Model 251; manifest 79; loader 711; engine 352.
+- The required full repository gate and APK assembly passed in about 5m30s:
+  2,115 tests, 0 failures, 0 errors, and 12 skipped across the nine requested
+  module reports.
+- Debug APK: 99,939,489 bytes; SHA-256
+  `B267A1A6478158EBA7432B59DE63B97A53C0AF0DCEF651E841DBAE4750334F41`.
+- The known AGP 8.7.3 / `compileSdk=36` warning remains non-fatal and does not
+  change the device-evidence requirement.
+
+### Still BLOCK
+
+- Old persisted flat filters cannot reconstruct custom categories, MIME,
+  authority ports, or path pattern types. Package refresh is required to
+  obtain the complete structured snapshot.
+- Hidden-PMS mixed virtual/real signature comparison intentionally returns no
+  match until a verified real-package signing read is added; this avoids a
+  signature false positive but is not full Android equivalence.
+- AMS/task, cross-process Provider, Service/Broadcast edge semantics, runtime
+  permissions, storage/native behavior, and device recovery evidence remain
+  incomplete.
+- This local batch is not GKD/AstroBox/QQ/WeChat/QQ Reader compatibility
+  evidence. Review decision remains **BLOCK**.

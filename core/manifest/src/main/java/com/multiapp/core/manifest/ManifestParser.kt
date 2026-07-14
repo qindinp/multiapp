@@ -4,6 +4,9 @@ import net.dongliu.apk.parser.ApkFile
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.os.PatternMatcher
+import com.multiapp.core.model.virtual.ResolvedIntentAuthority
+import com.multiapp.core.model.virtual.ResolvedIntentPathPattern
+import com.multiapp.core.model.virtual.ResolvedIntentPathPatternType
 import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import com.multiapp.core.model.virtual.VirtualProviderPathPattern
 import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
@@ -98,8 +101,18 @@ class ManifestParser @Inject constructor(
     data class IntentFilterInfo(
         val actions: List<String>,
         val categories: List<String> = emptyList(),
-        val dataSchemes: List<String> = emptyList()
-    )
+        val dataSchemes: List<String> = emptyList(),
+        val dataMimeTypes: List<String> = emptyList(),
+        val dataAuthorities: List<ResolvedIntentAuthority> = emptyList(),
+        val dataPathPatterns: List<ResolvedIntentPathPattern> = emptyList(),
+        val priority: Int = 0
+    ) {
+        val legacyDataAuthorities: List<String>
+            get() = dataAuthorities.map { authority -> authority.host }
+
+        val legacyDataPaths: List<String>
+            get() = dataPathPatterns.map { pattern -> pattern.path }
+    }
 
     companion object {
         const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
@@ -250,6 +263,14 @@ class ManifestParser @Inject constructor(
         android.util.Log.d("ManifestParser", "PackageManager parsed: pkg=${info.packageName}, " +
             "activities=${info.activities?.size ?: 0}, services=${info.services?.size ?: 0}")
 
+        return parseFromPackageInfo(info, pm)
+    }
+
+    internal fun parseFromPackageInfo(
+        info: PackageInfo,
+        pm: PackageManager
+    ): ParsedManifest {
+
         val rawActivities = (info.activities ?: emptyArray<android.content.pm.ActivityInfo>())
 
         // 启发式推断 launcher activity：
@@ -263,7 +284,7 @@ class ManifestParser @Inject constructor(
             ?: rawActivities.firstOrNull { it.name.contains("MainActivity") }?.name
 
         val activities = rawActivities.map { act ->
-            val filters = extractFiltersFromActivity(act)
+            val filters = extractFiltersFromComponent(act)
             val resolvedFilters = if (filters.isEmpty() && act.name == mainActivityName) {
                 // 为推断出的 launcher activity 注入 MAIN+LAUNCHER filter
                 listOf(IntentFilterInfo(
@@ -301,7 +322,7 @@ class ManifestParser @Inject constructor(
                 name = svc.name,
                 exported = svc.exported,
                 process = svc.processName?.takeIf { it.isNotEmpty() },
-                intentFilters = emptyList(),
+                intentFilters = extractFiltersFromComponent(svc),
                 permission = svc.permission?.takeIf { it.isNotEmpty() },
                 enabled = svc.enabled,
                 metaData = svc.metaData.toMetaDataList()
@@ -313,7 +334,7 @@ class ManifestParser @Inject constructor(
                 name = rcv.name,
                 exported = rcv.exported,
                 process = rcv.processName?.takeIf { it.isNotEmpty() },
-                intentFilters = emptyList(),
+                intentFilters = extractFiltersFromComponent(rcv),
                 permission = rcv.permission?.takeIf { it.isNotEmpty() },
                 enabled = rcv.enabled,
                 metaData = rcv.metaData.toMetaDataList()
@@ -385,8 +406,11 @@ class ManifestParser @Inject constructor(
         manifest: ParsedManifest
     ): ParsedManifest {
         val flags = PackageManager.GET_ACTIVITIES or
+            PackageManager.GET_SERVICES or
+            PackageManager.GET_RECEIVERS or
             PackageManager.GET_PROVIDERS or
-            PackageManager.GET_META_DATA
+            PackageManager.GET_META_DATA or
+            PackageManager.GET_RESOLVED_FILTER
         val info = runCatching {
             context.packageManager.getPackageArchiveInfo(apkFile.absolutePath, flags)
         }.getOrNull() ?: return manifest
@@ -450,6 +474,27 @@ class ManifestParser @Inject constructor(
                 }
             }
             .toMap()
+        val activityFiltersByName = (packageInfo.activities ?: emptyArray())
+            .mapNotNull { info ->
+                info.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    normalizeComponentName(manifest.packageName, name) to extractFiltersFromComponent(info)
+                }
+            }
+            .toMap()
+        val serviceFiltersByName = (packageInfo.services ?: emptyArray())
+            .mapNotNull { info ->
+                info.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    normalizeComponentName(manifest.packageName, name) to extractFiltersFromComponent(info)
+                }
+            }
+            .toMap()
+        val receiverFiltersByName = (packageInfo.receivers ?: emptyArray())
+            .mapNotNull { info ->
+                info.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    normalizeComponentName(manifest.packageName, name) to extractFiltersFromComponent(info)
+                }
+            }
+            .toMap()
         return manifest.copy(
             applicationThemeId = applicationThemeId,
             applicationMetaData = manifest.applicationMetaData.mergeTypedValues(applicationMetaData),
@@ -465,6 +510,9 @@ class ManifestParser @Inject constructor(
                     ?: component.themeId
                 component.copy(
                     themeId = resolvedTheme,
+                    intentFilters = component.intentFilters.ifEmpty {
+                        activityFiltersByName[componentName].orEmpty()
+                    },
                     metaData = component.metaData.mergeTypedValues(
                         activityMetaDataByName[componentName].orEmpty()
                     ),
@@ -475,6 +523,9 @@ class ManifestParser @Inject constructor(
             services = manifest.services.map { component ->
                 val componentName = normalizeComponentName(manifest.packageName, component.name)
                 component.copy(
+                    intentFilters = component.intentFilters.ifEmpty {
+                        serviceFiltersByName[componentName].orEmpty()
+                    },
                     metaData = component.metaData.mergeTypedValues(
                         serviceMetaDataByName[componentName].orEmpty()
                     )
@@ -483,6 +534,9 @@ class ManifestParser @Inject constructor(
             receivers = manifest.receivers.map { component ->
                 val componentName = normalizeComponentName(manifest.packageName, component.name)
                 component.copy(
+                    intentFilters = component.intentFilters.ifEmpty {
+                        receiverFiltersByName[componentName].orEmpty()
+                    },
                     metaData = component.metaData.mergeTypedValues(
                         receiverMetaDataByName[componentName].orEmpty()
                     )
@@ -508,7 +562,7 @@ class ManifestParser @Inject constructor(
 
     private fun findLauncherFromFilters(activities: Array<android.content.pm.ActivityInfo>): String? {
         for (act in activities) {
-            val filters = extractFiltersFromActivity(act)
+            val filters = extractFiltersFromComponent(act)
             for (f in filters) {
                 if (f.actions.contains("android.intent.action.MAIN") &&
                     f.categories.contains("android.intent.category.LAUNCHER")) {
@@ -519,85 +573,86 @@ class ManifestParser @Inject constructor(
         return null
     }
 
-    /**
-     * 从 ActivityInfo 中提取 intent-filter 信息
-     * 通过反射访问 ActivityInfo.filter（IntentFilter 对象），该字段在 GET_RESOLVED_FILTER 标志下可能被填充
-     */
-    private fun extractFiltersFromActivity(act: android.content.pm.ActivityInfo): List<IntentFilterInfo> {
-        try {
-            // ActivityInfo.filter 是隐藏 API，通过反射访问
-            val filterField = android.content.pm.ActivityInfo::class.java.getDeclaredField("filter")
-            filterField.isAccessible = true
-            val filter = filterField.get(act) as? android.content.IntentFilter ?: return emptyList()
+    /** Extract optional framework filters as a supplement to authoritative XML data. */
+    private fun extractFiltersFromComponent(component: Any): List<IntentFilterInfo> =
+        findFrameworkIntentFilters(component).mapNotNull(::extractFrameworkIntentFilter)
 
-            val actions = mutableListOf<String>()
-            val categories = mutableListOf<String>()
-            val dataSchemes = mutableListOf<String>()
-
-            // IntentFilter.actions 是隐藏字段，通过反射获取
-            try {
-                val actionsField = android.content.IntentFilter::class.java.getDeclaredField("mActions")
-                actionsField.isAccessible = true
-                @Suppress("UNCHECKED_CAST")
-                val actionList = actionsField.get(filter) as? List<String> ?: emptyList()
-                actions.addAll(actionList)
-            } catch (_: Exception) {
-                // 尝试替代方案
-                try {
-                    val countMethod = android.content.IntentFilter::class.java.getDeclaredMethod("countActions")
-                    countMethod.isAccessible = true
-                    val count = countMethod.invoke(filter) as Int
-                    for (i in 0 until count) {
-                        val getMethod = android.content.IntentFilter::class.java.getDeclaredMethod("getAction", Int::class.java)
-                        getMethod.isAccessible = true
-                        (getMethod.invoke(filter, i) as? String)?.let { actions.add(it) }
-                    }
-                } catch (_: Exception) {}
-            }
-
-            try {
-                val catsField = android.content.IntentFilter::class.java.getDeclaredField("mCategories")
-                catsField.isAccessible = true
-                @Suppress("UNCHECKED_CAST")
-                val catList = catsField.get(filter) as? List<String> ?: emptyList()
-                categories.addAll(catList)
-            } catch (_: Exception) {
-                try {
-                    val countMethod = android.content.IntentFilter::class.java.getDeclaredMethod("countCategories")
-                    countMethod.isAccessible = true
-                    val count = countMethod.invoke(filter) as Int
-                    for (i in 0 until count) {
-                        val getMethod = android.content.IntentFilter::class.java.getDeclaredMethod("getCategory", Int::class.java)
-                        getMethod.isAccessible = true
-                        (getMethod.invoke(filter, i) as? String)?.let { categories.add(it) }
-                    }
-                } catch (_: Exception) {}
-            }
-
-            try {
-                val countMethod = android.content.IntentFilter::class.java.getDeclaredMethod("countDataSchemes")
-                countMethod.isAccessible = true
-                val count = countMethod.invoke(filter) as Int
-                val getMethod = android.content.IntentFilter::class.java.getDeclaredMethod("getDataScheme", Int::class.java)
-                getMethod.isAccessible = true
-                for (i in 0 until count) {
-                    (getMethod.invoke(filter, i) as? String)?.let { dataSchemes.add(it) }
+    private fun findFrameworkIntentFilters(component: Any): List<android.content.IntentFilter> {
+        val filters = mutableListOf<android.content.IntentFilter>()
+        var currentClass: Class<*>? = component.javaClass
+        while (currentClass != null) {
+            currentClass.declaredFields
+                .filter { field ->
+                    field.name.contains("filter", ignoreCase = true) ||
+                        android.content.IntentFilter::class.java.isAssignableFrom(field.type)
                 }
-            } catch (_: Exception) {}
-
-            if (actions.isNotEmpty()) {
-                return listOf(
-                    IntentFilterInfo(
-                        actions = actions,
-                        categories = categories,
-                        dataSchemes = dataSchemes
-                    )
-                )
-            }
-        } catch (_: Exception) {
-            // filter 字段不可用（非安装 APK 或 API 版本差异）
+                .forEach { field ->
+                    val value = runCatching {
+                        field.isAccessible = true
+                        field.get(component)
+                    }.getOrNull()
+                    when (value) {
+                        is android.content.IntentFilter -> filters += value
+                        is Array<*> -> filters += value.filterIsInstance<android.content.IntentFilter>()
+                        is Iterable<*> -> filters += value.filterIsInstance<android.content.IntentFilter>()
+                    }
+                }
+            currentClass = currentClass.superclass
         }
-        return emptyList()
+        return filters.distinct()
+    }
+
+    internal fun extractFrameworkIntentFilter(
+        filter: android.content.IntentFilter
+    ): IntentFilterInfo? = runCatching {
+        val actions = (0 until filter.countActions()).map(filter::getAction)
+        if (actions.isEmpty()) return@runCatching null
+
+        val categories = (0 until filter.countCategories()).map(filter::getCategory)
+        val dataSchemes = (0 until filter.countDataSchemes()).map(filter::getDataScheme)
+        val dataMimeTypes = (0 until filter.countDataTypes()).map { index ->
+            filter.getDataType(index).toExternalMimeType()
+        }
+        val dataAuthorities = (0 until filter.countDataAuthorities()).map { index ->
+            val authority = filter.getDataAuthority(index)
+            ResolvedIntentAuthority(
+                host = authority.host,
+                port = authority.port.takeIf { it >= 0 }
+            )
+        }
+        val dataPathPatterns = (0 until filter.countDataPaths()).mapNotNull { index ->
+            filter.getDataPath(index).toResolvedIntentPathPattern()
+        }
+
+        IntentFilterInfo(
+            actions = actions,
+            categories = categories,
+            dataSchemes = dataSchemes,
+            dataMimeTypes = dataMimeTypes,
+            dataAuthorities = dataAuthorities,
+            dataPathPatterns = dataPathPatterns,
+            priority = filter.priority
+        )
+    }.getOrNull()
+
+    private fun String.toExternalMimeType(): String = when {
+        this == "*" -> "*/*"
+        '/' !in this -> "$this/*"
+        else -> this
+    }
+
+    private fun PatternMatcher.toResolvedIntentPathPattern(): ResolvedIntentPathPattern? {
+        val patternType = when (type) {
+            PatternMatcher.PATTERN_LITERAL -> ResolvedIntentPathPatternType.LITERAL
+            PatternMatcher.PATTERN_PREFIX -> ResolvedIntentPathPatternType.PREFIX
+            PatternMatcher.PATTERN_SIMPLE_GLOB -> ResolvedIntentPathPatternType.SIMPLE_GLOB
+            PatternMatcher.PATTERN_ADVANCED_GLOB -> ResolvedIntentPathPatternType.ADVANCED_GLOB
+            PatternMatcher.PATTERN_SUFFIX -> ResolvedIntentPathPatternType.SUFFIX
+            else -> return null
+        }
+        return path?.takeIf { it.isNotEmpty() }?.let { value ->
+            ResolvedIntentPathPattern(value, patternType)
+        }
     }
 
     /**
@@ -887,11 +942,56 @@ class ManifestParser @Inject constructor(
             val actions = collectNames(filterEl, "action")
             val categories = collectNames(filterEl, "category")
             val dataSchemes = collectAttributeValues(filterEl, "data", "scheme")
+            val dataMimeTypes = collectAttributeValues(filterEl, "data", "mimeType")
+            val dataAuthorities = collectIntentFilterAuthorities(filterEl)
+            val dataPathPatterns = collectIntentFilterPathPatterns(filterEl)
+            val priority = filterEl.getAttributeNS(ANDROID_NS, "priority").toIntOrNull() ?: 0
             if (actions.isNotEmpty()) {
-                filters.add(IntentFilterInfo(actions = actions, categories = categories, dataSchemes = dataSchemes))
+                filters.add(
+                    IntentFilterInfo(
+                        actions = actions,
+                        categories = categories,
+                        dataSchemes = dataSchemes,
+                        dataMimeTypes = dataMimeTypes,
+                        dataAuthorities = dataAuthorities,
+                        dataPathPatterns = dataPathPatterns,
+                        priority = priority
+                    )
+                )
             }
         }
         return filters
+    }
+
+    private fun collectIntentFilterAuthorities(filterEl: Element): List<ResolvedIntentAuthority> {
+        val authorities = mutableListOf<ResolvedIntentAuthority>()
+        forEachChild(filterEl, "data") { dataEl ->
+            val host = dataEl.getAttributeNS(ANDROID_NS, "host").takeIf { it.isNotEmpty() }
+                ?: return@forEachChild
+            val port = dataEl.getAttributeNS(ANDROID_NS, "port")
+                .takeIf { it.isNotEmpty() }
+                ?.toIntOrNull()
+            authorities += ResolvedIntentAuthority(host = host, port = port)
+        }
+        return authorities
+    }
+
+    private fun collectIntentFilterPathPatterns(filterEl: Element): List<ResolvedIntentPathPattern> {
+        val paths = mutableListOf<ResolvedIntentPathPattern>()
+        forEachChild(filterEl, "data") { dataEl ->
+            listOf(
+                "path" to ResolvedIntentPathPatternType.LITERAL,
+                "pathPrefix" to ResolvedIntentPathPatternType.PREFIX,
+                "pathPattern" to ResolvedIntentPathPatternType.SIMPLE_GLOB,
+                "pathAdvancedPattern" to ResolvedIntentPathPatternType.ADVANCED_GLOB,
+                "pathSuffix" to ResolvedIntentPathPatternType.SUFFIX
+            ).forEach { (attribute, type) ->
+                dataEl.getAttributeNS(ANDROID_NS, attribute)
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { path -> paths += ResolvedIntentPathPattern(path, type) }
+            }
+        }
+        return paths
     }
 
     private fun collectNames(parent: Element, tagName: String): List<String> {

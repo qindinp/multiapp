@@ -53,7 +53,8 @@ class ReflectionActivityThreadPackageManagerBridge : ActivityThreadPackageManage
             arrayOf(interfaceClass, VirtualPackageManagerProxyMarker::class.java),
             VirtualPackageManagerInvocationHandler(
                 originalPackageManager = original,
-                service = VirtualPackageService(snapshot),
+                service = VirtualPackageManagerServiceRegistry.serviceForPackage(snapshot.virtualPackageName)
+                    ?: VirtualPackageService(snapshot, runtimeUid),
                 runtimeUid = runtimeUid,
                 virtualizeUidQueries = true,
                 serviceResolver = VirtualPackageManagerServiceRegistry

@@ -118,7 +118,11 @@ class VirtualPackageSnapshotFactoryTest {
             services = snapshot.services.map { it.copy(metaData = emptyMap()) },
             providers = snapshot.providers.map { it.copy(metaData = emptyMap()) }
         )
-        val packageInfo = VirtualPackageInfoFactory.packageInfo(infoSnapshot)
+        val packageInfo = VirtualPackageInfoFactory.packageInfo(
+            infoSnapshot,
+            RUNTIME_UID,
+            VirtualPackageQueryFlags.INTERNAL_FULL
+        )
         val appInfo = requireNotNull(packageInfo.applicationInfo)
         val activityInfo = requireNotNull(packageInfo.activities).single()
         val serviceInfo = requireNotNull(packageInfo.services).single()
@@ -170,7 +174,12 @@ class VirtualPackageSnapshotFactoryTest {
             nativeLibraryDir = null
         )
 
-        val activityInfo = VirtualPackageInfoFactory.activityInfo(snapshot, snapshot.activities.single())
+        val activityInfo = VirtualPackageInfoFactory.activityInfo(
+            snapshot,
+            snapshot.activities.single(),
+            RUNTIME_UID,
+            VirtualPackageQueryFlags.INTERNAL_FULL
+        )
 
         assertEquals(0x7f010010, activityInfo.theme)
     }
@@ -199,6 +208,11 @@ class VirtualPackageSnapshotFactoryTest {
         val signingInfo = mockk<SigningInfo>()
         val packageInfo = VirtualPackageInfoFactory.packageInfo(
             snapshot,
+            RUNTIME_UID,
+            VirtualPackageQueryFlags.fromInt(
+                android.content.pm.PackageManager.GET_SIGNATURES or
+                    android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES
+            ),
             VirtualPackageSigningInfo(
                 legacySignatures = arrayOf(signature),
                 signingInfo = signingInfo,
@@ -261,7 +275,9 @@ class VirtualPackageSnapshotFactoryTest {
 
         val activityInfo = VirtualPackageInfoFactory.findActivity(
             snapshot,
-            "com.test.minimal.RealActivity"
+            "com.test.minimal.RealActivity",
+            RUNTIME_UID,
+            VirtualPackageQueryFlags.INTERNAL_FULL
         )
 
         assertEquals(0x7f010020, activityInfo?.theme)
@@ -387,4 +403,8 @@ class VirtualPackageSnapshotFactoryTest {
         packageLabel = "Install Label",
         installTimeMs = 1L
     )
+
+    private companion object {
+        const val RUNTIME_UID = 42420
+    }
 }

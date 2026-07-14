@@ -4467,3 +4467,60 @@ Remaining gate:
   native semantics remain incomplete.
 - This migration is not compatibility proof for GKD, AstroBox, QQ, WeChat, or
   QQ Reader. Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-14 Authoritative PMS Semantics Batch
+
+This batch moves package queries closer to the central VPMS shape used by
+VirtualApp and BlackBox. Package metadata, intent resolution, and enabled
+state now cross the same engine authority instead of being reconstructed by
+independent loader-side approximations.
+
+Implemented:
+
+- Manifest XML is the authoritative source for complete Activity, Service,
+  and Receiver intent filters. MIME types, authority host/port, literal,
+  prefix, simple-glob, advanced-glob, suffix paths, and priority survive into
+  `VirtualPackageSnapshot`.
+- Added one Android-free `ResolvedIntentFilterMatcher` aligned with Android 16
+  `IntentFilter.matchData()`. Engine and loader consumers now share it;
+  hidden `IPackageManager` query/resolve overloads preserve `resolvedType`.
+- Authoritative runtime IPC snapshot schema 2 transports structured
+  authorities and paths. Runtime persistence stores the same fields and still
+  reads legacy files that only contain host/path string lists.
+- VPMS projects query flags, runtime UID, original signing data, provider
+  multi-authorities, and `ResolveInfo.priority`. Unknown signing identity
+  remains fail-closed.
+- Added engine-owned, per-instance and package-generation application/
+  component enabled state. Strict Binder codecs validate process identity;
+  loader `PackageManager` calls use an installed engine dispatcher and cannot
+  fall back to the real PMS when authority is unavailable.
+- The production `EngineBinderProvider` endpoint now publishes
+  `owner.systemServer.packageService`. Activity, Service, and Broadcast plan
+  requests preserve URI ports, including bracketed IPv6 authority encoding.
+- Integration review fixed JVM-only UID/Bundle seams and retained action-only
+  compatibility for snapshots that still contain the old flat filter model.
+
+Verification:
+
+- Model 251, manifest 79, loader 711, and engine 352 tests pass: 1,393 tests,
+  0 failures, 0 errors.
+- `git diff --check` passes apart from existing line-ending warnings.
+- The single required full multi-module gate and APK assembly passed in about
+  5m30s. The nine requested module reports contain 2,115 tests, 0 failures,
+  0 errors, and 12 skipped.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 99,939,489 bytes.
+- APK SHA-256:
+  `B267A1A6478158EBA7432B59DE63B97A53C0AF0DCEF651E841DBAE4750334F41`.
+- AGP 8.7.3 still emits its known `compileSdk=36` support warning; it did not
+  fail the gate and is not device/runtime evidence.
+
+Remaining gate:
+
+- Legacy flat filter records cannot recover category/data distinctions; only
+  newly parsed structured filters provide Android-equivalent matching.
+- Mixed virtual/real hidden-PMS signature comparison remains fail-closed;
+  the public `PackageManager` wrapper can compare verified real package data.
+- Complete AMS/task, Provider, Service, Broadcast, runtime-permission,
+  storage/native semantics and API 28-36/HyperOS device evidence remain open.
+- No device artifact in this batch proves GKD, AstroBox, QQ, WeChat, or QQ
+  Reader. Commercial status remains **BLOCK**.

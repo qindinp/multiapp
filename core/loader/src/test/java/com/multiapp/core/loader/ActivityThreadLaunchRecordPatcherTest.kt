@@ -20,6 +20,8 @@ class ActivityThreadLaunchRecordPatcherTest {
 
     @BeforeTest
     fun setUp() {
+        VirtualPackageRegistry.global.clear()
+        VirtualProcessRuntime.global.clearAll()
         VirtualActivityLaunchAuthority.install(
             validator = VirtualActivityLaunchValidator {
                 VirtualActivityLaunchAuthorityResult(true, "test_authorized")

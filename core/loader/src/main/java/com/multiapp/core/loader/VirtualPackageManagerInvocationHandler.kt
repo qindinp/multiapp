@@ -23,6 +23,10 @@ class VirtualPackageManagerInvocationHandler(
     private val serviceResolver: VirtualPackageManagerServiceResolver? = null
 ) : InvocationHandler {
 
+    init {
+        require(runtimeUid > 0) { "runtimeUid must be a positive Android application UID" }
+    }
+
     override fun invoke(proxy: Any, method: Method, args: Array<Any?>?): Any? {
         if (method.declaringClass == VirtualPackageManagerProxyMarker::class.java) {
             return originalPackageManager
@@ -39,27 +43,67 @@ class VirtualPackageManagerInvocationHandler(
 
     private fun dispatchVirtual(method: Method, args: Array<Any?>): VirtualDispatchResult = when (method.name) {
         "getPackageInfo", "getPackageInfoVersioned" -> packageNameArg(args, 0)
-            ?.let { packageName -> serviceForPackage(packageName)?.getPackageInfo(packageName)?.handled() }
+            ?.let { packageName ->
+                serviceForPackage(packageName)?.let { packageService ->
+                    VirtualDispatchResult.Handled(packageService.getPackageInfo(packageName, queryFlags(args)))
+                }
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "getApplicationInfo" -> packageNameArg(args, 0)
-            ?.let { packageName -> serviceForPackage(packageName)?.getApplicationInfo(packageName)?.handled() }
+            ?.let { packageName ->
+                serviceForPackage(packageName)?.let { packageService ->
+                    VirtualDispatchResult.Handled(packageService.getApplicationInfo(packageName, queryFlags(args)))
+                }
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "getActivityInfo" -> componentArg(args, 0)
-            ?.let { component -> serviceForComponent(component)?.getActivityInfo(component)?.handled() }
+            ?.let { component ->
+                serviceForComponent(component)?.let { packageService ->
+                    VirtualDispatchResult.Handled(packageService.getActivityInfo(component, queryFlags(args)))
+                }
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "getServiceInfo" -> componentArg(args, 0)
-            ?.let { component -> serviceForComponent(component)?.getServiceInfo(component)?.handled() }
+            ?.let { component ->
+                serviceForComponent(component)?.let { packageService ->
+                    VirtualDispatchResult.Handled(packageService.getServiceInfo(component, queryFlags(args)))
+                }
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "getReceiverInfo" -> componentArg(args, 0)
-            ?.let { component -> serviceForComponent(component)?.getReceiverInfo(component)?.handled() }
+            ?.let { component ->
+                serviceForComponent(component)?.let { packageService ->
+                    VirtualDispatchResult.Handled(packageService.getReceiverInfo(component, queryFlags(args)))
+                }
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "getProviderInfo" -> componentArg(args, 0)
-            ?.let { component -> serviceForComponent(component)?.getProviderInfo(component)?.handled() }
+            ?.let { component ->
+                serviceForComponent(component)?.let { packageService ->
+                    VirtualDispatchResult.Handled(packageService.getProviderInfo(component, queryFlags(args)))
+                }
+            }
+            ?: VirtualDispatchResult.NotHandled
+
+        "getApplicationEnabledSetting" -> packageNameArg(args, 0)
+            ?.let { packageName ->
+                serviceForPackage(packageName)?.getApplicationEnabledSetting(packageName)?.handled()
+            }
+            ?: VirtualDispatchResult.NotHandled
+
+        "setApplicationEnabledSetting" -> packageNameArg(args, 0)
+            ?.let { packageName ->
+                val newState = intArg(args, 1) ?: PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                val flags = intArg(args, 2) ?: 0
+                serviceForPackage(packageName)
+                    ?.takeIf { it.setApplicationEnabledSetting(packageName, newState, flags) }
+                    ?.let { VirtualDispatchResult.Handled(null) }
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "getComponentEnabledSetting" -> componentArg(args, 0)
@@ -77,29 +121,43 @@ class VirtualPackageManagerInvocationHandler(
             ?: VirtualDispatchResult.NotHandled
 
         "resolveContentProvider" -> stringArg(args, 0)
-            ?.let { authority -> serviceForAuthority(authority)?.resolveContentProvider(authority)?.handled() }
+            ?.let { authority ->
+                serviceForAuthority(authority)?.let { packageService ->
+                    VirtualDispatchResult.Handled(packageService.resolveContentProvider(authority, queryFlags(args)))
+                }
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "queryIntentActivities" -> queryIntentActivities(method, args)
 
         "resolveIntent", "resolveActivity" -> intentArg(args, 0)
-            ?.let { intent -> serviceForIntent(intent)?.resolveActivity(intent)?.handled() }
+            ?.let { intent ->
+                val resolvedType = resolvedTypeArg(method, args)
+                serviceForIntent(intent, resolvedType)
+                    ?.resolveActivity(intent, queryFlags(args), resolvedType)
+                    ?.handled()
+            }
             ?: VirtualDispatchResult.NotHandled
 
-        "queryIntentServices" -> queryIntent(args) { packageService, intent ->
-            packageService.queryIntentServices(intent)
+        "queryIntentServices" -> queryIntent(method, args) { packageService, intent, resolvedType ->
+            packageService.queryIntentServices(intent, queryFlags(args), resolvedType)
         }
 
         "resolveService" -> intentArg(args, 0)
-            ?.let { intent -> serviceForIntent(intent)?.resolveService(intent)?.handled() }
+            ?.let { intent ->
+                val resolvedType = resolvedTypeArg(method, args)
+                serviceForIntent(intent, resolvedType)
+                    ?.resolveService(intent, queryFlags(args), resolvedType)
+                    ?.handled()
+            }
             ?: VirtualDispatchResult.NotHandled
 
-        "queryIntentReceivers" -> queryIntent(args) { packageService, intent ->
-            packageService.queryBroadcastReceivers(intent)
+        "queryIntentReceivers" -> queryIntent(method, args) { packageService, intent, resolvedType ->
+            packageService.queryBroadcastReceivers(intent, queryFlags(args), resolvedType)
         }
 
-        "queryIntentContentProviders" -> queryIntent(args) { packageService, intent ->
-            packageService.queryIntentContentProviders(intent)
+        "queryIntentContentProviders" -> queryIntent(method, args) { packageService, intent, resolvedType ->
+            packageService.queryIntentContentProviders(intent, queryFlags(args), resolvedType)
         }
 
         "getInstalledPackages" -> installedPackages(method, args).handled()
@@ -117,6 +175,14 @@ class VirtualPackageManagerInvocationHandler(
             }
         }
 
+        "checkSignatures" -> checkSignatures(args)
+
+        "checkUidSignatures" -> checkUidSignatures(args)
+
+        "hasSigningCertificate" -> hasSigningCertificate(args)
+
+        "hasUidSigningCertificate" -> hasUidSigningCertificate(args)
+
         "getPackageUid" -> packageNameArg(args, 0)
             ?.let { packageName -> serviceForPackage(packageName)?.getPackageUid(packageName, runtimeUid)?.handled() }
             ?: VirtualDispatchResult.NotHandled
@@ -130,7 +196,11 @@ class VirtualPackageManagerInvocationHandler(
             ?: VirtualDispatchResult.NotHandled
 
         "getPackagesHoldingPermissions" -> stringArrayArg(args, 0)
-            ?.let { permissions -> service.getPackagesHoldingPermissions(permissions).takeIf { it.isNotEmpty() }?.handled() }
+            ?.let { permissions ->
+                service.getPackagesHoldingPermissions(permissions, queryFlags(args))
+                    .takeIf { it.isNotEmpty() }
+                    ?.handled()
+            }
             ?: VirtualDispatchResult.NotHandled
 
         "queryContentProviders" -> queryContentProviders(args)?.handled()
@@ -141,6 +211,56 @@ class VirtualPackageManagerInvocationHandler(
             ?: VirtualDispatchResult.NotHandled
 
         else -> VirtualDispatchResult.NotHandled
+    }
+
+    private fun checkSignatures(args: Array<Any?>): VirtualDispatchResult {
+        val firstPackage = stringArg(args, 0)
+        val secondPackage = stringArg(args, 1)
+        if (firstPackage == null || secondPackage == null) return checkUidSignatures(args)
+        val firstService = serviceForPackage(firstPackage)
+        val secondService = serviceForPackage(secondPackage)
+        if (firstService == null && secondService == null) return VirtualDispatchResult.NotHandled
+        val firstSigningInfo = firstService?.signingInfoForPackage(firstPackage)
+        val secondSigningInfo = secondService?.signingInfoForPackage(secondPackage)
+        return VirtualDispatchResult.Handled(signatureComparison(firstSigningInfo, secondSigningInfo))
+    }
+
+    private fun checkUidSignatures(args: Array<Any?>): VirtualDispatchResult {
+        val firstUid = intArg(args, 0) ?: return VirtualDispatchResult.NotHandled
+        val secondUid = intArg(args, 1) ?: return VirtualDispatchResult.NotHandled
+        if (firstUid != runtimeUid && secondUid != runtimeUid) return VirtualDispatchResult.NotHandled
+        val firstSigningInfo = service.signingInfoForRuntimeUid(firstUid)
+        val secondSigningInfo = service.signingInfoForRuntimeUid(secondUid)
+        return VirtualDispatchResult.Handled(signatureComparison(firstSigningInfo, secondSigningInfo))
+    }
+
+    private fun hasSigningCertificate(args: Array<Any?>): VirtualDispatchResult {
+        val packageName = stringArg(args, 0) ?: return hasUidSigningCertificate(args)
+        val certificate = byteArrayArg(args, 1) ?: return VirtualDispatchResult.NotHandled
+        val type = intArg(args, 2) ?: return VirtualDispatchResult.NotHandled
+        val packageService = serviceForPackage(packageName) ?: return VirtualDispatchResult.NotHandled
+        return VirtualDispatchResult.Handled(
+            packageService.hasSigningCertificate(packageName, certificate, type) ?: false
+        )
+    }
+
+    private fun hasUidSigningCertificate(args: Array<Any?>): VirtualDispatchResult {
+        val uid = intArg(args, 0) ?: return VirtualDispatchResult.NotHandled
+        if (uid != runtimeUid) return VirtualDispatchResult.NotHandled
+        val certificate = byteArrayArg(args, 1) ?: return VirtualDispatchResult.NotHandled
+        val type = intArg(args, 2) ?: return VirtualDispatchResult.NotHandled
+        return VirtualDispatchResult.Handled(
+            service.hasRuntimeUidSigningCertificate(uid, certificate, type) ?: false
+        )
+    }
+
+    private fun signatureComparison(
+        first: VirtualPackageSigningInfo?,
+        second: VirtualPackageSigningInfo?
+    ): Int = if (first?.matches(second) == true) {
+        PackageManager.SIGNATURE_MATCH
+    } else {
+        PackageManager.SIGNATURE_NO_MATCH
     }
 
     private fun packagesForUid(method: Method, args: Array<Any?>, uid: Int): Array<String>? {
@@ -161,11 +281,15 @@ class VirtualPackageManagerInvocationHandler(
 
     private fun queryContentProviders(args: Array<Any?>): List<Any>? {
         val uid = intArg(args, 1) ?: return null
-        return if (uid == runtimeUid) service.queryContentProviders(stringArg(args, 0), uid, runtimeUid) else null
+        return if (uid == runtimeUid) {
+            service.queryContentProviders(stringArg(args, 0), uid, runtimeUid, queryFlags(args, 2))
+        } else {
+            null
+        }
     }
 
     private fun installedPackages(method: Method, args: Array<Any?>): Any {
-        val virtualPackages = service.getInstalledPackages()
+        val virtualPackages = service.getInstalledPackages(queryFlags(args, 0))
         val originalResult = invokeOriginalOrNull(method, args)
         return mergeAggregateResult(
             originalResult = originalResult,
@@ -176,7 +300,7 @@ class VirtualPackageManagerInvocationHandler(
     }
 
     private fun installedApplications(method: Method, args: Array<Any?>): Any {
-        val virtualApplications = service.getInstalledApplications()
+        val virtualApplications = service.getInstalledApplications(queryFlags(args, 0))
         val originalResult = invokeOriginalOrNull(method, args)
         return mergeAggregateResult(
             originalResult = originalResult,
@@ -188,8 +312,9 @@ class VirtualPackageManagerInvocationHandler(
 
     private fun queryIntentActivities(method: Method, args: Array<Any?>): VirtualDispatchResult {
         val intent = intentArg(args, 0) ?: return VirtualDispatchResult.NotHandled
-        val packageService = serviceForIntent(intent) ?: service
-        val virtualActivities = packageService.queryIntentActivities(intent)
+        val resolvedType = resolvedTypeArg(method, args)
+        val packageService = serviceForIntent(intent, resolvedType) ?: service
+        val virtualActivities = packageService.queryIntentActivities(intent, queryFlags(args), resolvedType)
         if (virtualActivities.isEmpty()) return VirtualDispatchResult.NotHandled
         if (!intent.isUnscopedLauncherIntent()) return virtualActivities.handled()
 
@@ -204,26 +329,31 @@ class VirtualPackageManagerInvocationHandler(
     }
 
     private fun queryIntent(
+        method: Method,
         args: Array<Any?>,
-        query: (VirtualPackageService, Intent) -> List<Any>
+        query: (VirtualPackageService, Intent, String?) -> List<Any>
     ): VirtualDispatchResult {
         val intent = intentArg(args, 0) ?: return VirtualDispatchResult.NotHandled
-        val packageService = serviceForIntent(intent) ?: service
-        return query(packageService, intent).takeIf { it.isNotEmpty() }?.handled()
+        val resolvedType = resolvedTypeArg(method, args)
+        val packageService = serviceForIntent(intent, resolvedType) ?: service
+        return query(packageService, intent, resolvedType).takeIf { it.isNotEmpty() }?.handled()
             ?: VirtualDispatchResult.NotHandled
     }
 
     private fun serviceForPackage(packageName: String): VirtualPackageService? =
-        serviceResolver?.serviceForPackage(packageName) ?: service.takeIf { service.getPackageInfo(packageName) != null }
+        serviceResolver?.serviceForPackage(packageName) ?: service.takeIf { it.handlesPackage(packageName) }
 
     private fun serviceForComponent(component: ComponentName): VirtualPackageService? =
-        serviceResolver?.serviceForComponent(component) ?: service.takeIf { service.getPackageInfo(component.packageName) != null }
+        serviceResolver?.serviceForComponent(component) ?: service.takeIf { it.handlesPackage(component.packageName) }
 
     private fun serviceForAuthority(authority: String): VirtualPackageService? =
         serviceResolver?.serviceForAuthority(authority) ?: service.takeIf { service.resolveContentProvider(authority) != null }
 
-    private fun serviceForIntent(intent: Intent): VirtualPackageService? =
-        serviceResolver?.serviceForIntent(intent) ?: service.takeIf { it.resolveActivity(intent) != null || it.resolveService(intent) != null }
+    private fun serviceForIntent(intent: Intent, resolvedType: String? = null): VirtualPackageService? =
+        serviceResolver?.serviceForIntent(intent) ?: service.takeIf {
+            it.resolveActivity(intent, VirtualPackageQueryFlags.NONE, resolvedType) != null ||
+                it.resolveService(intent, VirtualPackageQueryFlags.NONE, resolvedType) != null
+        }
 
     private fun Intent.isUnscopedLauncherIntent(): Boolean {
         if (runCatching { component }.getOrNull() != null) return false
@@ -323,11 +453,31 @@ class VirtualPackageManagerInvocationHandler(
         return value.filterIsInstance<String>().takeIf { it.size == value.size }?.toTypedArray()
     }
 
+    private fun byteArrayArg(args: Array<Any?>, index: Int): ByteArray? = args.getOrNull(index) as? ByteArray
+
     private fun componentArg(args: Array<Any?>, index: Int): ComponentName? = args.getOrNull(index) as? ComponentName
 
     private fun intentArg(args: Array<Any?>, index: Int): Intent? = args.getOrNull(index) as? Intent
 
+    private fun resolvedTypeArg(method: Method, args: Array<Any?>, intentIndex: Int = 0): String? {
+        val resolvedTypeIndex = intentIndex + 1
+        if (method.parameterTypes.getOrNull(resolvedTypeIndex) != String::class.java) return null
+        return args.getOrNull(resolvedTypeIndex) as? String
+    }
+
     private fun intArg(args: Array<Any?>, index: Int): Int? = args.getOrNull(index) as? Int
+
+    private fun queryFlags(args: Array<Any?>, startIndex: Int = 1): Long {
+        val value = args.asSequence()
+            .drop(startIndex)
+            .filterIsInstance<Number>()
+            .firstOrNull()
+        return when (value) {
+            is Int -> VirtualPackageQueryFlags.fromInt(value)
+            null -> VirtualPackageQueryFlags.NONE
+            else -> value.toLong()
+        }
+    }
 
     private fun Any.handled(): VirtualDispatchResult = VirtualDispatchResult.Handled(this)
 

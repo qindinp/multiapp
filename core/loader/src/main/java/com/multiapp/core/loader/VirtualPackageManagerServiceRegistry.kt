@@ -19,10 +19,12 @@ object VirtualPackageManagerServiceRegistry : VirtualPackageManagerServiceResolv
 
     fun register(
         snapshot: VirtualPackageSnapshot,
+        runtimeUid: Int,
         packageManager: PackageManager? = null
     ): VirtualPackageService {
         val service = VirtualPackageService(
             snapshot = snapshot,
+            runtimeUid = runtimeUid,
             packageSigningInfo = VirtualPackageArchiveSigningResolver.resolve(packageManager, snapshot)
         )
         service.packageAliases().forEach { packageName ->

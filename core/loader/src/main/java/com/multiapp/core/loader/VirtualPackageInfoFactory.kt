@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.content.pm.ProviderInfo
 import android.content.pm.PathPermission
 import android.os.PatternMatcher
@@ -18,7 +19,12 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
 internal object VirtualPackageInfoFactory {
 
-    fun applicationInfo(snapshot: VirtualPackageSnapshot): ApplicationInfo = ApplicationInfo().apply {
+    fun applicationInfo(
+        snapshot: VirtualPackageSnapshot,
+        runtimeUid: Int,
+        flags: Long
+    ): ApplicationInfo = ApplicationInfo().apply {
+        uid = requireRuntimeUid(runtimeUid)
         packageName = snapshot.originPackageName
         className = snapshot.applicationClassName
         name = snapshot.applicationClassName
@@ -42,36 +48,59 @@ internal object VirtualPackageInfoFactory {
         processName = snapshot.processName
         taskAffinity = snapshot.taskAffinity
         theme = snapshot.themeId
-        metaData = snapshot.metaData.toBundle(snapshot.typedMetaData)
+        if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_META_DATA)) {
+            metaData = snapshot.metaData.toBundle(snapshot.typedMetaData)
+        }
         enabled = true
     }
 
     @Suppress("DEPRECATION")
     fun packageInfo(
         snapshot: VirtualPackageSnapshot,
+        runtimeUid: Int,
+        flags: Long,
         packageSigningInfo: VirtualPackageSigningInfo? = null
     ): PackageInfo = PackageInfo().apply {
         packageName = snapshot.originPackageName
         versionCode = snapshot.versionCode.toInt()
         versionName = snapshot.versionName
-        applicationInfo = applicationInfo(snapshot)
-        requestedPermissions = snapshot.permissions.toTypedArray()
-        activities = snapshot.activities.map { activityInfo(snapshot, it) }.toTypedArray()
-        services = snapshot.services.map { serviceInfo(snapshot, it) }.toTypedArray()
-        receivers = snapshot.receivers.map { receiverInfo(snapshot, it) }.toTypedArray()
-        providers = snapshot.providers.mapNotNull { providerInfo(snapshot, it) }.toTypedArray()
-        packageSigningInfo?.let { signing ->
-            signatures = signing.legacySignatures.copyOf()
-            signingInfo = signing.signingInfo
+        applicationInfo = applicationInfo(snapshot, runtimeUid, flags)
+        if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_PERMISSIONS)) {
+            requestedPermissions = snapshot.permissions.toTypedArray()
+        }
+        if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_ACTIVITIES)) {
+            activities = snapshot.activities.map { activityInfo(snapshot, it, runtimeUid, flags) }.toTypedArray()
+        }
+        if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_SERVICES)) {
+            services = snapshot.services.map { serviceInfo(snapshot, it, runtimeUid, flags) }.toTypedArray()
+        }
+        if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_RECEIVERS)) {
+            receivers = snapshot.receivers.map { receiverInfo(snapshot, it, runtimeUid, flags) }.toTypedArray()
+        }
+        if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_PROVIDERS)) {
+            providers = snapshot.providers.mapNotNull {
+                providerInfo(snapshot, it, runtimeUid, flags)
+            }.toTypedArray()
+        }
+        if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_SIGNATURES)) {
+            packageSigningInfo?.let { signing -> signatures = signing.legacySignatures.copyOf() }
+        }
+        if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_SIGNING_CERTIFICATES)) {
+            packageSigningInfo?.let { signing -> signingInfo = signing.signingInfo }
         }
     }
 
-    fun activityInfo(snapshot: VirtualPackageSnapshot, component: ResolvedComponent): ActivityInfo =
+    fun activityInfo(
+        snapshot: VirtualPackageSnapshot,
+        component: ResolvedComponent,
+        runtimeUid: Int,
+        flags: Long
+    ): ActivityInfo =
         ActivityInfo().apply {
             packageName = snapshot.originPackageName
             name = component.name
             exported = component.exported
-            applicationInfo = applicationInfo(snapshot)
+            applicationInfo = applicationInfo(snapshot, runtimeUid, flags)
             enabled = true
             launchMode = toActivityInfoLaunchMode(component.launchMode)
             processName = component.processName
@@ -80,50 +109,74 @@ internal object VirtualPackageInfoFactory {
             screenOrientation = toActivityInfoScreenOrientation(component.screenOrientation)
             configChanges = toActivityInfoConfigChanges(component.configChanges)
             permission = component.permission
-            metaData = component.metaData.toBundle(component.typedMetaData)
+            if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_META_DATA)) {
+                metaData = component.metaData.toBundle(component.typedMetaData)
+            }
             targetActivity = component.targetActivityName
         }
 
-    fun receiverInfo(snapshot: VirtualPackageSnapshot, component: ResolvedComponent): ActivityInfo =
-        activityInfo(snapshot, component)
+    fun receiverInfo(
+        snapshot: VirtualPackageSnapshot,
+        component: ResolvedComponent,
+        runtimeUid: Int,
+        flags: Long
+    ): ActivityInfo = activityInfo(snapshot, component, runtimeUid, flags)
 
-    fun serviceInfo(snapshot: VirtualPackageSnapshot, component: ResolvedComponent): ServiceInfo =
+    fun serviceInfo(
+        snapshot: VirtualPackageSnapshot,
+        component: ResolvedComponent,
+        runtimeUid: Int,
+        flags: Long
+    ): ServiceInfo =
         ServiceInfo().apply {
             packageName = snapshot.originPackageName
             name = component.name
             exported = component.exported
-            applicationInfo = applicationInfo(snapshot)
+            applicationInfo = applicationInfo(snapshot, runtimeUid, flags)
             enabled = true
             processName = component.processName
             permission = component.permission
-            metaData = component.metaData.toBundle(component.typedMetaData)
+            if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_META_DATA)) {
+                metaData = component.metaData.toBundle(component.typedMetaData)
+            }
         }
 
-    fun providerInfo(snapshot: VirtualPackageSnapshot, component: ResolvedComponent): ProviderInfo? {
-        val authority = component.authorities.firstOrNull() ?: return null
+    fun providerInfo(
+        snapshot: VirtualPackageSnapshot,
+        component: ResolvedComponent,
+        runtimeUid: Int,
+        flags: Long
+    ): ProviderInfo? {
+        val authority = component.authorities.filter { it.isNotBlank() }.joinToString(";")
+            .takeIf { it.isNotBlank() }
+            ?: return null
         return ProviderInfo().apply {
             packageName = snapshot.originPackageName
             name = component.name
             exported = component.exported
-            applicationInfo = applicationInfo(snapshot)
+            applicationInfo = applicationInfo(snapshot, runtimeUid, flags)
             enabled = true
             this.authority = authority
             processName = component.processName
             readPermission = component.readPermission ?: component.permission
             writePermission = component.writePermission ?: component.permission
             grantUriPermissions = component.grantUriPermissions || component.uriPermissionPatterns.isNotEmpty()
-            pathPermissions = component.pathPermissions.map { permission ->
-                PathPermission(
-                    permission.pattern.path,
-                    permission.pattern.type.toAndroidPatternType(),
-                    permission.readPermission,
-                    permission.writePermission
-                )
-            }.toTypedArray().takeIf { it.isNotEmpty() }
-            uriPermissionPatterns = component.uriPermissionPatterns.map { pattern ->
-                PatternMatcher(pattern.path, pattern.type.toAndroidPatternType())
-            }.toTypedArray().takeIf { it.isNotEmpty() }
-            metaData = component.metaData.toBundle(component.typedMetaData)
+            if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_URI_PERMISSION_PATTERNS)) {
+                pathPermissions = component.pathPermissions.map { permission ->
+                    PathPermission(
+                        permission.pattern.path,
+                        permission.pattern.type.toAndroidPatternType(),
+                        permission.readPermission,
+                        permission.writePermission
+                    )
+                }.toTypedArray().takeIf { it.isNotEmpty() }
+                uriPermissionPatterns = component.uriPermissionPatterns.map { pattern ->
+                    PatternMatcher(pattern.path, pattern.type.toAndroidPatternType())
+                }.toTypedArray().takeIf { it.isNotEmpty() }
+            }
+            if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_META_DATA)) {
+                metaData = component.metaData.toBundle(component.typedMetaData)
+            }
         }
     }
 
@@ -136,7 +189,11 @@ internal object VirtualPackageInfoFactory {
             com.multiapp.core.model.virtual.VirtualProviderPathPatternType.SUFFIX -> PatternMatcher.PATTERN_SUFFIX
         }
 
-    fun launcherResolveInfo(snapshot: VirtualPackageSnapshot): ResolveInfo? {
+    fun launcherResolveInfo(
+        snapshot: VirtualPackageSnapshot,
+        runtimeUid: Int,
+        flags: Long
+    ): ResolveInfo? {
         val launcherName = snapshot.launcherActivityName
             ?: snapshot.activities.resolveLauncherIntentActivityName()
             ?: return null
@@ -149,35 +206,65 @@ internal object VirtualPackageInfoFactory {
                 intentFilters = listOf(Intent.ACTION_MAIN, Intent.CATEGORY_LAUNCHER)
             )
         return ResolveInfo().apply {
-            activityInfo = activityInfo(snapshot, component)
+            activityInfo = activityInfo(snapshot, component, runtimeUid, flags)
         }
     }
 
-    fun findActivity(snapshot: VirtualPackageSnapshot, componentName: ComponentName): ActivityInfo? {
+    fun findActivity(
+        snapshot: VirtualPackageSnapshot,
+        componentName: ComponentName,
+        runtimeUid: Int,
+        flags: Long
+    ): ActivityInfo? {
         if (!snapshot.matchesPackageName(componentName.packageName)) return null
-        return findActivity(snapshot, componentName.className)
+        return findActivity(snapshot, componentName.className, runtimeUid, flags)
     }
 
-    internal fun findActivity(snapshot: VirtualPackageSnapshot, className: String): ActivityInfo? =
+    internal fun findActivity(
+        snapshot: VirtualPackageSnapshot,
+        className: String,
+        runtimeUid: Int,
+        flags: Long
+    ): ActivityInfo? =
         snapshot.activities.firstOrNull {
             it.name == className || it.targetActivityName == className
-        }?.let { activityInfo(snapshot, it) }
+        }?.let { activityInfo(snapshot, it, runtimeUid, flags) }
 
-    fun findService(snapshot: VirtualPackageSnapshot, componentName: ComponentName): ServiceInfo? {
+    fun findService(
+        snapshot: VirtualPackageSnapshot,
+        componentName: ComponentName,
+        runtimeUid: Int,
+        flags: Long
+    ): ServiceInfo? {
         if (!snapshot.matchesPackageName(componentName.packageName)) return null
         return snapshot.services.firstOrNull { it.name == componentName.className }
-            ?.let { serviceInfo(snapshot, it) }
+            ?.let { serviceInfo(snapshot, it, runtimeUid, flags) }
     }
 
-    fun findReceiver(snapshot: VirtualPackageSnapshot, componentName: ComponentName): ActivityInfo? {
+    fun findReceiver(
+        snapshot: VirtualPackageSnapshot,
+        componentName: ComponentName,
+        runtimeUid: Int,
+        flags: Long
+    ): ActivityInfo? {
         if (!snapshot.matchesPackageName(componentName.packageName)) return null
         return snapshot.receivers.firstOrNull { it.name == componentName.className }
-            ?.let { receiverInfo(snapshot, it) }
+            ?.let { receiverInfo(snapshot, it, runtimeUid, flags) }
     }
 
-    fun findProvider(snapshot: VirtualPackageSnapshot, authority: String): ProviderInfo? =
+    fun findProvider(
+        snapshot: VirtualPackageSnapshot,
+        authority: String,
+        runtimeUid: Int,
+        flags: Long
+    ): ProviderInfo? =
         snapshot.providers.firstOrNull { authority in it.authorities }
-            ?.let { providerInfo(snapshot, it) }
+            ?.let { providerInfo(snapshot, it, runtimeUid, flags) }
+
+    private fun requireRuntimeUid(runtimeUid: Int): Int {
+        require(runtimeUid > 0) { "runtimeUid must be a positive Android application UID" }
+        return runtimeUid
+    }
 
     private fun toActivityInfoLaunchMode(launchMode: String?): Int = when (launchMode) {
         "singleTop" -> ActivityInfo.LAUNCH_SINGLE_TOP
@@ -248,6 +335,26 @@ internal object VirtualPackageInfoFactory {
             else -> bundle.putString(key, value.toString())
         }
     }
+}
+
+internal object VirtualPackageQueryFlags {
+    const val NONE: Long = 0L
+
+    val INTERNAL_FULL: Long = listOf(
+        PackageManager.GET_ACTIVITIES,
+        PackageManager.GET_RECEIVERS,
+        PackageManager.GET_SERVICES,
+        PackageManager.GET_PROVIDERS,
+        PackageManager.GET_PERMISSIONS,
+        PackageManager.GET_META_DATA,
+        PackageManager.GET_SIGNATURES,
+        PackageManager.GET_SIGNING_CERTIFICATES,
+        PackageManager.GET_URI_PERMISSION_PATTERNS
+    ).fold(0L) { result, flag -> result or fromInt(flag) }
+
+    fun fromInt(flags: Int): Long = flags.toLong() and 0xffff_ffffL
+
+    fun includes(flags: Long, requested: Int): Boolean = flags and fromInt(requested) != 0L
 }
 
 internal fun VirtualMetaDataValue.toPlatformMetaDataValue(): Any = when (type) {

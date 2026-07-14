@@ -19,7 +19,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `package and application queries are backed by snapshot package aliases`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
 
         assertEquals("com.test.minimal", service.getPackageInfo("com.test.minimal")?.packageName)
         assertEquals("com.test.minimal", service.getPackageInfo("com.multiapp.instance.abc")?.packageName)
@@ -30,7 +30,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `component and provider queries resolve from snapshot`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
 
         assertEquals("com.test.minimal.MainActivity", service.getActivityInfo(component("com.test.minimal.MainActivity"))?.name)
         assertEquals("com.test.minimal.SyncService", service.getServiceInfo(component("com.test.minimal.SyncService"))?.name)
@@ -41,9 +41,27 @@ class VirtualPackageServiceTest {
     }
 
     @Test
-    fun `component enabled setting is answered only for snapshot components`() {
-        val service = VirtualPackageService(snapshot())
+    fun `application and component enabled settings use authoritative dispatcher`() {
+        val requests = mutableListOf<VirtualPackageEnabledStateRequest>()
+        val service = VirtualPackageService(
+            snapshot = snapshot(),
+            runtimeUid = RUNTIME_UID,
+            enabledStateDispatcher = VirtualPackageEnabledStateDispatcher { request ->
+                requests += request
+                VirtualPackageEnabledStateDispatchResult(
+                    authoritative = true,
+                    found = true,
+                    enabledState = request.newState ?: PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+                    changed = request.operation == VirtualPackageEnabledStateOperation.SET,
+                    reason = "test_authoritative_state"
+                )
+            }
+        )
 
+        assertEquals(
+            PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+            service.getApplicationEnabledSetting("com.multiapp.instance.abc")
+        )
         assertEquals(
             PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
             service.getComponentEnabledSetting(component("com.test.minimal.MainActivity"))
@@ -67,13 +85,76 @@ class VirtualPackageServiceTest {
                 0
             )
         )
-        assertNull(service.getComponentEnabledSetting(component("com.test.minimal.Missing")))
-        assertEquals(false, service.setComponentEnabledSetting(component("com.test.minimal.Missing"), 0, 0))
+        assertTrue(
+            service.setApplicationEnabledSetting(
+                "com.test.minimal",
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER,
+                0
+            )
+        )
+        assertEquals(7, requests.size)
+        assertEquals(VirtualPackageEnabledComponentType.ACTIVITY, requests[1].componentType)
+        assertEquals(VirtualPackageEnabledComponentType.SERVICE, requests[2].componentType)
+        assertEquals(VirtualPackageEnabledComponentType.RECEIVER, requests[3].componentType)
+        assertEquals(VirtualPackageEnabledComponentType.PROVIDER, requests[4].componentType)
+    }
+
+    @Test
+    fun `virtual enabled settings fail closed when engine authority is unavailable`() {
+        val service = VirtualPackageService(
+            snapshot = snapshot(),
+            runtimeUid = RUNTIME_UID,
+            enabledStateDispatcher = VirtualPackageEnabledStateDispatcher {
+                VirtualPackageEnabledStateDispatchResult.unavailable("test_authority_unavailable")
+            }
+        )
+
+        assertEquals(
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            service.getApplicationEnabledSetting("com.test.minimal")
+        )
+        assertEquals(
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            service.getComponentEnabledSetting(component("com.test.minimal.SyncService"))
+        )
+        assertEquals(
+            PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+            service.getComponentEnabledSetting(component("com.test.minimal.Missing"))
+        )
+        assertTrue(
+            service.setApplicationEnabledSetting(
+                "com.test.minimal",
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                0
+            )
+        )
+        assertTrue(
+            service.setComponentEnabledSetting(
+                component("com.test.minimal.Missing"),
+                PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                0
+            )
+        )
+        assertNull(service.getApplicationEnabledSetting("com.other"))
+        assertNull(
+            service.getComponentEnabledSetting(
+                component("com.other.Missing", packageName = "com.other")
+            )
+        )
+        assertEquals(false, service.setApplicationEnabledSetting("com.other", 0, 0))
+        assertEquals(
+            false,
+            service.setComponentEnabledSetting(
+                component("com.other.Missing", packageName = "com.other"),
+                0,
+                0
+            )
+        )
     }
 
     @Test
     fun `intent queries resolve activities services receivers and providers`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
 
         val launcherIntent = intent(Intent.ACTION_MAIN, setOf(Intent.CATEGORY_LAUNCHER))
         val serviceIntent = intent("com.test.SYNC")
@@ -88,7 +169,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `launcher activity alias keeps alias info with target activity`() {
-        val service = VirtualPackageService(aliasSnapshot())
+        val service = VirtualPackageService(aliasSnapshot(), RUNTIME_UID)
 
         val result = service.resolveActivity(intent(Intent.ACTION_MAIN, setOf(Intent.CATEGORY_LAUNCHER)))
 
@@ -104,7 +185,8 @@ class VirtualPackageServiceTest {
                 activities = listOf(
                     ResolvedComponent(name = "com.test.minimal.ExportedActivity", exported = true)
                 )
-            )
+            ),
+            runtimeUid = RUNTIME_UID
         )
 
         assertNull(service.getLaunchIntentForPackage("com.test.minimal"))
@@ -119,7 +201,8 @@ class VirtualPackageServiceTest {
                     ResolvedComponent(name = "com.test.minimal.ExportedActivity", exported = true),
                     ResolvedComponent(name = "com.test.minimal.MainActivity", exported = false)
                 )
-            )
+            ),
+            runtimeUid = RUNTIME_UID
         )
 
         val result = service.resolveActivity(intent(Intent.ACTION_MAIN, setOf(Intent.CATEGORY_LAUNCHER)))
@@ -133,14 +216,16 @@ class VirtualPackageServiceTest {
                         ResolvedComponent(name = "com.test.minimal.ExportedActivity", exported = true),
                         ResolvedComponent(name = "com.test.minimal.MainActivity", exported = false)
                     )
-                )
+                ),
+                RUNTIME_UID,
+                VirtualPackageQueryFlags.INTERNAL_FULL
             )
         )
     }
 
     @Test
     fun `view activity matches http scheme filter`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
 
         val result = service.resolveActivity(
             intent(
@@ -155,7 +240,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `custom action and category must match component filter`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
 
         val result = service.resolveActivity(
             intent(
@@ -169,7 +254,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `scheme mismatch and missing data do not match scheme filter`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
 
         val https = intent(
             action = Intent.ACTION_VIEW,
@@ -186,8 +271,28 @@ class VirtualPackageServiceTest {
     }
 
     @Test
+    fun `resolved MIME type uses shared matcher wildcard semantics`() {
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
+        val send = intent(action = Intent.ACTION_SEND)
+
+        val image = service.resolveActivity(
+            send,
+            VirtualPackageQueryFlags.NONE,
+            resolvedType = "image/png"
+        )
+        val text = service.resolveActivity(
+            send,
+            VirtualPackageQueryFlags.NONE,
+            resolvedType = "text/plain"
+        )
+
+        assertEquals("com.test.minimal.MimeActivity", image?.activityInfo?.name)
+        assertNull(text)
+    }
+
+    @Test
     fun `explicit component wins even when intent filter would not match`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
 
         val result = service.resolveActivity(
             intent(
@@ -214,7 +319,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `runtime uid queries are snapshot scoped to package aliases`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
         val runtimeUid = 42420
 
         assertEquals(runtimeUid, service.getPackageUid("com.test.minimal", runtimeUid))
@@ -244,7 +349,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `declared permission is denied when engine grant state is unavailable`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
 
         assertEquals(
             PackageManager.PERMISSION_DENIED,
@@ -254,7 +359,7 @@ class VirtualPackageServiceTest {
 
     @Test
     fun `content provider queries are scoped by runtime uid and process name`() {
-        val service = VirtualPackageService(snapshot())
+        val service = VirtualPackageService(snapshot(), RUNTIME_UID)
         val runtimeUid = 42420
 
         val allProviders = service.queryContentProviders(null, runtimeUid, runtimeUid)
@@ -276,6 +381,7 @@ class VirtualPackageServiceTest {
 
     private fun permissionAwareService() = VirtualPackageService(
         snapshot = snapshot(),
+        runtimeUid = RUNTIME_UID,
         permissionCheckDispatcher = VirtualPermissionCheckDispatcher { request ->
             VirtualPermissionCheckDispatchResult(
                 handled = true,
@@ -345,6 +451,16 @@ class VirtualPackageServiceTest {
                         categories = listOf("com.test.category.SPECIAL")
                     )
                 )
+            ),
+            ResolvedComponent(
+                name = "com.test.minimal.MimeActivity",
+                exported = true,
+                resolvedIntentFilters = listOf(
+                    ResolvedIntentFilter(
+                        actions = listOf(Intent.ACTION_SEND),
+                        dataMimeTypes = listOf("image/*")
+                    )
+                )
             )
         ),
         services = listOf(
@@ -400,4 +516,8 @@ class VirtualPackageServiceTest {
             ResolvedComponent(name = "com.test.minimal.MainActivity", exported = false)
         )
     )
+
+    private companion object {
+        const val RUNTIME_UID = 42420
+    }
 }

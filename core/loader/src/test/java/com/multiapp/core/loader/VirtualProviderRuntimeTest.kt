@@ -95,7 +95,7 @@ class VirtualProviderRuntimeTest {
     }
 
     private fun request(snapshot: VirtualPackageSnapshot = snapshot()): VirtualProviderCreateRequest {
-        val resolution = VirtualProviderManager("com.multiapp.app")
+        val resolution = VirtualProviderManager("com.multiapp.app", runtimeUidProvider = { RUNTIME_UID })
             .resolve(snapshot, "com.test.minimal.probe")!!
         val config = VirtualContextConfig(
             instanceId = snapshot.instanceId,
@@ -157,5 +157,9 @@ class VirtualProviderRuntimeTest {
             selection: String?,
             selectionArgs: Array<out String>?
         ): Int = 0
+    }
+
+    private companion object {
+        const val RUNTIME_UID = 42420
     }
 }

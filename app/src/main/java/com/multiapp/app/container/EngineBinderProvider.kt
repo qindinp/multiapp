@@ -46,6 +46,7 @@ class EngineBinderProvider : ContentProvider() {
             appOpsService = owner.systemServer.appOpsService,
             serviceService = owner.systemServer.serviceService,
             broadcastService = owner.systemServer.broadcastService,
+            packageService = owner.systemServer.packageService,
             virtualizationEngine = owner.virtualizationEngine,
             processControlPlane = owner.processControlPlane
         )

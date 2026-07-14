@@ -323,7 +323,11 @@ open class VirtualContextWrapper(
 
     private val virtualPackageManager: PackageManager? by lazy(LazyThreadSafetyMode.NONE) {
         config.packageSnapshot?.let { snapshot ->
-            VirtualPackageManagerWrapper(base.packageManager, snapshot)
+            VirtualPackageManagerWrapper(
+                base = base.packageManager,
+                snapshot = snapshot,
+                runtimeUid = currentRuntimeUid()
+            )
         }
     }
 
@@ -1646,6 +1650,7 @@ open class VirtualContextWrapper(
 
     private fun createGuestApplicationInfo(source: ApplicationInfo): ApplicationInfo {
         return ApplicationInfo(source).apply {
+            uid = currentRuntimeUid()
             packageName = config.originPackageName
             sourceDir = config.sourceDir
             publicSourceDir = config.publicSourceDir
@@ -1656,6 +1661,12 @@ open class VirtualContextWrapper(
                 theme = config.packageSnapshot?.themeId ?: 0
             }
         }
+    }
+
+    private fun currentRuntimeUid(): Int {
+        return RuntimeUidCompat.resolve(
+            runCatching { base.applicationInfo.uid }.getOrNull()
+        )
     }
 
     private fun ApplicationInfo.applySplitPaths(config: VirtualContextConfig) {

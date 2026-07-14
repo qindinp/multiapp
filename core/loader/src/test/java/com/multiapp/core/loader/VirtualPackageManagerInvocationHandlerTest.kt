@@ -7,24 +7,42 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.content.pm.ProviderInfo
 import android.content.pm.ResolveInfo
+import android.content.pm.Signature
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class VirtualPackageManagerInvocationHandlerTest {
+    private lateinit var bundleSupport: MockAndroidBundleSupport
+
+    @BeforeTest
+    fun setUpBundleSupport() {
+        bundleSupport = MockAndroidBundleSupport()
+    }
+
+    @AfterTest
+    fun tearDownBundleSupport() {
+        bundleSupport.close()
+    }
 
     @Test
     fun `virtual package and application queries return snapshot data before original PMS`() {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID
         )
 
@@ -82,7 +100,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID
         )
 
@@ -112,6 +130,55 @@ class VirtualPackageManagerInvocationHandlerTest {
         assertEquals(listOf("com.test.minimal.BootReceiver"), receivers.map { it.activityInfo.name })
         assertEquals(listOf("com.test.minimal.ProbeProvider"), providers.map { it.providerInfo.name })
         assertEquals(listOf("queryIntentActivities:${Intent.ACTION_MAIN}"), original.calls)
+    }
+
+    @Test
+    fun `hidden intent query overloads pass resolved MIME type to virtual matcher`() {
+        val original = FakePackageManagerApiImpl()
+        val handler = VirtualPackageManagerInvocationHandler(
+            originalPackageManager = original,
+            service = VirtualPackageService(mimeSnapshot(), RUNTIME_UID),
+            runtimeUid = RUNTIME_UID
+        )
+        val intent = actionIntent("com.test.MIME")
+        val signature = arrayOf(
+            Intent::class.java,
+            String::class.java,
+            Long::class.javaPrimitiveType!!,
+            Int::class.javaPrimitiveType!!
+        )
+        val args: Array<Any?> = arrayOf(intent, "image/png", 0L, 0)
+
+        val activity = handler.invoke(Any(), apiMethod("resolveIntent", *signature), args) as ResolveInfo
+        val activities = handler.invoke(
+            Any(),
+            apiMethod("queryIntentActivities", *signature),
+            args
+        ) as List<ResolveInfo>
+        val service = handler.invoke(Any(), apiMethod("resolveService", *signature), args) as ResolveInfo
+        val services = handler.invoke(
+            Any(),
+            apiMethod("queryIntentServices", *signature),
+            args
+        ) as List<ResolveInfo>
+        val receivers = handler.invoke(
+            Any(),
+            apiMethod("queryIntentReceivers", *signature),
+            args
+        ) as List<ResolveInfo>
+        val providers = handler.invoke(
+            Any(),
+            apiMethod("queryIntentContentProviders", *signature),
+            args
+        ) as List<ResolveInfo>
+
+        assertEquals("com.test.minimal.MimeActivity", activity.activityInfo.name)
+        assertEquals("com.test.minimal.MimeActivity", activities.single().activityInfo.name)
+        assertEquals("com.test.minimal.MimeService", service.serviceInfo.name)
+        assertEquals("com.test.minimal.MimeService", services.single().serviceInfo.name)
+        assertEquals("com.test.minimal.MimeReceiver", receivers.single().activityInfo.name)
+        assertEquals("com.test.minimal.MimeProvider", providers.single().providerInfo.name)
+        assertTrue(original.calls.isEmpty())
     }
 
     @Test
@@ -158,7 +225,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         )
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID
         )
 
@@ -180,7 +247,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val original = FakePackageManagerSliceApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID
         )
 
@@ -198,21 +265,42 @@ class VirtualPackageManagerInvocationHandlerTest {
     }
 
     @Test
-    fun `component enabled setting methods are handled for virtual components`() {
+    fun `virtual enabled settings fail closed without delegating to original PMS`() {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(
+                snapshot = snapshot(),
+                runtimeUid = RUNTIME_UID,
+                enabledStateDispatcher = VirtualPackageEnabledStateDispatcher {
+                    VirtualPackageEnabledStateDispatchResult.unavailable("test_authority_unavailable")
+                }
+            ),
             runtimeUid = RUNTIME_UID
         )
         val component = component("com.test.minimal.SyncService")
 
-        val state = handler.invoke(
+        val applicationState = handler.invoke(
+            proxy = Any(),
+            method = apiMethod("getApplicationEnabledSetting", String::class.java),
+            args = arrayOf("com.test.minimal")
+        ) as Int
+        val componentState = handler.invoke(
             proxy = Any(),
             method = apiMethod("getComponentEnabledSetting", android.content.ComponentName::class.java),
             args = arrayOf(component)
         ) as Int
-        val setResult = handler.invoke(
+        val setApplicationResult = handler.invoke(
+            proxy = Any(),
+            method = apiMethod(
+                "setApplicationEnabledSetting",
+                String::class.java,
+                Int::class.javaPrimitiveType!!,
+                Int::class.javaPrimitiveType!!
+            ),
+            args = arrayOf("com.test.minimal", PackageManager.COMPONENT_ENABLED_STATE_ENABLED, 0)
+        )
+        val setComponentResult = handler.invoke(
             proxy = Any(),
             method = apiMethod(
                 "setComponentEnabledSetting",
@@ -223,8 +311,10 @@ class VirtualPackageManagerInvocationHandlerTest {
             args = arrayOf(component, PackageManager.COMPONENT_ENABLED_STATE_DISABLED, 0)
         )
 
-        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, state)
-        assertEquals(null, setResult)
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, applicationState)
+        assertEquals(PackageManager.COMPONENT_ENABLED_STATE_DISABLED, componentState)
+        assertEquals(null, setApplicationResult)
+        assertEquals(null, setComponentResult)
         assertTrue(original.calls.isEmpty())
     }
 
@@ -233,7 +323,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID
         )
 
@@ -260,7 +350,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID
         )
         val proxy = Any()
@@ -282,7 +372,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID,
             virtualizeUidQueries = false
         )
@@ -310,7 +400,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         )
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID,
             virtualizeUidQueries = true
         )
@@ -330,7 +420,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val originalWithName = FakePackageManagerApiImpl(nameForUid = { "host.uid.name" })
         val handlerWithName = VirtualPackageManagerInvocationHandler(
             originalPackageManager = originalWithName,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID,
             virtualizeUidQueries = true
         )
@@ -347,7 +437,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val originalWithoutName = FakePackageManagerApiImpl(nameForUid = { null })
         val handlerWithoutName = VirtualPackageManagerInvocationHandler(
             originalPackageManager = originalWithoutName,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID,
             virtualizeUidQueries = true
         )
@@ -368,7 +458,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(snapshot()),
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
             runtimeUid = RUNTIME_UID,
             virtualizeUidQueries = true
         )
@@ -407,7 +497,7 @@ class VirtualPackageManagerInvocationHandlerTest {
         val resolver = FakeResolver(listOf(first, second))
         val handler = VirtualPackageManagerInvocationHandler(
             originalPackageManager = original,
-            service = VirtualPackageService(first),
+            service = VirtualPackageService(first, RUNTIME_UID),
             runtimeUid = RUNTIME_UID,
             serviceResolver = resolver
         )
@@ -423,22 +513,129 @@ class VirtualPackageManagerInvocationHandlerTest {
         assertTrue(original.calls.isEmpty())
     }
 
+    @Test
+    fun `binder handler applies flags and keeps virtual signing queries off original PMS`() {
+        val original = FakePackageManagerApiImpl()
+        val certificate = "binder-verified-certificate".toByteArray()
+        val handler = VirtualPackageManagerInvocationHandler(
+            originalPackageManager = original,
+            service = VirtualPackageService(
+                snapshot = snapshot(),
+                runtimeUid = RUNTIME_UID,
+                packageSigningInfo = signingInfo(certificate)
+            ),
+            runtimeUid = RUNTIME_UID
+        )
+
+        val basic = handler.invoke(
+            Any(),
+            apiMethod("getPackageInfo", String::class.java, Int::class.javaPrimitiveType!!),
+            arrayOf("com.test.minimal", 0)
+        ) as PackageInfo
+        val applicationWithMetaData = handler.invoke(
+            Any(),
+            apiMethod("getApplicationInfo", String::class.java, Int::class.javaPrimitiveType!!),
+            arrayOf("com.test.minimal", PackageManager.GET_META_DATA)
+        ) as ApplicationInfo
+        assertEquals("app", assertNotNull(applicationWithMetaData.metaData).getString("scope"))
+        val requested = handler.invoke(
+            Any(),
+            apiMethod("getPackageInfo", String::class.java, Int::class.javaPrimitiveType!!),
+            arrayOf(
+                "com.test.minimal",
+                PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA or PackageManager.GET_SIGNATURES
+            )
+        ) as PackageInfo
+        val packageSignatureResult = handler.invoke(
+            Any(),
+            apiMethod("checkSignatures", String::class.java, String::class.java),
+            arrayOf("com.test.minimal", "com.multiapp.instance.abc")
+        ) as Int
+        val uidSignatureResult = handler.invoke(
+            Any(),
+            apiMethod("checkUidSignatures", Int::class.javaPrimitiveType!!, Int::class.javaPrimitiveType!!),
+            arrayOf(RUNTIME_UID, RUNTIME_UID)
+        ) as Int
+        val hasCertificate = handler.invoke(
+            Any(),
+            apiMethod(
+                "hasSigningCertificate",
+                String::class.java,
+                ByteArray::class.java,
+                Int::class.javaPrimitiveType!!
+            ),
+            arrayOf("com.test.minimal", certificate, PackageManager.CERT_INPUT_RAW_X509)
+        ) as Boolean
+
+        val basicApplication = assertNotNull(basic.applicationInfo)
+        val requestedApplication = assertNotNull(requested.applicationInfo)
+        val requestedActivities = assertNotNull(requested.activities)
+        assertNull(basic.activities)
+        assertNull(basicApplication.metaData)
+        assertEquals(1, requestedActivities.size)
+        assertNotNull(requestedApplication.metaData)
+        assertEquals(RUNTIME_UID, assertNotNull(requestedActivities.single().applicationInfo).uid)
+        @Suppress("DEPRECATION")
+        assertEquals(1, assertNotNull(requested.signatures).size)
+        assertEquals(PackageManager.SIGNATURE_MATCH, packageSignatureResult)
+        assertEquals(PackageManager.SIGNATURE_MATCH, uidSignatureResult)
+        assertTrue(hasCertificate)
+        assertTrue(original.calls.isEmpty())
+
+        val unknownHandler = VirtualPackageManagerInvocationHandler(
+            originalPackageManager = original,
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
+            runtimeUid = RUNTIME_UID
+        )
+        val unknownResult = unknownHandler.invoke(
+            Any(),
+            apiMethod("checkSignatures", String::class.java, String::class.java),
+            arrayOf("com.test.minimal", "com.multiapp.instance.abc")
+        ) as Int
+        val unknownCertificate = unknownHandler.invoke(
+            Any(),
+            apiMethod(
+                "hasUidSigningCertificate",
+                Int::class.javaPrimitiveType!!,
+                ByteArray::class.java,
+                Int::class.javaPrimitiveType!!
+            ),
+            arrayOf(RUNTIME_UID, certificate, PackageManager.CERT_INPUT_RAW_X509)
+        ) as Boolean
+
+        assertEquals(PackageManager.SIGNATURE_NO_MATCH, unknownResult)
+        assertFalse(unknownCertificate)
+        assertTrue(original.calls.isEmpty())
+    }
+
     private interface FakePackageManagerApi {
         fun getPackageInfo(packageName: String, flags: Int): PackageInfo?
         fun getApplicationInfo(packageName: String, flags: Int): ApplicationInfo?
+        fun checkSignatures(packageName1: String, packageName2: String): Int
+        fun checkUidSignatures(uid1: Int, uid2: Int): Int
+        fun hasSigningCertificate(packageName: String, certificate: ByteArray, type: Int): Boolean
+        fun hasUidSigningCertificate(uid: Int, certificate: ByteArray, type: Int): Boolean
         fun checkPermission(permissionName: String, packageName: String): Int
         fun getPackageUid(packageName: String, flags: Int): Int
         fun getPackagesForUid(uid: Int): Array<String>?
         fun getNameForUid(uid: Int): String?
         fun resolveActivity(intent: Intent, flags: Int): ResolveInfo?
+        fun resolveIntent(intent: Intent, resolvedType: String?, flags: Long, userId: Int): ResolveInfo?
         fun queryIntentActivities(intent: Intent, flags: Int): List<ResolveInfo>
+        fun queryIntentActivities(intent: Intent, resolvedType: String?, flags: Long, userId: Int): List<ResolveInfo>
         fun queryIntentServices(intent: Intent, flags: Int): List<ResolveInfo>
+        fun queryIntentServices(intent: Intent, resolvedType: String?, flags: Long, userId: Int): List<ResolveInfo>
+        fun resolveService(intent: Intent, resolvedType: String?, flags: Long, userId: Int): ResolveInfo?
         fun queryIntentReceivers(intent: Intent, flags: Int): List<ResolveInfo>
+        fun queryIntentReceivers(intent: Intent, resolvedType: String?, flags: Long, userId: Int): List<ResolveInfo>
         fun queryIntentContentProviders(intent: Intent, flags: Int): List<ResolveInfo>
+        fun queryIntentContentProviders(intent: Intent, resolvedType: String?, flags: Long, userId: Int): List<ResolveInfo>
         fun getInstalledPackages(flags: Int): List<PackageInfo>
         fun getInstalledApplications(flags: Int): List<ApplicationInfo>
         fun getPackagesHoldingPermissions(permissions: Array<String>, flags: Int): List<PackageInfo>
         fun queryContentProviders(processName: String?, uid: Int, flags: Int): List<ProviderInfo>
+        fun getApplicationEnabledSetting(packageName: String): Int
+        fun setApplicationEnabledSetting(packageName: String, newState: Int, flags: Int)
         fun getComponentEnabledSetting(componentName: android.content.ComponentName): Int
         fun setComponentEnabledSetting(componentName: android.content.ComponentName, newState: Int, flags: Int)
         fun originalOnly(packageName: String): String
@@ -460,6 +657,26 @@ class VirtualPackageManagerInvocationHandlerTest {
         override fun getApplicationInfo(packageName: String, flags: Int): ApplicationInfo? {
             calls += "getApplicationInfo:$packageName"
             return ApplicationInfo().apply { this.packageName = "base.$packageName" }
+        }
+
+        override fun checkSignatures(packageName1: String, packageName2: String): Int {
+            calls += "checkSignatures:$packageName1:$packageName2"
+            return PackageManager.SIGNATURE_NO_MATCH
+        }
+
+        override fun checkUidSignatures(uid1: Int, uid2: Int): Int {
+            calls += "checkUidSignatures:$uid1:$uid2"
+            return PackageManager.SIGNATURE_NO_MATCH
+        }
+
+        override fun hasSigningCertificate(packageName: String, certificate: ByteArray, type: Int): Boolean {
+            calls += "hasSigningCertificate:$packageName"
+            return false
+        }
+
+        override fun hasUidSigningCertificate(uid: Int, certificate: ByteArray, type: Int): Boolean {
+            calls += "hasUidSigningCertificate:$uid"
+            return false
         }
 
         override fun checkPermission(permissionName: String, packageName: String): Int {
@@ -487,9 +704,24 @@ class VirtualPackageManagerInvocationHandlerTest {
             return null
         }
 
+        override fun resolveIntent(intent: Intent, resolvedType: String?, flags: Long, userId: Int): ResolveInfo? {
+            calls += "resolveIntent:${intent.action}:$resolvedType"
+            return null
+        }
+
         override fun queryIntentActivities(intent: Intent, flags: Int): List<ResolveInfo> {
             calls += "queryIntentActivities:${intent.action}"
             return launcherActivities
+        }
+
+        override fun queryIntentActivities(
+            intent: Intent,
+            resolvedType: String?,
+            flags: Long,
+            userId: Int
+        ): List<ResolveInfo> {
+            calls += "queryIntentActivities:${intent.action}:$resolvedType"
+            return emptyList()
         }
 
         override fun queryIntentServices(intent: Intent, flags: Int): List<ResolveInfo> {
@@ -497,13 +729,48 @@ class VirtualPackageManagerInvocationHandlerTest {
             return emptyList()
         }
 
+        override fun queryIntentServices(
+            intent: Intent,
+            resolvedType: String?,
+            flags: Long,
+            userId: Int
+        ): List<ResolveInfo> {
+            calls += "queryIntentServices:${intent.action}:$resolvedType"
+            return emptyList()
+        }
+
+        override fun resolveService(intent: Intent, resolvedType: String?, flags: Long, userId: Int): ResolveInfo? {
+            calls += "resolveService:${intent.action}:$resolvedType"
+            return null
+        }
+
         override fun queryIntentReceivers(intent: Intent, flags: Int): List<ResolveInfo> {
             calls += "queryIntentReceivers:${intent.action}"
             return emptyList()
         }
 
+        override fun queryIntentReceivers(
+            intent: Intent,
+            resolvedType: String?,
+            flags: Long,
+            userId: Int
+        ): List<ResolveInfo> {
+            calls += "queryIntentReceivers:${intent.action}:$resolvedType"
+            return emptyList()
+        }
+
         override fun queryIntentContentProviders(intent: Intent, flags: Int): List<ResolveInfo> {
             calls += "queryIntentContentProviders:${intent.action}"
+            return emptyList()
+        }
+
+        override fun queryIntentContentProviders(
+            intent: Intent,
+            resolvedType: String?,
+            flags: Long,
+            userId: Int
+        ): List<ResolveInfo> {
+            calls += "queryIntentContentProviders:${intent.action}:$resolvedType"
             return emptyList()
         }
 
@@ -525,6 +792,15 @@ class VirtualPackageManagerInvocationHandlerTest {
         override fun queryContentProviders(processName: String?, uid: Int, flags: Int): List<ProviderInfo> {
             calls += "queryContentProviders:$processName:$uid:$flags"
             return emptyList()
+        }
+
+        override fun getApplicationEnabledSetting(packageName: String): Int {
+            calls += "getApplicationEnabledSetting:$packageName"
+            return PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+        }
+
+        override fun setApplicationEnabledSetting(packageName: String, newState: Int, flags: Int) {
+            calls += "setApplicationEnabledSetting:$packageName:$newState:$flags"
         }
 
         override fun getComponentEnabledSetting(componentName: android.content.ComponentName): Int {
@@ -570,7 +846,7 @@ class VirtualPackageManagerInvocationHandlerTest {
 
     private class FakeResolver(snapshots: List<VirtualPackageSnapshot>) : VirtualPackageManagerServiceResolver {
         private val services = snapshots.associate { snapshot ->
-            snapshot.originPackageName to VirtualPackageService(snapshot)
+            snapshot.originPackageName to VirtualPackageService(snapshot, RUNTIME_UID)
         }
 
         override fun serviceForPackage(packageName: String?): VirtualPackageService? = services[packageName]
@@ -620,6 +896,7 @@ class VirtualPackageManagerInvocationHandlerTest {
 
     private fun permissionAwareService() = VirtualPackageService(
         snapshot = snapshot(),
+        runtimeUid = RUNTIME_UID,
         permissionCheckDispatcher = VirtualPermissionCheckDispatcher { request ->
             VirtualPermissionCheckDispatchResult(
                 handled = true,
@@ -645,12 +922,14 @@ class VirtualPackageManagerInvocationHandlerTest {
         minSdk = 28,
         sourceDir = "/data/apks/minimal.apk",
         dataDir = "/data/inst",
+        metaData = mapOf("scope" to "app"),
         launcherActivityName = "$originPackageName.MainActivity",
         activities = listOf(
             ResolvedComponent(
                 name = "$originPackageName.MainActivity",
                 exported = true,
-                intentFilters = listOf(Intent.ACTION_MAIN, Intent.CATEGORY_LAUNCHER)
+                intentFilters = listOf(Intent.ACTION_MAIN, Intent.CATEGORY_LAUNCHER),
+                metaData = mapOf("scope" to "activity")
             )
         ),
         services = listOf(
@@ -678,6 +957,50 @@ class VirtualPackageManagerInvocationHandlerTest {
         ),
         permissions = listOf("android.permission.CAMERA")
     )
+
+    private fun mimeSnapshot(): VirtualPackageSnapshot {
+        val base = snapshot()
+        fun filter() = listOf(
+            ResolvedIntentFilter(
+                actions = listOf("com.test.MIME"),
+                dataMimeTypes = listOf("image/*")
+            )
+        )
+        return base.copy(
+            activities = base.activities + ResolvedComponent(
+                name = "com.test.minimal.MimeActivity",
+                exported = true,
+                resolvedIntentFilters = filter()
+            ),
+            services = base.services + ResolvedComponent(
+                name = "com.test.minimal.MimeService",
+                exported = true,
+                resolvedIntentFilters = filter()
+            ),
+            receivers = base.receivers + ResolvedComponent(
+                name = "com.test.minimal.MimeReceiver",
+                exported = true,
+                resolvedIntentFilters = filter()
+            ),
+            providers = base.providers + ResolvedComponent(
+                name = "com.test.minimal.MimeProvider",
+                exported = true,
+                authorities = listOf("com.test.minimal.mime"),
+                resolvedIntentFilters = filter()
+            )
+        )
+    }
+
+    private fun signingInfo(certificate: ByteArray): VirtualPackageSigningInfo =
+        VirtualPackageSigningInfo(
+            legacySignatures = arrayOf(Signature(certificate)),
+            signingInfo = null,
+            signerSha256Digests = listOf(certificate.sha256Hex())
+        )
+
+    private fun ByteArray.sha256Hex(): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(this)
+        .joinToString("") { byte -> "%02x".format(byte) }
 
     private companion object {
         const val RUNTIME_UID = 42420

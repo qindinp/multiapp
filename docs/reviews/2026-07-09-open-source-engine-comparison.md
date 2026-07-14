@@ -425,3 +425,50 @@ Current verdict:
   continuity, and stale generation rejection still need device evidence.
 - Complete virtual component/native semantics remain open, so commercial
   status stays `BLOCK`.
+
+## Authoritative PMS Comparison - 2026-07-14
+
+Pinned-source findings:
+
+- VirtualApp `7d739c85` keeps package queries in
+  `VPackageManagerService`, routes `resolvedType` through its package Binder,
+  and uses a central `IntentResolver` rather than independent component-side
+  string checks.
+- BlackBox `ffe950f7` follows the same central shape with
+  `BPackageManagerService`, `ComponentResolver`, and `IntentResolver`; its
+  client API also carries `resolvedType` into server queries.
+- DroidPlugin `c6ebf652` confirms the hidden-PMS hook and `resolvedType`
+  argument-routing pattern, but its package-wide plugin state is not a usable
+  per-instance enabled-state authority.
+- The older reference implementations return fixed values or no-op for some
+  component enabled-state APIs. MultiApp must not copy that limitation because
+  two clones of the same package can have different durable state.
+- Android 16 `IntentFilter.matchData()` remains the semantic source for MIME,
+  scheme, authority/port, path, and category matching.
+
+MultiApp decisions implemented in the current tree:
+
+1. Preserve complete manifest filters in the package snapshot and use one
+   Android-free matcher from both engine and loader.
+2. Carry structured filters through strict Binder schema 2 and durable runtime
+   persistence; retain legacy read compatibility without pretending the old
+   flat model is complete.
+3. Keep hidden `IPackageManager` overload parsing version-tolerant while
+   preserving `resolvedType` and numeric flags.
+4. Bind package enabled state to `instanceId + package generation`; mutations
+   go to the engine authority and never to Android's real PMS.
+5. Keep unknown and mixed-boundary signing checks fail-closed. A compatibility
+   shortcut must not create a signature match that cannot be proven from APK
+   signing data.
+6. Preserve URI host and port through Activity, Service, and Broadcast plans,
+   including IPv6 bracket encoding.
+
+Current verdict:
+
+- The four affected module suites pass 1,393 tests with no failures or errors.
+- The full repository gate and `:app:assembleDebug` pass in about 5m30s. The
+  nine requested module reports contain 2,115 tests, 0 failures, 0 errors,
+  and 12 skipped. The debug APK is 99,939,489 bytes with SHA-256
+  `B267A1A6478158EBA7432B59DE63B97A53C0AF0DCEF651E841DBAE4750334F41`.
+- This closes a local VPMS semantics batch, not full PMS/AMS/component/native
+  equivalence or device compatibility. Commercial status remains `BLOCK`.

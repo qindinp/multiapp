@@ -203,6 +203,12 @@ object EngineRuntimeIpcContract {
     const val KEY_ENGINE_PROFILE = "engineProfile"
     const val KEY_ENGINE_SUBSYSTEM_VERDICTS = "engineSubsystemVerdicts"
     const val KEY_ENGINE_OPERATION_EVIDENCE = "engineOperationEvidence"
+    const val KEY_PACKAGE_STATE_SCHEMA_VERSION = "packageStateSchemaVersion"
+    const val KEY_PACKAGE_STATE_TARGET = "packageStateTarget"
+    const val KEY_COMPONENT_TYPE = "componentType"
+    const val KEY_COMPONENT_CLASS_NAME = "componentClassName"
+    const val KEY_ENABLED_STATE = "enabledState"
+    const val KEY_CHANGED = "changed"
 
     const val MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_COUNT = 64
     const val MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_LENGTH = 512
@@ -304,6 +310,7 @@ class EngineRuntimeBinderEndpoint(
     private val appOpsService: VirtualAppOpsService = DefaultVirtualSystemServer(registry).appOpsService,
     private val serviceService: VirtualServiceService = DefaultVirtualSystemServer(registry).serviceService,
     private val broadcastService: VirtualBroadcastService = DefaultVirtualSystemServer(registry).broadcastService,
+    private val packageService: VirtualPackageService = DefaultVirtualPackageService,
     private val virtualizationEngine: VirtualizationEngine? = null,
     private val processControlPlane: EngineProcessControlPlane = EngineProcessControlPlane(
         runtimeRegistry = registry,
@@ -541,6 +548,62 @@ class EngineRuntimeBinderEndpoint(
             reason = authority.reason
         )
     }
+
+    override fun queryApplicationEnabledState(instanceId: String, request: Bundle): Bundle =
+        packageEnabledStateBundle(
+            instanceId = instanceId,
+            request = request,
+            target = EnginePackageEnabledStateTarget.APPLICATION,
+            mutation = false,
+            operation = "query_application"
+        ) {
+            packageService.queryApplicationEnabledState(instanceId)
+        }
+
+    override fun setApplicationEnabledState(instanceId: String, request: Bundle): Bundle =
+        packageEnabledStateBundle(
+            instanceId = instanceId,
+            request = request,
+            target = EnginePackageEnabledStateTarget.APPLICATION,
+            mutation = true,
+            operation = "set_application"
+        ) { decoded ->
+            packageService.setApplicationEnabledState(
+                instanceId,
+                requireNotNull(decoded.newState)
+            )
+        }
+
+    override fun queryComponentEnabledState(instanceId: String, request: Bundle): Bundle =
+        packageEnabledStateBundle(
+            instanceId = instanceId,
+            request = request,
+            target = EnginePackageEnabledStateTarget.COMPONENT,
+            mutation = false,
+            operation = "query_component"
+        ) { decoded ->
+            packageService.queryComponentEnabledState(
+                instanceId,
+                requireNotNull(decoded.componentType),
+                requireNotNull(decoded.className)
+            )
+        }
+
+    override fun setComponentEnabledState(instanceId: String, request: Bundle): Bundle =
+        packageEnabledStateBundle(
+            instanceId = instanceId,
+            request = request,
+            target = EnginePackageEnabledStateTarget.COMPONENT,
+            mutation = true,
+            operation = "set_component"
+        ) { decoded ->
+            packageService.setComponentEnabledState(
+                instanceId,
+                requireNotNull(decoded.componentType),
+                requireNotNull(decoded.className),
+                requireNotNull(decoded.newState)
+            )
+        }
 
     override fun authorizeActivityLaunch(
         capabilityToken: String,
@@ -1128,6 +1191,71 @@ class EngineRuntimeBinderEndpoint(
             putString(EngineRuntimeIpcContract.KEY_REASON, "caller_uid_mismatch")
         }
 
+    private fun packageEnabledStateBundle(
+        instanceId: String,
+        request: Bundle,
+        target: EnginePackageEnabledStateTarget,
+        mutation: Boolean,
+        operation: String,
+        block: (EnginePackageEnabledStateIpcRequest) -> VirtualPackageEnabledStateResult
+    ): Bundle = runtimeAuthorizedBundle(instanceId) {
+        val decoded = request.toPackageEnabledStateRequestOrNull(target, mutation)
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(
+                instanceId,
+                "invalid_package_enabled_state_${operation}_request"
+            )
+        if (decoded.identity.instanceId != instanceId) {
+            return@runtimeAuthorizedBundle invalidRequestBundle(
+                instanceId,
+                "package_enabled_state_instance_identity_mismatch"
+            )
+        }
+        val liveAuthority = processControlPlane.authorize(instanceId, callingPid())
+        if (
+            !liveAuthority.allowed ||
+            liveAuthority.identity != decoded.identity ||
+            decoded.identity.processId != callingPid()
+        ) {
+            return@runtimeAuthorizedBundle invalidRequestBundle(
+                instanceId,
+                "package_enabled_state_runtime_identity_mismatch"
+            )
+        }
+        val result = runCatching { block(decoded) }.getOrNull()
+            ?: return@runtimeAuthorizedBundle invalidRequestBundle(
+                instanceId,
+                "package_enabled_state_service_failure:$operation"
+            )
+        if (!result.matchesPackageStateRequest(decoded)) {
+            return@runtimeAuthorizedBundle invalidRequestBundle(
+                instanceId,
+                "invalid_package_enabled_state_service_response:$operation"
+            )
+        }
+        result.copy(authorityIdentity = decoded.identity)
+            .toPackageEnabledStateIpcBundle(decoded.identity)
+    }
+
+    private fun VirtualPackageEnabledStateResult.matchesPackageStateRequest(
+        request: EnginePackageEnabledStateIpcRequest
+    ): Boolean {
+        if (instanceId != request.identity.instanceId || target != request.target) return false
+        return when (target) {
+            EnginePackageEnabledStateTarget.APPLICATION -> componentType == null && className == null
+            EnginePackageEnabledStateTarget.COMPONENT -> {
+                if (componentType == null || className == null) {
+                    verdict != EngineResultStatus.PASS && componentType == null && className == null
+                } else {
+                    componentType == request.componentType &&
+                        normalizeVirtualComponentClassName(
+                            registry.get(instanceId)?.originPackageName.orEmpty(),
+                            className
+                        ) == className
+                }
+            }
+        }
+    }
+
     private fun runtimeAuthorizedBundle(instanceId: String, block: () -> Bundle): Bundle {
         if (!isAuthorized()) {
             return Bundle().apply {
@@ -1662,6 +1790,83 @@ object EngineRuntimeIpcClients {
             ?: return null
         return response.toRuntimeIpcSnapshotOrNull()
             ?.takeIf { snapshot -> snapshot.found && snapshot.processId == processId }
+    }
+
+    fun queryApplicationEnabledState(
+        identity: EngineProcessClientIdentity
+    ): VirtualPackageEnabledStateResult? = invokePackageEnabledState(
+        identity = identity,
+        target = EnginePackageEnabledStateTarget.APPLICATION
+    ) { service, request ->
+        service.queryApplicationEnabledState(identity.instanceId, request)
+    }
+
+    fun setApplicationEnabledState(
+        identity: EngineProcessClientIdentity,
+        newState: Int
+    ): VirtualPackageEnabledStateResult? = invokePackageEnabledState(
+        identity = identity,
+        target = EnginePackageEnabledStateTarget.APPLICATION,
+        newState = newState
+    ) { service, request ->
+        service.setApplicationEnabledState(identity.instanceId, request)
+    }
+
+    fun queryComponentEnabledState(
+        identity: EngineProcessClientIdentity,
+        type: VirtualPackageComponentType,
+        className: String
+    ): VirtualPackageEnabledStateResult? = invokePackageEnabledState(
+        identity = identity,
+        target = EnginePackageEnabledStateTarget.COMPONENT,
+        componentType = type,
+        className = className
+    ) { service, request ->
+        service.queryComponentEnabledState(identity.instanceId, request)
+    }
+
+    fun setComponentEnabledState(
+        identity: EngineProcessClientIdentity,
+        type: VirtualPackageComponentType,
+        className: String,
+        newState: Int
+    ): VirtualPackageEnabledStateResult? = invokePackageEnabledState(
+        identity = identity,
+        target = EnginePackageEnabledStateTarget.COMPONENT,
+        componentType = type,
+        className = className,
+        newState = newState
+    ) { service, request ->
+        service.setComponentEnabledState(identity.instanceId, request)
+    }
+
+    private fun invokePackageEnabledState(
+        identity: EngineProcessClientIdentity,
+        target: EnginePackageEnabledStateTarget,
+        componentType: VirtualPackageComponentType? = null,
+        className: String? = null,
+        newState: Int? = null,
+        call: (IEngineRuntimeService, Bundle) -> Bundle
+    ): VirtualPackageEnabledStateResult? {
+        val service = activeService() ?: return null
+        val request = identity.toPackageEnabledStateRequestBundle(
+            target = target,
+            componentType = componentType,
+            className = className,
+            newState = newState
+        )
+        val response = runCatching { call(service, request) }.getOrNull() ?: return null
+        return response.toPackageEnabledStateResultOrNull()?.takeIf { result ->
+            result.instanceId == identity.instanceId &&
+                result.authorityIdentity == identity &&
+                result.target == target &&
+                when (target) {
+                    EnginePackageEnabledStateTarget.APPLICATION ->
+                        result.componentType == null && result.className == null
+                    EnginePackageEnabledStateTarget.COMPONENT ->
+                        result.componentType == componentType && result.className != null
+                }
+        }
     }
 
     private fun Bundle.toRuntimeIpcSnapshotOrNull(): EngineRuntimeIpcSnapshot? = runCatching {

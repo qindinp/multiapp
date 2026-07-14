@@ -36,6 +36,16 @@ class EngineOwnerFileBoundaryTest {
             ),
             "Only the engine owner may open the durable Activity task store"
         )
+        assertEquals(
+            listOf(SERVER_INSTALLER),
+            constructorSites(
+                sources,
+                repoRoot,
+                Regex("""\bFileBackedEnginePackageEnabledStateStore\s*\("""),
+                "class FileBackedEnginePackageEnabledStateStore"
+            ),
+            "Only the engine owner may open the durable package enabled-state store"
+        )
     }
 
     private fun callSites(

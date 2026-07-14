@@ -37,8 +37,18 @@ class VirtualResourcesManager(
     }
 
     internal fun createApplicationInfo(config: VirtualContextConfig): ApplicationInfo {
-        return config.packageSnapshot?.let { VirtualPackageInfoFactory.applicationInfo(it) }
+        val runtimeUid = RuntimeUidCompat.resolve(
+            runCatching { hostContext.applicationInfo.uid }.getOrNull()
+        )
+        return config.packageSnapshot?.let {
+            VirtualPackageInfoFactory.applicationInfo(
+                snapshot = it,
+                runtimeUid = runtimeUid,
+                flags = VirtualPackageQueryFlags.INTERNAL_FULL
+            )
+        }
             ?: ApplicationInfo(hostContext.applicationInfo).apply {
+                uid = runtimeUid
                 packageName = config.originPackageName
                 className = null
                 name = null

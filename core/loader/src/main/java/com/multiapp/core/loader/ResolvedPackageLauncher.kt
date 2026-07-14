@@ -1,6 +1,7 @@
 package com.multiapp.core.loader
 
 import android.content.Intent
+import com.multiapp.core.model.virtual.IntentFilterMatchRequest
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedPackage
 
@@ -31,12 +32,11 @@ internal fun ResolvedComponent.aliasTargetActivityClassName(): String? =
     targetActivityName?.trim()?.takeIf { it.isNotEmpty() && it != name }
 
 internal fun ResolvedComponent.hasLauncherIntentFilter(): Boolean {
-    val legacyMatch = intentFilters.contains(Intent.ACTION_MAIN) &&
-        intentFilters.contains(Intent.CATEGORY_LAUNCHER)
-    if (legacyMatch) return true
-
-    return resolvedIntentFilters.any { filter ->
-        Intent.ACTION_MAIN in filter.actions &&
-            Intent.CATEGORY_LAUNCHER in filter.categories
-    }
+    return VirtualIntentFilterMatcher.matches(
+        request = IntentFilterMatchRequest(
+            action = Intent.ACTION_MAIN,
+            categories = setOf(Intent.CATEGORY_LAUNCHER)
+        ),
+        component = this
+    )
 }

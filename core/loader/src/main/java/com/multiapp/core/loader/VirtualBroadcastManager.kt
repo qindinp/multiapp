@@ -383,19 +383,6 @@ class VirtualBroadcastManager(
     }
 
     private fun ResolvedComponent.matchesImplicitBroadcast(intent: Intent): Boolean {
-        val action = runCatching { intent.action }.getOrNull()
-        val categories = runCatching { intent.categories.orEmpty() }.getOrDefault(emptySet())
-        val scheme = runCatching { intent.data?.scheme }.getOrNull()
-
-        if (resolvedIntentFilters.isNotEmpty()) {
-            return resolvedIntentFilters.any { filter ->
-                val actionMatches = filter.actions.isNotEmpty() && action in filter.actions
-                val categoriesMatch = filter.categories.containsAll(categories)
-                val schemeMatches = filter.dataSchemes.isEmpty() || scheme in filter.dataSchemes
-                actionMatches && categoriesMatch && schemeMatches
-            }
-        }
-
-        return intentFilters.isNotEmpty() && action in intentFilters
+        return VirtualIntentFilterMatcher.matches(intent, this)
     }
 }

@@ -46,7 +46,14 @@ internal object HostedActivityIdentity {
             it.name == guestActivityClassName || it.targetActivityName == guestActivityClassName
         }
         if (snapshot != null && componentInfo != null) {
-            return ActivityInfo(VirtualPackageInfoFactory.activityInfo(snapshot, componentInfo)).apply {
+            return ActivityInfo(
+                VirtualPackageInfoFactory.activityInfo(
+                    snapshot,
+                    componentInfo,
+                    RuntimeUidCompat.resolve(applicationInfo.uid),
+                    VirtualPackageQueryFlags.INTERNAL_FULL
+                )
+            ).apply {
                 packageName = config.originPackageName
                 name = guestActivityClassName
                 theme = componentInfo.themeId.takeIf { it != 0 } ?: snapshot.themeId

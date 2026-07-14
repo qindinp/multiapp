@@ -5,7 +5,10 @@ import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentAuthority
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
+import com.multiapp.core.model.virtual.ResolvedIntentPathPattern
+import com.multiapp.core.model.virtual.ResolvedIntentPathPatternType
 import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import com.multiapp.core.model.virtual.VirtualMetaDataValueType
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
@@ -262,6 +265,14 @@ private fun ResolvedIntentFilter.toBundle(bundleFactory: () -> Bundle): Bundle =
     putStringArrayList(RuntimeCodecKeys.DATA_MIME_TYPES, ArrayList(dataMimeTypes))
     putStringArrayList(RuntimeCodecKeys.DATA_AUTHORITIES, ArrayList(dataAuthorities))
     putStringArrayList(RuntimeCodecKeys.DATA_PATHS, ArrayList(dataPaths))
+    putBundle(
+        RuntimeCodecKeys.AUTHORITY_ENTRIES,
+        authorityEntries.toIntentAuthorityListBundle(bundleFactory)
+    )
+    putBundle(
+        RuntimeCodecKeys.PATH_PATTERNS,
+        pathPatterns.toResolvedIntentPathPatternListBundle(bundleFactory)
+    )
     putInt(RuntimeCodecKeys.PRIORITY, priority)
 }
 
@@ -274,9 +285,61 @@ private fun Bundle.toResolvedIntentFilterOrNull(): ResolvedIntentFilter? = runCa
         dataMimeTypes = boundedStringList(RuntimeCodecKeys.DATA_MIME_TYPES, MAX_FILTER_VALUE_COUNT),
         dataAuthorities = boundedStringList(RuntimeCodecKeys.DATA_AUTHORITIES, MAX_FILTER_VALUE_COUNT),
         dataPaths = boundedStringList(RuntimeCodecKeys.DATA_PATHS, MAX_FILTER_VALUE_COUNT),
-        priority = getInt(RuntimeCodecKeys.PRIORITY)
+        priority = getInt(RuntimeCodecKeys.PRIORITY),
+        authorityEntries = getBundle(RuntimeCodecKeys.AUTHORITY_ENTRIES)
+            ?.toIntentAuthorityListOrNull()
+            ?: error("missing intent-filter authorities"),
+        pathPatterns = getBundle(RuntimeCodecKeys.PATH_PATTERNS)
+            ?.toResolvedIntentPathPatternListOrNull()
+            ?: error("missing intent-filter path patterns")
     )
 }.getOrNull()
+
+private fun List<ResolvedIntentAuthority>.toIntentAuthorityListBundle(
+    bundleFactory: () -> Bundle
+): Bundle = toEntryListBundle(bundleFactory) { authority ->
+    bundleFactory().apply {
+        putString(RuntimeCodecKeys.HOST, authority.host)
+        putInt(RuntimeCodecKeys.PORT, authority.port ?: NO_AUTHORITY_PORT)
+    }
+}
+
+private fun Bundle.toIntentAuthorityListOrNull(): List<ResolvedIntentAuthority>? = runCatching {
+    toEntryList(MAX_FILTER_VALUE_COUNT) { entry ->
+        entry.requireExactKeys(INTENT_AUTHORITY_FIELDS)
+        val encodedPort = entry.getInt(RuntimeCodecKeys.PORT).also { port ->
+            check(port == NO_AUTHORITY_PORT || port >= 0)
+        }
+        ResolvedIntentAuthority(
+            host = entry.requiredBoundedString(RuntimeCodecKeys.HOST),
+            port = encodedPort.takeUnless { it == NO_AUTHORITY_PORT }
+        )
+    }
+}.getOrNull()
+
+private fun List<ResolvedIntentPathPattern>.toResolvedIntentPathPatternListBundle(
+    bundleFactory: () -> Bundle
+): Bundle = toEntryListBundle(bundleFactory) { pattern ->
+    bundleFactory().apply {
+        putString(RuntimeCodecKeys.PATH, pattern.path)
+        putString(RuntimeCodecKeys.TYPE, pattern.type.name)
+    }
+}
+
+private fun Bundle.toResolvedIntentPathPatternListOrNull(): List<ResolvedIntentPathPattern>? =
+    runCatching {
+        toEntryList(MAX_FILTER_VALUE_COUNT) { entry ->
+            entry.requireExactKeys(INTENT_PATH_PATTERN_FIELDS)
+            ResolvedIntentPathPattern(
+                path = entry.requiredBoundedString(
+                    RuntimeCodecKeys.PATH,
+                    MAX_PATH_LENGTH,
+                    allowEmpty = false
+                ),
+                type = entry.requiredEnum<ResolvedIntentPathPatternType>(RuntimeCodecKeys.TYPE)
+            )
+        }
+    }.getOrNull()
 
 private fun List<VirtualProviderPathPermission>.toPathPermissionListBundle(
     bundleFactory: () -> Bundle
@@ -451,7 +514,11 @@ private fun VirtualInstanceRuntime.authoritativeRuntimeTextSize(): Int {
         entries.sumOf { it.key.length + it.value.type.name.length + it.value.encodedValue.length }
     fun ResolvedIntentFilter.sizeOfText(): Int =
         listOf(actions, categories, dataSchemes, dataMimeTypes, dataAuthorities, dataPaths)
-            .sumOf { it.sizeOfText() }
+            .sumOf { it.sizeOfText() } +
+            authorityEntries.sumOf { authority ->
+                authority.host.length + (authority.port?.toString()?.length ?: 0)
+            } +
+            pathPatterns.sumOf { pattern -> pattern.path.length + pattern.type.name.length }
     fun VirtualProviderPathPattern.sizeOfText(): Int = path.length + type.name.length
     fun ResolvedComponent.sizeOfText(): Int = listOf(
         name,
@@ -577,6 +644,10 @@ private object RuntimeCodecKeys {
     const val DATA_MIME_TYPES = "dataMimeTypes"
     const val DATA_AUTHORITIES = "dataAuthorities"
     const val DATA_PATHS = "dataPaths"
+    const val AUTHORITY_ENTRIES = "authorityEntries"
+    const val PATH_PATTERNS = "pathPatterns"
+    const val HOST = "host"
+    const val PORT = "port"
     const val PRIORITY = "priority"
     const val PATTERN = "pattern"
     const val PATH = "path"
@@ -674,8 +745,12 @@ private val INTENT_FILTER_FIELDS = setOf(
     RuntimeCodecKeys.DATA_MIME_TYPES,
     RuntimeCodecKeys.DATA_AUTHORITIES,
     RuntimeCodecKeys.DATA_PATHS,
+    RuntimeCodecKeys.AUTHORITY_ENTRIES,
+    RuntimeCodecKeys.PATH_PATTERNS,
     RuntimeCodecKeys.PRIORITY
 )
+private val INTENT_AUTHORITY_FIELDS = setOf(RuntimeCodecKeys.HOST, RuntimeCodecKeys.PORT)
+private val INTENT_PATH_PATTERN_FIELDS = setOf(RuntimeCodecKeys.PATH, RuntimeCodecKeys.TYPE)
 private val PATH_PERMISSION_FIELDS = setOf(
     RuntimeCodecKeys.PATTERN,
     RuntimeCodecKeys.READ_PERMISSION,
@@ -690,7 +765,7 @@ private val TYPED_META_DATA_ENTRY_FIELDS = setOf(
 )
 
 private const val AUTHORITATIVE_RUNTIME_SCHEMA_VERSION = 1
-private const val PACKAGE_SNAPSHOT_SCHEMA_VERSION = 1
+private const val PACKAGE_SNAPSHOT_SCHEMA_VERSION = 2
 private const val MAX_IDENTITY_LENGTH = 1_024
 private const val MAX_PATH_LENGTH = 4_096
 private const val MAX_META_DATA_VALUE_LENGTH = 16_384
@@ -706,3 +781,4 @@ private const val MAX_AUTHORITY_COUNT = 256
 private const val MAX_PATH_POLICY_COUNT = 256
 private const val MAX_META_DATA_COUNT = 4_096
 private const val SHA_256_HEX_LENGTH = 64
+private const val NO_AUTHORITY_PORT = -1

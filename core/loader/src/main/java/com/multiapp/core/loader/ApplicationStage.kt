@@ -366,7 +366,11 @@ class LoadedApkGuestApplicationCreator(
         request.progress("LOADED_APK_CREATE_STARTED", "creating guest LoadedApk sandbox", emptyMap())
         val activityThread = activityThreadProvider()
         val resourceBundle = resourceBundleProvider(request.hostContext, request.virtualContextConfig)
-        val applicationInfo = VirtualPackageInfoFactory.applicationInfo(snapshot).apply {
+        val applicationInfo = VirtualPackageInfoFactory.applicationInfo(
+            snapshot,
+            RuntimeUidCompat.resolve(resourceBundle.applicationInfo.uid),
+            VirtualPackageQueryFlags.INTERNAL_FULL
+        ).apply {
             className = request.applicationClassName.takeUnless { it == Application::class.java.name }
             name = className
         }

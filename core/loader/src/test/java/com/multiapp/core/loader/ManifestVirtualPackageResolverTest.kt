@@ -2,6 +2,9 @@ package com.multiapp.core.loader
 
 import android.content.Context
 import com.multiapp.core.manifest.ManifestParser
+import com.multiapp.core.model.virtual.ResolvedIntentAuthority
+import com.multiapp.core.model.virtual.ResolvedIntentPathPattern
+import com.multiapp.core.model.virtual.ResolvedIntentPathPatternType
 import io.mockk.every
 import io.mockk.mockk
 import java.io.File
@@ -52,7 +55,18 @@ class ManifestVirtualPackageResolverTest {
                         ManifestParser.IntentFilterInfo(
                             actions = listOf("com.example.SYNC"),
                             categories = listOf("android.intent.category.DEFAULT"),
-                            dataSchemes = listOf("content")
+                            dataSchemes = listOf("content"),
+                            dataMimeTypes = listOf("application/json"),
+                            dataAuthorities = listOf(
+                                ResolvedIntentAuthority("sync.example.com", 8443)
+                            ),
+                            dataPathPatterns = listOf(
+                                ResolvedIntentPathPattern(
+                                    "/v1/items",
+                                    ResolvedIntentPathPatternType.PREFIX
+                                )
+                            ),
+                            priority = 37
                         )
                     )
                 )
@@ -86,6 +100,23 @@ class ManifestVirtualPackageResolverTest {
         assertEquals(listOf("com.example.SYNC"), serviceFilter.actions)
         assertEquals(listOf("android.intent.category.DEFAULT"), serviceFilter.categories)
         assertEquals(listOf("content"), serviceFilter.dataSchemes)
+        assertEquals(listOf("application/json"), serviceFilter.dataMimeTypes)
+        assertEquals(
+            listOf(ResolvedIntentAuthority("sync.example.com", 8443)),
+            serviceFilter.authorityEntries
+        )
+        assertEquals(
+            listOf(
+                ResolvedIntentPathPattern(
+                    "/v1/items",
+                    ResolvedIntentPathPatternType.PREFIX
+                )
+            ),
+            serviceFilter.pathPatterns
+        )
+        assertEquals(listOf("sync.example.com"), serviceFilter.dataAuthorities)
+        assertEquals(listOf("/v1/items"), serviceFilter.dataPaths)
+        assertEquals(37, serviceFilter.priority)
         val receiverFilter = resolved.receivers.single().resolvedIntentFilters.single()
         assertEquals("com.example.app.BootReceiver", resolved.receivers.single().name)
         assertEquals(listOf("com.example.BOOT"), receiverFilter.actions)

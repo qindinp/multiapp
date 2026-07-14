@@ -20,6 +20,10 @@ interface IEngineRuntimeService {
     Bundle issueRecentsRestoreCapability(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, String restoreActivityId);
     Bundle queryRuntime(String instanceId);
     Bundle queryRuntimeByProcessId(int processId);
+    Bundle queryApplicationEnabledState(String instanceId, in Bundle request);
+    Bundle setApplicationEnabledState(String instanceId, in Bundle request);
+    Bundle queryComponentEnabledState(String instanceId, in Bundle request);
+    Bundle setComponentEnabledState(String instanceId, in Bundle request);
     Bundle authorizeActivityLaunch(String capabilityToken, String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String proxyActivityClassName, String guestActivityClassName);
     Bundle acknowledgeActivityResumed(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, String capabilityToken);
     Bundle queryEvidence(String instanceId);

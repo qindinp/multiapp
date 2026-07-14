@@ -64,7 +64,13 @@ class ManifestVirtualPackageResolver(
                                 ResolvedIntentFilter(
                                     actions = filter.actions,
                                     categories = filter.categories,
-                                    dataSchemes = filter.dataSchemes
+                                    dataSchemes = filter.dataSchemes,
+                                    dataMimeTypes = filter.dataMimeTypes,
+                                    dataAuthorities = filter.legacyDataAuthorities,
+                                    dataPaths = filter.legacyDataPaths,
+                                    priority = filter.priority,
+                                    authorityEntries = filter.dataAuthorities,
+                                    pathPatterns = filter.dataPathPatterns
                                 )
                             },
                             targetActivityName = normalizeComponentName(
@@ -87,7 +93,13 @@ class ManifestVirtualPackageResolver(
                                 ResolvedIntentFilter(
                                     actions = filter.actions,
                                     categories = filter.categories,
-                                    dataSchemes = filter.dataSchemes
+                                    dataSchemes = filter.dataSchemes,
+                                    dataMimeTypes = filter.dataMimeTypes,
+                                    dataAuthorities = filter.legacyDataAuthorities,
+                                    dataPaths = filter.legacyDataPaths,
+                                    priority = filter.priority,
+                                    authorityEntries = filter.dataAuthorities,
+                                    pathPatterns = filter.dataPathPatterns
                                 )
                             },
                             processName = component.process,
@@ -110,7 +122,13 @@ class ManifestVirtualPackageResolver(
                                 ResolvedIntentFilter(
                                     actions = filter.actions,
                                     categories = filter.categories,
-                                    dataSchemes = filter.dataSchemes
+                                    dataSchemes = filter.dataSchemes,
+                                    dataMimeTypes = filter.dataMimeTypes,
+                                    dataAuthorities = filter.legacyDataAuthorities,
+                                    dataPaths = filter.legacyDataPaths,
+                                    priority = filter.priority,
+                                    authorityEntries = filter.dataAuthorities,
+                                    pathPatterns = filter.dataPathPatterns
                                 )
                             },
                             processName = component.process,

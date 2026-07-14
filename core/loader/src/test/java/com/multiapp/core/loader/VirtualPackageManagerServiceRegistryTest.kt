@@ -23,8 +23,8 @@ class VirtualPackageManagerServiceRegistryTest {
             authority = authority
         )
 
-        VirtualPackageManagerServiceRegistry.register(first)
-        VirtualPackageManagerServiceRegistry.register(second)
+        VirtualPackageManagerServiceRegistry.register(first, RUNTIME_UID)
+        VirtualPackageManagerServiceRegistry.register(second, RUNTIME_UID)
 
         assertEquals(
             "com.test.registry.first.Provider",
@@ -64,4 +64,8 @@ class VirtualPackageManagerServiceRegistryTest {
             )
         )
     )
+
+    private companion object {
+        const val RUNTIME_UID = 42420
+    }
 }

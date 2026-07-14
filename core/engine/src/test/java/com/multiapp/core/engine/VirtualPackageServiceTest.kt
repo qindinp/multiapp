@@ -4,7 +4,10 @@ import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.ResolvedIntentAuthority
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
+import com.multiapp.core.model.virtual.ResolvedIntentPathPattern
+import com.multiapp.core.model.virtual.ResolvedIntentPathPatternType
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
 import kotlin.test.Test
@@ -144,6 +147,36 @@ class VirtualPackageServiceTest {
             action = "android.intent.action.MAIN",
             categories = setOf("android.intent.category.DEFAULT")
         )
+        val structuredMatches = restoredPackageService.resolveIntent(
+            instanceId = runtime.instanceId,
+            type = VirtualPackageComponentType.ACTIVITY,
+            action = "android.intent.action.VIEW",
+            categories = setOf("android.intent.category.DEFAULT"),
+            dataScheme = "https",
+            dataMimeType = "image/jpeg",
+            dataAuthority = "secure.example.com:8443",
+            dataPath = "/secure/document/42"
+        )
+        val wrongStructuredPort = restoredPackageService.resolveIntent(
+            instanceId = runtime.instanceId,
+            type = VirtualPackageComponentType.ACTIVITY,
+            action = "android.intent.action.VIEW",
+            categories = setOf("android.intent.category.DEFAULT"),
+            dataScheme = "https",
+            dataMimeType = "image/jpeg",
+            dataAuthority = "secure.example.com:443",
+            dataPath = "/secure/document/42"
+        )
+        val malformedAuthority = restoredPackageService.resolveIntent(
+            instanceId = runtime.instanceId,
+            type = VirtualPackageComponentType.ACTIVITY,
+            action = "android.intent.action.VIEW",
+            categories = setOf("android.intent.category.DEFAULT"),
+            dataScheme = "https",
+            dataMimeType = "image/jpeg",
+            dataAuthority = "secure.example.com:not-a-port",
+            dataPath = "/secure/document/42"
+        )
 
         assertEquals("com.test.app.MainActivity", launcher?.name)
         assertEquals("singleTask", launcher?.launchMode)
@@ -160,6 +193,9 @@ class VirtualPackageServiceTest {
         assertEquals(listOf("com.test.app.SyncService"), serviceMatches.map { it.name })
         assertEquals(listOf("com.test.app.BootReceiver"), receiverMatches.map { it.name })
         assertEquals(emptyList(), wrongCategoryMatches)
+        assertEquals(listOf("com.test.app.StructuredDeepLinkActivity"), structuredMatches.map { it.name })
+        assertEquals(emptyList(), wrongStructuredPort)
+        assertEquals(emptyList(), malformedAuthority)
     }
 
     private fun runtime() = VirtualInstanceRuntime(
@@ -249,6 +285,28 @@ class VirtualPackageServiceTest {
                             dataAuthorities = listOf("example.com"),
                             dataPaths = listOf("/deeplink"),
                             priority = 20
+                        )
+                    )
+                ),
+                ResolvedComponent(
+                    name = "com.test.app.StructuredDeepLinkActivity",
+                    exported = true,
+                    resolvedIntentFilters = listOf(
+                        ResolvedIntentFilter(
+                            actions = listOf("android.intent.action.VIEW"),
+                            categories = listOf("android.intent.category.DEFAULT"),
+                            dataSchemes = listOf("https"),
+                            dataMimeTypes = listOf("image/*"),
+                            priority = 30,
+                            authorityEntries = listOf(
+                                ResolvedIntentAuthority("secure.example.com", 8443)
+                            ),
+                            pathPatterns = listOf(
+                                ResolvedIntentPathPattern(
+                                    "/secure",
+                                    ResolvedIntentPathPatternType.PREFIX
+                                )
+                            )
                         )
                     )
                 )

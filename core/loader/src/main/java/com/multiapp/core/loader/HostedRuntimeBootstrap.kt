@@ -106,7 +106,11 @@ class HostedRuntimeBootstrap(
     private val providerHookInstallEnabled: Boolean = false,
     private val providerHookInstaller: VirtualProviderHookInstaller = VirtualProviderHookInstaller(),
     private val packageManagerProxyInstaller: VirtualPackageManagerGlobalInstallAction = VirtualPackageManagerGlobalInstaller(),
-    private val runtimeUidProvider: () -> Int = { runCatching { android.os.Process.myUid() }.getOrDefault(0) },
+    private val runtimeUidProvider: () -> Int = {
+        RuntimeUidCompat.resolve(
+            runCatching { hostContext?.applicationInfo?.uid }.getOrNull()
+        )
+    },
     private val applicationThreadRunner: ApplicationThreadRunner = DirectApplicationThreadRunner,
     private val applicationOnCreateInvoker: (Application) -> Unit = Application::onCreate,
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
