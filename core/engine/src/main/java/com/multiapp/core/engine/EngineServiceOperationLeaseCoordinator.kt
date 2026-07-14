@@ -46,6 +46,15 @@ class EngineServiceOperationLeaseCoordinator(
         transition = leases::authorize
     )
 
+    fun claimForConnection(
+        identity: EngineServiceOperationLeaseIdentity,
+        callingPid: Int
+    ): EngineServiceOperationLeaseDecision = transitionWithCurrentRuntime(
+        identity = identity,
+        callingPid = callingPid,
+        transition = leases::claimForConnection
+    )
+
     fun commit(
         identity: EngineServiceOperationLeaseIdentity,
         callingPid: Int

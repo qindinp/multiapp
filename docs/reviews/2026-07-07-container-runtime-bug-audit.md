@@ -2860,7 +2860,7 @@ process attribute change.
   `PluginManager` at `c6ebf652` confirm central package-manager publication,
   but do not provide a per-instance generation or task/dataRoot authority.
 
-### Verification before the final gate
+### Verification
 
 - Focused loader/engine/app reports: 1,173 tests, 0 failures, 0 errors.
 - Merged-manifest inspection confirms `:engine` placement and recovery-before-
@@ -2881,6 +2881,62 @@ process attribute change.
   storage/native behavior remains open.
 - No new artifact proves GKD, AstroBox, QQ, WeChat, or QQ Reader compatibility.
   Review decision remains **BLOCK**.
+
+## Review Update - 2026-07-14 Service Connection and Component Process Authority
+
+The previous review left a complete Service connection Binder index and real
+component-process allocation open. The current tree closes their local
+authority primitives, but production custom-process hosting is still absent.
+
+### Findings closed in the current tree
+
+- Service connection ownership is no longer inferred from the engine's list of
+  bound components. An opaque Binder token indexes exact generation, process,
+  and component records, and all mutations are authorized by the current engine
+  process identity.
+- A Service `BIND` result cannot skip connection registration: the operation
+  lease requires a one-time `CLAIMED` state before commit. Failed dispatch aborts
+  the claimed lease and suppresses the guest callback.
+- Same-target repeated bind is idempotent. Commit failure cannot return
+  `Blocked` after already exposing `onServiceConnected`, and unbind commit or
+  removal failure is no longer reported as success.
+- Binder death and explicit process/generation/instance revoke publish released
+  bindings after detaching the authority. The engine recalculates remaining
+  bindings and updates Service runtime state instead of leaving a stale BOUND
+  record indefinitely.
+- Component process slots are centrally allocated with generation tombstones,
+  primary-slot reservation, and stale/dead runtime filtering. Attach capability
+  and live client state bind runtime epoch, process epoch, sessions, slot, PID,
+  Binder, process name, and Linux process starttime.
+- The production identity probe parses `/proc/<pid>/cmdline` and field 22 of
+  `/proc/<pid>/stat`. Probe failure or PID reuse retires the old client and
+  permits only a higher process epoch to attach.
+
+### Verification
+
+- Focused loader/engine integration, security, death, retry, and procfs tests
+  pass after the final wiring review.
+- The final nine-module gate and `:app:assembleDebug` passed once in about
+  4m42s: 2,249 tests, 0 failures, 0 errors, and 12 skipped.
+- Debug APK: 100,028,189 bytes; SHA-256
+  `910AE4C30071B367573E144127615B6CEB832B12F6A301FB20473701B4098D3B`.
+- The AGP 8.7.3 / `compileSdk=36` warning remains non-fatal and is not device
+  compatibility evidence.
+
+### Still BLOCK
+
+- The new component-process API is not called by production launch code.
+  StubService/StubContentProvider do not transport or consume the attach ticket,
+  and the general runtime/Service endpoints still authorize only the primary
+  guest process. This is a control plane, not a working custom-process data
+  plane.
+- The host declares and bootstraps only eight real `:v0..:v7` slots. Residual
+  `ContainerActivityV8..V23` declarations do not establish 24 process slots.
+- Rebind callbacks, sticky restart, foreground-service type mapping, complete
+  Provider/Broadcast/permission/storage/native semantics, and process-death
+  device recovery remain incomplete.
+- There is no new API 28-36/HyperOS or named-app device artifact. Review
+  decision remains **BLOCK**.
 
 ## Review Update - 2026-07-14 Component Operation Authority
 

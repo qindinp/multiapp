@@ -43,6 +43,7 @@ data class EngineServiceOperationLeaseIdentity(
 enum class EngineServiceOperationLeaseState {
     ISSUED,
     AUTHORIZED,
+    CLAIMED,
     COMMITTED,
     ABORTED,
     EXPIRED,
@@ -165,6 +166,38 @@ class EngineServiceOperationLeaseRegistry(
     }
 
     @Synchronized
+    fun claimForConnection(
+        identity: EngineServiceOperationLeaseIdentity,
+        callingPid: Int
+    ): EngineServiceOperationLeaseDecision {
+        val lookup = lookupForTransition(identity, callingPid)
+        val record = lookup.record ?: return checkNotNull(lookup.rejection)
+        return when (record.state) {
+            EngineServiceOperationLeaseState.AUTHORIZED -> {
+                record.state = EngineServiceOperationLeaseState.CLAIMED
+                accepted(record.state, "service_operation_lease_connection_claimed")
+            }
+            EngineServiceOperationLeaseState.CLAIMED -> rejected(
+                EngineServiceOperationLeaseState.CLAIMED,
+                "service_operation_lease_connection_replayed"
+            )
+            EngineServiceOperationLeaseState.COMMITTED -> rejected(
+                EngineServiceOperationLeaseState.COMMITTED,
+                "service_operation_lease_already_committed"
+            )
+            EngineServiceOperationLeaseState.ISSUED -> rejected(
+                EngineServiceOperationLeaseState.ISSUED,
+                "service_operation_lease_not_authorized"
+            )
+            EngineServiceOperationLeaseState.ABORTED -> rejected(
+                EngineServiceOperationLeaseState.ABORTED,
+                "service_operation_lease_already_aborted"
+            )
+            else -> rejected(record.state, "service_operation_lease_invalid_state")
+        }
+    }
+
+    @Synchronized
     fun commit(
         identity: EngineServiceOperationLeaseIdentity,
         callingPid: Int
@@ -178,11 +211,21 @@ class EngineServiceOperationLeaseRegistry(
     ): EngineServiceOperationLeaseDecision {
         val lookup = lookupForTransition(identity, callingPid)
         val record = lookup.record ?: return checkNotNull(lookup.rejection)
+        if (
+            record.state == EngineServiceOperationLeaseState.AUTHORIZED &&
+            identity.operationType == VirtualServiceOperation.BIND
+        ) {
+            return rejected(
+                EngineServiceOperationLeaseState.AUTHORIZED,
+                "service_operation_lease_connection_not_claimed"
+            )
+        }
         return when (record.state) {
-            EngineServiceOperationLeaseState.AUTHORIZED -> {
+            EngineServiceOperationLeaseState.AUTHORIZED,
+            EngineServiceOperationLeaseState.CLAIMED -> {
                 if (!runCatching(commitAction).getOrDefault(false)) {
                     return rejected(
-                        EngineServiceOperationLeaseState.AUTHORIZED,
+                        record.state,
                         "service_operation_lease_commit_action_failed"
                     )
                 }
@@ -215,7 +258,8 @@ class EngineServiceOperationLeaseRegistry(
         val record = lookup.record ?: return checkNotNull(lookup.rejection)
         return when (record.state) {
             EngineServiceOperationLeaseState.ISSUED,
-            EngineServiceOperationLeaseState.AUTHORIZED -> {
+            EngineServiceOperationLeaseState.AUTHORIZED,
+            EngineServiceOperationLeaseState.CLAIMED -> {
                 record.state = EngineServiceOperationLeaseState.ABORTED
                 accepted(record.state, "service_operation_lease_aborted")
             }

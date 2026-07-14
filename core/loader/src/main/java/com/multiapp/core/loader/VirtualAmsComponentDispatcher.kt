@@ -12,6 +12,7 @@ import com.multiapp.core.model.virtual.ProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
+import java.util.IdentityHashMap
 import java.util.concurrent.Executor
 
 data class VirtualBroadcastDispatchOptions(
@@ -89,7 +90,7 @@ class DefaultVirtualAmsComponentDispatcher(
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global
 ) : VirtualAmsComponentDispatcher {
 
-    private val boundServiceConnections = linkedMapOf<ServiceConnection, VirtualServiceBoundConnection>()
+    private val boundServiceConnections = IdentityHashMap<ServiceConnection, VirtualServiceBoundConnection>()
 
     private val activityManager: VirtualActivityManager? by lazy(LazyThreadSafetyMode.NONE) {
         hostContext?.let { context ->
@@ -284,30 +285,6 @@ class DefaultVirtualAmsComponentDispatcher(
         flags: Int,
         executor: Executor?
     ): VirtualServiceBindDispatchResult {
-        val existingConnection = boundServiceConnections[connection]
-        if (existingConnection != null) {
-            dispatchServiceConnectedCallback(
-                connection = connection,
-                componentName = existingConnection.componentName,
-                binder = existingConnection.binder,
-                nullBinding = existingConnection.nullBinding,
-                executor = executor
-            )
-            return VirtualServiceBindDispatchResult.Bound(
-                startRequest = existingConnection.startRequest,
-                componentName = existingConnection.componentName,
-                binder = existingConnection.binder,
-                cached = true,
-                bindKey = existingConnection.bindKey,
-                flags = existingConnection.flags,
-                bindCount = existingConnection.bindCount,
-                activeConnectionCount = existingConnection.activeConnectionCount,
-                reusedBinder = true,
-                rebindDelivered = false,
-                connectionReused = true,
-                nullBinding = existingConnection.nullBinding
-            )
-        }
         val snapshot = packageSnapshot ?: return VirtualServiceBindDispatchResult.Blocked(
             sourceIntent = intent,
             reason = "missingPackageSnapshot",
@@ -325,6 +302,33 @@ class DefaultVirtualAmsComponentDispatcher(
         val startRequest = resolvedStartRequest.copy(
             processSlot = processRuntime.get(resolvedStartRequest.instanceId)?.result?.processSlot ?: processSlot
         )
+        val existingConnection = boundServiceConnections[connection]
+        if (existingConnection != null) {
+            if (!existingConnection.startRequest.hasSameServiceTarget(startRequest)) {
+                return VirtualServiceBindDispatchResult.Blocked(
+                    sourceIntent = intent,
+                    reason = "serviceConnectionAlreadyBoundToDifferentService",
+                    serviceResolved = true,
+                    flags = flags,
+                    autoCreate = flags and Context.BIND_AUTO_CREATE != 0,
+                    serviceAlreadyRunning = false
+                )
+            }
+            return VirtualServiceBindDispatchResult.Bound(
+                startRequest = existingConnection.startRequest,
+                componentName = existingConnection.componentName,
+                binder = existingConnection.binder,
+                cached = true,
+                bindKey = existingConnection.bindKey,
+                flags = existingConnection.flags,
+                bindCount = existingConnection.bindCount,
+                activeConnectionCount = existingConnection.activeConnectionCount,
+                reusedBinder = true,
+                rebindDelivered = false,
+                connectionReused = true,
+                nullBinding = existingConnection.nullBinding
+            )
+        }
         val bindRequest = VirtualServiceRuntimeBindRequest(
             startRequest = startRequest,
             guestContext = virtualContext,
@@ -347,7 +351,7 @@ class DefaultVirtualAmsComponentDispatcher(
                     result.startRequest.originPackageName,
                     result.startRequest.guestServiceClassName
                 )
-                boundServiceConnections[connection] = VirtualServiceBoundConnection(
+                val boundConnection = VirtualServiceBoundConnection(
                     connection = connection,
                     startRequest = result.startRequest,
                     componentName = componentName,
@@ -358,11 +362,9 @@ class DefaultVirtualAmsComponentDispatcher(
                     activeConnectionCount = result.activeConnectionCount,
                     nullBinding = result.binder == null
                 )
+                boundServiceConnections[connection] = boundConnection
                 dispatchServiceConnectedCallback(
-                    connection = connection,
-                    componentName = componentName,
-                    binder = result.binder,
-                    nullBinding = result.binder == null,
+                    boundConnection = boundConnection,
                     executor = executor
                 )
                 VirtualServiceBindDispatchResult.Bound(
@@ -521,37 +523,45 @@ class DefaultVirtualAmsComponentDispatcher(
         val nullBinding: Boolean
     )
 
+    private fun VirtualServiceStartRequest.hasSameServiceTarget(
+        other: VirtualServiceStartRequest
+    ): Boolean =
+        instanceId == other.instanceId &&
+            originPackageName == other.originPackageName &&
+            guestServiceClassName == other.guestServiceClassName
+
     private fun dispatchServiceConnectedCallback(
-        connection: ServiceConnection,
-        componentName: android.content.ComponentName,
-        binder: android.os.IBinder?,
-        nullBinding: Boolean,
+        boundConnection: VirtualServiceBoundConnection,
         executor: Executor?
     ) {
         val callback = Runnable {
-            if (nullBinding) {
-                connection.onNullBinding(componentName)
+            if (boundServiceConnections[boundConnection.connection] !== boundConnection) {
+                return@Runnable
+            }
+            if (boundConnection.nullBinding) {
+                boundConnection.connection.onNullBinding(boundConnection.componentName)
             } else {
-                connection.onServiceConnected(componentName, binder)
+                boundConnection.connection.onServiceConnected(
+                    boundConnection.componentName,
+                    boundConnection.binder
+                )
             }
         }
         dispatchServiceConnectionCallback(executor, callback)
     }
 
     private fun dispatchServiceConnectionCallback(executor: Executor?, callback: Runnable) {
-        if (executor != null) {
-            executor.execute(callback)
-            return
+        val dispatch = Runnable {
+            if (executor != null) {
+                executor.execute(callback)
+            } else {
+                callback.run()
+            }
         }
         runCatching {
-            val mainLooper = Looper.getMainLooper()
-            if (Looper.myLooper() == mainLooper) {
-                callback.run()
-            } else {
-                Handler(mainLooper).post(callback)
-            }
+            Handler(Looper.getMainLooper()).post(dispatch)
         }.getOrElse {
-            callback.run()
+            dispatch.run()
         }
     }
 

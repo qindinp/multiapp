@@ -47,10 +47,12 @@ class EngineBinderProvider : ContentProvider() {
             appOpsService = owner.systemServer.appOpsService,
             serviceService = owner.systemServer.serviceService,
             serviceOperationLeases = owner.serviceOperationLeases,
+            serviceConnections = owner.serviceConnections,
             broadcastService = owner.systemServer.broadcastService,
             packageService = owner.systemServer.packageService,
             virtualizationEngine = owner.virtualizationEngine,
-            processControlPlane = owner.processControlPlane
+            processControlPlane = owner.processControlPlane,
+            componentProcessAuthority = owner
         )
         return true
     }

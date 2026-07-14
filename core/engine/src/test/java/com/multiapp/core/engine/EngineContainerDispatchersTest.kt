@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ComponentName
 import android.content.ServiceConnection
 import android.net.Uri
+import android.os.IBinder
 import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
 import com.multiapp.core.loader.VirtualAmsComponentDispatcher
@@ -33,6 +34,7 @@ import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedIntentFilter
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.loader.toSummary
+import java.util.IdentityHashMap
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
@@ -355,7 +357,7 @@ class EngineContainerDispatchersTest {
                 intent,
                 any(),
                 any(),
-                connection,
+                any(),
                 Context.BIND_AUTO_CREATE,
                 null
             )
@@ -371,10 +373,12 @@ class EngineContainerDispatchersTest {
             reusedBinder = false,
             rebindDelivered = false
         )
+        val connectionAuthority = TestServiceConnectionAuthority()
         val dispatcher = DefaultEngineAmsComponentDispatcher(
             fallback = fallback,
             instanceId = runtime.instanceId,
             serviceService = leaseAwareService(server, runtime),
+            serviceConnectionAuthority = connectionAuthority,
             broadcastService = server.broadcastService
         )
 
@@ -399,9 +403,166 @@ class EngineContainerDispatchersTest {
             .single()
         assertEquals(EngineServiceLifecycleState.BOUND, runtimeRecord.state)
         assertEquals(1, runtimeRecord.activeBindCount)
+        assertEquals(1, connectionAuthority.bindingCount())
+        assertEquals("com.example.app.SyncService", connectionAuthority.bindings().single().component)
         verify(exactly = 1) {
-            fallback.dispatchBindService(intent, any(), any(), connection, Context.BIND_AUTO_CREATE, null)
+            fallback.dispatchBindService(intent, any(), any(), any(), Context.BIND_AUTO_CREATE, null)
         }
+    }
+
+    @Test
+    fun `ams bind service gate releases callback only after engine commit`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(runtime())
+        val intent = serviceSourceIntent(action = "test.SYNC")
+        val startRequest = VirtualServiceStartRequest(
+            instanceId = runtime.instanceId,
+            originPackageName = runtime.originPackageName,
+            guestServiceClassName = "com.example.app.SyncService",
+            sourceIntent = intent,
+            reason = "implicitBind",
+            processSlot = runtime.processSlot
+        )
+        val componentName = ComponentName(runtime.originPackageName, startRequest.guestServiceClassName)
+        val events = mutableListOf<String>()
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName, service: IBinder) = Unit
+
+            override fun onServiceDisconnected(name: ComponentName) = Unit
+
+            override fun onNullBinding(name: ComponentName) {
+                events += "callback"
+            }
+        }
+        val fallback = mockk<VirtualAmsComponentDispatcher>(relaxed = true)
+        every {
+            fallback.dispatchBindService(intent, any(), any(), any(), Context.BIND_AUTO_CREATE, null)
+        } answers {
+            arg<ServiceConnection>(3).onNullBinding(componentName)
+            VirtualServiceBindDispatchResult.Bound(
+                startRequest = startRequest,
+                componentName = componentName,
+                binder = null,
+                cached = false,
+                bindKey = "test.SYNC",
+                flags = Context.BIND_AUTO_CREATE,
+                bindCount = 1,
+                activeConnectionCount = 1,
+                reusedBinder = false,
+                rebindDelivered = false
+            )
+        }
+        val committedService = object : VirtualServiceService by leaseAwareService(server, runtime) {
+            override fun recordServiceDispatch(
+                instanceId: String,
+                result: VirtualServiceOperationResult
+            ): Boolean {
+                events += "commit"
+                return server.serviceService.recordServiceDispatch(instanceId, result)
+            }
+        }
+        val dispatcher = DefaultEngineAmsComponentDispatcher(
+            fallback = fallback,
+            instanceId = runtime.instanceId,
+            serviceService = committedService,
+            serviceConnectionAuthority = TestServiceConnectionAuthority(),
+            broadcastService = server.broadcastService
+        )
+
+        val result = dispatcher.dispatchBindService(
+            intent = intent,
+            virtualContext = mockk(relaxed = true),
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = null
+        )
+
+        assertTrue(result is VirtualServiceBindDispatchResult.Bound)
+        assertEquals(listOf("commit", "callback"), events)
+    }
+
+    @Test
+    fun `ams bind service gate suppresses callback and rolls back when engine commit fails`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(runtime())
+        val intent = serviceSourceIntent(action = "test.SYNC")
+        val startRequest = VirtualServiceStartRequest(
+            instanceId = runtime.instanceId,
+            originPackageName = runtime.originPackageName,
+            guestServiceClassName = "com.example.app.SyncService",
+            sourceIntent = intent,
+            reason = "implicitBind",
+            processSlot = runtime.processSlot
+        )
+        val componentName = ComponentName(runtime.originPackageName, startRequest.guestServiceClassName)
+        var callbackCount = 0
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName, service: IBinder) = Unit
+
+            override fun onServiceDisconnected(name: ComponentName) = Unit
+
+            override fun onNullBinding(name: ComponentName) {
+                callbackCount += 1
+            }
+        }
+        val fallback = mockk<VirtualAmsComponentDispatcher>(relaxed = true)
+        every {
+            fallback.dispatchBindService(intent, any(), any(), any(), Context.BIND_AUTO_CREATE, null)
+        } answers {
+            arg<ServiceConnection>(3).onNullBinding(componentName)
+            VirtualServiceBindDispatchResult.Bound(
+                startRequest = startRequest,
+                componentName = componentName,
+                binder = null,
+                cached = false,
+                bindKey = "test.SYNC",
+                flags = Context.BIND_AUTO_CREATE,
+                bindCount = 1,
+                activeConnectionCount = 1,
+                reusedBinder = false,
+                rebindDelivered = false
+            )
+        }
+        every { fallback.dispatchUnbindService(any()) } returns
+            VirtualServiceUnbindDispatchResult.Unbound(
+                startRequest = startRequest,
+                destroyed = true,
+                onUnbindResult = false,
+                onUnbindCalled = true,
+                bindKey = "test.SYNC",
+                activeConnectionCount = 0,
+                activeBindCount = 0
+            )
+        val rejectedService = object : VirtualServiceService by leaseAwareService(server, runtime) {
+            override fun recordServiceDispatch(
+                instanceId: String,
+                result: VirtualServiceOperationResult
+            ): Boolean = false
+        }
+        val connectionAuthority = TestServiceConnectionAuthority()
+        val dispatcher = DefaultEngineAmsComponentDispatcher(
+            fallback = fallback,
+            instanceId = runtime.instanceId,
+            serviceService = rejectedService,
+            serviceConnectionAuthority = connectionAuthority,
+            broadcastService = server.broadcastService
+        )
+
+        val result = dispatcher.dispatchBindService(
+            intent = intent,
+            virtualContext = mockk(relaxed = true),
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = null
+        )
+
+        assertTrue(result is VirtualServiceBindDispatchResult.Blocked)
+        assertEquals("service_connection_dispatch_commit_failed", result.reason)
+        assertEquals(0, callbackCount)
+        assertEquals(0, connectionAuthority.bindingCount())
+        verify(exactly = 1) { fallback.dispatchUnbindService(any()) }
     }
 
     @Test
@@ -486,7 +647,28 @@ class EngineContainerDispatchersTest {
             reason = "implicitBind",
             processSlot = runtime.processSlot
         )
-        every { fallback.dispatchUnbindService(connection) } returns
+        every {
+            fallback.dispatchBindService(
+                intent,
+                any(),
+                any(),
+                any(),
+                Context.BIND_AUTO_CREATE,
+                null
+            )
+        } returns VirtualServiceBindDispatchResult.Bound(
+            startRequest = startRequest,
+            componentName = ComponentName(runtime.originPackageName, startRequest.guestServiceClassName),
+            binder = null,
+            cached = false,
+            bindKey = "test.SYNC",
+            flags = Context.BIND_AUTO_CREATE,
+            bindCount = 1,
+            activeConnectionCount = 1,
+            reusedBinder = false,
+            rebindDelivered = false
+        )
+        every { fallback.dispatchUnbindService(any()) } returns
             VirtualServiceUnbindDispatchResult.Unbound(
                 startRequest = startRequest,
                 destroyed = true,
@@ -496,35 +678,29 @@ class EngineContainerDispatchersTest {
                 activeConnectionCount = 0,
                 activeBindCount = 0
             )
-        assertTrue(
-            server.serviceService.recordServiceDispatch(
-                runtime.instanceId,
-                VirtualServiceOperationResult(
-                    instanceId = runtime.instanceId,
-                    operation = VirtualServiceOperation.BIND,
-                    serviceClassName = startRequest.guestServiceClassName,
-                    action = "test.SYNC",
-                    verdict = EngineResultStatus.PASS,
-                    reason = "seed-bound-connection",
-                    bound = true,
-                    processSlot = runtime.processSlot,
-                    activeBindCount = 1,
-                    message = "seed_bound_connection"
-                )
-            )
-        )
+        val connectionAuthority = TestServiceConnectionAuthority()
         val dispatcher = DefaultEngineAmsComponentDispatcher(
             fallback = fallback,
             instanceId = runtime.instanceId,
             serviceService = leaseAwareService(server, runtime),
+            serviceConnectionAuthority = connectionAuthority,
             broadcastService = server.broadcastService
         )
 
+        val bound = dispatcher.dispatchBindService(
+            intent = intent,
+            virtualContext = mockk(relaxed = true),
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = null
+        )
         val result = dispatcher.dispatchUnbindService(connection)
         val dispatchEvidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("service", "dispatch")
             ?.last()
 
+        assertTrue(bound is VirtualServiceBindDispatchResult.Bound)
         assertTrue(result is VirtualServiceUnbindDispatchResult.Unbound)
         assertEquals(EngineResultStatus.PASS, dispatchEvidence?.verdict)
         assertEquals("UNBIND", dispatchEvidence?.entries?.get("operation"))
@@ -535,7 +711,91 @@ class EngineContainerDispatchersTest {
             .single()
         assertEquals(EngineServiceLifecycleState.STOPPED, runtimeRecord.state)
         assertEquals(0, runtimeRecord.activeBindCount)
-        verify(exactly = 1) { fallback.dispatchUnbindService(connection) }
+        assertEquals(0, connectionAuthority.bindingCount())
+        verify(exactly = 1) { fallback.dispatchUnbindService(any()) }
+    }
+
+    @Test
+    fun `ams unbind service gate reports engine commit failure without dropping authority`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(runtime())
+        val fallback = mockk<VirtualAmsComponentDispatcher>(relaxed = true)
+        val connection = mockk<ServiceConnection>(relaxed = true)
+        val intent = serviceSourceIntent(action = "test.SYNC")
+        val startRequest = VirtualServiceStartRequest(
+            instanceId = runtime.instanceId,
+            originPackageName = runtime.originPackageName,
+            guestServiceClassName = "com.example.app.SyncService",
+            sourceIntent = intent,
+            reason = "implicitBind",
+            processSlot = runtime.processSlot
+        )
+        every {
+            fallback.dispatchBindService(
+                intent,
+                any(),
+                any(),
+                any(),
+                Context.BIND_AUTO_CREATE,
+                null
+            )
+        } returns VirtualServiceBindDispatchResult.Bound(
+            startRequest = startRequest,
+            componentName = ComponentName(runtime.originPackageName, startRequest.guestServiceClassName),
+            binder = null,
+            cached = false,
+            bindKey = "test.SYNC",
+            flags = Context.BIND_AUTO_CREATE,
+            bindCount = 1,
+            activeConnectionCount = 1,
+            reusedBinder = false,
+            rebindDelivered = false
+        )
+        every { fallback.dispatchUnbindService(any()) } returns
+            VirtualServiceUnbindDispatchResult.Unbound(
+                startRequest = startRequest,
+                destroyed = true,
+                onUnbindResult = false,
+                onUnbindCalled = true,
+                bindKey = "test.SYNC",
+                activeConnectionCount = 0,
+                activeBindCount = 0
+            )
+        val serviceService = object : VirtualServiceService by leaseAwareService(server, runtime) {
+            override fun recordServiceDispatch(
+                instanceId: String,
+                result: VirtualServiceOperationResult
+            ): Boolean = if (result.operation == VirtualServiceOperation.UNBIND) {
+                false
+            } else {
+                server.serviceService.recordServiceDispatch(instanceId, result)
+            }
+        }
+        val connectionAuthority = TestServiceConnectionAuthority()
+        val dispatcher = DefaultEngineAmsComponentDispatcher(
+            fallback = fallback,
+            instanceId = runtime.instanceId,
+            serviceService = serviceService,
+            serviceConnectionAuthority = connectionAuthority,
+            broadcastService = server.broadcastService
+        )
+        assertTrue(
+            dispatcher.dispatchBindService(
+                intent = intent,
+                virtualContext = mockk(relaxed = true),
+                guestClassLoader = ClassLoader.getSystemClassLoader(),
+                connection = connection,
+                flags = Context.BIND_AUTO_CREATE,
+                executor = null
+            ) is VirtualServiceBindDispatchResult.Bound
+        )
+
+        val result = dispatcher.dispatchUnbindService(connection)
+
+        assertTrue(result is VirtualServiceUnbindDispatchResult.Failed)
+        assertEquals("engineCommit", result.stage)
+        assertEquals(1, connectionAuthority.bindingCount())
+        verify(exactly = 1) { fallback.dispatchUnbindService(any()) }
     }
 
     @Test
@@ -1032,6 +1292,94 @@ class EngineContainerDispatchersTest {
             )
             return plan.copy(targets = listOf(target.copy(operationLease = lease)))
         }
+    }
+
+    private class TestServiceConnectionAuthority : EngineServiceConnectionAuthority {
+        private val records = IdentityHashMap<IBinder, MutableList<EngineServiceConnectionBindingRecord>>()
+
+        override fun register(
+            instanceId: String,
+            operationLease: EngineServiceOperationLeaseIdentity,
+            connectionToken: IBinder
+        ): EngineServiceConnectionOperationResult {
+            val binding = EngineServiceConnectionBindingRecord(
+                instanceId = instanceId,
+                runtimeEpoch = operationLease.runtimeEpoch,
+                engineSessionId = operationLease.engineSessionId,
+                processSlot = operationLease.processSlot,
+                processId = operationLease.processId,
+                component = operationLease.component
+            )
+            val connectionRecords = records.getOrPut(connectionToken) { mutableListOf() }
+            val idempotent = binding in connectionRecords
+            if (!idempotent) connectionRecords += binding
+            return result(
+                operation = "registerServiceConnection",
+                accepted = true,
+                idempotent = idempotent,
+                bindings = listOf(binding),
+                reason = if (idempotent) "already_registered" else "registered"
+            )
+        }
+
+        override fun query(
+            instanceId: String,
+            connectionToken: IBinder
+        ): EngineServiceConnectionOperationResult {
+            val bindings = records[connectionToken].orEmpty().filter { it.instanceId == instanceId }
+            return result(
+                operation = "queryServiceConnection",
+                accepted = bindings.isNotEmpty(),
+                bindings = bindings,
+                reason = if (bindings.isEmpty()) "not_found" else "found"
+            )
+        }
+
+        override fun removeBinding(
+            instanceId: String,
+            binding: EngineServiceConnectionBindingRecord,
+            connectionToken: IBinder
+        ): EngineServiceConnectionOperationResult {
+            val removed = records[connectionToken]?.remove(binding) == true
+            if (records[connectionToken].isNullOrEmpty()) records.remove(connectionToken)
+            return result(
+                operation = "removeServiceConnectionBinding",
+                accepted = removed,
+                bindings = listOf(binding).takeIf { removed }.orEmpty(),
+                reason = if (removed) "removed" else "not_found"
+            )
+        }
+
+        override fun remove(
+            instanceId: String,
+            connectionToken: IBinder
+        ): EngineServiceConnectionOperationResult {
+            val removed = records.remove(connectionToken).orEmpty().filter { it.instanceId == instanceId }
+            return result(
+                operation = "removeServiceConnection",
+                accepted = removed.isNotEmpty(),
+                bindings = removed,
+                reason = if (removed.isEmpty()) "not_found" else "removed"
+            )
+        }
+
+        fun bindingCount(): Int = records.values.sumOf { it.size }
+
+        fun bindings(): List<EngineServiceConnectionBindingRecord> = records.values.flatten()
+
+        private fun result(
+            operation: String,
+            accepted: Boolean,
+            idempotent: Boolean = false,
+            bindings: List<EngineServiceConnectionBindingRecord>,
+            reason: String
+        ) = EngineServiceConnectionOperationResult(
+            operation = operation,
+            accepted = accepted,
+            idempotent = idempotent,
+            bindings = bindings,
+            reason = reason
+        )
     }
 
     private fun serviceSourceIntent(action: String): Intent {

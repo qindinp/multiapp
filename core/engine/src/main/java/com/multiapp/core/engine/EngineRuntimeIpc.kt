@@ -52,6 +52,14 @@ object EngineRuntimeIpcContract {
     const val KEY_LIVE_AUTHORITY = "liveAuthority"
     const val KEY_CLIENT_TOKEN_ALIVE = "clientTokenAlive"
     const val KEY_ATTACH_OPERATION = "attachOperation"
+    const val KEY_PROCESS_EPOCH = "processEpoch"
+    const val KEY_CLIENT_SESSION_ID = "clientSessionId"
+    const val KEY_EFFECTIVE_GUEST_PROCESS_NAME = "effectiveGuestProcessName"
+    const val KEY_ALREADY_RUNNING = "alreadyRunning"
+    const val KEY_ATTACH_CAPABILITY = "attachCapability"
+    const val KEY_COMPONENT_PROCESS_LAUNCH_TICKET = "componentProcessLaunchTicket"
+    const val KEY_COMPONENT_PROCESS_STATE = "componentProcessState"
+    const val KEY_PROCESS_START_TICKS = "processStartTicks"
     const val KEY_SAME_PROCESS = "sameProcess"
     const val KEY_COMPONENT = "component"
     const val KEY_OPERATION = "operation"
@@ -138,6 +146,7 @@ object EngineRuntimeIpcContract {
     const val KEY_ACTIVE_BIND_COUNT = "activeBindCount"
     const val KEY_SERVICE_RECORDS = "serviceRecords"
     const val KEY_SERVICE_STATE = "serviceState"
+    const val KEY_SERVICE_CONNECTION_BINDINGS = "serviceConnectionBindings"
     const val KEY_SERVICE_OPERATION_LEASE = "serviceOperationLease"
     const val KEY_SERVICE_LEASE_TOKEN = "serviceLeaseToken"
     const val KEY_ISSUED_AT_NANOS = "issuedAtNanos"
@@ -221,6 +230,10 @@ object EngineRuntimeIpcContract {
     const val MAX_PROXY_ACTIVITY_SLOT_CANDIDATE_TOTAL_LENGTH = 16_384
     const val MAX_PROXY_ACTIVITY_SLOT_IDENTITY_LENGTH = 512
     const val MAX_PROXY_ACTIVITY_SLOT_TASK_KEY_LENGTH = 1_024
+    const val MAX_SERVICE_CONNECTION_BINDING_COUNT = 128
+    const val MAX_SERVICE_CONNECTION_IDENTITY_LENGTH = 1_024
+    const val MAX_SERVICE_CONNECTION_REASON_LENGTH = 2_048
+    const val MAX_COMPONENT_PROCESS_TEXT_LENGTH = 1_024
 
     fun authority(hostPackageName: String): String = hostPackageName + AUTHORITY_SUFFIX
 
@@ -319,6 +332,8 @@ class EngineRuntimeBinderEndpoint(
     private val serviceService: VirtualServiceService = DefaultVirtualSystemServer(registry).serviceService,
     private val serviceOperationLeases: EngineServiceOperationLeaseCoordinator =
         EngineServiceOperationLeaseCoordinator(registry),
+    private val serviceConnections: EngineServiceConnectionRegistry =
+        EngineServiceConnectionRegistry(),
     private val broadcastService: VirtualBroadcastService = DefaultVirtualSystemServer(registry).broadcastService,
     private val packageService: VirtualPackageService = DefaultVirtualPackageService,
     private val virtualizationEngine: VirtualizationEngine? = null,
@@ -326,6 +341,7 @@ class EngineRuntimeBinderEndpoint(
         runtimeRegistry = registry,
         activityLaunchCapabilities = activityLaunchCapabilities
     ),
+    private val componentProcessAuthority: EngineComponentProcessAuthority? = null,
     private val recentsRestoreCapabilityIssuer: EngineRecentsRestoreCapabilityIssuer =
         EngineRecentsRestoreCapabilityIssuer(
             runtimeRegistry = registry,
@@ -335,7 +351,9 @@ class EngineRuntimeBinderEndpoint(
         ),
     private val callingUid: () -> Int = Binder::getCallingUid,
     private val callingPid: () -> Int = Binder::getCallingPid,
-    private val callingProcessName: (Int) -> String? = ::readAndroidProcessName
+    private val callingProcessName: (Int) -> String? = ::readAndroidProcessName,
+    private val callingProcessStartTicks: (Int) -> Long? = ::readAndroidProcessStartTicks,
+    private val ipcBundleFactory: () -> Bundle = ::Bundle
 ) : IEngineRuntimeService.Stub() {
 
     init {
@@ -552,11 +570,68 @@ class EngineRuntimeBinderEndpoint(
                 processId,
                 if (matches.isEmpty()) "runtime_process_id_not_found" else "runtime_process_id_ambiguous"
             )
-        val authority = processControlPlane.authorize(runtime.instanceId, processId)
+        val authority = authorizeProcess(runtime.instanceId, processId)
         runtime.toIpcBundle(
             liveAuthority = authority.allowed,
             reason = authority.reason
         )
+    }
+
+    override fun prepareComponentProcess(
+        instanceId: String,
+        guestProcessName: String
+    ): Bundle = runtimeAuthorizedBundle(instanceId) {
+        val authority = componentProcessAuthority
+            ?: return@runtimeAuthorizedBundle componentProcessRejected(
+                COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId,
+                "component_process_authority_unavailable"
+            )
+        authority.prepare(instanceId, guestProcessName).toComponentProcessIpcBundle(ipcBundleFactory)
+    }
+
+    override fun attachComponentProcessClient(
+        attachCapability: String,
+        clientToken: IBinder
+    ): Bundle = authorizedBundle {
+        if (
+            attachCapability.length < MIN_COMPONENT_PROCESS_CAPABILITY_LENGTH ||
+            attachCapability.length > EngineRuntimeIpcContract.MAX_COMPONENT_PROCESS_TEXT_LENGTH ||
+            attachCapability != attachCapability.trim()
+        ) {
+            return@authorizedBundle componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_OPERATION,
+                UNKNOWN_COMPONENT_PROCESS_INSTANCE,
+                "invalid_component_process_attach_capability"
+            )
+        }
+        val authority = componentProcessAuthority
+            ?: return@authorizedBundle componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_OPERATION,
+                UNKNOWN_COMPONENT_PROCESS_INSTANCE,
+                "component_process_authority_unavailable"
+            )
+        val callerPid = callingPid()
+        authority.attach(
+            attachCapability = attachCapability,
+            clientToken = clientToken,
+            callingPid = callerPid,
+            callingProcessName = callingProcessName(callerPid),
+            callingProcessStartTicks = callingProcessStartTicks(callerPid)
+        ).toComponentProcessIpcBundle(ipcBundleFactory)
+    }
+
+    override fun queryComponentProcessClient(
+        instanceId: String,
+        guestProcessName: String
+    ): Bundle = runtimeAuthorizedBundle(instanceId) {
+        val authority = componentProcessAuthority
+            ?: return@runtimeAuthorizedBundle componentProcessRejected(
+                COMPONENT_PROCESS_QUERY_OPERATION,
+                instanceId,
+                "component_process_authority_unavailable"
+            )
+        authority.query(instanceId, guestProcessName).toComponentProcessIpcBundle(ipcBundleFactory)
     }
 
     override fun queryApplicationEnabledState(instanceId: String, request: Bundle): Bundle =
@@ -1264,14 +1339,19 @@ class EngineRuntimeBinderEndpoint(
         val decodedResult = result.toServiceOperationResultOrNull() ?: return false
         if (decodedResult.instanceId != instanceId) return false
         val lease = decodedResult.operationLease ?: return false
+        val callerPid = callingPid()
         if (!decodedResult.matches(lease)) {
-            serviceOperationLeases.abort(lease, callingPid())
+            serviceOperationLeases.abort(lease, callerPid)
             return false
         }
-        val decision = serviceOperationLeases.commit(lease, callingPid()) {
+        val decision = serviceOperationLeases.commit(lease, callerPid) {
             serviceService.recordServiceDispatch(instanceId, decodedResult)
         }
         recordServiceLeaseEvidence(lease, decision, "dispatch-result")
+        if (!decision.accepted && lease.operationType == VirtualServiceOperation.BIND) {
+            val aborted = serviceOperationLeases.abort(lease, callerPid)
+            recordServiceLeaseEvidence(lease, aborted, "bind-dispatch-abort")
+        }
         return decision.accepted
     }
 
@@ -1360,6 +1440,218 @@ class EngineRuntimeBinderEndpoint(
 
     override fun queryServiceRuntimeState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
         serviceService.queryServiceRuntimeState(instanceId).toIpcBundle()
+    }
+
+    override fun registerServiceConnection(
+        instanceId: String,
+        operationLease: Bundle,
+        connectionToken: IBinder
+    ): Bundle = runtimeAuthorizedBundle(instanceId) {
+        val lease = operationLease.toServiceOperationLeaseIdentityOrNull()
+            ?: return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REGISTER_OPERATION,
+                "invalid_service_connection_lease"
+            )
+        if (lease.instanceId != instanceId || lease.operationType != VirtualServiceOperation.BIND) {
+            return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REGISTER_OPERATION,
+                "service_connection_lease_mismatch"
+            )
+        }
+        val processIdentity = processControlPlane.authorize(instanceId, callingPid()).identity
+            ?: return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REGISTER_OPERATION,
+                "service_connection_process_unauthorized"
+            )
+        if (
+            lease.runtimeEpoch != processIdentity.runtimeEpoch ||
+            lease.engineSessionId != processIdentity.engineSessionId ||
+            lease.processSlot != processIdentity.processSlot ||
+            lease.processId != processIdentity.processId
+        ) {
+            return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REGISTER_OPERATION,
+                "service_connection_process_binding_mismatch"
+            )
+        }
+        val leaseDecision = serviceOperationLeases.claimForConnection(lease, callingPid())
+        if (!leaseDecision.accepted) {
+            return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REGISTER_OPERATION,
+                "service_connection_lease_unclaimable:${leaseDecision.reason}"
+            )
+        }
+        val binding = EngineServiceConnectionBindingRecord(
+            instanceId = processIdentity.instanceId,
+            runtimeEpoch = processIdentity.runtimeEpoch,
+            engineSessionId = processIdentity.engineSessionId,
+            processSlot = processIdentity.processSlot,
+            processId = processIdentity.processId,
+            component = lease.component
+        )
+        val registered = serviceConnections.register(
+            binding,
+            connectionToken,
+            ::recordReleasedServiceConnections
+        )
+        if (!registered.accepted) {
+            serviceOperationLeases.abort(lease, callingPid())
+        }
+        EngineServiceConnectionOperationResult(
+            operation = SERVICE_CONNECTION_REGISTER_OPERATION,
+            accepted = registered.accepted,
+            idempotent = registered.idempotent,
+            bindings = listOfNotNull(registered.binding).takeIf { registered.accepted }.orEmpty(),
+            reason = registered.reason
+        ).toServiceConnectionIpcBundle(ipcBundleFactory)
+    }
+
+    override fun queryServiceConnection(
+        instanceId: String,
+        connectionToken: IBinder
+    ): Bundle = runtimeAuthorizedBundle(instanceId) {
+        val identity = processControlPlane.authorize(instanceId, callingPid()).identity
+            ?: return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_QUERY_OPERATION,
+                "service_connection_process_unauthorized"
+            )
+        val queried = serviceConnections.query(connectionToken)
+        if (queried.bindings.any { binding -> !binding.matches(identity) }) {
+            return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_QUERY_OPERATION,
+                "service_connection_owner_mismatch"
+            )
+        }
+        EngineServiceConnectionOperationResult(
+            operation = SERVICE_CONNECTION_QUERY_OPERATION,
+            accepted = queried.found,
+            idempotent = false,
+            bindings = queried.bindings,
+            reason = queried.reason
+        ).toServiceConnectionIpcBundle(ipcBundleFactory)
+    }
+
+    override fun removeServiceConnectionBinding(
+        instanceId: String,
+        binding: Bundle,
+        connectionToken: IBinder
+    ): Bundle = runtimeAuthorizedBundle(instanceId) {
+        val decoded = binding.toServiceConnectionBindingOrNull()
+            ?: return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REMOVE_BINDING_OPERATION,
+                "invalid_service_connection_binding"
+            )
+        val identity = processControlPlane.authorize(instanceId, callingPid()).identity
+            ?: return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REMOVE_BINDING_OPERATION,
+                "service_connection_process_unauthorized"
+            )
+        if (!decoded.matches(identity)) {
+            return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REMOVE_BINDING_OPERATION,
+                "service_connection_owner_mismatch"
+            )
+        }
+        val removed = serviceConnections.unbind(connectionToken, decoded)
+        EngineServiceConnectionOperationResult(
+            operation = SERVICE_CONNECTION_REMOVE_BINDING_OPERATION,
+            accepted = removed.removed,
+            idempotent = false,
+            bindings = removed.bindings,
+            reason = removed.reason
+        ).toServiceConnectionIpcBundle(ipcBundleFactory)
+    }
+
+    override fun removeServiceConnection(
+        instanceId: String,
+        connectionToken: IBinder
+    ): Bundle = runtimeAuthorizedBundle(instanceId) {
+        val identity = processControlPlane.authorize(instanceId, callingPid()).identity
+            ?: return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REMOVE_OPERATION,
+                "service_connection_process_unauthorized"
+            )
+        val queried = serviceConnections.query(connectionToken)
+        if (queried.bindings.any { binding -> !binding.matches(identity) }) {
+            return@runtimeAuthorizedBundle serviceConnectionRejected(
+                SERVICE_CONNECTION_REMOVE_OPERATION,
+                "service_connection_owner_mismatch"
+            )
+        }
+        val removed = serviceConnections.removeAll(connectionToken)
+        EngineServiceConnectionOperationResult(
+            operation = SERVICE_CONNECTION_REMOVE_OPERATION,
+            accepted = removed.removed,
+            idempotent = false,
+            bindings = removed.bindings,
+            reason = removed.reason
+        ).toServiceConnectionIpcBundle(ipcBundleFactory)
+    }
+
+    private fun serviceConnectionRejected(operation: String, reason: String): Bundle =
+        EngineServiceConnectionOperationResult(
+            operation = operation,
+            accepted = false,
+            idempotent = false,
+            bindings = emptyList(),
+            reason = reason
+        ).toServiceConnectionIpcBundle(ipcBundleFactory)
+
+    private fun componentProcessRejected(operation: String, instanceId: String, reason: String): Bundle =
+        EngineComponentProcessOperationResult(
+            operation = operation,
+            instanceId = instanceId,
+            accepted = false,
+            idempotent = false,
+            alreadyRunning = false,
+            launchTicket = null,
+            processState = null,
+            reason = reason
+        ).toComponentProcessIpcBundle(ipcBundleFactory)
+
+    private fun EngineServiceConnectionBindingRecord.matches(
+        identity: EngineProcessClientIdentity
+    ): Boolean = instanceId == identity.instanceId &&
+        runtimeEpoch == identity.runtimeEpoch &&
+        engineSessionId == identity.engineSessionId &&
+        processSlot == identity.processSlot &&
+        processId == identity.processId
+
+    private fun recordReleasedServiceConnections(
+        bindings: List<EngineServiceConnectionBindingRecord>
+    ) {
+        bindings.distinctBy { binding ->
+            listOf(
+                binding.instanceId,
+                binding.runtimeEpoch.toString(),
+                binding.engineSessionId,
+                binding.component
+            )
+        }.forEach { binding ->
+            val runtime = registry.get(binding.instanceId) ?: return@forEach
+            if (
+                runtime.runtimeEpoch != binding.runtimeEpoch ||
+                runtime.engineSessionId != binding.engineSessionId
+            ) {
+                return@forEach
+            }
+            serviceService.recordServiceDispatch(
+                binding.instanceId,
+                VirtualServiceOperationResult(
+                    instanceId = binding.instanceId,
+                    operation = VirtualServiceOperation.UNBIND,
+                    serviceClassName = binding.component,
+                    action = null,
+                    verdict = EngineResultStatus.PARTIAL,
+                    reason = "service_connection_authority_released",
+                    unbound = true,
+                    destroyed = false,
+                    processSlot = binding.processSlot,
+                    activeBindCount = serviceConnections.activeBindingCount(binding),
+                    message = "engine_service_connection_authority_released"
+                )
+            )
+        }
     }
 
     override fun planBroadcast(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
@@ -1488,6 +1780,28 @@ class EngineRuntimeBinderEndpoint(
         return if (authority.allowed) block() else {
             missingLiveAuthorityBundle(instanceId, authority.reason)
         }
+    }
+
+    private fun authorizeProcess(instanceId: String, processId: Int): EngineProcessAuthorityDecision {
+        val primary = processControlPlane.authorize(instanceId, processId)
+        if (primary.allowed) return primary
+        val component = componentProcessAuthority?.authorizeCaller(
+            instanceId = instanceId,
+            callingPid = processId,
+            callingProcessName = callingProcessName(processId),
+            callingProcessStartTicks = callingProcessStartTicks(processId)
+        ) ?: return primary
+        return EngineProcessAuthorityDecision(
+            allowed = true,
+            identity = EngineProcessClientIdentity(
+                instanceId = component.instanceId,
+                runtimeEpoch = component.runtimeEpoch,
+                engineSessionId = component.engineSessionId,
+                processSlot = component.processSlot,
+                processId = component.processId
+            ),
+            reason = "live_component_process_authority_confirmed"
+        )
     }
 
     private fun isAuthorized(): Boolean = callingUid() == hostUid
@@ -2012,6 +2326,57 @@ object EngineRuntimeIpcClients {
             ?.takeIf { snapshot -> snapshot.found && snapshot.processId == processId }
     }
 
+    fun prepareComponentProcess(
+        instanceId: String,
+        guestProcessName: String
+    ): EngineComponentProcessOperationResult? {
+        if (instanceId.isBlank() || guestProcessName.isBlank()) return null
+        val response = runCatching {
+            activeService()?.prepareComponentProcess(instanceId, guestProcessName)
+        }.getOrNull() ?: return null
+        return response.toComponentProcessOperationResultOrNull()
+            ?.takeIf { result ->
+                result.operation == COMPONENT_PROCESS_PREPARE_OPERATION &&
+                    result.instanceId == instanceId
+            }
+    }
+
+    fun attachComponentProcessClient(
+        launchTicket: EngineComponentProcessLaunchTicket,
+        clientToken: IBinder
+    ): EngineComponentProcessOperationResult? {
+        val response = runCatching {
+            activeService()?.attachComponentProcessClient(
+                launchTicket.attachCapability,
+                clientToken
+            )
+        }.getOrNull() ?: return null
+        return response.toComponentProcessOperationResultOrNull()
+            ?.takeIf { result ->
+                result.operation == COMPONENT_PROCESS_ATTACH_OPERATION &&
+                    (!result.accepted || result.processState?.let { state ->
+                        state.instanceId == launchTicket.instanceId &&
+                            state.effectiveGuestProcessName == launchTicket.effectiveGuestProcessName &&
+                            state.processSlot == launchTicket.processSlot
+                    } == true)
+            }
+    }
+
+    fun queryComponentProcessClient(
+        instanceId: String,
+        guestProcessName: String
+    ): EngineComponentProcessOperationResult? {
+        if (instanceId.isBlank() || guestProcessName.isBlank()) return null
+        val response = runCatching {
+            activeService()?.queryComponentProcessClient(instanceId, guestProcessName)
+        }.getOrNull() ?: return null
+        return response.toComponentProcessOperationResultOrNull()
+            ?.takeIf { result ->
+                result.operation == COMPONENT_PROCESS_QUERY_OPERATION &&
+                    result.instanceId == instanceId
+            }
+    }
+
     fun queryApplicationEnabledState(
         identity: EngineProcessClientIdentity
     ): VirtualPackageEnabledStateResult? = invokePackageEnabledState(
@@ -2444,6 +2809,82 @@ object EngineRuntimeIpcClients {
         }.getOrNull() ?: return null
         return response.toServiceRuntimeStateOrNull()
     }
+
+    internal fun registerServiceConnection(
+        instanceId: String,
+        operationLease: EngineServiceOperationLeaseIdentity,
+        connectionToken: IBinder
+    ): EngineServiceConnectionOperationResult? {
+        if (operationLease.instanceId != instanceId ||
+            operationLease.operationType != VirtualServiceOperation.BIND
+        ) {
+            return null
+        }
+        val response = runCatching {
+            activeService()?.registerServiceConnection(
+                instanceId,
+                operationLease.toIpcBundle(),
+                connectionToken
+            )
+        }.getOrNull() ?: return null
+        return response.toServiceConnectionOperationResultOrNull()
+            ?.takeIf { result ->
+                result.operation == SERVICE_CONNECTION_REGISTER_OPERATION &&
+                    result.bindings.all { binding ->
+                        binding.instanceId == instanceId &&
+                            binding.runtimeEpoch == operationLease.runtimeEpoch &&
+                            binding.engineSessionId == operationLease.engineSessionId &&
+                            binding.processSlot == operationLease.processSlot &&
+                            binding.processId == operationLease.processId &&
+                            binding.component == operationLease.component
+                    } &&
+                    (!result.accepted || result.bindings.size == 1)
+            }
+    }
+
+    internal fun queryServiceConnection(
+        instanceId: String,
+        connectionToken: IBinder
+    ): EngineServiceConnectionOperationResult? = runCatching {
+        activeService()?.queryServiceConnection(instanceId, connectionToken)
+    }.getOrNull()
+        ?.toServiceConnectionOperationResultOrNull()
+        ?.takeIf { result ->
+            result.operation == SERVICE_CONNECTION_QUERY_OPERATION &&
+                result.bindings.all { it.instanceId == instanceId }
+        }
+
+    internal fun removeServiceConnectionBinding(
+        instanceId: String,
+        binding: EngineServiceConnectionBindingRecord,
+        connectionToken: IBinder
+    ): EngineServiceConnectionOperationResult? {
+        if (binding.instanceId != instanceId) return null
+        return runCatching {
+            activeService()?.removeServiceConnectionBinding(
+                instanceId,
+                binding.toServiceConnectionIpcBundle(),
+                connectionToken
+            )
+        }.getOrNull()
+            ?.toServiceConnectionOperationResultOrNull()
+            ?.takeIf { result ->
+                result.operation == SERVICE_CONNECTION_REMOVE_BINDING_OPERATION &&
+                    result.bindings.all { it == binding }
+            }
+    }
+
+    internal fun removeServiceConnection(
+        instanceId: String,
+        connectionToken: IBinder
+    ): EngineServiceConnectionOperationResult? = runCatching {
+        activeService()?.removeServiceConnection(instanceId, connectionToken)
+    }.getOrNull()
+        ?.toServiceConnectionOperationResultOrNull()
+        ?.takeIf { result ->
+            result.operation == SERVICE_CONNECTION_REMOVE_OPERATION &&
+                result.bindings.all { it.instanceId == instanceId }
+        }
 
     fun planBroadcast(
         instanceId: String,
@@ -3976,7 +4417,7 @@ private fun Bundle.toServiceOperationResultOrNull(): VirtualServiceOperationResu
     )
 }.getOrNull()
 
-private fun EngineServiceOperationLeaseIdentity.toIpcBundle(): Bundle = Bundle().apply {
+internal fun EngineServiceOperationLeaseIdentity.toIpcBundle(): Bundle = Bundle().apply {
     putString(EngineRuntimeIpcContract.KEY_SERVICE_LEASE_TOKEN, leaseToken)
     putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
     putLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH, runtimeEpoch)
@@ -3989,7 +4430,7 @@ private fun EngineServiceOperationLeaseIdentity.toIpcBundle(): Bundle = Bundle()
     putLong(EngineRuntimeIpcContract.KEY_EXPIRES_AT_NANOS, expiresAtNanos)
 }
 
-private fun Bundle.toServiceOperationLeaseIdentityOrNull(): EngineServiceOperationLeaseIdentity? = runCatching {
+internal fun Bundle.toServiceOperationLeaseIdentityOrNull(): EngineServiceOperationLeaseIdentity? = runCatching {
     EngineServiceOperationLeaseIdentity(
         leaseToken = getString(EngineRuntimeIpcContract.KEY_SERVICE_LEASE_TOKEN).orEmpty(),
         instanceId = getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID).orEmpty(),
@@ -4014,6 +4455,11 @@ private fun VirtualServiceRuntimeState.toIpcBundle(): Bundle = Bundle().apply {
     )
     putString(EngineRuntimeIpcContract.KEY_MESSAGE, message)
 }
+
+internal const val SERVICE_CONNECTION_REGISTER_OPERATION = "registerServiceConnection"
+internal const val SERVICE_CONNECTION_QUERY_OPERATION = "queryServiceConnection"
+internal const val SERVICE_CONNECTION_REMOVE_BINDING_OPERATION = "removeServiceConnectionBinding"
+internal const val SERVICE_CONNECTION_REMOVE_OPERATION = "removeServiceConnection"
 
 private fun Bundle.toServiceRuntimeStateOrNull(): VirtualServiceRuntimeState? = runCatching {
     val records = getParcelableArrayList<Bundle>(EngineRuntimeIpcContract.KEY_SERVICE_RECORDS)
@@ -4273,3 +4719,18 @@ private fun readAndroidProcessName(processId: Int): String? {
             .takeIf { it.isNotBlank() }
     }.getOrNull()
 }
+
+private fun readAndroidProcessStartTicks(processId: Int): Long? {
+    if (processId <= 0) return null
+    return runCatching {
+        val stat = File("/proc/$processId/stat").readText()
+        val fieldsAfterName = stat.substringAfterLast(") ", missingDelimiterValue = "")
+            .trim()
+            .split(Regex("\\s+"))
+        fieldsAfterName.getOrNull(PROC_STAT_STARTTIME_OFFSET_AFTER_NAME)
+            ?.toLongOrNull()
+            ?.takeIf { ticks -> ticks > 0L }
+    }.getOrNull()
+}
+
+private const val PROC_STAT_STARTTIME_OFFSET_AFTER_NAME = 19

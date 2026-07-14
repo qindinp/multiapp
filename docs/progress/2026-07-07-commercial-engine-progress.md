@@ -4639,3 +4639,68 @@ Remaining gate:
   component process slot or cross-process data plane has been implemented.
 - Broadcast, runtime permission, storage/native/linker, device recovery, and
   compatibility evidence remain open. Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-14 Service Connection Authority and Component Process Control Plane
+
+This batch closes the next local control-plane slice after component operation
+leases. It makes Service connection identity server-owned and introduces a
+generation-bound component-process authority. It does not yet start custom
+Provider/Service processes in production.
+
+Implemented:
+
+- The engine owns an `IBinder -> Service binding` index bound to instance,
+  runtime epoch, engine session, process slot, PID, and component. Registration,
+  query, per-binding removal, full removal, generation/process/instance revoke,
+  Binder death, tombstones, and strict IPC codecs fail closed.
+- A `BIND` operation lease must move through `ISSUED -> AUTHORIZED -> CLAIMED ->
+  COMMITTED`; dispatch cannot commit without a claimed connection. Failed bind
+  commit aborts the claim instead of leaving reusable authority until expiry.
+- Loader connection identity is object-identity based. Rebinding the same
+  connection to the same Service is idempotent and does not redeliver
+  `onServiceConnected`; reuse for another Service remains explicitly blocked.
+- Guest Service callbacks are commit-gated. A synchronous or executor callback
+  is released only after engine state commits; failed commit rolls back the
+  loader binding and server connection without delivering a false success.
+- Binder/process/generation connection release now reconciles engine
+  `activeBindCount` and Service lifecycle state. Unbind commit/removal failure is
+  reported as `Failed` rather than returning a contradictory successful result.
+- The engine now allocates custom guest process names to declared `:v0..:v7`
+  slots with runtime-generation fences. Live primary runtime slots are reserved
+  first; `STOPPED/DEAD` runtimes no longer consume the component slot pool.
+- Component attach uses an opaque one-time capability and a live client identity
+  containing runtime/process epochs, engine/client sessions, process slot, PID,
+  and `/proc/<pid>/stat` starttime. Every live query rechecks Binder liveness,
+  `/proc/<pid>/cmdline`, and starttime, so PID reuse retires the old client.
+- The production Binder endpoint publishes the new registries and AIDL methods;
+  injected identity probes are shared by the owner and client registry.
+
+Verification:
+
+- The affected loader dispatcher, Service lease/connection, component-process,
+  endpoint-security, and server-runtime test classes pass after integration.
+- `git diff --check` has no whitespace errors; only the repository's existing
+  LF/CRLF conversion warnings remain.
+- The final nine-module gate and `:app:assembleDebug` passed once in about
+  4m42s: 2,249 tests, 0 failures, 0 errors, and 12 skipped.
+- Final module counts include engine 465, loader 724, and app 132 tests.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 100,028,189 bytes.
+- APK SHA-256:
+  `910AE4C30071B367573E144127615B6CEB832B12F6A301FB20473701B4098D3B`.
+- AGP 8.7.3 still emits the known `compileSdk=36` warning; it is not device
+  evidence and does not change the `BLOCK` decision.
+
+Remaining gate:
+
+- `prepareComponentProcess` / `attachComponentProcessClient` have no production
+  caller yet. StubService/StubContentProvider do not carry the attach capability
+  into a target slot, and component clients cannot use the Service/Provider data
+  plane. Custom-process components remain `UNSUPPORTED`.
+- There are eight real shared process slots, not 24. Primary instance processes
+  and custom component processes compete for `:v0..:v7` until a larger declared
+  and bootstrapped stub pool is implemented.
+- Sticky/rebind/foreground Service semantics, custom-process Provider transport,
+  ordered/sticky Broadcast, permissions, storage/native/linker, and device
+  recovery evidence remain incomplete.
+- No device artifact from this batch proves GKD, AstroBox, QQ, WeChat, or QQ
+  Reader compatibility. Commercial status remains **BLOCK**.

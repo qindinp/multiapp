@@ -16,6 +16,7 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
+import java.util.concurrent.Executor
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -358,9 +359,84 @@ class VirtualAmsComponentDispatcherTest {
         assertTrue(secondBound.connectionReused)
         assertEquals(1, service.onBindCalls)
         assertEquals(1, service.onUnbindCalls)
-        verify(exactly = 2) {
+        verify(exactly = 1) {
             connection.onServiceConnected(any<ComponentName>(), binder)
         }
+    }
+
+    @Test
+    fun `dispatchBindService drops pending callback when bind commit is rolled back`() {
+        val binder = mockk<IBinder>(relaxed = true)
+        val service = FakeService(binder = binder)
+        val dispatcher = dispatcher(
+            serviceRuntime = VirtualServiceRuntime(
+                serviceFactory = ServiceFactory { _, _ -> service },
+                serviceAttacher = ServiceAttacher { _, _, _, _ -> },
+                recordManager = VirtualServiceRecordManager()
+            )
+        )
+        val pendingCallbacks = mutableListOf<Runnable>()
+        val callbackExecutor = Executor { callback -> pendingCallbacks += callback }
+        val connection = mockk<ServiceConnection>(relaxed = true)
+
+        val bindResult = dispatcher.dispatchBindService(
+            intent = explicitIntent("com.test.minimal", "com.test.minimal.SyncService"),
+            virtualContext = mockk(relaxed = true),
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = callbackExecutor
+        )
+        val rollbackResult = dispatcher.dispatchUnbindService(connection)
+        pendingCallbacks.single().run()
+
+        assertIs<VirtualServiceBindDispatchResult.Bound>(bindResult)
+        assertIs<VirtualServiceUnbindDispatchResult.Unbound>(rollbackResult)
+        assertEquals(1, service.onBindCalls)
+        assertEquals(1, service.onUnbindCalls)
+        verify(exactly = 0) { connection.onServiceConnected(any<ComponentName>(), any()) }
+        verify(exactly = 0) { connection.onNullBinding(any<ComponentName>()) }
+    }
+
+    @Test
+    fun `dispatchBindService rejects reusing connection for a different service`() {
+        val binder = mockk<IBinder>(relaxed = true)
+        val service = FakeService(binder = binder)
+        val dispatcher = dispatcher(
+            serviceRuntime = VirtualServiceRuntime(
+                serviceFactory = ServiceFactory { _, _ -> service },
+                serviceAttacher = ServiceAttacher { _, _, _, _ -> },
+                recordManager = VirtualServiceRecordManager()
+            )
+        )
+        val connection = mockk<ServiceConnection>(relaxed = true)
+        val context = mockk<Context>(relaxed = true)
+
+        val first = dispatcher.dispatchBindService(
+            intent = explicitIntent("com.test.minimal", "com.test.minimal.SyncService"),
+            virtualContext = context,
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = null
+        )
+        val second = dispatcher.dispatchBindService(
+            intent = explicitIntent("com.test.minimal", "com.test.minimal.OtherService"),
+            virtualContext = context,
+            guestClassLoader = ClassLoader.getSystemClassLoader(),
+            connection = connection,
+            flags = Context.BIND_AUTO_CREATE,
+            executor = null
+        )
+        dispatcher.dispatchUnbindService(connection)
+
+        assertIs<VirtualServiceBindDispatchResult.Bound>(first)
+        val blocked = assertIs<VirtualServiceBindDispatchResult.Blocked>(second)
+        assertEquals("serviceConnectionAlreadyBoundToDifferentService", blocked.reason)
+        assertTrue(blocked.serviceResolved)
+        assertEquals(1, service.onBindCalls)
+        assertEquals(1, service.onUnbindCalls)
+        verify(exactly = 1) { connection.onServiceConnected(any<ComponentName>(), binder) }
     }
 
     @Test
@@ -537,6 +613,10 @@ class VirtualAmsComponentDispatcherTest {
                 name = "com.test.minimal.SyncService",
                 exported = false,
                 intentFilters = listOf("com.test.SYNC")
+            ),
+            ResolvedComponent(
+                name = "com.test.minimal.OtherService",
+                exported = false
             )
         ),
         receivers = listOf(

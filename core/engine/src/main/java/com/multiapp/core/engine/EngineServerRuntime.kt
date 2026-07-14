@@ -13,7 +13,9 @@ import javax.inject.Singleton
 @Singleton
 class EngineServerRuntime private constructor(
     graph: EngineServerRuntimeGraph
-) {
+) : EngineComponentProcessAuthority {
+    private val componentProcessAttachLock = Any()
+    private val componentProcessIdentityProbe = graph.componentProcessIdentityProbe
     val serverGenerationId: String = UUID.randomUUID().toString()
 
     @Inject
@@ -49,12 +51,366 @@ class EngineServerRuntime private constructor(
         graph.activityLaunchCapabilities
     val processDeathRegistry: EngineProcessDeathRegistry = graph.processDeathRegistry
     val serviceOperationLeases: EngineServiceOperationLeaseCoordinator = graph.serviceOperationLeases
+    val serviceConnections: EngineServiceConnectionRegistry = graph.serviceConnections
     val activityOperationTransactions: EngineActivityOperationTransactionCoordinator =
         graph.activityOperationTransactions
     val providerProcessEndpoints: EngineProviderProcessEndpointControlPlane =
         graph.providerProcessEndpoints
+    val componentProcessSlots: EngineComponentProcessSlotAllocator = graph.componentProcessSlots
+    val componentProcessClients: EngineComponentProcessClientRegistry = graph.componentProcessClients
+    val componentProcessLaunchCapabilities: EngineComponentProcessLaunchCapabilityRegistry =
+        graph.componentProcessLaunchCapabilities
     val processControlPlane: EngineProcessControlPlane = graph.processControlPlane
     val virtualizationEngine: VirtualizationEngine = graph.virtualizationEngine
+
+    fun allocateComponentProcessSlot(
+        instanceId: String,
+        guestProcessName: String
+    ): EngineComponentProcessSlotAssignment? {
+        val runtime = runtimeRegistry.get(instanceId) ?: return null
+        if (runtime.state == VirtualRuntimeState.STOPPED || runtime.state == VirtualRuntimeState.DEAD) {
+            return null
+        }
+        val effectiveGuestProcessName = guestProcessName
+            .takeIf { it.isNotBlank() }
+            ?.toEffectiveGuestProcessName(runtime.originPackageName)
+            ?: return null
+        if (effectiveGuestProcessName !in runtime.declaredGuestProcessNames()) return null
+        reservePrimaryComponentProcessSlots(
+            hostPackageName = runtime.hostPackageName,
+            runtimeRegistry = runtimeRegistry,
+            allocator = componentProcessSlots
+        )
+        val applicationGuestProcessName = runtime.packageSnapshot.processName
+            ?.toEffectiveGuestProcessName(runtime.originPackageName)
+            ?: runtime.originPackageName
+        val declaredProcessSlots = declaredComponentProcessSlots(runtime.hostPackageName)
+        return componentProcessSlots.allocate(
+            instanceId = runtime.instanceId,
+            runtimeEpoch = runtime.runtimeEpoch,
+            engineSessionId = runtime.engineSessionId,
+            guestProcessName = effectiveGuestProcessName,
+            applicationGuestProcessName = applicationGuestProcessName,
+            primaryProcessSlot = runtime.processSlot,
+            declaredCandidateSlots = declaredProcessSlots.filterNot { it == runtime.processSlot }
+        )
+    }
+
+    internal fun attachComponentProcessClient(
+        identity: EngineComponentProcessClientIdentity,
+        clientToken: android.os.IBinder,
+        callingPid: Int,
+        callingProcessName: String?,
+        callingProcessStartTicks: Long? = identity.processStartTicks
+    ): EngineComponentProcessClientAttachResult {
+        validateComponentProcessClientIdentity(
+            identity,
+            callingPid,
+            callingProcessName,
+            callingProcessStartTicks
+        )?.let { reason ->
+            return componentProcessAttachRejected(identity, reason)
+        }
+        return componentProcessClients.attach(identity, clientToken) { deadIdentity ->
+            serviceConnections.revokeProcess(
+                instanceId = deadIdentity.instanceId,
+                runtimeEpoch = deadIdentity.runtimeEpoch,
+                engineSessionId = deadIdentity.engineSessionId,
+                processSlot = deadIdentity.processSlot,
+                processId = deadIdentity.processId
+            )
+        }
+    }
+
+    override fun prepare(
+        instanceId: String,
+        guestProcessName: String
+    ): EngineComponentProcessOperationResult {
+        synchronized(componentProcessAttachLock) {
+        val runtime = runtimeRegistry.get(instanceId)
+            ?: return componentProcessRejected(
+                COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId,
+                "component_process_runtime_not_found"
+            )
+        val effectiveGuestProcessName = guestProcessName
+            .takeIf { it.isNotBlank() }
+            ?.toEffectiveGuestProcessName(runtime.originPackageName)
+            ?: return componentProcessRejected(
+                COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId,
+                "component_process_name_invalid"
+            )
+        val applicationGuestProcessName = runtime.packageSnapshot.processName
+            ?.toEffectiveGuestProcessName(runtime.originPackageName)
+            ?: runtime.originPackageName
+        if (effectiveGuestProcessName == applicationGuestProcessName) {
+            return componentProcessRejected(
+                COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId,
+                "component_process_must_be_custom"
+            )
+        }
+        val live = componentProcessClients.queryByKey(instanceId, effectiveGuestProcessName)
+        if (
+            live.found && live.identity != null && live.clientToken != null &&
+            isComponentProcessIdentityAuthoritative(live.identity, live.clientToken)
+        ) {
+            return EngineComponentProcessOperationResult(
+                operation = COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId = instanceId,
+                accepted = true,
+                idempotent = true,
+                alreadyRunning = true,
+                launchTicket = null,
+                processState = live.identity.toPublicComponentProcessState(),
+                reason = "component_process_already_running"
+            )
+        }
+        val assignment = runCatching {
+            allocateComponentProcessSlot(instanceId, effectiveGuestProcessName)
+        }.getOrElse { error ->
+            return componentProcessRejected(
+                COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId,
+                if (error is EngineComponentProcessSlotExhaustedException) {
+                    "component_process_slot_exhausted"
+                } else {
+                    "component_process_slot_allocation_failed"
+                }
+            )
+        } ?: return componentProcessRejected(
+            COMPONENT_PROCESS_PREPARE_OPERATION,
+            instanceId,
+            "component_process_not_declared"
+        )
+        val issued = runCatching {
+            componentProcessLaunchCapabilities.issue(assignment)
+        }.getOrElse {
+            return componentProcessRejected(
+                COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId,
+                "component_process_launch_capability_issue_failed"
+            )
+        }
+        return if (issued.accepted && issued.identity != null) {
+            EngineComponentProcessOperationResult(
+                operation = COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId = instanceId,
+                accepted = true,
+                idempotent = issued.idempotent,
+                alreadyRunning = false,
+                launchTicket = issued.identity.toLaunchTicket(),
+                processState = null,
+                reason = issued.reason
+            )
+        } else {
+            componentProcessRejected(
+                COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId,
+                issued.reason
+            )
+        }
+        }
+    }
+
+    override fun attach(
+        attachCapability: String,
+        clientToken: android.os.IBinder,
+        callingPid: Int,
+        callingProcessName: String?,
+        callingProcessStartTicks: Long?
+    ): EngineComponentProcessOperationResult = synchronized(componentProcessAttachLock) {
+        val launch = componentProcessLaunchCapabilities.query(attachCapability)
+        val launchIdentity = launch.identity
+            ?: return@synchronized componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_OPERATION,
+                UNKNOWN_COMPONENT_PROCESS_INSTANCE,
+                launch.reason
+            )
+        val startTicks = callingProcessStartTicks
+            ?.takeIf { ticks -> ticks > 0L }
+            ?: return@synchronized componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_OPERATION,
+                launchIdentity.instanceId,
+                "component_process_start_ticks_unavailable"
+            )
+        val clientIdentity = runCatching {
+            launchIdentity.toClientIdentity(callingPid, startTicks)
+        }
+            .getOrElse {
+                return@synchronized componentProcessRejected(
+                    COMPONENT_PROCESS_ATTACH_OPERATION,
+                    launchIdentity.instanceId,
+                    "component_process_client_identity_invalid"
+                )
+            }
+        if (componentProcessClients.isAuthoritative(clientIdentity, clientToken)) {
+            return@synchronized componentProcessAttached(clientIdentity, idempotent = true)
+        }
+        validateComponentProcessClientIdentity(
+            clientIdentity,
+            callingPid,
+            callingProcessName,
+            startTicks
+        )?.let { reason ->
+            return@synchronized componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_OPERATION,
+                launchIdentity.instanceId,
+                reason
+            )
+        }
+        val capability = componentProcessLaunchCapabilities.consume(attachCapability)
+        if (!capability.accepted) {
+            return@synchronized componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_OPERATION,
+                launchIdentity.instanceId,
+                capability.reason
+            )
+        }
+        val attached = attachComponentProcessClient(
+            clientIdentity,
+            clientToken,
+            callingPid,
+            callingProcessName,
+            startTicks
+        )
+        if (attached.accepted && attached.identity != null) {
+            componentProcessAttached(attached.identity, attached.idempotent)
+        } else {
+            componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_OPERATION,
+                launchIdentity.instanceId,
+                attached.reason
+            )
+        }
+    }
+
+    override fun query(
+        instanceId: String,
+        guestProcessName: String
+    ): EngineComponentProcessOperationResult {
+        val runtime = runtimeRegistry.get(instanceId)
+            ?: return componentProcessRejected(
+                COMPONENT_PROCESS_QUERY_OPERATION,
+                instanceId,
+                "component_process_runtime_not_found"
+            )
+        val effectiveGuestProcessName = guestProcessName
+            .takeIf { it.isNotBlank() }
+            ?.toEffectiveGuestProcessName(runtime.originPackageName)
+            ?: return componentProcessRejected(
+                COMPONENT_PROCESS_QUERY_OPERATION,
+                instanceId,
+                "component_process_name_invalid"
+            )
+        if (effectiveGuestProcessName !in runtime.declaredGuestProcessNames()) {
+            return componentProcessRejected(
+                COMPONENT_PROCESS_QUERY_OPERATION,
+                instanceId,
+                "component_process_not_declared"
+            )
+        }
+        val queried = componentProcessClients.queryByKey(instanceId, effectiveGuestProcessName)
+        return if (
+            queried.found && queried.identity != null && queried.clientToken != null &&
+            isComponentProcessIdentityAuthoritative(queried.identity, queried.clientToken)
+        ) {
+            EngineComponentProcessOperationResult(
+                operation = COMPONENT_PROCESS_QUERY_OPERATION,
+                instanceId = instanceId,
+                accepted = true,
+                idempotent = false,
+                alreadyRunning = true,
+                launchTicket = null,
+                processState = queried.identity.toPublicComponentProcessState(),
+                reason = queried.reason
+            )
+        } else {
+            componentProcessRejected(
+                COMPONENT_PROCESS_QUERY_OPERATION,
+                instanceId,
+                queried.reason
+            )
+        }
+    }
+
+    private fun validateComponentProcessClientIdentity(
+        identity: EngineComponentProcessClientIdentity,
+        callingPid: Int,
+        callingProcessName: String?,
+        callingProcessStartTicks: Long?
+    ): String? {
+        val runtime = runtimeRegistry.get(identity.instanceId)
+            ?: return "component_process_runtime_not_found"
+        if (runtime.state == VirtualRuntimeState.STOPPED || runtime.state == VirtualRuntimeState.DEAD) {
+            return "component_process_runtime_not_live"
+        }
+        if (
+            runtime.runtimeEpoch != identity.runtimeEpoch ||
+            runtime.engineSessionId != identity.engineSessionId
+        ) {
+            return "component_process_runtime_generation_mismatch"
+        }
+        if (identity.effectiveGuestProcessName !in runtime.declaredGuestProcessNames()) {
+            return "component_process_name_not_declared"
+        }
+        val applicationGuestProcessName = runtime.packageSnapshot.processName
+            ?.toEffectiveGuestProcessName(runtime.originPackageName)
+            ?: runtime.originPackageName
+        if (identity.effectiveGuestProcessName == applicationGuestProcessName) {
+            return "component_process_must_be_custom"
+        }
+        val assignment = componentProcessSlots.query(
+            instanceId = identity.instanceId,
+            runtimeEpoch = identity.runtimeEpoch,
+            engineSessionId = identity.engineSessionId,
+            guestProcessName = identity.effectiveGuestProcessName
+        ) ?: return "component_process_slot_not_allocated"
+        if (assignment.processSlot != identity.processSlot) return "component_process_slot_mismatch"
+        if (identity.processId != callingPid) return "component_process_pid_mismatch"
+        if (callingProcessName != identity.processSlot) return "component_process_android_name_mismatch"
+        if (callingProcessStartTicks != identity.processStartTicks) {
+            return "component_process_start_ticks_mismatch"
+        }
+        return null
+    }
+
+    override fun authorizeCaller(
+        instanceId: String,
+        callingPid: Int,
+        callingProcessName: String?,
+        callingProcessStartTicks: Long?
+    ): EngineComponentProcessClientIdentity? {
+        val queried = componentProcessClients.queryByPid(callingPid)
+        val identity = queried.identity ?: return null
+        val token = queried.clientToken ?: return null
+        if (identity.instanceId != instanceId) return null
+        if (
+            validateComponentProcessClientIdentity(
+                identity,
+                callingPid,
+                callingProcessName,
+                callingProcessStartTicks
+            ) != null
+        ) {
+            return null
+        }
+        return identity.takeIf { componentProcessClients.isAuthoritative(identity, token) }
+    }
+
+    private fun isComponentProcessIdentityAuthoritative(
+        identity: EngineComponentProcessClientIdentity,
+        clientToken: android.os.IBinder
+    ): Boolean {
+        val observed = componentProcessIdentityProbe.read(identity.processId) ?: return false
+        return validateComponentProcessClientIdentity(
+            identity = identity,
+            callingPid = identity.processId,
+            callingProcessName = observed.processName,
+            callingProcessStartTicks = observed.processStartTicks
+        ) == null && componentProcessClients.isAuthoritative(identity, clientToken)
+    }
 
     companion object {
         internal fun createForTest(
@@ -72,6 +428,8 @@ class EngineServerRuntime private constructor(
             activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
                 EngineActivityLaunchCapabilityRegistry(),
             processDeathRegistry: EngineProcessDeathRegistry = EngineProcessDeathRegistry(),
+            componentProcessIdentityProbe: EngineComponentProcessIdentityProbe =
+                EngineComponentProcessIdentityProbe { null },
             processControlPlaneFactory: EngineProcessControlPlaneFactory =
                 EngineProcessControlPlaneFactory { registry, deathRegistry, capabilities, cleanup ->
                     EngineProcessControlPlane(registry, deathRegistry, capabilities, cleanup)
@@ -90,6 +448,7 @@ class EngineServerRuntime private constructor(
                 systemServerHandle = EngineSystemServerHandle(runtimeRegistry, systemServer),
                 activityLaunchCapabilities = activityLaunchCapabilities,
                 processDeathRegistry = processDeathRegistry,
+                componentProcessIdentityProbe = componentProcessIdentityProbe,
                 processControlPlaneFactory = processControlPlaneFactory
             )
         )
@@ -111,8 +470,13 @@ private class EngineServerRuntimeGraph(
     val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry,
     val processDeathRegistry: EngineProcessDeathRegistry,
     val serviceOperationLeases: EngineServiceOperationLeaseCoordinator,
+    val serviceConnections: EngineServiceConnectionRegistry,
     val activityOperationTransactions: EngineActivityOperationTransactionCoordinator,
     val providerProcessEndpoints: EngineProviderProcessEndpointControlPlane,
+    val componentProcessSlots: EngineComponentProcessSlotAllocator,
+    val componentProcessClients: EngineComponentProcessClientRegistry,
+    val componentProcessLaunchCapabilities: EngineComponentProcessLaunchCapabilityRegistry,
+    val componentProcessIdentityProbe: EngineComponentProcessIdentityProbe,
     val processControlPlane: EngineProcessControlPlane,
     val virtualizationEngine: DefaultVirtualizationEngineCore
 )
@@ -130,6 +494,8 @@ private fun createEngineServerRuntimeGraph(
     systemServerHandle: EngineSystemServerHandle,
     activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry,
     processDeathRegistry: EngineProcessDeathRegistry,
+    componentProcessIdentityProbe: EngineComponentProcessIdentityProbe =
+        EngineComponentProcessIdentityProbe.PROCFS,
     processControlPlaneFactory: EngineProcessControlPlaneFactory =
         EngineProcessControlPlaneFactory { registry, deathRegistry, capabilities, generationCleanup ->
             EngineProcessControlPlane(
@@ -143,7 +509,16 @@ private fun createEngineServerRuntimeGraph(
     val runtimeRegistry = systemServerHandle.registry
     val systemServer = systemServerHandle.server
     val serviceOperationLeases = EngineServiceOperationLeaseCoordinator(runtimeRegistry)
+    val serviceConnections = EngineServiceConnectionRegistry()
     val activityOperationTransactions = EngineActivityOperationTransactionCoordinator()
+    val componentProcessSlots = EngineComponentProcessSlotAllocator()
+    val componentProcessClients = EngineComponentProcessClientRegistry(componentProcessIdentityProbe)
+    val componentProcessLaunchCapabilities = EngineComponentProcessLaunchCapabilityRegistry()
+    reservePrimaryComponentProcessSlots(
+        hostPackageName = hostPackageName,
+        runtimeRegistry = runtimeRegistry,
+        allocator = componentProcessSlots
+    )
     val providerEndpointRegistry = EngineProviderProcessEndpointRegistry()
     val providerProcessEndpoints = EngineProviderProcessEndpointControlPlane(
         runtimeAuthority = providerEndpointRuntimeAuthority(runtimeRegistry),
@@ -164,7 +539,27 @@ private fun createEngineServerRuntimeGraph(
             identity.runtimeEpoch,
             identity.engineSessionId
         )
+        serviceConnections.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
         providerProcessEndpoints.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
+        componentProcessSlots.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
+        componentProcessClients.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
+        componentProcessLaunchCapabilities.revokeGeneration(
             identity.instanceId,
             identity.runtimeEpoch,
             identity.engineSessionId
@@ -197,7 +592,11 @@ private fun createEngineServerRuntimeGraph(
         permissionGrantSeeder = permissionGrantSeeder,
         ephemeralInstanceCleanup = { instanceId ->
             serviceOperationLeases.revokeInstance(instanceId)
+            serviceConnections.revokeInstance(instanceId)
             providerProcessEndpoints.revokeInstance(instanceId)
+            componentProcessSlots.revokeInstance(instanceId)
+            componentProcessClients.revokeInstance(instanceId)
+            componentProcessLaunchCapabilities.revokeInstance(instanceId)
             activityOperationTransactions.revokeInstance(instanceId)
         },
         evidenceSessionFactory = { UUID.randomUUID().toString() },
@@ -214,11 +613,122 @@ private fun createEngineServerRuntimeGraph(
         activityLaunchCapabilities = activityLaunchCapabilities,
         processDeathRegistry = processDeathRegistry,
         serviceOperationLeases = serviceOperationLeases,
+        serviceConnections = serviceConnections,
         activityOperationTransactions = activityOperationTransactions,
         providerProcessEndpoints = providerProcessEndpoints,
+        componentProcessSlots = componentProcessSlots,
+        componentProcessClients = componentProcessClients,
+        componentProcessLaunchCapabilities = componentProcessLaunchCapabilities,
+        componentProcessIdentityProbe = componentProcessIdentityProbe,
         processControlPlane = processControlPlane,
         virtualizationEngine = virtualizationEngine
     )
+}
+
+private fun componentProcessAttachRejected(
+    identity: EngineComponentProcessClientIdentity,
+    reason: String
+) = EngineComponentProcessClientAttachResult(
+    accepted = false,
+    idempotent = false,
+    replacedGeneration = false,
+    identity = identity,
+    reason = reason
+)
+
+private fun componentProcessRejected(
+    operation: String,
+    instanceId: String,
+    reason: String
+) = EngineComponentProcessOperationResult(
+    operation = operation,
+    instanceId = instanceId,
+    accepted = false,
+    idempotent = false,
+    alreadyRunning = false,
+    launchTicket = null,
+    processState = null,
+    reason = reason
+)
+
+private fun componentProcessAttached(
+    identity: EngineComponentProcessClientIdentity,
+    idempotent: Boolean
+) = EngineComponentProcessOperationResult(
+    operation = COMPONENT_PROCESS_ATTACH_OPERATION,
+    instanceId = identity.instanceId,
+    accepted = true,
+    idempotent = idempotent,
+    alreadyRunning = false,
+    launchTicket = null,
+    processState = identity.toPublicComponentProcessState(),
+    reason = if (idempotent) {
+        "component_process_client_already_attached"
+    } else {
+        "component_process_client_attached"
+    }
+)
+
+private fun EngineComponentProcessLaunchIdentity.toLaunchTicket() =
+    EngineComponentProcessLaunchTicket(
+        instanceId = instanceId,
+        effectiveGuestProcessName = effectiveGuestProcessName,
+        processSlot = processSlot,
+        attachCapability = attachCapability
+    )
+
+private fun reservePrimaryComponentProcessSlots(
+    hostPackageName: String,
+    runtimeRegistry: EngineRuntimeRegistry,
+    allocator: EngineComponentProcessSlotAllocator
+) {
+    val declaredProcessSlots = declaredComponentProcessSlots(hostPackageName)
+    runtimeRegistry.list().forEach { runtime ->
+        if (runtime.state == VirtualRuntimeState.STOPPED || runtime.state == VirtualRuntimeState.DEAD) {
+            return@forEach
+        }
+        if (runtime.processSlot !in declaredProcessSlots) return@forEach
+        val applicationGuestProcessName = runtime.packageSnapshot.processName
+            ?.toEffectiveGuestProcessName(runtime.originPackageName)
+            ?: runtime.originPackageName
+        allocator.allocate(
+            instanceId = runtime.instanceId,
+            runtimeEpoch = runtime.runtimeEpoch,
+            engineSessionId = runtime.engineSessionId,
+            guestProcessName = applicationGuestProcessName,
+            applicationGuestProcessName = applicationGuestProcessName,
+            primaryProcessSlot = runtime.processSlot,
+            declaredCandidateSlots = declaredProcessSlots.filterNot { it == runtime.processSlot }
+        )
+    }
+}
+
+private fun declaredComponentProcessSlots(hostPackageName: String): List<String> =
+    EngineProxyActivitySlots.classNames(hostPackageName)
+        .mapNotNull { className ->
+            EngineProxyActivitySlots.processSlotForClassName(hostPackageName, className)
+        }
+        .distinct()
+
+private fun com.multiapp.core.model.engine.VirtualInstanceRuntime.declaredGuestProcessNames(): Set<String> {
+    val applicationGuestProcessName = packageSnapshot.processName
+        ?.toEffectiveGuestProcessName(originPackageName)
+        ?: originPackageName
+    return buildSet {
+        add(applicationGuestProcessName)
+        sequenceOf(
+            packageSnapshot.activities,
+            packageSnapshot.services,
+            packageSnapshot.providers,
+            packageSnapshot.receivers
+        ).flatten().forEach { component ->
+            add(
+                component.processName
+                    ?.toEffectiveGuestProcessName(originPackageName)
+                    ?: applicationGuestProcessName
+            )
+        }
+    }
 }
 
 private fun providerEndpointRuntimeAuthority(

@@ -95,6 +95,41 @@ class EngineServiceOperationLeaseRegistryTest {
     }
 
     @Test
+    fun `connection claim is one-time and remains commit eligible`() {
+        val registry = EngineServiceOperationLeaseRegistry(
+            clockNanos = { 100L },
+            tokenFactory = { "service-lease-connection" }
+        )
+        val identity = registry.issue(
+            runtime(),
+            PROCESS_ID,
+            VirtualServiceOperation.BIND,
+            SERVICE_COMPONENT,
+            PROCESS_SLOT
+        )
+        assertTrue(registry.authorize(identity, PROCESS_ID).accepted)
+
+        val unclaimedCommit = registry.commit(identity, PROCESS_ID)
+        val claimed = registry.claimForConnection(identity, PROCESS_ID)
+        val replay = registry.claimForConnection(identity, PROCESS_ID)
+        val failedCommit = registry.commit(identity, PROCESS_ID) { false }
+        val stateAfterFailedCommit = registry.stateOf(identity)
+        val committed = registry.commit(identity, PROCESS_ID)
+
+        assertFalse(unclaimedCommit.accepted)
+        assertEquals("service_operation_lease_connection_not_claimed", unclaimedCommit.reason)
+        assertTrue(claimed.accepted)
+        assertEquals(EngineServiceOperationLeaseState.CLAIMED, claimed.state)
+        assertFalse(replay.accepted)
+        assertEquals("service_operation_lease_connection_replayed", replay.reason)
+        assertFalse(failedCommit.accepted)
+        assertEquals(EngineServiceOperationLeaseState.CLAIMED, failedCommit.state)
+        assertEquals(EngineServiceOperationLeaseState.CLAIMED, stateAfterFailedCommit)
+        assertTrue(committed.accepted)
+        assertEquals(EngineServiceOperationLeaseState.COMMITTED, committed.state)
+    }
+
+    @Test
     fun `commit action runs once and a failed action leaves lease retryable`() {
         val registry = EngineServiceOperationLeaseRegistry(tokenFactory = { "service-lease-action" })
         val identity = registry.issue(

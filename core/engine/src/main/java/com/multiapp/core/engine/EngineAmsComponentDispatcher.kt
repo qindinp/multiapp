@@ -1,9 +1,12 @@
 package com.multiapp.core.engine
 
 import android.content.Context
+import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
+import android.os.Binder
+import android.os.IBinder
 import com.multiapp.core.loader.VirtualAmsComponentDispatcher
 import com.multiapp.core.loader.VirtualBroadcastDispatchOptions
 import com.multiapp.core.loader.VirtualBroadcastRecord
@@ -16,6 +19,7 @@ import com.multiapp.core.loader.VirtualServiceStopDispatchResult
 import com.multiapp.core.loader.VirtualServiceUnbindDispatchResult
 import com.multiapp.core.model.engine.EngineResultStatus
 import java.util.concurrent.Executor
+import java.util.IdentityHashMap
 
 class DefaultEngineAmsComponentDispatcher(
     private val fallback: VirtualAmsComponentDispatcher,
@@ -27,10 +31,13 @@ class DefaultEngineAmsComponentDispatcher(
     private val serviceService: VirtualServiceService = DefaultVirtualSystemServer(
         EngineRuntimeRegistry.global
     ).serviceService,
+    private val serviceConnectionAuthority: EngineServiceConnectionAuthority? = null,
     private val broadcastService: VirtualBroadcastService = DefaultVirtualSystemServer(
         EngineRuntimeRegistry.global
     ).broadcastService
 ) : VirtualAmsComponentDispatcher {
+    private val serviceConnectionTokens = IdentityHashMap<ServiceConnection, IBinder>()
+    private val serviceConnectionBridges = IdentityHashMap<ServiceConnection, CommitGatedServiceConnection>()
 
     override fun resolveStartActivityIntent(intent: Intent): VirtualContextWrapper.StartActivityMappingResult {
         val planRequest = intent.toActivityPlanRequest()
@@ -147,28 +154,131 @@ class DefaultEngineAmsComponentDispatcher(
         if (blocked != null) {
             return blocked
         }
-        val result = fallback.dispatchBindService(intent, virtualContext, guestClassLoader, connection, flags, executor)
-        serviceService.recordServiceDispatchIfPossible(
+        val connectionAuthority = serviceConnectionAuthority
+        val registration = connectionAuthority?.let { authority ->
+            val lease = plan.targets.singleOrNull()?.operationLease
+                ?: return serviceConnectionBlocked(intent, flags, "service_connection_lease_missing")
+            val tokenWasExisting = serviceConnectionTokenOrNull(connection) != null
+            val connectionToken = serviceConnectionToken(connection)
+            val result = authority.register(instanceId, lease, connectionToken)
+            if (result?.accepted != true || result.bindings.size != 1) {
+                if (!tokenWasExisting) {
+                    discardServiceConnectionToken(connection, connectionToken)
+                }
+                return serviceConnectionBlocked(
+                    intent,
+                    flags,
+                    "service_connection_registration_failed:${result?.reason ?: "authority_unavailable"}"
+                )
+            }
+            RegisteredServiceConnection(
+                connectionToken,
+                result.bindings.single(),
+                result.idempotent,
+                tokenWasExisting
+            )
+        }
+        val dispatchConnection = registration?.let {
+            serviceConnectionBridge(connection, initiallyOpen = it.tokenWasExisting)
+        } ?: connection
+        val result = fallback.dispatchBindService(
+            intent,
+            virtualContext,
+            guestClassLoader,
+            dispatchConnection,
+            flags,
+            executor
+        )
+        val recorded = serviceService.recordServiceDispatchIfPossible(
             result.toServiceOperationResult(instanceId, intent),
             plan
         )
+        if (registration != null && result is VirtualServiceBindDispatchResult.Bound && recorded) {
+            serviceConnectionBridgeOrNull(connection)?.commit()
+        }
+        if (registration != null && (result !is VirtualServiceBindDispatchResult.Bound || !recorded)) {
+            if (!registration.idempotent) {
+                connectionAuthority.removeBinding(
+                    instanceId,
+                    registration.binding,
+                    registration.connectionToken
+                )
+                if (result is VirtualServiceBindDispatchResult.Bound) {
+                    fallback.dispatchUnbindService(dispatchConnection)
+                }
+            }
+            if (!registration.tokenWasExisting) {
+                discardServiceConnectionToken(connection, registration.connectionToken)
+                discardServiceConnectionBridge(connection)
+            }
+            if (result is VirtualServiceBindDispatchResult.Bound && !recorded) {
+                return serviceConnectionBlocked(intent, flags, "service_connection_dispatch_commit_failed")
+            }
+        }
         return result
     }
 
     override fun dispatchUnbindService(connection: ServiceConnection): VirtualServiceUnbindDispatchResult {
+        val connectionAuthority = serviceConnectionAuthority
+        val connectionToken = connectionAuthority?.let { serviceConnectionTokenOrNull(connection) }
+        if (connectionAuthority != null && connectionToken == null) {
+            return VirtualServiceUnbindDispatchResult.NotFound
+        }
+        val authoritativeBinding = if (connectionAuthority == null) {
+            null
+        } else {
+            val query = connectionAuthority.query(instanceId, requireNotNull(connectionToken))
+            if (query?.accepted != true || query.bindings.size != 1) {
+                return VirtualServiceUnbindDispatchResult.NotFound
+            }
+            query.bindings.single()
+        }
         val planRequest = VirtualServiceDispatchPlanRequest(
             operation = VirtualServiceOperation.UNBIND,
+            serviceClassName = authoritativeBinding?.component,
             operationLeaseRequested = true
         )
         val plan = serviceService.planService(instanceId, planRequest)
         if (plan.shouldBlockLoaderDispatch()) {
             return VirtualServiceUnbindDispatchResult.NotFound
         }
-        val result = fallback.dispatchUnbindService(connection)
-        serviceService.recordServiceDispatchIfPossible(
+        val dispatchConnection = if (connectionAuthority == null) {
+            connection
+        } else {
+            serviceConnectionBridgeOrNull(connection)
+                ?: return VirtualServiceUnbindDispatchResult.NotFound
+        }
+        val result = fallback.dispatchUnbindService(dispatchConnection)
+        val recorded = serviceService.recordServiceDispatchIfPossible(
             result.toServiceOperationResult(instanceId),
             plan
         )
+        if (result is VirtualServiceUnbindDispatchResult.Unbound && !recorded) {
+            return VirtualServiceUnbindDispatchResult.Failed(
+                startRequest = result.startRequest,
+                stage = "engineCommit",
+                error = IllegalStateException("service_connection_dispatch_commit_failed")
+            )
+        }
+        if (
+            connectionAuthority != null &&
+            connectionToken != null &&
+            result is VirtualServiceUnbindDispatchResult.Unbound &&
+            recorded
+        ) {
+            val removed = connectionAuthority.remove(instanceId, connectionToken)
+            if (removed?.accepted != true) {
+                return VirtualServiceUnbindDispatchResult.Failed(
+                    startRequest = result.startRequest,
+                    stage = "connectionRemoval",
+                    error = IllegalStateException(
+                        "service_connection_removal_failed:${removed?.reason ?: "authority_unavailable"}"
+                    )
+                )
+            }
+            discardServiceConnectionToken(connection, connectionToken)
+            discardServiceConnectionBridge(connection)
+        }
         return result
     }
 
@@ -608,9 +718,9 @@ class DefaultEngineAmsComponentDispatcher(
     private fun VirtualServiceService.recordServiceDispatchIfPossible(
         result: VirtualServiceOperationResult,
         plan: VirtualServiceDispatchPlan
-    ) {
-        val lease = plan.targets.singleOrNull()?.operationLease ?: return
-        recordServiceDispatch(
+    ): Boolean {
+        val lease = plan.targets.singleOrNull()?.operationLease ?: return false
+        return recordServiceDispatch(
             result.instanceId,
             result.copy(
                 serviceClassName = result.serviceClassName ?: lease.component,
@@ -618,6 +728,129 @@ class DefaultEngineAmsComponentDispatcher(
                 operationLease = lease
             )
         )
+    }
+
+    private fun serviceConnectionToken(connection: ServiceConnection): IBinder =
+        synchronized(serviceConnectionTokens) {
+            serviceConnectionTokens[connection] ?: Binder().also { token ->
+                serviceConnectionTokens[connection] = token
+            }
+        }
+
+    private fun serviceConnectionTokenOrNull(connection: ServiceConnection): IBinder? =
+        synchronized(serviceConnectionTokens) { serviceConnectionTokens[connection] }
+
+    private fun discardServiceConnectionToken(connection: ServiceConnection, token: IBinder) {
+        synchronized(serviceConnectionTokens) {
+            if (serviceConnectionTokens[connection] === token) {
+                serviceConnectionTokens.remove(connection)
+            }
+        }
+    }
+
+    private fun serviceConnectionBridge(
+        connection: ServiceConnection,
+        initiallyOpen: Boolean
+    ): CommitGatedServiceConnection = synchronized(serviceConnectionBridges) {
+        serviceConnectionBridges[connection] ?: CommitGatedServiceConnection(
+            delegate = connection,
+            initiallyOpen = initiallyOpen
+        ).also { bridge ->
+            serviceConnectionBridges[connection] = bridge
+        }
+    }
+
+    private fun serviceConnectionBridgeOrNull(
+        connection: ServiceConnection
+    ): CommitGatedServiceConnection? = synchronized(serviceConnectionBridges) {
+        serviceConnectionBridges[connection]
+    }
+
+    private fun discardServiceConnectionBridge(connection: ServiceConnection) {
+        val bridge = synchronized(serviceConnectionBridges) {
+            serviceConnectionBridges.remove(connection)
+        }
+        bridge?.cancel()
+    }
+
+    private fun serviceConnectionBlocked(
+        intent: Intent,
+        flags: Int,
+        reason: String
+    ) = VirtualServiceBindDispatchResult.Blocked(
+        sourceIntent = intent,
+        reason = reason,
+        serviceResolved = true,
+        flags = flags,
+        autoCreate = flags and Context.BIND_AUTO_CREATE != 0,
+        serviceAlreadyRunning = false
+    )
+
+    private data class RegisteredServiceConnection(
+        val connectionToken: IBinder,
+        val binding: EngineServiceConnectionBindingRecord,
+        val idempotent: Boolean,
+        val tokenWasExisting: Boolean
+    )
+
+    private class CommitGatedServiceConnection(
+        private val delegate: ServiceConnection,
+        initiallyOpen: Boolean
+    ) : ServiceConnection {
+        private val pendingCallbacks = mutableListOf<(ServiceConnection) -> Unit>()
+        private var state = if (initiallyOpen) State.OPEN else State.PENDING
+
+        override fun onServiceConnected(name: ComponentName, service: IBinder) {
+            dispatch { it.onServiceConnected(name, service) }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName) {
+            dispatch { it.onServiceDisconnected(name) }
+        }
+
+        override fun onBindingDied(name: ComponentName) {
+            dispatch { it.onBindingDied(name) }
+        }
+
+        override fun onNullBinding(name: ComponentName) {
+            dispatch { it.onNullBinding(name) }
+        }
+
+        fun commit() {
+            val callbacks = synchronized(this) {
+                if (state != State.PENDING) return
+                state = State.OPEN
+                pendingCallbacks.toList().also { pendingCallbacks.clear() }
+            }
+            callbacks.forEach { callback -> callback(delegate) }
+        }
+
+        fun cancel() {
+            synchronized(this) {
+                state = State.CANCELLED
+                pendingCallbacks.clear()
+            }
+        }
+
+        private fun dispatch(callback: (ServiceConnection) -> Unit) {
+            val forward = synchronized(this) {
+                when (state) {
+                    State.PENDING -> {
+                        pendingCallbacks += callback
+                        null
+                    }
+                    State.OPEN -> callback
+                    State.CANCELLED -> null
+                }
+            }
+            forward?.invoke(delegate)
+        }
+
+        private enum class State {
+            PENDING,
+            OPEN,
+            CANCELLED
+        }
     }
 }
 

@@ -159,6 +159,211 @@ class EngineServerRuntimeTest {
         assertEquals("provider_component_process_slot_not_allocated", customProcess.reason)
     }
 
+    @Test
+    fun `component process allocation reserves every runtime primary slot before custom slot`() {
+        val runtimeRegistry = EngineRuntimeRegistry()
+        val runtime = providerRuntime()
+        runtimeRegistry.register(runtime)
+        val owner = EngineServerRuntime.createForTest(
+            hostPackageName = runtime.hostPackageName,
+            instanceManager = mockk<InstanceManager>(relaxed = true),
+            virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = runtimeRegistry,
+            systemServer = DefaultVirtualSystemServer(runtimeRegistry)
+        )
+
+        val custom = owner.allocateComponentProcessSlot(runtime.instanceId, ":remote")
+        val primaryOwner = owner.componentProcessSlots.ownerOf(runtime.processSlot)
+
+        assertEquals(runtime.instanceId, primaryOwner?.instanceId)
+        assertEquals(runtime.originPackageName, primaryOwner?.guestProcessName)
+        assertEquals("${runtime.hostPackageName}:v1", custom?.processSlot)
+        assertEquals("${runtime.originPackageName}:remote", custom?.guestProcessName)
+        assertEquals(null, owner.allocateComponentProcessSlot(runtime.instanceId, ":undeclared"))
+    }
+
+    @Test
+    fun `component process allocation ignores stopped and dead runtime primary slots`() {
+        val runtimeRegistry = EngineRuntimeRegistry()
+        val runtime = providerRuntime()
+        val deadRuntime = runtime.copy(
+            instanceId = "instance-dead",
+            virtualPackageName = "com.multiapp.virtual.dead",
+            dataRoot = "build/tmp/provider-dead",
+            packageSnapshot = runtime.packageSnapshot.copy(
+                instanceId = "instance-dead",
+                virtualPackageName = "com.multiapp.virtual.dead",
+                dataDir = "build/tmp/provider-dead"
+            ),
+            processSlot = "${runtime.hostPackageName}:v1",
+            proxySlot = "${runtime.hostPackageName}.container.ProxyActivity1",
+            runtimeEpoch = runtime.runtimeEpoch + 1,
+            engineSessionId = "provider-dead-engine-session",
+            processId = null,
+            processName = null,
+            state = VirtualRuntimeState.DEAD
+        )
+        runtimeRegistry.register(deadRuntime)
+        runtimeRegistry.register(runtime)
+        val owner = EngineServerRuntime.createForTest(
+            hostPackageName = runtime.hostPackageName,
+            instanceManager = mockk<InstanceManager>(relaxed = true),
+            virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = runtimeRegistry,
+            systemServer = DefaultVirtualSystemServer(runtimeRegistry)
+        )
+
+        val custom = owner.allocateComponentProcessSlot(runtime.instanceId, ":remote")
+
+        assertEquals("${runtime.hostPackageName}:v1", custom?.processSlot)
+        assertEquals(runtime.instanceId, owner.componentProcessSlots.ownerOf(custom!!.processSlot)?.instanceId)
+    }
+
+    @Test
+    fun `component process client attach requires declared allocation and actual Android identity`() {
+        val runtimeRegistry = EngineRuntimeRegistry()
+        val runtime = providerRuntime()
+        runtimeRegistry.register(runtime)
+        val processId = requireNotNull(runtime.processId) + 1
+        val owner = EngineServerRuntime.createForTest(
+            hostPackageName = runtime.hostPackageName,
+            instanceManager = mockk<InstanceManager>(relaxed = true),
+            virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = runtimeRegistry,
+            systemServer = DefaultVirtualSystemServer(runtimeRegistry),
+            componentProcessIdentityProbe = EngineComponentProcessIdentityProbe { candidatePid ->
+                if (candidatePid == processId) {
+                    EngineComponentProcessHostIdentity(
+                        processName = "${runtime.hostPackageName}:v1",
+                        processStartTicks = processId.toLong() * 10L
+                    )
+                } else {
+                    null
+                }
+            }
+        )
+        val unallocatedIdentity = componentProcessIdentity(runtime, "${runtime.hostPackageName}:v1", processId)
+        val token = mockk<IBinder>(relaxed = true)
+        every { token.isBinderAlive } returns true
+
+        val unallocated = owner.attachComponentProcessClient(
+            unallocatedIdentity,
+            token,
+            processId,
+            unallocatedIdentity.processSlot
+        )
+        val assignment = requireNotNull(owner.allocateComponentProcessSlot(runtime.instanceId, ":remote"))
+        val identity = componentProcessIdentity(runtime, assignment.processSlot, processId)
+        val wrongPid = owner.attachComponentProcessClient(
+            identity,
+            token,
+            processId + 1,
+            identity.processSlot
+        )
+        val attached = owner.attachComponentProcessClient(
+            identity,
+            token,
+            processId,
+            identity.processSlot
+        )
+
+        assertFalse(unallocated.accepted)
+        assertEquals("component_process_slot_not_allocated", unallocated.reason)
+        assertFalse(wrongPid.accepted)
+        assertEquals("component_process_pid_mismatch", wrongPid.reason)
+        assertTrue(attached.accepted)
+        assertTrue(owner.componentProcessClients.isAuthoritative(identity, token))
+    }
+
+    @Test
+    fun `component process IPC authority requires engine ticket and actual slot process`() {
+        val runtimeRegistry = EngineRuntimeRegistry()
+        val runtime = providerRuntime()
+        runtimeRegistry.register(runtime)
+        val processId = requireNotNull(runtime.processId) + 10
+        val processStartTicks = processId.toLong() * 10L
+        var observedProcessStartTicks = processStartTicks
+        val owner = EngineServerRuntime.createForTest(
+            hostPackageName = runtime.hostPackageName,
+            instanceManager = mockk<InstanceManager>(relaxed = true),
+            virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = runtimeRegistry,
+            systemServer = DefaultVirtualSystemServer(runtimeRegistry),
+            componentProcessIdentityProbe = EngineComponentProcessIdentityProbe { candidatePid ->
+                if (candidatePid == processId) {
+                    EngineComponentProcessHostIdentity(
+                        processName = "${runtime.hostPackageName}:v1",
+                        processStartTicks = observedProcessStartTicks
+                    )
+                } else {
+                    null
+                }
+            }
+        )
+        val prepared = owner.prepare(runtime.instanceId, ":remote")
+        val launchTicket = requireNotNull(prepared.launchTicket)
+        val token = mockk<IBinder>(relaxed = true)
+        every { token.isBinderAlive } returns true
+
+        val forgedProcess = owner.attach(
+            launchTicket.attachCapability,
+            token,
+            processId,
+            "${runtime.hostPackageName}:v7",
+            processStartTicks
+        )
+        val attached = owner.attach(
+            launchTicket.attachCapability,
+            token,
+            processId,
+            launchTicket.processSlot,
+            processStartTicks
+        )
+        val repeated = owner.attach(
+            launchTicket.attachCapability,
+            token,
+            processId,
+            launchTicket.processSlot,
+            processStartTicks
+        )
+        val queried = owner.query(runtime.instanceId, ":remote")
+        val authorized = owner.authorizeCaller(
+            runtime.instanceId,
+            processId,
+            launchTicket.processSlot,
+            processStartTicks
+        )
+        val reusedPid = owner.authorizeCaller(
+            runtime.instanceId,
+            processId,
+            launchTicket.processSlot,
+            processStartTicks + 1L
+        )
+
+        assertTrue(prepared.accepted)
+        assertFalse(prepared.alreadyRunning)
+        assertFalse(forgedProcess.accepted)
+        assertEquals("component_process_android_name_mismatch", forgedProcess.reason)
+        assertTrue(attached.accepted)
+        assertFalse(attached.idempotent)
+        assertFalse(repeated.accepted)
+        assertEquals("component_process_launch_capability_not_found", repeated.reason)
+        assertTrue(queried.accepted)
+        assertTrue(queried.alreadyRunning)
+        assertEquals(attached.processState, queried.processState)
+        assertEquals(attached.processState?.processId, authorized?.processId)
+        assertEquals(null, reusedPid)
+
+        observedProcessStartTicks += 1L
+        val deadClient = owner.query(runtime.instanceId, ":remote")
+        assertFalse(deadClient.accepted)
+        assertEquals(0, owner.componentProcessClients.activeCount())
+    }
+
     private fun providerRuntime(): VirtualInstanceRuntime = VirtualInstanceRuntime(
         instanceId = "instance-provider-endpoint",
         hostPackageName = "com.multiapp.app",
@@ -217,6 +422,22 @@ class EngineServerRuntimeTest {
         runtimeEpoch = runtime.runtimeEpoch,
         engineSessionId = runtime.engineSessionId,
         processId = processId
+    )
+
+    private fun componentProcessIdentity(
+        runtime: VirtualInstanceRuntime,
+        processSlot: String,
+        processId: Int
+    ) = EngineComponentProcessClientIdentity(
+        instanceId = runtime.instanceId,
+        runtimeEpoch = runtime.runtimeEpoch,
+        engineSessionId = runtime.engineSessionId,
+        processEpoch = 1L,
+        clientSessionId = "component-session-1",
+        effectiveGuestProcessName = "${runtime.originPackageName}:remote",
+        processSlot = processSlot,
+        processId = processId,
+        processStartTicks = processId.toLong() * 10L
     )
 
     private fun instanceRecord(instanceId: String) = VirtualInstanceRecord(

@@ -20,6 +20,9 @@ interface IEngineRuntimeService {
     Bundle issueRecentsRestoreCapability(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, String restoreActivityId);
     Bundle queryRuntime(String instanceId);
     Bundle queryRuntimeByProcessId(int processId);
+    Bundle prepareComponentProcess(String instanceId, String guestProcessName);
+    Bundle attachComponentProcessClient(String attachCapability, IBinder clientToken);
+    Bundle queryComponentProcessClient(String instanceId, String guestProcessName);
     Bundle queryApplicationEnabledState(String instanceId, in Bundle request);
     Bundle setApplicationEnabledState(String instanceId, in Bundle request);
     Bundle queryComponentEnabledState(String instanceId, in Bundle request);
@@ -53,6 +56,10 @@ interface IEngineRuntimeService {
     Bundle planService(String instanceId, in Bundle request);
     boolean recordServiceDispatch(String instanceId, in Bundle result);
     Bundle queryServiceRuntimeState(String instanceId);
+    Bundle registerServiceConnection(String instanceId, in Bundle operationLease, IBinder connectionToken);
+    Bundle queryServiceConnection(String instanceId, IBinder connectionToken);
+    Bundle removeServiceConnectionBinding(String instanceId, in Bundle binding, IBinder connectionToken);
+    Bundle removeServiceConnection(String instanceId, IBinder connectionToken);
     Bundle planBroadcast(String instanceId, in Bundle request);
     boolean recordBroadcastDispatch(String instanceId, in Bundle result);
     Bundle queryBroadcastRuntimeState(String instanceId);

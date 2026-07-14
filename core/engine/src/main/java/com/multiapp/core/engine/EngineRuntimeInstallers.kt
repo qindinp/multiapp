@@ -80,6 +80,7 @@ object EngineRuntimeInstallers {
                 ),
                 activityService = activityService,
                 serviceService = serviceService,
+                serviceConnectionAuthority = IpcEngineServiceConnectionAuthority,
                 broadcastService = broadcastService
             )
         }
