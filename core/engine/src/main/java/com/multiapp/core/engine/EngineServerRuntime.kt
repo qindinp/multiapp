@@ -125,8 +125,16 @@ class EngineServerRuntime private constructor(
     override fun prepare(
         instanceId: String,
         guestProcessName: String
+    ): EngineComponentProcessOperationResult = synchronized(componentProcessAttachLock) {
+        // Android starts the selected StubService in the target slot. That process binds the
+        // guest runtime and consumes this ticket, so the caller never blocks on cold bootstrap.
+        prepareComponentProcessLaunchLocked(instanceId, guestProcessName)
+    }
+
+    private fun prepareComponentProcessLaunchLocked(
+        instanceId: String,
+        guestProcessName: String
     ): EngineComponentProcessOperationResult {
-        synchronized(componentProcessAttachLock) {
         val runtime = runtimeRegistry.get(instanceId)
             ?: return componentProcessRejected(
                 COMPONENT_PROCESS_PREPARE_OPERATION,
@@ -156,14 +164,9 @@ class EngineServerRuntime private constructor(
             live.found && live.identity != null && live.clientToken != null &&
             isComponentProcessIdentityAuthoritative(live.identity, live.clientToken)
         ) {
-            return EngineComponentProcessOperationResult(
-                operation = COMPONENT_PROCESS_PREPARE_OPERATION,
-                instanceId = instanceId,
-                accepted = true,
+            return componentProcessRunning(
+                identity = live.identity,
                 idempotent = true,
-                alreadyRunning = true,
-                launchTicket = null,
-                processState = live.identity.toPublicComponentProcessState(),
                 reason = "component_process_already_running"
             )
         }
@@ -180,10 +183,10 @@ class EngineServerRuntime private constructor(
                 }
             )
         } ?: return componentProcessRejected(
-            COMPONENT_PROCESS_PREPARE_OPERATION,
-            instanceId,
-            "component_process_not_declared"
-        )
+                COMPONENT_PROCESS_PREPARE_OPERATION,
+                instanceId,
+                "component_process_not_declared"
+            )
         val issued = runCatching {
             componentProcessLaunchCapabilities.issue(assignment)
         }.getOrElse {
@@ -193,25 +196,24 @@ class EngineServerRuntime private constructor(
                 "component_process_launch_capability_issue_failed"
             )
         }
-        return if (issued.accepted && issued.identity != null) {
-            EngineComponentProcessOperationResult(
-                operation = COMPONENT_PROCESS_PREPARE_OPERATION,
-                instanceId = instanceId,
-                accepted = true,
-                idempotent = issued.idempotent,
-                alreadyRunning = false,
-                launchTicket = issued.identity.toLaunchTicket(),
-                processState = null,
-                reason = issued.reason
-            )
-        } else {
-            componentProcessRejected(
+        if (!issued.accepted || issued.identity == null) {
+            return componentProcessRejected(
                 COMPONENT_PROCESS_PREPARE_OPERATION,
                 instanceId,
                 issued.reason
             )
         }
-        }
+        val ticket = issued.identity.toLaunchTicket()
+        return EngineComponentProcessOperationResult(
+            operation = COMPONENT_PROCESS_PREPARE_OPERATION,
+            instanceId = instanceId,
+            accepted = true,
+            idempotent = issued.idempotent,
+            alreadyRunning = false,
+            launchTicket = ticket,
+            processState = null,
+            reason = issued.reason
+        )
     }
 
     override fun attach(
@@ -418,7 +420,8 @@ class EngineServerRuntime private constructor(
             instanceManager: InstanceManager,
             virtualInstallService: VirtualInstallService,
             activityLauncher: EngineActivityLauncher,
-            processBootstrapper: EngineProcessBootstrapper = EngineProcessBootstrapper.IMMEDIATE,
+            processBootstrapper: EngineProcessBootstrapper =
+                EngineProcessBootstrapper.PRIMARY_IMMEDIATE_COMPONENT_DEFERRED,
             processTerminator: EngineProcessTerminator = EngineProcessTerminator.TEST_NO_OP,
             slotStore: EngineRuntimeSlotStore = InMemoryEngineRuntimeSlotStore(),
             hookRuntime: EngineHookRuntime = EngineHookRuntime.NO_OP,
@@ -477,6 +480,7 @@ private class EngineServerRuntimeGraph(
     val componentProcessClients: EngineComponentProcessClientRegistry,
     val componentProcessLaunchCapabilities: EngineComponentProcessLaunchCapabilityRegistry,
     val componentProcessIdentityProbe: EngineComponentProcessIdentityProbe,
+    val processBootstrapper: EngineProcessBootstrapper,
     val processControlPlane: EngineProcessControlPlane,
     val virtualizationEngine: DefaultVirtualizationEngineCore
 )
@@ -620,6 +624,7 @@ private fun createEngineServerRuntimeGraph(
         componentProcessClients = componentProcessClients,
         componentProcessLaunchCapabilities = componentProcessLaunchCapabilities,
         componentProcessIdentityProbe = componentProcessIdentityProbe,
+        processBootstrapper = processBootstrapper,
         processControlPlane = processControlPlane,
         virtualizationEngine = virtualizationEngine
     )
@@ -667,6 +672,21 @@ private fun componentProcessAttached(
     } else {
         "component_process_client_attached"
     }
+)
+
+private fun componentProcessRunning(
+    identity: EngineComponentProcessClientIdentity,
+    idempotent: Boolean,
+    reason: String
+) = EngineComponentProcessOperationResult(
+    operation = COMPONENT_PROCESS_PREPARE_OPERATION,
+    instanceId = identity.instanceId,
+    accepted = true,
+    idempotent = idempotent,
+    alreadyRunning = true,
+    launchTicket = null,
+    processState = identity.toPublicComponentProcessState(),
+    reason = reason
 )
 
 private fun EngineComponentProcessLaunchIdentity.toLaunchTicket() =

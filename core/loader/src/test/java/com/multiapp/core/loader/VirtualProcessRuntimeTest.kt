@@ -401,6 +401,12 @@ class VirtualProcessRuntimeTest {
         assertNull(
             runtime.reusableResult(
                 "inst-001",
+                fingerprint.copy(effectiveGuestProcessName = "com.example.app:remote")
+            )
+        )
+        assertNull(
+            runtime.reusableResult(
+                "inst-001",
                 fingerprint.copy(splitApkPaths = listOf("/tmp/moved-split.apk"))
             )
         )

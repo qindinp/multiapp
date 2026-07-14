@@ -49,9 +49,10 @@ class EngineVirtualUriPermissionDispatcherTest {
     }
 
     @Test
-    fun `guest URI check resolves target instance by durable process id`() {
+    fun `guest URI check resolves a cross-process target through the engine authority`() {
         val service = mockk<VirtualProviderService>(relaxed = true)
         val requestSlot = slot<VirtualProviderUriGrantRequest>()
+        var resolutionRequest: Pair<String, Int>? = null
         every { service.checkUriPermission("target", capture(requestSlot)) } returns result(
             ownerInstanceId = "owner",
             targetInstanceId = "target",
@@ -60,7 +61,10 @@ class EngineVirtualUriPermissionDispatcherTest {
         )
         val dispatcher = dispatcher(
             service = service,
-            runtimesByPid = mapOf(3002 to runtimeSnapshot("target", 3002))
+            uriPermissionCheckTarget = { callerInstanceId, targetProcessId ->
+                resolutionRequest = callerInstanceId to targetProcessId
+                runtimeSnapshot("target", targetProcessId)
+            }
         )
 
         val actual = dispatcher.dispatch(
@@ -79,6 +83,42 @@ class EngineVirtualUriPermissionDispatcherTest {
         assertEquals("owner", requestSlot.captured.ownerInstanceId)
         assertEquals("target", requestSlot.captured.targetInstanceId)
         assertEquals(3002, requestSlot.captured.callingPid)
+        assertEquals("owner" to 3002, resolutionRequest)
+    }
+
+    @Test
+    fun `guest URI check supports its own live process`() {
+        val service = mockk<VirtualProviderService>(relaxed = true)
+        var targetResolutionCalled = false
+        every { service.checkUriPermission("owner", any()) } returns result(
+            ownerInstanceId = "owner",
+            targetInstanceId = "owner",
+            granted = true,
+            message = "provider_uri_grant_self_access"
+        )
+        val dispatcher = dispatcher(
+            service = service,
+            uriPermissionCheckTarget = { _, _ ->
+                targetResolutionCalled = true
+                runtimeSnapshot("owner", 3001)
+            }
+        )
+
+        val actual = dispatcher.dispatch(
+            VirtualUriPermissionRequest(
+                operation = VirtualUriPermissionOperation.CHECK,
+                uri = uri("com.test.provider", "/books/7"),
+                modeFlags = EngineProviderUriGrantModes.READ,
+                pid = 3001,
+                uid = 1000
+            )
+        )
+
+        assertTrue(actual.handled)
+        assertTrue(actual.success)
+        assertTrue(actual.granted)
+        assertTrue(targetResolutionCalled)
+        verify(exactly = 1) { service.checkUriPermission("owner", any()) }
     }
 
     @Test
@@ -152,11 +192,19 @@ class EngineVirtualUriPermissionDispatcherTest {
 
     private fun dispatcher(
         service: VirtualProviderService,
-        runtimesByPid: Map<Int, EngineRuntimeIpcSnapshot> = emptyMap()
+        uriPermissionCheckTarget: (String, Int) -> EngineRuntimeIpcSnapshot? = { _, _ -> null },
+        uriPermissionChecker: (
+            String,
+            String,
+            VirtualProviderUriGrantRequest
+        ) -> VirtualProviderUriGrantResult? = { _, targetInstanceId, request ->
+            service.checkUriPermission(targetInstanceId, request)
+        }
     ) = EngineVirtualUriPermissionDispatcher(
         config = config(),
         providerService = service,
-        runtimeByProcessId = runtimesByPid::get,
+        uriPermissionCheckTarget = uriPermissionCheckTarget,
+        uriPermissionChecker = uriPermissionChecker,
         hostUid = 1000,
         processId = 3001
     )

@@ -158,6 +158,7 @@ class VirtualServiceManager(
             putExtra(EXTRA_GUEST_SERVICE_CLASS_NAME, spec.guestServiceClassName)
             putExtra(EXTRA_SERVICE_START_REASON, spec.reason)
             putExtra(EXTRA_FOREGROUND_SERVICE, spec.foreground)
+            putExtra(EXTRA_ORIGINAL_GUEST_INTENT, Intent(request.sourceIntent))
             if (!spec.processSlot.isNullOrBlank()) {
                 putExtra(EXTRA_PROCESS_SLOT, spec.processSlot)
             }

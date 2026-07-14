@@ -14,6 +14,8 @@ import com.multiapp.core.loader.VirtualBroadcastResult
 import com.multiapp.core.loader.VirtualBroadcastResultCode
 import com.multiapp.core.loader.VirtualContextWrapper
 import com.multiapp.core.loader.VirtualServiceBindDispatchResult
+import com.multiapp.core.loader.VirtualServiceIntentStore
+import com.multiapp.core.loader.VirtualServiceManager
 import com.multiapp.core.loader.VirtualServiceStartRequest
 import com.multiapp.core.loader.VirtualServiceStopDispatchResult
 import com.multiapp.core.loader.VirtualServiceUnbindDispatchResult
@@ -31,6 +33,11 @@ class DefaultEngineAmsComponentDispatcher(
     private val serviceService: VirtualServiceService = DefaultVirtualSystemServer(
         EngineRuntimeRegistry.global
     ).serviceService,
+    private val componentProcessPreparer: (String, String) -> EngineComponentProcessOperationResult? =
+        EngineRuntimeIpcClients::prepareComponentProcess,
+    private val serviceManagerFactory: (String) -> VirtualServiceManager = ::VirtualServiceManager,
+    private val componentTicketEncoder: (EngineComponentProcessLaunchTicket) -> android.os.Bundle =
+        { ticket -> ticket.toComponentProcessLaunchTicketIpcBundle() },
     private val serviceConnectionAuthority: EngineServiceConnectionAuthority? = null,
     private val broadcastService: VirtualBroadcastService = DefaultVirtualSystemServer(
         EngineRuntimeRegistry.global
@@ -111,12 +118,20 @@ class DefaultEngineAmsComponentDispatcher(
             VirtualServiceOperation.START
         }
         val planRequest = intent.toServicePlanRequest(operation)
-        val plan = serviceService.planService(instanceId, planRequest)
+        val preparation = serviceService.planService(instanceId, planRequest)
+            .prepareCustomServiceProcess()
+        val plan = preparation.plan
         val blocked = plan.toBlockedStartServiceResult(intent, foreground)
         if (blocked != null) {
             return blocked
         }
-        return fallback.resolveStartServiceIntent(intent, foreground)
+        val fallbackResult = fallback.resolveStartServiceIntent(intent, foreground)
+        return fallbackResult.remapToEngineServiceTarget(
+            plan,
+            intent,
+            foreground,
+            preparation.launchTicket
+        )
     }
 
     override fun dispatchStopService(intent: Intent): VirtualServiceStopDispatchResult? {
@@ -377,6 +392,132 @@ class DefaultEngineAmsComponentDispatcher(
             operationLeaseRequested = operationLeaseRequested
         )
     }
+
+    private fun VirtualServiceDispatchPlan.prepareCustomServiceProcess(): PreparedCustomServiceProcess {
+        if (verdict == EngineResultStatus.FAIL || verdict == EngineResultStatus.UNSUPPORTED) {
+            return PreparedCustomServiceProcess(this)
+        }
+        val target = targets.singleOrNull() ?: return PreparedCustomServiceProcess(this)
+        if (target.sameProcess) return PreparedCustomServiceProcess(this)
+        if (operation !in setOf(VirtualServiceOperation.START, VirtualServiceOperation.START_FOREGROUND)) {
+            return PreparedCustomServiceProcess(
+                copy(
+                    verdict = EngineResultStatus.UNSUPPORTED,
+                    targets = emptyList(),
+                    message = "component_service_${operation.name.lowercase()}_unsupported"
+                )
+            )
+        }
+        val effectiveGuestProcessName = target.processName
+            ?: return PreparedCustomServiceProcess(
+                copy(
+                    verdict = EngineResultStatus.FAIL,
+                    targets = emptyList(),
+                    message = "component_service_effective_process_missing"
+                )
+            )
+        val prepared = runCatching {
+            componentProcessPreparer(instanceId, effectiveGuestProcessName)
+        }.getOrNull()
+            ?: return PreparedCustomServiceProcess(
+                copy(
+                    verdict = EngineResultStatus.FAIL,
+                    targets = emptyList(),
+                    message = "component_service_process_prepare_unavailable"
+                )
+            )
+        val processState = prepared.processState
+        if (prepared.accepted && prepared.alreadyRunning && processState?.live == true) {
+            if (
+                processState.instanceId == instanceId &&
+                processState.effectiveGuestProcessName == effectiveGuestProcessName &&
+                processState.processSlot.isNotBlank()
+            ) {
+                return PreparedCustomServiceProcess(
+                    copy(targets = listOf(target.copy(processSlot = processState.processSlot)))
+                )
+            }
+            return PreparedCustomServiceProcess(
+                copy(
+                    verdict = EngineResultStatus.FAIL,
+                    targets = emptyList(),
+                    message = "component_service_running_process_identity_mismatch"
+                )
+            )
+        }
+        val launchTicket = prepared.launchTicket
+        if (
+            prepared.accepted && !prepared.alreadyRunning && launchTicket != null &&
+            launchTicket.instanceId == instanceId &&
+            launchTicket.effectiveGuestProcessName == effectiveGuestProcessName &&
+            launchTicket.processSlot.isNotBlank()
+        ) {
+            return PreparedCustomServiceProcess(
+                plan = copy(targets = listOf(target.copy(processSlot = launchTicket.processSlot))),
+                launchTicket = launchTicket
+            )
+        }
+        return PreparedCustomServiceProcess(
+            copy(
+                verdict = EngineResultStatus.FAIL,
+                targets = emptyList(),
+                message = "component_service_process_prepare_failed:${prepared.reason}"
+            )
+        )
+    }
+
+    private fun VirtualContextWrapper.StartServiceMappingResult.remapToEngineServiceTarget(
+        plan: VirtualServiceDispatchPlan,
+        sourceIntent: Intent,
+        foreground: Boolean,
+        launchTicket: EngineComponentProcessLaunchTicket?
+    ): VirtualContextWrapper.StartServiceMappingResult {
+        val remapped = this as? VirtualContextWrapper.StartServiceMappingResult.Remapped ?: return this
+        val target = plan.targets.singleOrNull()
+            ?: return VirtualContextWrapper.StartServiceMappingResult.Blocked(
+                sourceIntent = sourceIntent,
+                foreground = foreground,
+                reason = "engine_service_target_missing"
+            )
+        val hostPackageName = remapped.proxyIntent.component?.packageName.orEmpty()
+        val manager = hostPackageName.takeIf { it.isNotBlank() }
+            ?.let(serviceManagerFactory)
+            ?: return VirtualContextWrapper.StartServiceMappingResult.Blocked(
+                sourceIntent = sourceIntent,
+                foreground = foreground,
+                reason = "engine_service_host_package_missing"
+            )
+        if (manager.stubServiceClassNameForProcessSlot(target.processSlot) == null) {
+            return VirtualContextWrapper.StartServiceMappingResult.Blocked(
+                sourceIntent = sourceIntent,
+                foreground = foreground,
+                reason = "engine_service_process_slot_invalid:${target.processSlot}"
+            )
+        }
+        val routedRequest = remapped.startRequest.copy(processSlot = target.processSlot)
+        val routedIntent = manager.createProxyIntent(routedRequest).apply {
+            launchTicket?.let { ticket ->
+                putExtra(
+                    EXTRA_ENGINE_COMPONENT_PROCESS_LAUNCH_TICKET,
+                    componentTicketEncoder(ticket)
+                )
+            }
+        }
+        VirtualServiceIntentStore.clear(
+            remapped.proxyIntent.getStringExtra(VirtualServiceManager.EXTRA_VIRTUAL_SERVICE_TOKEN)
+        )
+        return VirtualContextWrapper.StartServiceMappingResult.Remapped(
+            sourceIntent = sourceIntent,
+            foreground = foreground,
+            startRequest = routedRequest,
+            proxyIntent = routedIntent
+        )
+    }
+
+    private data class PreparedCustomServiceProcess(
+        val plan: VirtualServiceDispatchPlan,
+        val launchTicket: EngineComponentProcessLaunchTicket? = null
+    )
 
     private fun VirtualServiceDispatchPlan.toBlockedStartServiceResult(
         intent: Intent,

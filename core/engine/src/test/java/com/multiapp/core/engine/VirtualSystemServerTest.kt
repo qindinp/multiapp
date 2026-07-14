@@ -1305,7 +1305,7 @@ class VirtualSystemServerTest {
         assertEquals("explicit", plan.targets.single().reason)
         assertEquals(VirtualServiceOperation.START, plan.targets.single().operation)
         assertEquals(runtime.processSlot, plan.targets.single().processSlot)
-        assertEquals(runtime.processName, plan.targets.single().processName)
+        assertEquals(runtime.originPackageName, plan.targets.single().processName)
         assertTrue(plan.targets.single().sameProcess)
         val evidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("service", "plan")
@@ -1468,7 +1468,7 @@ class VirtualSystemServerTest {
     }
 
     @Test
-    fun `service service rejects custom process routes before loader dispatch`() {
+    fun `service service plans custom process starts and rejects custom binds`() {
         val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
         val runtime = server.runtimeService.register(
             runtime(
@@ -1481,7 +1481,21 @@ class VirtualSystemServerTest {
             )
         )
 
-        val plan = server.serviceService.planService(
+        val startPlan = server.serviceService.planService(
+            instanceId = runtime.instanceId,
+            request = VirtualServiceDispatchPlanRequest(
+                operation = VirtualServiceOperation.START,
+                serviceClassName = "RemoteService"
+            )
+        )
+        val foregroundPlan = server.serviceService.planService(
+            instanceId = runtime.instanceId,
+            request = VirtualServiceDispatchPlanRequest(
+                operation = VirtualServiceOperation.START_FOREGROUND,
+                serviceClassName = "RemoteService"
+            )
+        )
+        val bindPlan = server.serviceService.planService(
             instanceId = runtime.instanceId,
             request = VirtualServiceDispatchPlanRequest(
                 operation = VirtualServiceOperation.BIND,
@@ -1489,10 +1503,16 @@ class VirtualSystemServerTest {
             )
         )
 
-        assertEquals(EngineResultStatus.UNSUPPORTED, plan.verdict)
-        assertEquals("service_cross_process_unsupported", plan.message)
-        assertTrue(plan.targets.isEmpty())
-        assertEquals(setOf("cross-process-service"), plan.unsupportedOperations)
+        assertEquals(EngineResultStatus.PARTIAL, startPlan.verdict)
+        assertEquals("com.test.app:remote", startPlan.targets.single().processName)
+        assertFalse(startPlan.targets.single().sameProcess)
+        assertEquals(runtime.processSlot, startPlan.targets.single().processSlot)
+        assertEquals(EngineResultStatus.PARTIAL, foregroundPlan.verdict)
+        assertTrue(foregroundPlan.targets.single().foreground)
+        assertEquals(EngineResultStatus.UNSUPPORTED, bindPlan.verdict)
+        assertEquals("service_cross_process_bind_unsupported", bindPlan.message)
+        assertTrue(bindPlan.targets.isEmpty())
+        assertEquals(setOf("cross-process-bind-service"), bindPlan.unsupportedOperations)
     }
 
     @Test

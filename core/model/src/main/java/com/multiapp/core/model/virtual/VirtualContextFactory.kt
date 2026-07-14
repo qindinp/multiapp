@@ -38,7 +38,12 @@ data class VirtualContextConfig(
     /** Whether the package requests isolated split loading. */
     val isolatedSplits: Boolean = packageSnapshot?.isolatedSplits ?: false,
     /** Real host Android process slot currently owning this virtual runtime. */
-    val processSlot: String? = null
+    val processSlot: String? = null,
+    /** Manifest guest process hosted inside [processSlot]. Never contains the host :vN identity. */
+    val effectiveGuestProcessName: String = resolveEffectiveGuestProcessName(
+        originPackageName = originPackageName,
+        declaredProcessName = packageSnapshot?.processName
+    )
 ) {
     /** Code paths for class loading: base APK first, then split APKs. */
     val codeSourceDirs: List<String>
@@ -59,6 +64,9 @@ data class VirtualContextConfig(
         }
         require(splitNames.isEmpty() || splitNames.size == splitSourceDirs.size) {
             "splitNames size must match splitSourceDirs size"
+        }
+        require(effectiveGuestProcessName.isNotBlank()) {
+            "effectiveGuestProcessName must not be blank"
         }
     }
 }
@@ -90,7 +98,8 @@ data class VirtualContextSpec(
     val splitPublicSourceDirs: List<String>,
     val splitNames: List<String>,
     val nativeLibraryDir: String?,
-    val processSlot: String?
+    val processSlot: String?,
+    val effectiveGuestProcessName: String
 ) {
     companion object {
         fun from(config: VirtualContextConfig): VirtualContextSpec =
@@ -107,7 +116,17 @@ data class VirtualContextSpec(
                 splitPublicSourceDirs = config.splitPublicSourceDirs,
                 splitNames = config.splitNames,
                 nativeLibraryDir = config.nativeLibraryDir,
-                processSlot = config.processSlot
+                processSlot = config.processSlot,
+                effectiveGuestProcessName = config.effectiveGuestProcessName
             )
     }
+}
+
+private fun resolveEffectiveGuestProcessName(
+    originPackageName: String,
+    declaredProcessName: String?
+): String {
+    val normalized = declaredProcessName?.trim()?.takeIf(String::isNotEmpty)
+        ?: return originPackageName
+    return if (normalized.startsWith(':')) originPackageName + normalized else normalized
 }

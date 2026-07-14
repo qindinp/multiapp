@@ -15,8 +15,10 @@ import com.multiapp.core.engine.DefaultEngineServiceDispatcher
 import com.multiapp.core.engine.DefaultEngineServiceRouter
 import com.multiapp.core.engine.EngineServiceEvidenceFields
 import com.multiapp.core.engine.EngineServiceDispatchRequest
+import com.multiapp.core.engine.EngineServiceDispatchResult
 import com.multiapp.core.engine.EngineServiceRuntimeBindEvidence
 import com.multiapp.core.engine.EngineServiceRouter
+import com.multiapp.core.engine.EngineServiceStartRequestSnapshot
 import com.multiapp.core.engine.EngineServiceStartRoute
 import com.multiapp.core.engine.toEngineEvidenceFields
 
@@ -157,15 +159,26 @@ open class StubService : Service() {
                 "foreground=$foreground, foregroundStatus=$foregroundStatus, " +
                 "runtimeBindStatus=${runtimeBindResult.status}, startId=$startId"
         )
-        val dispatchResult = DefaultEngineServiceDispatcher().dispatch(
-            EngineServiceDispatchRequest(
-                hostContext = this,
-                proxyIntent = intent,
-                route = startRoute,
-                flags = flags,
-                startId = startId
+        val dispatchResult = when (runtimeBindResult) {
+            is HostedServiceRuntimeBindResult.Bound -> DefaultEngineServiceDispatcher().dispatch(
+                EngineServiceDispatchRequest(
+                    hostContext = this,
+                    proxyIntent = intent,
+                    route = startRoute,
+                    flags = flags,
+                    startId = startId
+                )
             )
-        )
+            is HostedServiceRuntimeBindResult.Failed -> startRoute?.let { route ->
+                EngineServiceDispatchResult.RuntimeIncomplete(
+                    startRequest = route.toStartRequestSnapshot(),
+                    reason = "runtime_bind_failed:${runtimeBindResult.detail}:" +
+                        runtimeBindResult.errorMessage.orEmpty()
+                )
+            } ?: EngineServiceDispatchResult.InvalidProxyIntent("runtime_bind_failed_without_route")
+            is HostedServiceRuntimeBindResult.NotRequested ->
+                EngineServiceDispatchResult.InvalidProxyIntent(runtimeBindResult.detail)
+        }
         val evidence = dispatchResult.toEngineEvidenceFields(
             fallbackInstanceId = instanceId,
             fallbackOriginPackageName = originPackage,
@@ -247,6 +260,16 @@ open class StubService : Service() {
             Log.w(TAG, "Unable to write service evidence for instanceId=${evidence.instanceId}", error)
         }
     }
+
+    private fun EngineServiceStartRoute.toStartRequestSnapshot() = EngineServiceStartRequestSnapshot(
+        instanceId = instanceId,
+        originPackageName = originPackageName,
+        guestServiceClassName = guestServiceClassName,
+        reason = reason,
+        foreground = foreground,
+        proxyToken = proxyToken,
+        processSlot = processSlot
+    )
 
     companion object {
         private const val TAG = "StubService"

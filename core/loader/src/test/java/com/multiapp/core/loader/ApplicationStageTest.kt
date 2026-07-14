@@ -382,7 +382,8 @@ class ApplicationStageTest {
             nativeLibraryDir = "/data/instances/inst-001/lib",
             classLoader = ClassLoader.getSystemClassLoader(),
             packageSnapshot = snapshot,
-            processSlot = "com.multiapp.app:v2"
+            processSlot = "com.multiapp.app:v2",
+            effectiveGuestProcessName = "com.example.app:remote"
         )
 
         val result = creator.create(
@@ -399,6 +400,7 @@ class ApplicationStageTest {
         assertSame(application, result.application)
         assertEquals(snapshot.originPackageName, capturedState?.packageName)
         assertEquals(TestApplication::class.java.name, capturedState?.applicationInfo?.className)
+        assertEquals("com.example.app:remote", capturedState?.applicationInfo?.processName)
         assertEquals(listOf(snapshot.originPackageName, snapshot.virtualPackageName), capturedAliases?.toList())
         assertTrue("LOADED_APK_CREATE_STARTED" in progressStatuses)
         assertTrue("MAKE_APPLICATION_FINISHED" in progressStatuses)
@@ -407,6 +409,7 @@ class ApplicationStageTest {
         assertEquals("PASS", evidence["loadedApkApplicationCreatorStatus"])
         assertEquals("GUEST_SANDBOX", evidence["loadedApkApplicationCreatorSource"])
         assertEquals("PASS", evidence["activityThreadApplicationBindingStatus"])
+        assertEquals("com.example.app:remote", evidence["loadedApkApplicationInfoProcessName"])
         assertEquals("true", evidence["loadedApkApplicationOnCreateDeferred"])
     }
 

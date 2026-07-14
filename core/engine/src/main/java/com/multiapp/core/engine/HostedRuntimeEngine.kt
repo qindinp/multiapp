@@ -31,17 +31,35 @@ interface HostedRuntimeEngine {
         providerHookEnabled: Boolean,
         processSlot: String?
     ): EngineHostedBootstrapResult? = reusableResult(instanceId)
+    fun reusableResult(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?,
+        effectiveGuestProcessName: String? = null
+    ): EngineHostedBootstrapResult? = reusableResult(instanceId, providerHookEnabled, processSlot)
     fun runBootstrap(
         instanceId: String,
         providerHookEnabled: Boolean = true,
         processSlot: String? = null
     ): EngineHostedBootstrapResult
+    fun runBootstrap(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?,
+        effectiveGuestProcessName: String? = null
+    ): EngineHostedBootstrapResult = runBootstrap(instanceId, providerHookEnabled, processSlot)
 
     fun bindApplication(
         instanceId: String,
         providerHookEnabled: Boolean = true,
         processSlot: String? = null
     ): HostedRuntimeBindOutcome
+    fun bindApplication(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?,
+        effectiveGuestProcessName: String? = null
+    ): HostedRuntimeBindOutcome = bindApplication(instanceId, providerHookEnabled, processSlot)
 }
 
 data class HostedRuntimeBindOutcome(
@@ -65,7 +83,8 @@ class DefaultHostedRuntimeEngine @Inject constructor(
         val fingerprint = bindingFingerprint(
             instanceId = instanceId,
             providerHookEnabled = false,
-            processSlot = null
+            processSlot = null,
+            effectiveGuestProcessName = null
         ) ?: return null
         return processRuntime.reusableResult(instanceId, fingerprint)
     }
@@ -74,8 +93,25 @@ class DefaultHostedRuntimeEngine @Inject constructor(
         instanceId: String,
         providerHookEnabled: Boolean,
         processSlot: String?
+    ): EngineHostedBootstrapResult? = reusableResult(
+        instanceId = instanceId,
+        providerHookEnabled = providerHookEnabled,
+        processSlot = processSlot,
+        effectiveGuestProcessName = null
+    )
+
+    override fun reusableResult(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?,
+        effectiveGuestProcessName: String?
     ): EngineHostedBootstrapResult? {
-        val fingerprint = bindingFingerprint(instanceId, providerHookEnabled, processSlot) ?: return null
+        val fingerprint = bindingFingerprint(
+            instanceId,
+            providerHookEnabled,
+            processSlot,
+            effectiveGuestProcessName
+        ) ?: return null
         return processRuntime.reusableResult(instanceId, fingerprint)
     }
 
@@ -83,21 +119,35 @@ class DefaultHostedRuntimeEngine @Inject constructor(
         instanceId: String,
         providerHookEnabled: Boolean,
         processSlot: String?
+    ): EngineHostedBootstrapResult = runBootstrap(
+        instanceId = instanceId,
+        providerHookEnabled = providerHookEnabled,
+        processSlot = processSlot,
+        effectiveGuestProcessName = null
+    )
+
+    override fun runBootstrap(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?,
+        effectiveGuestProcessName: String?
     ): EngineHostedBootstrapResult = EngineHostedBootstrapResult.fromLoader(
-        runBootstrapLoader(instanceId, providerHookEnabled, processSlot)
+        runBootstrapLoader(instanceId, providerHookEnabled, processSlot, effectiveGuestProcessName)
     )
 
     private fun runBootstrapLoader(
         instanceId: String,
         providerHookEnabled: Boolean,
-        processSlot: String?
+        processSlot: String?,
+        effectiveGuestProcessName: String?
     ): HostedBootstrapResult {
-        val runtime = authoritativeRuntime(instanceId, processSlot)
+        val runtimeView = authoritativeRuntime(instanceId, processSlot, effectiveGuestProcessName)
             ?: return authorityFailureResult(
                 instanceId,
                 processSlot,
                 "authoritative engine runtime unavailable or stale"
             )
+        val runtime = runtimeView.runtime
         val installRecord = runtime.toInstallRecordOrNull()
             ?: return authorityFailureResult(
                 instanceId,
@@ -122,7 +172,8 @@ class DefaultHostedRuntimeEngine @Inject constructor(
                     publishedInstanceId,
                     EngineHostedBootstrapResult.fromLoader(result)
                 )
-            }
+            },
+            effectiveGuestProcessName = runtimeView.effectiveGuestProcessName
         ).run(instanceId, runtime.processSlot)
     }
 
@@ -130,15 +181,27 @@ class DefaultHostedRuntimeEngine @Inject constructor(
         instanceId: String,
         providerHookEnabled: Boolean,
         processSlot: String?
+    ): HostedRuntimeBindOutcome = bindApplication(
+        instanceId = instanceId,
+        providerHookEnabled = providerHookEnabled,
+        processSlot = processSlot,
+        effectiveGuestProcessName = null
+    )
+
+    override fun bindApplication(
+        instanceId: String,
+        providerHookEnabled: Boolean,
+        processSlot: String?,
+        effectiveGuestProcessName: String?
     ): HostedRuntimeBindOutcome {
         val fingerprint = requireNotNull(
-            bindingFingerprint(instanceId, providerHookEnabled, processSlot)
+            bindingFingerprint(instanceId, providerHookEnabled, processSlot, effectiveGuestProcessName)
         ) {
             "Unable to build hosted runtime binding fingerprint: instanceId=$instanceId"
         }
         return processRuntime.bindApplication(instanceId, fingerprint) {
             EngineHostedBootstrapResult.fromLoader(
-                runBootstrapLoader(instanceId, providerHookEnabled, processSlot)
+                runBootstrapLoader(instanceId, providerHookEnabled, processSlot, effectiveGuestProcessName)
             )
         }
     }
@@ -146,9 +209,11 @@ class DefaultHostedRuntimeEngine @Inject constructor(
     private fun bindingFingerprint(
         instanceId: String,
         providerHookEnabled: Boolean,
-        processSlot: String?
+        processSlot: String?,
+        effectiveGuestProcessName: String?
     ): HostedRuntimeBindingFingerprint? {
-        val engineRuntime = authoritativeRuntime(instanceId, processSlot) ?: return null
+        val runtimeView = authoritativeRuntime(instanceId, processSlot, effectiveGuestProcessName) ?: return null
+        val engineRuntime = runtimeView.runtime
         val snapshot = engineRuntime.packageSnapshot
         val sourceSha256 = snapshot.sourceSha256 ?: return null
         if (snapshot.splitSourceDirs.size != snapshot.splitSha256s.size) return null
@@ -167,20 +232,22 @@ class DefaultHostedRuntimeEngine @Inject constructor(
             splitApkSha256s = snapshot.splitSha256s,
             applicationClassName = snapshot.applicationClassName,
             engineProfile = engineRuntime.profile.name,
-            providerHookEnabled = providerHookEnabled
+            providerHookEnabled = providerHookEnabled,
+            effectiveGuestProcessName = runtimeView.effectiveGuestProcessName
         )
     }
 
     private fun authoritativeRuntime(
         instanceId: String,
-        expectedProcessSlot: String?
-    ): VirtualInstanceRuntime? = EngineRuntimeIpcClients.engineQueryRuntimeState(instanceId)
+        expectedProcessSlot: String?,
+        effectiveGuestProcessName: String?
+    ): ProcessSpecificHostedRuntimeView? = EngineRuntimeIpcClients.engineQueryRuntimeState(instanceId)
         ?.takeIf { runtime ->
             runtime.instanceId == instanceId &&
-                (expectedProcessSlot.isNullOrBlank() || runtime.processSlot == expectedProcessSlot) &&
                 runtime.state != VirtualRuntimeState.STOPPED &&
                 runtime.state != VirtualRuntimeState.DEAD
         }
+        ?.deriveHostedRuntimeView(expectedProcessSlot, effectiveGuestProcessName)
 
     private fun authorityFailureResult(
         instanceId: String,
@@ -201,6 +268,63 @@ class DefaultHostedRuntimeEngine @Inject constructor(
             success = false
         )
     }
+}
+
+internal data class ProcessSpecificHostedRuntimeView(
+    val runtime: VirtualInstanceRuntime,
+    val effectiveGuestProcessName: String
+)
+
+internal fun VirtualInstanceRuntime.deriveHostedRuntimeView(
+    expectedProcessSlot: String?,
+    requestedEffectiveGuestProcessName: String?
+): ProcessSpecificHostedRuntimeView? {
+    val applicationGuestProcessName = packageSnapshot.processName
+        .toEffectiveGuestProcessName(originPackageName)
+    if (requestedEffectiveGuestProcessName == null) {
+        if (!expectedProcessSlot.isNullOrBlank() && processSlot != expectedProcessSlot) return null
+        return ProcessSpecificHostedRuntimeView(this, applicationGuestProcessName)
+    }
+
+    val effectiveGuestProcessName = requestedEffectiveGuestProcessName
+        .trim()
+        .takeIf(String::isNotEmpty)
+        ?.toEffectiveGuestProcessName(originPackageName)
+        ?: return null
+    val targetProcessSlot = expectedProcessSlot?.trim()?.takeIf(String::isNotEmpty) ?: return null
+
+    if (effectiveGuestProcessName == applicationGuestProcessName) {
+        if (targetProcessSlot != processSlot) return null
+        return ProcessSpecificHostedRuntimeView(this, applicationGuestProcessName)
+    }
+    if (targetProcessSlot == processSlot) return null
+    if (effectiveGuestProcessName !in packageSnapshot.declaredComponentGuestProcessNames()) return null
+
+    return ProcessSpecificHostedRuntimeView(
+        runtime = copy(
+            processSlot = targetProcessSlot,
+            processId = null,
+            processName = targetProcessSlot
+        ),
+        effectiveGuestProcessName = effectiveGuestProcessName
+    )
+}
+
+private fun com.multiapp.core.model.virtual.VirtualPackageSnapshot.declaredComponentGuestProcessNames(): Set<String> =
+    processName.toEffectiveGuestProcessName(originPackageName).let { applicationGuestProcessName ->
+        sequenceOf(activities, services, receivers, providers)
+            .flatten()
+            .map { component ->
+                component.processName
+                    ?.toEffectiveGuestProcessName(originPackageName)
+                    ?: applicationGuestProcessName
+            }
+            .toSet()
+    }
+
+private fun String?.toEffectiveGuestProcessName(originPackageName: String): String {
+    val normalized = this?.trim()?.takeIf(String::isNotEmpty) ?: return originPackageName
+    return if (normalized.startsWith(':')) originPackageName + normalized else normalized
 }
 
 private class ReadOnlyRuntimeInstanceManager(

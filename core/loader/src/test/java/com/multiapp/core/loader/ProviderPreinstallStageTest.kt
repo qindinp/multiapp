@@ -16,7 +16,7 @@ import kotlin.test.assertEquals
 class ProviderPreinstallStageTest {
 
     @Test
-    fun `legacy null process installs main provider and skips custom provider`() {
+    fun `application process installs only its providers`() {
         val createCount = AtomicInteger()
         val attachCount = AtomicInteger()
         val runtime = VirtualProviderRuntime(
@@ -27,7 +27,7 @@ class ProviderPreinstallStageTest {
             providerAttacher = ProviderAttacher { _, _, _ -> attachCount.incrementAndGet() }
         )
         val snapshot = snapshot(
-            processName = null,
+            processName = ":main",
             providers = listOf(
                 provider("com.test.minimal.MainProvider", "com.test.minimal.main", processName = null),
                 provider("com.test.minimal.RemoteProvider", "com.test.minimal.remote", processName = ":remote")
@@ -36,12 +36,13 @@ class ProviderPreinstallStageTest {
 
         val result = preinstaller(runtime).preinstall(request(snapshot))
 
-        assertEquals(GuestProviderPreinstallStatus.PARTIAL, result.status)
+        assertEquals(GuestProviderPreinstallStatus.PASS, result.status)
+        assertEquals("com.test.minimal:main", result.effectiveGuestProcessName)
         assertEquals(1, result.attemptedProviderCount)
         assertEquals(1, result.installedProviderCount)
         assertEquals(1, result.skippedProviderCount)
         assertEquals(listOf("com.test.minimal.main"), result.installedAuthorities)
-        assertEquals(listOf("CUSTOM_PROCESS_NOT_BOUND"), result.skippedReasons)
+        assertEquals(listOf("DIFFERENT_GUEST_PROCESS"), result.skippedReasons)
         assertEquals(1, createCount.get())
         assertEquals(1, attachCount.get())
 
@@ -49,11 +50,13 @@ class ProviderPreinstallStageTest {
         assertEquals("com.test.minimal.RemoteProvider", skipped.providerClassName)
         assertEquals(":remote", skipped.declaredProcessName)
         assertEquals("com.test.minimal:remote", skipped.effectiveProcessName)
-        assertEquals(GuestProviderPreinstallSkipReason.CUSTOM_PROCESS_NOT_BOUND, skipped.reason)
+        assertEquals(GuestProviderPreinstallSkipReason.DIFFERENT_GUEST_PROCESS, skipped.reason)
     }
 
     @Test
-    fun `custom process provider is fail closed before runtime creation`() {
+    fun `custom process installs its provider`() {
+        val createCount = AtomicInteger()
+        val attachCount = AtomicInteger()
         val snapshot = snapshot(
             providers = listOf(
                 provider(
@@ -64,21 +67,25 @@ class ProviderPreinstallStageTest {
             )
         )
         val runtime = VirtualProviderRuntime(
-            providerFactory = ProviderFactory { _, _ -> error("custom process provider must not be created") },
-            providerAttacher = ProviderAttacher { _, _, _ -> error("custom process provider must not attach") }
+            providerFactory = ProviderFactory { _, _ ->
+                createCount.incrementAndGet()
+                FakeProvider()
+            },
+            providerAttacher = ProviderAttacher { _, _, _ -> attachCount.incrementAndGet() }
         )
 
-        val result = preinstaller(runtime).preinstall(request(snapshot))
-
-        assertEquals(GuestProviderPreinstallStatus.SKIPPED, result.status)
-        assertEquals(0, result.attemptedProviderCount)
-        assertEquals(0, result.installedProviderCount)
-        assertEquals(1, result.skippedProviderCount)
-        assertEquals(listOf("CUSTOM_PROCESS_NOT_BOUND"), result.skippedReasons)
-        assertEquals(
-            GuestProviderPreinstallSkipReason.CUSTOM_PROCESS_NOT_BOUND,
-            result.skippedProviders.single().reason
+        val result = preinstaller(runtime).preinstall(
+            request(snapshot, effectiveGuestProcessName = "com.test.minimal:remote")
         )
+
+        assertEquals(GuestProviderPreinstallStatus.PASS, result.status)
+        assertEquals("com.test.minimal:remote", result.effectiveGuestProcessName)
+        assertEquals(1, result.attemptedProviderCount)
+        assertEquals(1, result.installedProviderCount)
+        assertEquals(0, result.skippedProviderCount)
+        assertEquals(listOf("com.test.minimal.remote"), result.installedAuthorities)
+        assertEquals(1, createCount.get())
+        assertEquals(1, attachCount.get())
     }
 
     @Test
@@ -129,7 +136,10 @@ class ProviderPreinstallStageTest {
         }
     )
 
-    private fun request(snapshot: VirtualPackageSnapshot): GuestProviderPreinstallRequest {
+    private fun request(
+        snapshot: VirtualPackageSnapshot,
+        effectiveGuestProcessName: String? = null
+    ): GuestProviderPreinstallRequest {
         val classLoader = ClassLoader.getSystemClassLoader()
         return GuestProviderPreinstallRequest(
             hostPackageName = "com.multiapp.app",
@@ -144,7 +154,13 @@ class ProviderPreinstallStageTest {
                 sourceDir = snapshot.sourceDir,
                 nativeLibraryDir = snapshot.nativeLibraryDir,
                 classLoader = classLoader,
-                packageSnapshot = snapshot
+                packageSnapshot = snapshot,
+                effectiveGuestProcessName = effectiveGuestProcessName
+                    ?: if (snapshot.processName?.startsWith(':') == true) {
+                        snapshot.originPackageName + snapshot.processName
+                    } else {
+                        snapshot.processName ?: snapshot.originPackageName
+                    }
             )
         )
     }

@@ -90,6 +90,35 @@ class EngineComponentIpcServicesTest {
     }
 
     @Test
+    fun `component Service execution plan accepts server scoped target without primary lease`() {
+        val request = serviceRequest().copy(operationLeaseRequested = true)
+        val componentPlan = servicePlan("component_authorized").copy(
+            targets = listOf(
+                VirtualServiceDispatchTarget(
+                    instanceId = "instance-1",
+                    originPackageName = "com.example",
+                    virtualPackageName = "com.multiapp.instance.example",
+                    serviceClassName = "com.example.RemoteService",
+                    action = "test.SYNC",
+                    reason = "explicit",
+                    operation = VirtualServiceOperation.START,
+                    processSlot = "com.multiapp.app:v3",
+                    processName = "com.example:remote",
+                    sameProcess = false
+                )
+            )
+        )
+
+        val accepted = IpcBackedVirtualServiceService(
+            remotePlan = { _, _ -> componentPlan },
+            authorityConnected = { true }
+        ).planService("instance-1", request)
+
+        assertSame(componentPlan, accepted)
+        assertEquals(null, accepted.targets.single().operationLease)
+    }
+
+    @Test
     fun `unavailable authority fails closed without Service fallback`() {
         val fallback = mockk<VirtualServiceService>(relaxed = true)
         val request = serviceRequest()

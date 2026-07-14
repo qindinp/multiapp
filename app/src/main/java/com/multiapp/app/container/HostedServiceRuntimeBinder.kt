@@ -2,7 +2,11 @@ package com.multiapp.app.container
 
 import android.content.Context
 import android.content.Intent
+import android.os.Binder
+import android.os.IBinder
 import com.multiapp.core.engine.DefaultEngineServiceRouter
+import com.multiapp.core.engine.EngineComponentProcessLaunchTicket
+import com.multiapp.core.engine.EngineComponentProcessOperationResult
 import com.multiapp.core.engine.EngineHostedBootstrapResult
 import com.multiapp.core.engine.EngineRuntimeAuthorityValidator
 import com.multiapp.core.engine.EngineRuntimeIpcClients
@@ -17,7 +21,14 @@ class HostedServiceRuntimeBinder(
     private val requestDecoder: (String, Intent) -> EngineServiceStartRoute? = { hostPackageName, intent ->
         serviceRouter.routeFromProxyIntent(hostPackageName, intent)
     },
-    private val authorityQuery: (String) -> EngineRuntimeIpcSnapshot? = EngineRuntimeIpcClients::queryRuntime
+    private val authorityQuery: (String) -> EngineRuntimeIpcSnapshot? = EngineRuntimeIpcClients::queryRuntime,
+    private val componentAuthorityQuery: (String) -> EngineComponentProcessOperationResult? =
+        EngineRuntimeIpcClients::queryCallingComponentProcess,
+    private val componentClientAttacher: (
+        EngineComponentProcessLaunchTicket,
+        IBinder
+    ) -> EngineComponentProcessOperationResult? = EngineRuntimeIpcClients::attachComponentProcessClient,
+    private val processToken: IBinder = PROCESS_TOKEN
 ) {
     fun ensureBound(hostContext: Context, proxyIntent: Intent?): HostedServiceRuntimeBindResult {
         val request = proxyIntent
@@ -28,21 +39,78 @@ class HostedServiceRuntimeBinder(
     }
 
     fun ensureBound(hostContext: Context, route: EngineServiceStartRoute): HostedServiceRuntimeBindResult {
-        val authority = EngineRuntimeAuthorityValidator.validate(
+        val primaryAuthority = EngineRuntimeAuthorityValidator.validate(
             snapshot = authorityQuery(route.instanceId),
             expectedProcessSlot = route.processSlot
         )
-        if (!authority.allowed) {
+        val launchTicket = route.componentProcessLaunchTicket
+        val queriedComponentAuthority = if (primaryAuthority.allowed && launchTicket == null) {
+            null
+        } else {
+            componentAuthorityQuery(route.instanceId)
+        }
+        val liveComponentAuthority = queriedComponentAuthority
+            ?.takeIf { result -> result.isLiveCallerAuthority() }
+        if (liveComponentAuthority != null && !liveComponentAuthority.matches(route, launchTicket)) {
             return HostedServiceRuntimeBindResult.Failed(
                 instanceId = route.instanceId,
                 processSlot = route.processSlot,
                 errorClassName = SecurityException::class.java.name,
-                errorMessage = authority.reason,
+                errorMessage = "component_process_caller_identity_mismatch",
+                detail = "componentProcessAuthorityMismatch"
+            )
+        }
+        var componentAuthority = liveComponentAuthority
+        if (!primaryAuthority.allowed && componentAuthority == null && launchTicket == null) {
+            return HostedServiceRuntimeBindResult.Failed(
+                instanceId = route.instanceId,
+                processSlot = route.processSlot,
+                errorClassName = SecurityException::class.java.name,
+                errorMessage = primaryAuthority.reason,
                 detail = "engineRuntimeAuthorityRejected"
             )
         }
+        var pendingAttachDetail = if (componentAuthority != null && launchTicket != null) {
+            "componentProcessAlreadyAttached"
+        } else {
+            null
+        }
+        if (componentAuthority == null && launchTicket != null) {
+            val pendingAttach = componentClientAttacher(launchTicket, processToken)
+            if (pendingAttach.matchesAttachedProcess(route, launchTicket)) {
+                pendingAttachDetail = if (pendingAttach?.idempotent == true) {
+                    "componentProcessAlreadyAttached"
+                } else {
+                    "componentProcessAttached"
+                }
+            } else {
+                componentAuthority = componentAuthorityQuery(route.instanceId)
+                    ?.takeIf { result -> result.matches(route, launchTicket) }
+                if (componentAuthority == null) {
+                    return HostedServiceRuntimeBindResult.Failed(
+                        instanceId = route.instanceId,
+                        processSlot = route.processSlot,
+                        errorClassName = SecurityException::class.java.name,
+                        errorMessage = pendingAttach?.reason
+                            ?: "component_process_attach_ipc_unavailable",
+                        detail = "componentProcessAttachFailed"
+                    )
+                }
+                pendingAttachDetail = "componentProcessAlreadyAttached"
+            }
+        }
+        val effectiveGuestProcessName = componentAuthority
+            ?.processState
+            ?.effectiveGuestProcessName
+            ?: launchTicket?.effectiveGuestProcessName
+        val providerHookEnabled = componentAuthority == null && launchTicket == null
         val runtimeEngine = runtimeEngineFactory(hostContext)
-        runtimeEngine.reusableResult(route.instanceId)?.let { result ->
+        runtimeEngine.reusableResult(
+            instanceId = route.instanceId,
+            providerHookEnabled = providerHookEnabled,
+            processSlot = route.processSlot,
+            effectiveGuestProcessName = effectiveGuestProcessName
+        )?.let { result ->
             if (!route.processSlot.isNullOrBlank() && result.processSlot != route.processSlot) {
                 return HostedServiceRuntimeBindResult.Failed(
                     instanceId = route.instanceId,
@@ -52,27 +120,31 @@ class HostedServiceRuntimeBinder(
                     detail = "runtimeProcessSlotMismatch"
                 )
             }
-            return HostedServiceRuntimeBindResult.Bound(
+            val bound = HostedServiceRuntimeBindResult.Bound(
                 instanceId = route.instanceId,
                 processSlot = route.processSlot,
                 result = result,
                 status = "CACHED",
-                detail = "runtimeAlreadyReusable"
+                detail = pendingAttachDetail ?: "runtimeAlreadyReusable"
             )
+            return bound
         }
 
         return runCatching {
             val result = runtimeEngine.bindApplication(
                 instanceId = route.instanceId,
-                processSlot = route.processSlot
+                providerHookEnabled = providerHookEnabled,
+                processSlot = route.processSlot,
+                effectiveGuestProcessName = effectiveGuestProcessName
             ).result
-            HostedServiceRuntimeBindResult.Bound(
+            val bound = HostedServiceRuntimeBindResult.Bound(
                 instanceId = route.instanceId,
                 processSlot = route.processSlot,
                 result = result,
                 status = "BOUND",
-                detail = "runtimeBoundForServiceProxy"
+                detail = pendingAttachDetail ?: "runtimeBoundForServiceProxy"
             )
+            bound
         }.getOrElse { error ->
             HostedServiceRuntimeBindResult.Failed(
                 instanceId = route.instanceId,
@@ -82,6 +154,42 @@ class HostedServiceRuntimeBinder(
                 detail = "runtimeBindFailed"
             )
         }
+    }
+
+    private fun EngineComponentProcessOperationResult.isLiveCallerAuthority(): Boolean =
+        accepted && alreadyRunning && processState?.live == true
+
+    private fun EngineComponentProcessOperationResult?.matches(
+        route: EngineServiceStartRoute,
+        ticket: EngineComponentProcessLaunchTicket?
+    ): Boolean {
+        val state = this?.processState
+        return this != null && state != null && isLiveCallerAuthority() &&
+            instanceId == route.instanceId &&
+            state.instanceId == route.instanceId &&
+            state.processSlot == route.processSlot &&
+            (ticket == null ||
+                ticket.instanceId == route.instanceId &&
+                ticket.processSlot == route.processSlot &&
+                state.effectiveGuestProcessName == ticket.effectiveGuestProcessName)
+    }
+
+    private fun EngineComponentProcessOperationResult?.matchesAttachedProcess(
+        route: EngineServiceStartRoute,
+        ticket: EngineComponentProcessLaunchTicket
+    ): Boolean {
+        val state = this?.processState
+        return this != null && accepted && !alreadyRunning && state?.live == true &&
+            instanceId == route.instanceId &&
+            state.instanceId == route.instanceId &&
+            ticket.instanceId == route.instanceId &&
+            state.effectiveGuestProcessName == ticket.effectiveGuestProcessName &&
+            state.processSlot == route.processSlot &&
+            ticket.processSlot == route.processSlot
+    }
+
+    private companion object {
+        val PROCESS_TOKEN: IBinder = Binder()
     }
 }
 

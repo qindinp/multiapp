@@ -2,6 +2,7 @@ package com.multiapp.core.engine
 
 import android.os.IBinder
 import com.multiapp.core.model.engine.EngineProfile
+import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.instance.CompatibilityMode
@@ -362,6 +363,38 @@ class EngineServerRuntimeTest {
         val deadClient = owner.query(runtime.instanceId, ":remote")
         assertFalse(deadClient.accepted)
         assertEquals(0, owner.componentProcessClients.activeCount())
+    }
+
+    @Test
+    fun `component prepare issues one launch ticket without blocking on guest bootstrap`() {
+        val runtimeRegistry = EngineRuntimeRegistry()
+        val runtime = providerRuntime()
+        runtimeRegistry.register(runtime)
+        var bootstrapCalled = false
+        val owner = EngineServerRuntime.createForTest(
+            hostPackageName = runtime.hostPackageName,
+            instanceManager = mockk<InstanceManager>(relaxed = true),
+            virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+            activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = EngineProcessBootstrapper {
+                bootstrapCalled = true
+                error("component prepare must not synchronously bootstrap the target process")
+            },
+            runtimeRegistry = runtimeRegistry,
+            systemServer = DefaultVirtualSystemServer(runtimeRegistry)
+        )
+
+        val first = owner.prepare(runtime.instanceId, ":remote")
+        val repeated = owner.prepare(runtime.instanceId, ":remote")
+
+        assertTrue(first.accepted, first.reason)
+        assertFalse(first.alreadyRunning)
+        assertEquals(null, first.processState)
+        assertTrue(first.launchTicket?.attachCapability?.isNotBlank() == true)
+        assertTrue(repeated.accepted, repeated.reason)
+        assertTrue(repeated.idempotent)
+        assertEquals(first.launchTicket, repeated.launchTicket)
+        assertFalse(bootstrapCalled)
     }
 
     private fun providerRuntime(): VirtualInstanceRuntime = VirtualInstanceRuntime(

@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.ComponentName
 import android.content.ServiceConnection
 import android.net.Uri
+import android.os.Bundle
 import android.os.IBinder
 import com.multiapp.core.loader.BootstrapResult
 import com.multiapp.core.loader.HostedBootstrapResult
@@ -38,6 +39,7 @@ import java.util.IdentityHashMap
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.spyk
+import io.mockk.slot
 import io.mockk.verify
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -334,6 +336,193 @@ class EngineContainerDispatchersTest {
         assertEquals("fallback-called", result.reason)
         assertEquals(EngineResultStatus.PARTIAL, planEvidence?.verdict)
         assertEquals("implicit_service_route_planned", planEvidence?.entries?.get("servicePlanMessage"))
+        verify(exactly = 1) { fallback.resolveStartServiceIntent(intent, false) }
+    }
+
+    @Test
+    fun `ams custom Service start uses prepared component slot for StubService`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(
+            runtime(
+                services = listOf(
+                    ResolvedComponent(
+                        name = "com.example.app.RemoteService",
+                        processName = ":remote",
+                        resolvedIntentFilters = listOf(
+                            ResolvedIntentFilter(actions = listOf("test.REMOTE"))
+                        )
+                    )
+                )
+            )
+        )
+        val intent = serviceSourceIntent(action = "test.REMOTE")
+        val originalRequest = VirtualServiceStartRequest(
+            instanceId = runtime.instanceId,
+            originPackageName = runtime.originPackageName,
+            guestServiceClassName = "com.example.app.RemoteService",
+            sourceIntent = intent,
+            reason = "implicit",
+            proxyToken = "original-proxy-token",
+            processSlot = runtime.processSlot
+        )
+        val originalProxyComponent = mockk<ComponentName> {
+            every { packageName } returns runtime.hostPackageName
+            every { className } returns "${runtime.hostPackageName}.container.StubServiceV1"
+        }
+        val originalProxy = mockk<Intent>(relaxed = true) {
+            every { component } returns originalProxyComponent
+        }
+        val routedProxy = mockk<Intent>(relaxed = true)
+        val fallback = mockk<VirtualAmsComponentDispatcher>()
+        every {
+            fallback.resolveStartServiceIntent(intent, false)
+        } returns VirtualContextWrapper.StartServiceMappingResult.Remapped(
+            sourceIntent = intent,
+            foreground = false,
+            startRequest = originalRequest,
+            proxyIntent = originalProxy
+        )
+        val componentSlot = "${runtime.hostPackageName}:v3"
+        val serviceManager = mockk<VirtualServiceManager>()
+        every { serviceManager.stubServiceClassNameForProcessSlot(componentSlot) } returns
+            "${runtime.hostPackageName}.container.StubServiceV3"
+        every {
+            serviceManager.createProxyIntent(match { request -> request.processSlot == componentSlot })
+        } returns routedProxy
+        val dispatcher = DefaultEngineAmsComponentDispatcher(
+            fallback = fallback,
+            instanceId = runtime.instanceId,
+            serviceService = server.serviceService,
+            componentProcessPreparer = { instanceId, processName ->
+                assertEquals(runtime.instanceId, instanceId)
+                assertEquals("com.example.app:remote", processName)
+                EngineComponentProcessOperationResult(
+                    operation = COMPONENT_PROCESS_PREPARE_OPERATION,
+                    instanceId = runtime.instanceId,
+                    accepted = true,
+                    idempotent = true,
+                    alreadyRunning = true,
+                    launchTicket = null,
+                    processState = EngineComponentProcessState(
+                        instanceId = runtime.instanceId,
+                        effectiveGuestProcessName = processName,
+                        processSlot = componentSlot,
+                        processId = 4303,
+                        processEpoch = 3L,
+                        live = true
+                    ),
+                    reason = "component_process_already_running"
+                )
+            },
+            serviceManagerFactory = { hostPackageName ->
+                assertEquals(runtime.hostPackageName, hostPackageName)
+                serviceManager
+            },
+            broadcastService = server.broadcastService
+        )
+
+        val result = dispatcher.resolveStartServiceIntent(intent, foreground = false)
+            as VirtualContextWrapper.StartServiceMappingResult.Remapped
+
+        assertEquals(componentSlot, result.startRequest.processSlot)
+        assertTrue(result.proxyIntent === routedProxy)
+        verify(exactly = 1) { fallback.resolveStartServiceIntent(intent, false) }
+        verify(exactly = 1) {
+            serviceManager.createProxyIntent(match { request -> request.processSlot == componentSlot })
+        }
+    }
+
+    @Test
+    fun `ams custom Service start routes ticket without waiting for target bootstrap`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(
+            runtime(
+                services = listOf(
+                    ResolvedComponent(
+                        name = "com.example.app.RemoteService",
+                        processName = ":remote",
+                        resolvedIntentFilters = listOf(
+                            ResolvedIntentFilter(actions = listOf("test.REMOTE"))
+                        )
+                    )
+                )
+            )
+        )
+        val intent = serviceSourceIntent(action = "test.REMOTE")
+        val originalRequest = VirtualServiceStartRequest(
+            instanceId = runtime.instanceId,
+            originPackageName = runtime.originPackageName,
+            guestServiceClassName = "com.example.app.RemoteService",
+            sourceIntent = intent,
+            reason = "implicit",
+            proxyToken = "original-proxy-token",
+            processSlot = runtime.processSlot
+        )
+        val originalProxyComponent = mockk<ComponentName> {
+            every { packageName } returns runtime.hostPackageName
+        }
+        val originalProxy = mockk<Intent>(relaxed = true) {
+            every { component } returns originalProxyComponent
+        }
+        val fallback = mockk<VirtualAmsComponentDispatcher>()
+        every { fallback.resolveStartServiceIntent(intent, false) } returns
+            VirtualContextWrapper.StartServiceMappingResult.Remapped(
+                sourceIntent = intent,
+                foreground = false,
+                startRequest = originalRequest,
+                proxyIntent = originalProxy
+            )
+        val componentSlot = "${runtime.hostPackageName}:v3"
+        val launchTicket = EngineComponentProcessLaunchTicket(
+            instanceId = runtime.instanceId,
+            effectiveGuestProcessName = "com.example.app:remote",
+            processSlot = componentSlot,
+            attachCapability = "component-service-${"x".repeat(32)}"
+        )
+        val encodedTicket = componentTicketBundle(launchTicket)
+        val routedProxy = mockk<Intent>(relaxed = true)
+        val serviceManager = mockk<VirtualServiceManager>()
+        every { serviceManager.stubServiceClassNameForProcessSlot(componentSlot) } returns
+            "${runtime.hostPackageName}.container.StubServiceV3"
+        every {
+            serviceManager.createProxyIntent(match { request -> request.processSlot == componentSlot })
+        } returns routedProxy
+        val ticketBundle = slot<Bundle>()
+        every {
+            routedProxy.putExtra(EXTRA_ENGINE_COMPONENT_PROCESS_LAUNCH_TICKET, capture(ticketBundle))
+        } returns routedProxy
+        val dispatcher = DefaultEngineAmsComponentDispatcher(
+            fallback = fallback,
+            instanceId = runtime.instanceId,
+            serviceService = server.serviceService,
+            componentProcessPreparer = { _, processName ->
+                EngineComponentProcessOperationResult(
+                    operation = COMPONENT_PROCESS_PREPARE_OPERATION,
+                    instanceId = runtime.instanceId,
+                    accepted = true,
+                    idempotent = false,
+                    alreadyRunning = false,
+                    launchTicket = launchTicket,
+                    processState = null,
+                    reason = "component_process_launch_capability_issued"
+                )
+            },
+            serviceManagerFactory = { serviceManager },
+            componentTicketEncoder = { ticket ->
+                assertEquals(launchTicket, ticket)
+                encodedTicket
+            },
+            broadcastService = server.broadcastService
+        )
+
+        val result = dispatcher.resolveStartServiceIntent(intent, foreground = false)
+            as VirtualContextWrapper.StartServiceMappingResult.Remapped
+        val routedTicket = ticketBundle.captured.toComponentProcessLaunchTicketOrNull()
+
+        assertEquals(componentSlot, result.startRequest.processSlot)
+        assertEquals(runtime.instanceId, routedTicket?.instanceId)
+        assertEquals("com.example.app:remote", routedTicket?.effectiveGuestProcessName)
+        assertEquals(componentSlot, routedTicket?.processSlot)
         verify(exactly = 1) { fallback.resolveStartServiceIntent(intent, false) }
     }
 
@@ -972,6 +1161,14 @@ class EngineContainerDispatchersTest {
             processSlot = "com.multiapp.app:v2",
             proxyToken = proxyToken
         )
+        val launchTicket = EngineComponentProcessLaunchTicket(
+            instanceId = "inst-001",
+            effectiveGuestProcessName = "com.example.app:remote",
+            processSlot = "com.multiapp.app:v2",
+            attachCapability = "service-route-${"x".repeat(32)}"
+        )
+        every { intent.getBundleExtra(EXTRA_ENGINE_COMPONENT_PROCESS_LAUNCH_TICKET) } returns
+            componentTicketBundle(launchTicket)
         val router = DefaultEngineServiceRouter(
             processRuntime = DefaultEngineHostedProcessRuntime(VirtualProcessRuntime())
         )
@@ -988,6 +1185,7 @@ class EngineContainerDispatchersTest {
         assertEquals("explicit", route.reason)
         assertTrue(route.foreground)
         assertEquals("com.multiapp.app:v2", route.processSlot)
+        assertEquals(launchTicket, route.componentProcessLaunchTicket)
     }
 
     @Test
@@ -1224,7 +1422,15 @@ class EngineContainerDispatchersTest {
         instanceId: String = "inst-001",
         activities: List<ResolvedComponent> = emptyList(),
         providers: List<ResolvedComponent> = emptyList(),
-        receivers: List<ResolvedComponent> = emptyList()
+        receivers: List<ResolvedComponent> = emptyList(),
+        services: List<ResolvedComponent> = listOf(
+            ResolvedComponent(
+                name = "com.example.app.SyncService",
+                resolvedIntentFilters = listOf(
+                    ResolvedIntentFilter(actions = listOf("test.SYNC"))
+                )
+            )
+        )
     ): VirtualInstanceRuntime = VirtualInstanceRuntime(
         instanceId = instanceId,
         hostPackageName = "com.multiapp.app",
@@ -1243,14 +1449,7 @@ class EngineContainerDispatchersTest {
             sourceDir = "build/tmp/example.apk",
             dataDir = "build/tmp/$instanceId",
             activities = activities,
-            services = listOf(
-                ResolvedComponent(
-                    name = "com.example.app.SyncService",
-                    resolvedIntentFilters = listOf(
-                        ResolvedIntentFilter(actions = listOf("test.SYNC"))
-                    )
-                )
-            ),
+            services = services,
             receivers = receivers,
             providers = providers
         ),
@@ -1460,5 +1659,19 @@ class EngineContainerDispatchersTest {
         every { getStringExtra(VirtualServiceManager.EXTRA_PROCESS_SLOT) } returns processSlot
         every { getStringExtra(VirtualServiceManager.EXTRA_VIRTUAL_SERVICE_TOKEN) } returns proxyToken
         every { getBooleanExtra(VirtualServiceManager.EXTRA_FOREGROUND_SERVICE, false) } returns foreground
+    }
+
+    private fun componentTicketBundle(ticket: EngineComponentProcessLaunchTicket): Bundle = mockk {
+        every { keySet() } returns setOf(
+            EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+            EngineRuntimeIpcContract.KEY_EFFECTIVE_GUEST_PROCESS_NAME,
+            EngineRuntimeIpcContract.KEY_PROCESS_SLOT,
+            EngineRuntimeIpcContract.KEY_ATTACH_CAPABILITY
+        )
+        every { getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID) } returns ticket.instanceId
+        every { getString(EngineRuntimeIpcContract.KEY_EFFECTIVE_GUEST_PROCESS_NAME) } returns
+            ticket.effectiveGuestProcessName
+        every { getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT) } returns ticket.processSlot
+        every { getString(EngineRuntimeIpcContract.KEY_ATTACH_CAPABILITY) } returns ticket.attachCapability
     }
 }

@@ -15,7 +15,8 @@ class ApplicationStage(
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val effectiveGuestProcessName: String? = null
 ) {
     fun execute(input: BootstrapStageInput): BootstrapStageOutput {
         val startMs = clock()
@@ -38,6 +39,11 @@ class ApplicationStage(
             input = input,
             startMs = startMs,
             message = "Package snapshot is required before Application creation"
+        )
+        val currentGuestProcessName = resolveGuestProcessName(
+            requestedProcessName = effectiveGuestProcessName,
+            applicationProcessName = packageSnapshot.processName,
+            originPackageName = packageSnapshot.originPackageName
         )
 
         val resolvedAppClassName = applicationClassNameResolver(guestClassLoader, originApkPath)
@@ -77,6 +83,8 @@ class ApplicationStage(
                     "applicationClassSource" to appClassSource,
                     "originPackageName" to instance.originPackageName,
                     "virtualPackageName" to instance.virtualPackageName,
+                    "effectiveGuestProcessName" to currentGuestProcessName,
+                    "processSlot" to input.processSlot.orEmpty(),
                     "threadName" to Thread.currentThread().name,
                     "elapsedMs" to (System.currentTimeMillis() - startMs).toString()
                 ) + extra
@@ -103,7 +111,8 @@ class ApplicationStage(
                     splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
                     splitNames = packageSnapshot.splitNames,
                     isolatedSplits = packageSnapshot.isolatedSplits,
-                    processSlot = input.processSlot
+                    processSlot = input.processSlot,
+                    effectiveGuestProcessName = currentGuestProcessName
                 )
                 val creation = guestApplicationCreator.create(
                     GuestApplicationCreateRequest(
@@ -138,7 +147,7 @@ class ApplicationStage(
                 providerPreinstallEvidence = providerPreinstallResult.toEvidence()
                 progress(
                     "PROVIDER_PREINSTALL_FINISHED",
-                    "same-process provider preinstall finished before Application.onCreate",
+                    "current guest process provider preinstall finished before Application.onCreate",
                     providerPreinstallEvidence.associate { it.key to it.value }
                 )
                 progress("ON_CREATE_STARTED", "guest Application.onCreate started")
@@ -171,7 +180,9 @@ class ApplicationStage(
                             ),
                             BootstrapEvidence("contextPackageName", creation.attachedContextPackageName.orEmpty()),
                             BootstrapEvidence("originPackageName", instance.originPackageName),
-                            BootstrapEvidence("virtualPackageName", instance.virtualPackageName)
+                            BootstrapEvidence("virtualPackageName", instance.virtualPackageName),
+                            BootstrapEvidence("effectiveGuestProcessName", currentGuestProcessName),
+                            BootstrapEvidence("processSlot", input.processSlot.orEmpty())
                         ) + creation.evidence + providerPreinstallEvidence,
                         durationMs = clock() - startMs
                     ),
@@ -220,6 +231,17 @@ class ApplicationStage(
                 )
             }
         )
+    }
+
+    private fun resolveGuestProcessName(
+        requestedProcessName: String?,
+        applicationProcessName: String?,
+        originPackageName: String
+    ): String {
+        val normalized = requestedProcessName?.trim()?.takeIf(String::isNotEmpty)
+            ?: applicationProcessName?.trim()?.takeIf(String::isNotEmpty)
+            ?: originPackageName
+        return if (normalized.startsWith(':')) originPackageName + normalized else normalized
     }
 
     private fun currentApplicationThreadEvidence(): ApplicationThreadEvidence {
@@ -373,6 +395,7 @@ class LoadedApkGuestApplicationCreator(
         ).apply {
             className = request.applicationClassName.takeUnless { it == Application::class.java.name }
             name = className
+            processName = request.virtualContextConfig.effectiveGuestProcessName
         }
         val state = LoadedApkRuntimeState(
             packageName = snapshot.originPackageName,
@@ -461,6 +484,10 @@ class LoadedApkGuestApplicationCreator(
                 BootstrapEvidence("loadedApkApplicationCreatorPatchedFields", installResult.patchResult.patchedFields.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationCreatorSkippedFields", installResult.patchResult.skippedFieldReasons.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationCreatorInstalledAliasCount", installResult.installedAliasCount.toString()),
+                BootstrapEvidence(
+                    "loadedApkApplicationInfoProcessName",
+                    request.virtualContextConfig.effectiveGuestProcessName
+                ),
                 BootstrapEvidence(
                     "loadedApkApplicationCreatorBindPatchedFields",
                     bindResult.loadedApkPatchResult.patchedFields.joinToString(",")

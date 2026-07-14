@@ -27,6 +27,7 @@ class VirtualContextFactoryTest {
         assertEquals("/data/app/com.example.origin/base.apk", config.sourceDir)
         assertEquals("/data/app/com.example.origin/lib/arm64", config.nativeLibraryDir)
         assertEquals(classLoader, config.classLoader)
+        assertEquals("com.example.origin", config.effectiveGuestProcessName)
     }
 
     @Test
@@ -60,7 +61,8 @@ class VirtualContextFactoryTest {
             splitSourceDirs = listOf("/runtime/split_config.arm64_v8a.apk"),
             splitPublicSourceDirs = listOf("/public/split_config.arm64_v8a.apk"),
             splitNames = listOf("config.arm64_v8a"),
-            dataDir = "/data/data/com.example.virtual/test-instance-003"
+            dataDir = "/data/data/com.example.virtual/test-instance-003",
+            processName = ":worker"
         )
         val config = VirtualContextConfig(
             instanceId = snapshot.instanceId,
@@ -83,6 +85,7 @@ class VirtualContextFactoryTest {
             config.publicResourceDirs
         )
         assertEquals(listOf("config.arm64_v8a"), config.splitNames)
+        assertEquals("com.example.origin:worker", config.effectiveGuestProcessName)
     }
 
     @Test
@@ -177,7 +180,8 @@ class VirtualContextFactoryTest {
             sourceDir = "/runtime/base.apk",
             nativeLibraryDir = "/runtime/lib/arm64-v8a",
             classLoader = ClassLoader.getSystemClassLoader(),
-            processSlot = ":v2"
+            processSlot = ":v2",
+            effectiveGuestProcessName = "com.example.origin:remote"
         )
 
         val spec = VirtualContextSpec.from(config)
@@ -188,5 +192,6 @@ class VirtualContextFactoryTest {
         assertEquals("${config.dataDir}/cache", spec.cacheDir)
         assertEquals(config.nativeLibraryDir, spec.nativeLibraryDir)
         assertEquals(":v2", spec.processSlot)
+        assertEquals("com.example.origin:remote", spec.effectiveGuestProcessName)
     }
 }

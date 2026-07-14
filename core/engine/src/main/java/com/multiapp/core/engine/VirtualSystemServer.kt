@@ -3754,15 +3754,27 @@ internal class RegistryBackedVirtualServiceService(
         } else {
             implicitTargets(runtime, request)
         }
-        if (targets.any { !it.sameProcess }) {
+        if (
+            targets.any { !it.sameProcess } &&
+            request.operation !in setOf(
+                VirtualServiceOperation.START,
+                VirtualServiceOperation.START_FOREGROUND
+            )
+        ) {
             val plan = VirtualServiceDispatchPlan(
                 instanceId = runtime.instanceId,
                 operation = request.operation,
                 verdict = EngineResultStatus.UNSUPPORTED,
                 action = request.action,
                 supportedOperations = supportedServiceOperations,
-                unsupportedOperations = setOf("cross-process-service"),
-                message = "service_cross_process_unsupported"
+                unsupportedOperations = setOf("cross-process-${request.operation.name.lowercase()}-service"),
+                message = when (request.operation) {
+                    VirtualServiceOperation.BIND -> "service_cross_process_bind_unsupported"
+                    VirtualServiceOperation.UNBIND -> "service_cross_process_unbind_unsupported"
+                    VirtualServiceOperation.STOP -> "service_cross_process_stop_unsupported"
+                    VirtualServiceOperation.START,
+                    VirtualServiceOperation.START_FOREGROUND -> error("handled above")
+                }
             )
             recordPlanEvidence(plan, runtime, request)
             return plan
@@ -4045,8 +4057,13 @@ internal class RegistryBackedVirtualServiceService(
         runtime: VirtualInstanceRuntime,
         request: VirtualServiceDispatchPlanRequest,
         reason: String
-    ): VirtualServiceDispatchTarget =
-        VirtualServiceDispatchTarget(
+    ): VirtualServiceDispatchTarget {
+        val effectiveProcessName = processName
+            ?.normalizeGuestProcessName(runtime.originPackageName)
+            ?: runtime.packageSnapshot.processName
+                ?.normalizeGuestProcessName(runtime.originPackageName)
+            ?: runtime.originPackageName
+        return VirtualServiceDispatchTarget(
             instanceId = runtime.instanceId,
             originPackageName = runtime.originPackageName,
             virtualPackageName = runtime.virtualPackageName,
@@ -4055,11 +4072,12 @@ internal class RegistryBackedVirtualServiceService(
             reason = reason,
             operation = request.operation,
             processSlot = runtime.processSlot,
-            processName = processName ?: runtime.processName,
+            processName = effectiveProcessName,
             sameProcess = isSameGuestProcess(runtime),
             foreground = request.operation == VirtualServiceOperation.START_FOREGROUND,
             priority = resolvedIntentFilters.maxOfOrNull { it.priority } ?: 0
         )
+    }
 
     private fun ResolvedComponent.isSameGuestProcess(runtime: VirtualInstanceRuntime): Boolean {
         val applicationProcess = runtime.packageSnapshot.processName

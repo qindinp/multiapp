@@ -3099,3 +3099,81 @@ All four are closed in the current local tree.
   storage/native behavior, and device recovery evidence remain open.
 - No new artifact proves GKD, AstroBox, QQ, WeChat, or QQ Reader compatibility.
   Review decision remains **BLOCK**.
+
+## Review Update - 2026-07-15 Ticketed Custom-Process Service Bootstrap and URI Permission Authority
+
+The current uncommitted tree connects the component-process control plane to
+custom-process Service `START`/`START_FOREGROUND`, makes cold runtime
+construction attach-first, and adds caller/target authority to URI-permission
+checks. It does not close custom-process Provider routing or the overall
+commercial review.
+
+### Findings closed in the current tree
+
+- A hosted runtime no longer treats the host `:vN` slot as the guest manifest
+  process. `effectiveGuestProcessName` participates in the runtime binding
+  fingerprint, LoadedApk `ApplicationInfo.processName`, Application creation,
+  and process-specific Provider preinstall.
+- For a custom-process Service, the engine allocates `processSlot` and issues a
+  one-time `EngineComponentProcessLaunchTicket`. The AMS dispatcher carries the
+  ticket and original guest Intent in an explicit `StubServiceVn` Intent, whose
+  Android start enters the selected target process.
+- `prepareComponentProcess()` no longer synchronously waits for the 45-second
+  ContentProvider bootstrap path. It returns the allocation/ticket so Service
+  dispatch can let Android start the explicit target stub.
+- On cold target-process entry, `HostedServiceRuntimeBinder` calls
+  `attachComponentProcessClient()` before LoadedApk/ClassLoader/Application
+  construction. The engine consumes the ticket and registers the Binder-calling
+  PID, slot, `/proc/<pid>/stat` starttime, and live Binder after generation and
+  exact process checks; only an accepted attach continues to
+  `HostedRuntimeEngine.bindApplication()`.
+- Custom-process Service `START` and `START_FOREGROUND` use this path. `BIND`,
+  `UNBIND`, and `STOP` remain explicit `UNSUPPORTED` results; foreground type,
+  restart, and complete lifecycle equivalence are not claimed.
+- Shared pending Service tickets are no longer consumed twice after the target
+  process has attached. Concurrent attach races re-query Binder caller
+  authority and continue only when instance, slot, effective guest process, and
+  liveness all match; mismatches still fail closed.
+- Component Service calls are authorized from the Binder calling PID via
+  `queryCallingComponentProcess()`. The exception is limited to Service plan
+  and dispatch-record operations and does not weaken the general runtime or
+  component endpoint authorization surface.
+- Bootstrap calls retain a per-slot in-flight tombstone until the owner finishes
+  generation-bound cleanup. Recycling requires the requested
+  instance/runtime/session generation and exact PID, slot, UID, and process
+  starttime. An unavailable or changed identity keeps the tombstone and rejects
+  reuse; process-name-only termination is no longer allowed.
+- URI-permission checking first authenticates the Binder caller before resolving
+  one unique live target PID, then re-authorizes caller and target on the check
+  IPC and substitutes authoritative UID/PID values. Caller-supplied target
+  identity alone is no longer sufficient.
+
+### Verification
+
+- Full nine-module JUnit gate plus `:app:assembleDebug`: **PASS** in 5m42s.
+  Parsed XML totals are 2,285 tests, 0 failures, 0 errors, and 12 skipped.
+- Per module: common 42, model 257, instance 80, manifest 81, identity 112,
+  loader 724, hook 356, engine 488, app 145.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 100,892,737 bytes
+  (96.22 MiB), SHA-256
+  `AD31EBE1CE960D3F8A7794ACB7F7C1DB7ABEAD09094272CDACDC5F066721D9C2`.
+- Build log: `.tmp/full-gate-20260715-020522.log`. No current-batch device
+  artifact is claimed.
+
+### Still BLOCK
+
+- `ProviderRouteTokenRegistry` remains a process-local `LinkedHashMap`. A route
+  token issued by a caller cannot be found by a Provider hosted in another
+  `:vN` process, which makes `TOKEN_NOT_FOUND` deterministic rather than an
+  application-specific failure. Engine-owned cross-process custom-Provider
+  token authority is the next blocking item.
+- Route-token issue/consumption, caller identity, target endpoint generation,
+  authority, operation, and expiry must become engine-server authority. The
+  attach ticket/capability must not be copied into Provider URIs, and token
+  state must not be shared through a file-backed workaround.
+- Custom-process Provider transport, Service bind/stop/sticky/rebind/foreground
+  type semantics, observer/notify and URI grants, Broadcast, permissions,
+  storage/native/linker, Activity task/window equivalence, and device recovery
+  evidence remain incomplete.
+- The passing local gate is not named-app device compatibility evidence. Review
+  decision remains **BLOCK**.

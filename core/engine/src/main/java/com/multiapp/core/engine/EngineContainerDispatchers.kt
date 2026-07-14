@@ -14,6 +14,9 @@ import com.multiapp.core.loader.VirtualServiceStartRequest
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.ProviderRouteContract
 
+internal const val EXTRA_ENGINE_COMPONENT_PROCESS_LAUNCH_TICKET =
+    "multiapp.engine.componentProcessLaunchTicket"
+
 data class EngineProviderDispatchRequest(
     val hostPackageName: String,
     val hostContext: Context,
@@ -194,8 +197,22 @@ class EngineServiceStartRoute internal constructor(
     val foreground: Boolean,
     val proxyToken: String?,
     val processSlot: String?,
+    val componentProcessLaunchTicket: EngineComponentProcessLaunchTicket?,
     internal val startRequest: VirtualServiceStartRequest
 ) {
+    init {
+        componentProcessLaunchTicket?.let { ticket ->
+            require(ticket.instanceId == instanceId) { "component ticket instance must match route" }
+            require(ticket.processSlot == processSlot) { "component ticket process slot must match route" }
+            require(ticket.effectiveGuestProcessName.isNotBlank()) {
+                "component ticket guest process must not be blank"
+            }
+            require(ticket.attachCapability.length >= MIN_COMPONENT_PROCESS_CAPABILITY_LENGTH) {
+                "component ticket capability must be unguessable"
+            }
+        }
+    }
+
     companion object {
         fun create(
             instanceId: String,
@@ -205,7 +222,8 @@ class EngineServiceStartRoute internal constructor(
             reason: String = "explicit",
             foreground: Boolean = false,
             proxyToken: String? = null,
-            processSlot: String? = null
+            processSlot: String? = null,
+            componentProcessLaunchTicket: EngineComponentProcessLaunchTicket? = null
         ): EngineServiceStartRoute {
             require(instanceId.isNotBlank()) { "instanceId must not be blank" }
             require(originPackageName.isNotBlank()) { "originPackageName must not be blank" }
@@ -220,11 +238,15 @@ class EngineServiceStartRoute internal constructor(
                     foreground = foreground,
                     proxyToken = proxyToken,
                     processSlot = processSlot
-                )
+                ),
+                componentProcessLaunchTicket
             )
         }
 
-        internal fun fromStartRequest(request: VirtualServiceStartRequest): EngineServiceStartRoute =
+        internal fun fromStartRequest(
+            request: VirtualServiceStartRequest,
+            componentProcessLaunchTicket: EngineComponentProcessLaunchTicket? = null
+        ): EngineServiceStartRoute =
             EngineServiceStartRoute(
                 instanceId = request.instanceId,
                 originPackageName = request.originPackageName,
@@ -233,6 +255,7 @@ class EngineServiceStartRoute internal constructor(
                 foreground = request.foreground,
                 proxyToken = request.proxyToken,
                 processSlot = request.processSlot,
+                componentProcessLaunchTicket = componentProcessLaunchTicket,
                 startRequest = request
             )
     }
@@ -260,9 +283,14 @@ class DefaultEngineServiceRouter(
     }
 ) : EngineServiceRouter {
     override fun routeFromProxyIntent(hostPackageName: String, proxyIntent: Intent?): EngineServiceStartRoute? {
-        return proxyIntent
-            ?.let { serviceManagerFactory(hostPackageName).requestFromProxyIntent(it) }
-            ?.let(EngineServiceStartRoute.Companion::fromStartRequest)
+        val intent = proxyIntent ?: return null
+        val request = serviceManagerFactory(hostPackageName).requestFromProxyIntent(intent) ?: return null
+        val componentTicket = intent
+            .getBundleExtra(EXTRA_ENGINE_COMPONENT_PROCESS_LAUNCH_TICKET)
+            ?.toComponentProcessLaunchTicketOrNull()
+        return runCatching {
+            EngineServiceStartRoute.fromStartRequest(request, componentTicket)
+        }.getOrNull()
     }
 
     override fun launchInfo(proxyIntent: Intent?, route: EngineServiceStartRoute?): EngineServiceLaunchInfo {
@@ -397,11 +425,13 @@ class DefaultEngineServiceDispatcher private constructor(
         result: EngineServiceDispatchResult,
         operationLease: EngineServiceOperationLeaseIdentity?
     ) {
-        val lease = operationLease ?: return
-        val dispatchResult = result.toVirtualServiceOperationResult()?.copy(
-            processSlot = lease.processSlot,
-            operationLease = lease
-        ) ?: return
+        val rawResult = result.toVirtualServiceOperationResult() ?: return
+        val dispatchResult = operationLease?.let { lease ->
+            rawResult.copy(
+                processSlot = lease.processSlot,
+                operationLease = lease
+            )
+        } ?: rawResult
         recordServiceDispatch(dispatchResult.instanceId, dispatchResult)
     }
 }

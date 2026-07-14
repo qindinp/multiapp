@@ -13,7 +13,12 @@ import com.multiapp.core.model.virtual.VirtualContextConfig
 
 internal data class EngineUriPermissionBackend(
     val providerService: VirtualProviderService,
-    val runtimeByProcessId: (Int) -> EngineRuntimeIpcSnapshot?
+    val uriPermissionCheckTarget: (String, Int) -> EngineRuntimeIpcSnapshot?,
+    val uriPermissionChecker: (
+        String,
+        String,
+        VirtualProviderUriGrantRequest
+    ) -> VirtualProviderUriGrantResult?
 )
 
 class EngineVirtualUriPermissionDispatcherFactory internal constructor(
@@ -22,7 +27,8 @@ class EngineVirtualUriPermissionDispatcherFactory internal constructor(
         val ignored = context
         EngineUriPermissionBackend(
             providerService = IpcBackedVirtualProviderService(),
-            runtimeByProcessId = EngineRuntimeIpcClients::queryRuntimeByProcessId
+            uriPermissionCheckTarget = EngineRuntimeIpcClients::resolveUriPermissionCheckTarget,
+            uriPermissionChecker = EngineRuntimeIpcClients::checkProviderUriPermissionForCaller
         )
     },
     private val uidProvider: (Context) -> Int = { it.applicationInfo.uid },
@@ -36,7 +42,8 @@ class EngineVirtualUriPermissionDispatcherFactory internal constructor(
         return EngineVirtualUriPermissionDispatcher(
             config = request.config,
             providerService = backend.providerService,
-            runtimeByProcessId = backend.runtimeByProcessId,
+            uriPermissionCheckTarget = backend.uriPermissionCheckTarget,
+            uriPermissionChecker = backend.uriPermissionChecker,
             hostUid = uidProvider(request.hostContext),
             processId = pidProvider()
         )
@@ -46,7 +53,12 @@ class EngineVirtualUriPermissionDispatcherFactory internal constructor(
 internal class EngineVirtualUriPermissionDispatcher(
     private val config: VirtualContextConfig,
     private val providerService: VirtualProviderService,
-    private val runtimeByProcessId: (Int) -> EngineRuntimeIpcSnapshot?,
+    private val uriPermissionCheckTarget: (String, Int) -> EngineRuntimeIpcSnapshot?,
+    private val uriPermissionChecker: (
+        String,
+        String,
+        VirtualProviderUriGrantRequest
+    ) -> VirtualProviderUriGrantResult?,
     private val hostUid: Int,
     private val processId: Int
 ) : VirtualUriPermissionDispatcher {
@@ -149,16 +161,17 @@ internal class EngineVirtualUriPermissionDispatcher(
         ownerInstanceId: String?
     ): VirtualProviderUriGrantResult? {
         if (request.uid != hostUid || request.pid <= 0) return null
-        val targetRuntime = runtimeByProcessId(request.pid)
+        val targetRuntime = uriPermissionCheckTarget(config.instanceId, request.pid)
             ?.takeIf { runtime ->
                 runtime.found && runtime.liveAuthority && runtime.processId == request.pid &&
                     !runtime.instanceId.isBlank()
             }
             ?: return null
         val targetInstanceId = targetRuntime.instanceId
-        return providerService.checkUriPermission(
-            targetInstanceId = targetInstanceId,
-            request = request.toEngineRequest(
+        return uriPermissionChecker(
+            config.instanceId,
+            targetInstanceId,
+            request.toEngineRequest(
                 authority = authority,
                 ownerInstanceId = ownerInstanceId,
                 targetInstanceId = targetInstanceId,

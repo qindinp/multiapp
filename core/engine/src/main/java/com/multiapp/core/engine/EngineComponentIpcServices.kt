@@ -29,7 +29,10 @@ class IpcBackedVirtualServiceService(
                     when (it.verdict) {
                         EngineResultStatus.PASS,
                         EngineResultStatus.PARTIAL -> !request.operationLeaseRequested ||
-                            it.targets.size == 1 && it.targets.single().operationLease != null
+                            it.targets.size == 1 && (
+                                it.targets.single().operationLease != null ||
+                                    !it.targets.single().sameProcess
+                                )
                         EngineResultStatus.FAIL,
                         EngineResultStatus.UNSUPPORTED -> true
                     }

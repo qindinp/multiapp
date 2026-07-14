@@ -4704,3 +4704,96 @@ Remaining gate:
   recovery evidence remain incomplete.
 - No device artifact from this batch proves GKD, AstroBox, QQ, WeChat, or QQ
   Reader compatibility. Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-15 Ticketed Custom-Process Service Bootstrap and URI Permission Authority
+
+This uncommitted batch connects the component-process control plane to the
+production custom-process Service start path and hardens URI-permission caller
+and target authority. It does not close the cross-process custom-Provider data
+plane or the commercial gate.
+
+Implemented:
+
+- Runtime binding now distinguishes the physical `processSlot` from the
+  manifest-derived `effectiveGuestProcessName`. The guest process identity is
+  included in `HostedRuntimeBindingFingerprint`, preventing a custom process
+  from reusing the primary process Application, ClassLoader, or LoadedApk.
+- `LoadedApk.ApplicationInfo.processName` is set to the effective guest process.
+  Provider preinstall selects only Providers belonging to that guest process
+  and retains the required ordering before its guest `Application.onCreate()`.
+- For a custom-process Service, the engine allocates the physical
+  `processSlot` and issues a one-time `EngineComponentProcessLaunchTicket`.
+  The AMS dispatcher puts that ticket and the original guest Intent into an
+  explicit `StubServiceVn` proxy Intent; starting that Intent is what enters the
+  selected `:vN` process. `prepareComponentProcess()` now returns the allocation
+  and ticket without synchronously waiting on the 45-second ContentProvider
+  bootstrap path.
+- On a cold `StubServiceVn` entry, the target process calls
+  `attachComponentProcessClient()` before `HostedRuntimeEngine.bindApplication()`.
+  The engine consumes the ticket and registers the Binder-calling PID,
+  `processSlot`, `/proc/<pid>/stat` starttime, and live client Binder only after
+  generation and exact host-process identity checks pass. Only that accepted
+  attach may continue into process-specific LoadedApk/ClassLoader/Application
+  creation and Provider preinstall.
+- Custom-process Service `START` and `START_FOREGROUND` are connected to this
+  explicit target-process path. `BIND`, `UNBIND`, and `STOP` remain explicitly
+  `UNSUPPORTED`; foreground routing is not proof of complete foreground-service
+  type, restart, or lifecycle semantics.
+- Concurrent starts may share one pending component ticket. A target process
+  now reuses an already-authoritative caller attachment before trying to consume
+  that ticket again; an attach race is accepted only after a second query
+  matches the live caller instance, slot, and effective guest process.
+- `queryCallingComponentProcess(instanceId)` derives component-client identity
+  from the Binder calling PID. Only the Service planning/recording data plane
+  receives this narrow authorization; the general runtime bundle is not opened
+  to same-UID guest callers.
+- The shared bootstrap transport retains an in-flight per-slot tombstone until
+  its owning call completes generation-bound cleanup. Only that owner may
+  recycle the slot. Timeout cleanup requires the response to preserve the
+  requested instance/runtime/session generation plus exact PID, process slot,
+  and `/proc/<pid>/stat` starttime. Missing or changed identity keeps the
+  tombstone fail-closed; no process is killed by process-name matching alone.
+- URI-permission checks now use two engine-authoritative stages. The engine
+  first authenticates the Binder caller before resolving a unique live target
+  PID, then revalidates both caller and target on the permission-check IPC and
+  overwrites caller UID/PID with authoritative host/runtime values.
+
+Verification:
+
+- The full nine-module gate and `:app:assembleDebug` completed successfully in
+  5m42s. JUnit XML totals are 2,285 tests, 0 failures, 0 errors, and 12 skipped:
+  common 42, model 257, instance 80, manifest 81, identity 112, loader 724,
+  hook 356, engine 488, and app 145.
+- APK: `app/build/outputs/apk/debug/app-debug.apk`, 100,892,737 bytes
+  (96.22 MiB), SHA-256
+  `AD31EBE1CE960D3F8A7794ACB7F7C1DB7ABEAD09094272CDACDC5F066721D9C2`.
+- Build log: `.tmp/full-gate-20260715-020522.log`. AGP 8.7.3 still warns that
+  it was tested only through `compileSdk=35` while this project uses 36.
+- No current-batch device artifact is claimed.
+
+Next batch:
+
+1. Move cross-process custom-Provider route-token issue,
+   validation/consumption, expiry, caller identity, and endpoint generation into
+   the engine-owned Provider service. Do not transport the component attach
+   capability in a URI and do not share route-token state through files.
+2. Connect custom-process Provider bootstrap and its Binder data plane to the
+   generation-bound endpoint registry, with operation and target authority
+   checked by the engine on every dispatch.
+3. Complete custom-process Service bind/unbind/stop, connection death, sticky/
+   rebind behavior, and foreground-service type mapping without broadening the
+   primary-runtime authorization surface.
+4. After that batch is integrated, rerun the full gate once, then collect
+   process-death and API 28-36/HyperOS device evidence.
+
+Remaining gate:
+
+- `ProviderRouteTokenRegistry` is still a process-local `LinkedHashMap`. A token
+  issued in the caller process is absent in a custom Provider process, so target
+  validation necessarily returns `TOKEN_NOT_FOUND`. Engine-owned cross-process
+  custom-Provider token authority is the next blocking item.
+- Provider observer/notify and URI-grant lifecycle, remaining Service semantics,
+  Broadcast, permissions, storage/native/linker, and Activity task/window
+  equivalence remain incomplete.
+- No device artifact from this batch proves GKD, AstroBox, QQ, WeChat, or QQ
+  Reader compatibility. Commercial status remains **BLOCK**.

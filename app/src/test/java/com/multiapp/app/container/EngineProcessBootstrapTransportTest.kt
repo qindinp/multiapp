@@ -1,6 +1,8 @@
 package com.multiapp.app.container
 
 import android.os.IBinder
+import com.multiapp.core.engine.EngineComponentProcessLaunchTicket
+import com.multiapp.core.engine.EngineProcessBootstrapKind
 import com.multiapp.core.engine.EngineProcessBootstrapRequest
 import com.multiapp.core.engine.EngineProcessBootstrapResult
 import com.multiapp.core.engine.EngineProcessBootstrapState
@@ -18,6 +20,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import io.mockk.every
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -35,6 +38,24 @@ class EngineProcessBootstrapTransportTest {
         )
         assertNull(EngineProcessBootstrapIpc.authority("com.multiapp.app", "com.multiapp.app:v8"))
         assertNull(EngineProcessBootstrapIpc.authority("com.multiapp.app", "not-a-slot"))
+    }
+
+    @Test
+    fun `component bootstrap envelope carries kind and complete launch ticket`() {
+        val request = componentRequest()
+
+        val envelope = EngineProcessBootstrapIpc.requestEnvelope(request)
+
+        assertEquals(EngineProcessBootstrapKind.COMPONENT_RUNTIME, envelope.kind)
+        assertEquals(request.componentLaunchTicket, envelope.componentLaunchTicket)
+        assertEquals(request.runtime.processSlot, envelope.processSlot)
+        assertTrue(envelope.isWellFormed())
+        assertFalse(envelope.copy(processSlot = "com.multiapp.app:v7").isWellFormed())
+        assertFalse(
+            envelope.copy(
+                componentLaunchTicket = envelope.componentLaunchTicket?.copy(instanceId = "other-instance")
+            ).isWellFormed()
+        )
     }
 
     @Test
@@ -70,9 +91,14 @@ class EngineProcessBootstrapTransportTest {
                     null
                 },
                 executor = executor,
-                processRecycler = EngineProcessSlotRecycler { slot ->
+                processRecycler = EngineProcessSlotRecycler { recycleRequest ->
                     recycleCalls += 1
-                    EngineProcessSlotRecycleResult("KILL_REQUESTED", 2468, "recycled $slot")
+                    EngineProcessSlotRecycleResult(
+                        "RECYCLED",
+                        2468,
+                        "recycled ${recycleRequest.processSlot}",
+                        slotReusable = true
+                    )
                 }
             )
 
@@ -81,8 +107,14 @@ class EngineProcessBootstrapTransportTest {
             assertEquals(EngineProcessBootstrapState.TIMED_OUT, result.state)
             assertEquals(EngineResultStatus.FAIL, result.verdict)
             assertTrue(!result.ready)
-            assertEquals(1, recycleCalls)
-            assertEquals("KILL_REQUESTED", result.evidence["processSlotRecycleStatus"])
+            assertEquals(0, recycleCalls)
+            assertTrue(
+                result.evidence["processSlotRecycleStatus"] in setOf(
+                    "DEFERRED_IN_FLIGHT",
+                    "IDENTITY_UNAVAILABLE"
+                )
+            )
+            assertEquals("false", result.evidence["processSlotReusable"])
         } finally {
             executor.shutdownNow()
         }
@@ -108,6 +140,7 @@ class EngineProcessBootstrapTransportTest {
         val release = CountDownLatch(1)
         val exited = CountDownLatch(1)
         val calls = AtomicInteger()
+        val recycleCalls = AtomicInteger()
         val token = mockk<IBinder> { every { isBinderAlive } returns true }
         try {
             val bootstrapper = ContentProviderEngineProcessBootstrapper(
@@ -129,8 +162,17 @@ class EngineProcessBootstrapTransportTest {
                     readyResult(envelope, token)
                 },
                 executor = executor,
-                processRecycler = EngineProcessSlotRecycler {
-                    EngineProcessSlotRecycleResult("KILL_REQUESTED", 2468, "test recycle")
+                processRecycler = EngineProcessSlotRecycler { recycleRequest ->
+                    recycleCalls.incrementAndGet()
+                    assertEquals(42L, recycleRequest.runtimeEpoch)
+                    assertEquals(2468, recycleRequest.processId)
+                    assertEquals(12_345L, recycleRequest.processStartTicks)
+                    EngineProcessSlotRecycleResult(
+                        "RECYCLED",
+                        2468,
+                        "test recycle",
+                        slotReusable = true
+                    )
                 }
             )
 
@@ -145,6 +187,11 @@ class EngineProcessBootstrapTransportTest {
 
             release.countDown()
             assertTrue(exited.await(1, TimeUnit.SECONDS))
+            val cleanupDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+            while (recycleCalls.get() == 0 && System.nanoTime() < cleanupDeadline) {
+                Thread.yield()
+            }
+            assertEquals(1, recycleCalls.get())
             val recoveryDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
             var recovered = bootstrapper.bootstrap(request(runtimeEpoch = 44L))
             while (
@@ -159,6 +206,163 @@ class EngineProcessBootstrapTransportTest {
             assertEquals(2, calls.get())
         } finally {
             release.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `failed bootstrap keeps slot tombstone until generation cleanup finishes`() {
+        val bootstrapExecutor = Executors.newFixedThreadPool(2)
+        val callerExecutor = Executors.newSingleThreadExecutor()
+        val recycleEntered = CountDownLatch(1)
+        val releaseRecycle = CountDownLatch(1)
+        val calls = AtomicInteger()
+        val recycleCalls = AtomicInteger()
+        val token = mockk<IBinder> { every { isBinderAlive } returns true }
+        try {
+            val bootstrapper = ContentProviderEngineProcessBootstrapper(
+                hostPackageName = "com.multiapp.app",
+                timeoutMs = 1_000L,
+                transport = EngineProcessBootstrapTransport { _, envelope ->
+                    if (calls.incrementAndGet() == 1) {
+                        EngineProcessBootstrapResult(
+                            state = EngineProcessBootstrapState.FAILED,
+                            verdict = EngineResultStatus.FAIL,
+                            instanceId = envelope.instanceId,
+                            runtimeEpoch = envelope.runtimeEpoch,
+                            engineSessionId = envelope.engineSessionId,
+                            processId = 2468,
+                            processStartTicks = 12_345L,
+                            processName = envelope.processSlot,
+                            message = "test bootstrap failure"
+                        )
+                    } else {
+                        readyResult(envelope, token)
+                    }
+                },
+                executor = bootstrapExecutor,
+                processRecycler = EngineProcessSlotRecycler { recycleRequest ->
+                    recycleCalls.incrementAndGet()
+                    recycleEntered.countDown()
+                    check(releaseRecycle.await(1, TimeUnit.SECONDS)) { "cleanup release timed out" }
+                    EngineProcessSlotRecycleResult(
+                        "RECYCLED",
+                        2468,
+                        "recycled ${recycleRequest.processSlot}",
+                        slotReusable = true
+                    )
+                }
+            )
+            val first = callerExecutor.submit<EngineProcessBootstrapResult> {
+                bootstrapper.bootstrap(request())
+            }
+            assertTrue(recycleEntered.await(1, TimeUnit.SECONDS))
+
+            val sameGeneration = bootstrapper.bootstrap(request())
+            val blockedRetry = bootstrapper.bootstrap(request(runtimeEpoch = 43L))
+
+            assertEquals(EngineProcessBootstrapState.FAILED, sameGeneration.state)
+            assertEquals("DEFERRED_TO_OWNER", sameGeneration.evidence["processSlotRecycleStatus"])
+            assertEquals(EngineProcessBootstrapState.STALE, blockedRetry.state)
+            assertEquals("true", blockedRetry.evidence["bootstrapInFlightTombstone"])
+            assertEquals(1, calls.get())
+            assertEquals(1, recycleCalls.get())
+            releaseRecycle.countDown()
+            assertEquals(EngineProcessBootstrapState.FAILED, first.get(1, TimeUnit.SECONDS).state)
+
+            val recovered = bootstrapper.bootstrap(request(runtimeEpoch = 44L))
+            assertEquals(EngineProcessBootstrapState.READY, recovered.state)
+            assertEquals(2, calls.get())
+        } finally {
+            releaseRecycle.countDown()
+            callerExecutor.shutdownNow()
+            bootstrapExecutor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `stale bootstrap recycles only the exact observed process generation`() {
+        val executor = Executors.newSingleThreadExecutor()
+        val calls = AtomicInteger()
+        var recycleRequest: EngineProcessSlotRecycleRequest? = null
+        val token = mockk<IBinder> { every { isBinderAlive } returns true }
+        try {
+            val bootstrapper = ContentProviderEngineProcessBootstrapper(
+                hostPackageName = "com.multiapp.app",
+                timeoutMs = 1_000L,
+                transport = EngineProcessBootstrapTransport { _, envelope ->
+                    if (calls.incrementAndGet() == 1) {
+                        EngineProcessBootstrapResult(
+                            state = EngineProcessBootstrapState.STALE,
+                            verdict = EngineResultStatus.FAIL,
+                            instanceId = envelope.instanceId,
+                            runtimeEpoch = envelope.runtimeEpoch,
+                            engineSessionId = envelope.engineSessionId,
+                            processId = 2468,
+                            processStartTicks = 12_345L,
+                            processName = envelope.processSlot,
+                            message = "runtime changed after guest bootstrap"
+                        )
+                    } else {
+                        readyResult(envelope, token)
+                    }
+                },
+                executor = executor,
+                processRecycler = EngineProcessSlotRecycler { request ->
+                    recycleRequest = request
+                    EngineProcessSlotRecycleResult(
+                        status = "RECYCLED",
+                        processId = request.processId,
+                        message = "exact generation recycled",
+                        slotReusable = true
+                    )
+                }
+            )
+
+            val stale = bootstrapper.bootstrap(request())
+            val recovered = bootstrapper.bootstrap(request(runtimeEpoch = 43L))
+
+            assertEquals(EngineProcessBootstrapState.STALE, stale.state)
+            assertEquals("RECYCLED", stale.evidence["processSlotRecycleStatus"])
+            assertEquals("true", stale.evidence["processSlotReusable"])
+            assertEquals("instance-1", recycleRequest?.instanceId)
+            assertEquals(42L, recycleRequest?.runtimeEpoch)
+            assertEquals("engine-evidence-42", recycleRequest?.engineSessionId)
+            assertEquals("com.multiapp.app:v3", recycleRequest?.processSlot)
+            assertEquals(2468, recycleRequest?.processId)
+            assertEquals(12_345L, recycleRequest?.processStartTicks)
+            assertEquals(EngineProcessBootstrapState.READY, recovered.state)
+            assertEquals(2, calls.get())
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun `bootstrap without exact process identity retains fail closed slot tombstone`() {
+        val executor = Executors.newSingleThreadExecutor()
+        val calls = AtomicInteger()
+        try {
+            val bootstrapper = ContentProviderEngineProcessBootstrapper(
+                hostPackageName = "com.multiapp.app",
+                timeoutMs = 1_000L,
+                transport = EngineProcessBootstrapTransport { _, _ ->
+                    calls.incrementAndGet()
+                    null
+                },
+                executor = executor
+            )
+
+            val first = bootstrapper.bootstrap(request())
+            val retry = bootstrapper.bootstrap(request(runtimeEpoch = 43L))
+
+            assertEquals(EngineProcessBootstrapState.STALE, first.state)
+            assertEquals("IDENTITY_UNAVAILABLE", first.evidence["processSlotRecycleStatus"])
+            assertEquals("false", first.evidence["processSlotReusable"])
+            assertEquals(EngineProcessBootstrapState.STALE, retry.state)
+            assertEquals("true", retry.evidence["bootstrapInFlightTombstone"])
+            assertEquals(1, calls.get())
+        } finally {
             executor.shutdownNow()
         }
     }
@@ -184,6 +388,7 @@ class EngineProcessBootstrapTransportTest {
                         engineSessionId = envelope.engineSessionId,
                         clientToken = processToken,
                         processId = 2468,
+                        processStartTicks = 12_345L,
                         processName = envelope.processSlot,
                         launcherActivityClassName = "com.test.app.MainActivity",
                         applicationStatus = "PASS",
@@ -208,6 +413,58 @@ class EngineProcessBootstrapTransportTest {
     }
 
     @Test
+    fun `matching cached component response is accepted without launcher activity`() {
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val processToken = mockk<IBinder> {
+                every { isBinderAlive } returns true
+            }
+            var observedEnvelope: EngineProcessBootstrapRequestEnvelope? = null
+            val bootstrapper = ContentProviderEngineProcessBootstrapper(
+                hostPackageName = "com.multiapp.app",
+                timeoutMs = 1_000L,
+                transport = EngineProcessBootstrapTransport { _, envelope ->
+                    observedEnvelope = envelope
+                    EngineProcessBootstrapResult(
+                        state = EngineProcessBootstrapState.READY,
+                        verdict = EngineResultStatus.PASS,
+                        instanceId = envelope.instanceId,
+                        runtimeEpoch = envelope.runtimeEpoch,
+                        engineSessionId = envelope.engineSessionId,
+                        clientToken = processToken,
+                        processId = 2469,
+                        processStartTicks = 12_346L,
+                        processName = envelope.processSlot,
+                        cached = true,
+                        launcherActivityClassName = null,
+                        applicationStatus = "PASS",
+                        providerPreinstallStatus = "SKIPPED",
+                        systemServiceProxyStatus = "SUCCESS",
+                        message = "component guest process is READY"
+                    )
+                },
+                executor = executor
+            )
+
+            val result = bootstrapper.bootstrap(componentRequest())
+
+            assertEquals(EngineProcessBootstrapState.READY, result.state, result.message)
+            assertTrue(result.cached)
+            assertNull(result.launcherActivityClassName)
+            assertEquals(
+                EngineProcessBootstrapKind.COMPONENT_RUNTIME,
+                observedEnvelope?.kind
+            )
+            assertEquals(
+                "com.test.app:remote",
+                observedEnvelope?.componentLaunchTicket?.effectiveGuestProcessName
+            )
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
     fun `READY response without live process token fails closed`() {
         val executor = Executors.newSingleThreadExecutor()
         try {
@@ -222,6 +479,7 @@ class EngineProcessBootstrapTransportTest {
                         runtimeEpoch = envelope.runtimeEpoch,
                         engineSessionId = envelope.engineSessionId,
                         processId = 2468,
+                        processStartTicks = 12_345L,
                         processName = envelope.processSlot,
                         launcherActivityClassName = "com.test.app.MainActivity",
                         message = "guest process is READY"
@@ -251,6 +509,7 @@ class EngineProcessBootstrapTransportTest {
         engineSessionId = envelope.engineSessionId,
         clientToken = token,
         processId = 2468,
+        processStartTicks = 12_345L,
         processName = envelope.processSlot,
         launcherActivityClassName = "com.test.app.MainActivity",
         applicationStatus = "PASS",
@@ -292,4 +551,25 @@ class EngineProcessBootstrapTransportTest {
         legacyProviderHookEnabled = false,
         evidenceMode = EngineEvidenceMode.MINIMAL
     )
+
+    private fun componentRequest(): EngineProcessBootstrapRequest {
+        val primary = request().runtime
+        val ticket = EngineComponentProcessLaunchTicket(
+            instanceId = primary.instanceId,
+            effectiveGuestProcessName = "${primary.originPackageName}:remote",
+            processSlot = "com.multiapp.app:v4",
+            attachCapability = "c".repeat(64)
+        )
+        return EngineProcessBootstrapRequest(
+            runtime = primary.copy(
+                processSlot = ticket.processSlot,
+                processName = ticket.effectiveGuestProcessName
+            ),
+            providerRoutingEnabled = true,
+            legacyProviderHookEnabled = false,
+            evidenceMode = EngineEvidenceMode.MINIMAL,
+            kind = EngineProcessBootstrapKind.COMPONENT_RUNTIME,
+            componentLaunchTicket = ticket
+        )
+    }
 }

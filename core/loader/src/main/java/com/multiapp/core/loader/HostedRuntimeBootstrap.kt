@@ -116,7 +116,8 @@ class HostedRuntimeBootstrap(
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
-    private val clock: () -> Long = System::currentTimeMillis
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val effectiveGuestProcessName: String? = null
 ) {
 
     /**
@@ -393,7 +394,8 @@ class HostedRuntimeBootstrap(
             processRuntime = processRuntime,
             activityRecordManager = activityRecordManager,
             runtimePublisher = runtimePublisher,
-            clock = clock
+            clock = clock,
+            effectiveGuestProcessName = effectiveGuestProcessName
         ).execute(preparedContext)
         stageResults.add(applicationOutput.result)
 

@@ -44,7 +44,10 @@ class EngineComponentProcessEndpointSecurityTest {
         val query = endpoint.queryComponentProcessClient(INSTANCE_ID, GUEST_PROCESS_NAME)
 
         assertFalse(prepare.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
-        assertEquals("runtime_process_id_mismatch", prepare.getString(EngineRuntimeIpcContract.KEY_REASON))
+        assertEquals(
+            "component_process_prepare_caller_unauthorized",
+            prepare.getString(EngineRuntimeIpcContract.KEY_REASON)
+        )
         assertFalse(query.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
         verify(exactly = 0) { authority.prepare(any(), any()) }
         verify(exactly = 0) { authority.query(any(), any()) }
@@ -120,15 +123,57 @@ class EngineComponentProcessEndpointSecurityTest {
         }
     }
 
+    @Test
+    fun `calling component query derives only the attached Binder caller identity`() {
+        val authority = mockk<EngineComponentProcessAuthority>(relaxed = true)
+        val identity = componentIdentity()
+        val endpoint = endpoint(
+            authority = authority,
+            processDecision = EngineProcessAuthorityDecision(
+                allowed = false,
+                identity = null,
+                reason = "runtime_process_id_mismatch"
+            ),
+            componentIdentity = identity
+        )
+
+        val accepted = endpoint.queryCallingComponentProcess(INSTANCE_ID)
+            .toComponentProcessOperationResultOrNull()
+        val wrongInstance = endpoint.queryCallingComponentProcess("instance-other")
+            .toComponentProcessOperationResultOrNull()
+        val broadControlQuery = endpoint.queryComponentProcessClient(INSTANCE_ID, GUEST_PROCESS_NAME)
+
+        assertTrue(accepted?.accepted == true)
+        assertEquals(identity.toPublicComponentProcessState(), accepted?.processState)
+        assertFalse(wrongInstance?.accepted ?: true)
+        assertEquals("component_process_caller_unauthorized", wrongInstance?.reason)
+        assertFalse(broadControlQuery.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertEquals(
+            "runtime_process_id_mismatch",
+            broadControlQuery.getString(EngineRuntimeIpcContract.KEY_REASON)
+        )
+        verify(exactly = 1) {
+            authority.authorizeCaller(
+                INSTANCE_ID,
+                CALLING_PID,
+                PROCESS_SLOT,
+                PROCESS_START_TICKS
+            )
+        }
+    }
+
     private fun endpoint(
         authority: EngineComponentProcessAuthority,
-        processDecision: EngineProcessAuthorityDecision
+        processDecision: EngineProcessAuthorityDecision,
+        componentIdentity: EngineComponentProcessClientIdentity? = null
     ): EngineRuntimeBinderEndpoint {
         val controlPlane = mockk<EngineProcessControlPlane>()
         every { controlPlane.authorize(INSTANCE_ID, CALLING_PID) } returns processDecision
         every {
-            authority.authorizeCaller(INSTANCE_ID, CALLING_PID, PROCESS_SLOT, PROCESS_START_TICKS)
-        } returns null
+            authority.authorizeCaller(any(), CALLING_PID, PROCESS_SLOT, PROCESS_START_TICKS)
+        } answers {
+            componentIdentity?.takeIf { identity -> identity.instanceId == firstArg<String>() }
+        }
         val unsafeClass = Class.forName("sun.misc.Unsafe")
         val unsafe = unsafeClass.getDeclaredField("theUnsafe").run {
             isAccessible = true
@@ -171,6 +216,18 @@ class EngineComponentProcessEndpointSecurityTest {
         effectiveGuestProcessName = GUEST_PROCESS_NAME,
         processSlot = PROCESS_SLOT,
         attachCapability = "component-attach-capability-${"x".repeat(32)}"
+    )
+
+    private fun componentIdentity() = EngineComponentProcessClientIdentity(
+        instanceId = INSTANCE_ID,
+        runtimeEpoch = RUNTIME_EPOCH,
+        engineSessionId = ENGINE_SESSION_ID,
+        processEpoch = 3L,
+        clientSessionId = "component-client-session-3",
+        effectiveGuestProcessName = GUEST_PROCESS_NAME,
+        processSlot = PROCESS_SLOT,
+        processId = CALLING_PID,
+        processStartTicks = PROCESS_START_TICKS
     )
 
     private fun liveBinder(): IBinder = mockk {

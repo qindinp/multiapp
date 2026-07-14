@@ -20,9 +20,11 @@ interface IEngineRuntimeService {
     Bundle issueRecentsRestoreCapability(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, String restoreActivityId);
     Bundle queryRuntime(String instanceId);
     Bundle queryRuntimeByProcessId(int processId);
+    Bundle resolveUriPermissionCheckTarget(String callerInstanceId, int targetProcessId);
     Bundle prepareComponentProcess(String instanceId, String guestProcessName);
     Bundle attachComponentProcessClient(String attachCapability, IBinder clientToken);
     Bundle queryComponentProcessClient(String instanceId, String guestProcessName);
+    Bundle queryCallingComponentProcess(String instanceId);
     Bundle queryApplicationEnabledState(String instanceId, in Bundle request);
     Bundle setApplicationEnabledState(String instanceId, in Bundle request);
     Bundle queryComponentEnabledState(String instanceId, in Bundle request);
@@ -48,6 +50,7 @@ interface IEngineRuntimeService {
     Bundle grantProviderUriPermission(String ownerInstanceId, in Bundle request);
     Bundle revokeProviderUriPermission(String ownerInstanceId, in Bundle request);
     Bundle checkProviderUriPermission(String targetInstanceId, in Bundle request);
+    Bundle checkProviderUriPermissionForCaller(String callerInstanceId, String targetInstanceId, in Bundle request);
     Bundle takePersistableProviderUriPermission(String targetInstanceId, in Bundle request);
     Bundle releasePersistableProviderUriPermission(String targetInstanceId, in Bundle request);
     Bundle checkPermission(String instanceId, String permissionName);

@@ -14,12 +14,51 @@ enum class EngineProcessBootstrapState {
     UNSUPPORTED
 }
 
+enum class EngineProcessBootstrapKind {
+    PRIMARY_RUNTIME,
+    COMPONENT_RUNTIME
+}
+
 data class EngineProcessBootstrapRequest(
     val runtime: VirtualInstanceRuntime,
     val providerRoutingEnabled: Boolean,
     val legacyProviderHookEnabled: Boolean,
-    val evidenceMode: EngineEvidenceMode
-)
+    val evidenceMode: EngineEvidenceMode,
+    val kind: EngineProcessBootstrapKind = EngineProcessBootstrapKind.PRIMARY_RUNTIME,
+    val componentLaunchTicket: EngineComponentProcessLaunchTicket? = null
+) {
+    init {
+        when (kind) {
+            EngineProcessBootstrapKind.PRIMARY_RUNTIME -> require(componentLaunchTicket == null) {
+                "primary runtime bootstrap must not carry a component launch ticket"
+            }
+            EngineProcessBootstrapKind.COMPONENT_RUNTIME -> {
+                val ticket = requireNotNull(componentLaunchTicket) {
+                    "component runtime bootstrap requires a component launch ticket"
+                }
+                require(ticket.instanceId == runtime.instanceId) {
+                    "component launch ticket instance must match the runtime"
+                }
+                require(ticket.processSlot == runtime.processSlot) {
+                    "component launch ticket process slot must match the runtime view"
+                }
+                require(ticket.effectiveGuestProcessName == runtime.processName) {
+                    "component launch ticket process name must match the runtime view"
+                }
+                require(ticket.attachCapability.length >= MIN_COMPONENT_BOOTSTRAP_CAPABILITY_LENGTH) {
+                    "component launch ticket capability must be unguessable"
+                }
+                require(ticket.attachCapability == ticket.attachCapability.trim()) {
+                    "component launch ticket capability must be trimmed"
+                }
+            }
+        }
+    }
+
+    private companion object {
+        const val MIN_COMPONENT_BOOTSTRAP_CAPABILITY_LENGTH = 32
+    }
+}
 
 data class EngineProcessBootstrapResult(
     val state: EngineProcessBootstrapState,
@@ -29,6 +68,7 @@ data class EngineProcessBootstrapResult(
     val engineSessionId: String,
     val clientToken: IBinder? = null,
     val processId: Int? = null,
+    val processStartTicks: Long? = null,
     val processName: String? = null,
     val cached: Boolean = false,
     val durationMs: Long = 0L,
@@ -44,6 +84,9 @@ data class EngineProcessBootstrapResult(
         require(runtimeEpoch > 0L) { "runtimeEpoch must be positive" }
         require(engineSessionId.isNotBlank()) { "engineSessionId must not be blank" }
         require(processId == null || processId > 0) { "processId must be positive" }
+        require(processStartTicks == null || processStartTicks > 0L) {
+            "processStartTicks must be positive"
+        }
         require(processName?.isNotBlank() ?: true) { "processName must not be blank" }
         require(durationMs >= 0L) { "durationMs must not be negative" }
         require(message.isNotBlank()) { "message must not be blank" }
@@ -73,6 +116,7 @@ data class EngineProcessBootstrapResult(
             "engineSessionId" to engineSessionId,
             "clientTokenPresent" to (clientToken != null).toString(),
             "processId" to processId?.toString().orEmpty(),
+            "processStartTicks" to processStartTicks?.toString().orEmpty(),
             "processName" to processName.orEmpty(),
             "cached" to cached.toString(),
             "durationMs" to durationMs.toString(),
@@ -105,9 +149,26 @@ data class EngineProcessBootstrapResult(
                 providerPreinstallStatus = "TEST_IMMEDIATE_READY",
                 systemServiceProxyStatus = "TEST_IMMEDIATE_READY",
                 message = "process bootstrap supplied by immediate test adapter",
-                evidence = mapOf("bootstrapTransport" to "immediate-test-adapter")
+                evidence = mapOf(
+                    "bootstrapTransport" to "immediate-test-adapter",
+                    "bootstrapKind" to request.kind.name
+                )
             )
         }
+
+        fun unsupported(
+            request: EngineProcessBootstrapRequest,
+            message: String
+        ): EngineProcessBootstrapResult = EngineProcessBootstrapResult(
+            state = EngineProcessBootstrapState.UNSUPPORTED,
+            verdict = EngineResultStatus.UNSUPPORTED,
+            instanceId = request.runtime.instanceId,
+            runtimeEpoch = request.runtime.runtimeEpoch,
+            engineSessionId = request.runtime.engineSessionId,
+            processName = request.runtime.processSlot,
+            message = message,
+            evidence = mapOf("bootstrapKind" to request.kind.name)
+        )
     }
 }
 
@@ -116,6 +177,16 @@ fun interface EngineProcessBootstrapper {
 
     companion object {
         val IMMEDIATE = EngineProcessBootstrapper(EngineProcessBootstrapResult::immediateReady)
+        val PRIMARY_IMMEDIATE_COMPONENT_DEFERRED = EngineProcessBootstrapper { request ->
+            if (request.kind == EngineProcessBootstrapKind.COMPONENT_RUNTIME) {
+                EngineProcessBootstrapResult.unsupported(
+                    request,
+                    "component process bootstrap is not configured for this adapter"
+                )
+            } else {
+                EngineProcessBootstrapResult.immediateReady(request)
+            }
+        }
     }
 }
 
@@ -139,14 +210,18 @@ object EngineProcessBootstrapReadiness {
         val identityMatches = result.instanceId == request.runtime.instanceId &&
             result.processSlot == request.runtime.processSlot &&
             processName == request.runtime.processSlot
+        val providerPreinstallReady = providerPreinstallStatus != null &&
+            providerPreinstallStatus !in setOf("PARTIAL", "FAILED")
+        val launcherReady = request.kind == EngineProcessBootstrapKind.COMPONENT_RUNTIME ||
+            !result.launcherActivityClassName.isNullOrBlank()
         val mandatoryRuntimeReady = result.success &&
             result.guestClassLoader != null &&
             result.guestApplication != null &&
             applicationStage?.status == EngineBootstrapStatus.SUCCESS &&
             applicationStatus == "PASS" &&
             systemServiceStage?.status != EngineBootstrapStatus.FAILED &&
-            providerPreinstallStatus !in setOf("PARTIAL", "FAILED") &&
-            !result.launcherActivityClassName.isNullOrBlank()
+            providerPreinstallReady &&
+            launcherReady
 
         if (!identityMatches) {
             return baseResult(
@@ -237,6 +312,9 @@ object EngineProcessBootstrapReadiness {
         evidence = linkedMapOf(
             "hostedBootstrapSuccess" to result.success.toString(),
             "hostedBootstrapProcessSlot" to result.processSlot.orEmpty(),
+            "bootstrapKind" to request.kind.name,
+            "effectiveGuestProcessName" to
+                request.componentLaunchTicket?.effectiveGuestProcessName.orEmpty(),
             "guestClassLoaderReady" to (result.guestClassLoader != null).toString(),
             "guestApplicationReady" to (result.guestApplication != null).toString(),
             "applicationStageStatus" to (result.firstStageResult(EngineBootstrapStage.APPLICATION)?.status?.name ?: "MISSING"),

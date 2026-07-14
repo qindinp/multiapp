@@ -13,7 +13,8 @@ data class HostedRuntimeBindingFingerprint(
     val splitApkSha256s: List<String>,
     val applicationClassName: String?,
     val engineProfile: String,
-    val providerHookEnabled: Boolean
+    val providerHookEnabled: Boolean,
+    val effectiveGuestProcessName: String = originPackageName
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }
@@ -27,5 +28,8 @@ data class HostedRuntimeBindingFingerprint(
         require(splitApkPaths.none { it.isBlank() }) { "splitApkPaths must not contain blanks" }
         require(splitApkSha256s.none { it.isBlank() }) { "splitApkSha256s must not contain blanks" }
         require(engineProfile.isNotBlank()) { "engineProfile must not be blank" }
+        require(effectiveGuestProcessName.isNotBlank()) {
+            "effectiveGuestProcessName must not be blank"
+        }
     }
 }

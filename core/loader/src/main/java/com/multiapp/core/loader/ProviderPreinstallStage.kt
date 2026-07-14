@@ -16,30 +16,35 @@ class GuestProviderPreinstaller(
 ) {
     fun preinstall(request: GuestProviderPreinstallRequest): GuestProviderPreinstallResult {
         val providers = request.snapshot.providers
+        val effectiveGuestProcessName = request.config.effectiveGuestProcessName
         if (providers.isEmpty()) {
             return GuestProviderPreinstallResult(
                 status = GuestProviderPreinstallStatus.SKIPPED,
+                effectiveGuestProcessName = effectiveGuestProcessName,
                 totalProviderCount = 0,
                 skippedProviderCount = 0,
                 skippedReasons = listOf("NO_PROVIDERS")
             )
         }
 
-        val sameProcessProviders = providers.filter { it.runsInApplicationProcess(request.snapshot) }
+        val currentProcessProviders = providers.filter { provider ->
+            provider.effectiveProcessName(request.snapshot) == effectiveGuestProcessName
+        }
         val skippedProviders = providers
-            .filterNot { it.runsInApplicationProcess(request.snapshot) }
+            .filterNot { provider -> provider.effectiveProcessName(request.snapshot) == effectiveGuestProcessName }
             .map { provider ->
                 GuestProviderPreinstallSkippedProvider(
                     providerClassName = provider.name,
                     authorities = provider.authorities,
                     declaredProcessName = provider.processName,
                     effectiveProcessName = provider.effectiveProcessName(request.snapshot),
-                    reason = GuestProviderPreinstallSkipReason.CUSTOM_PROCESS_NOT_BOUND
+                    reason = GuestProviderPreinstallSkipReason.DIFFERENT_GUEST_PROCESS
                 )
             }
-        if (sameProcessProviders.isEmpty()) {
+        if (currentProcessProviders.isEmpty()) {
             return GuestProviderPreinstallResult(
                 status = GuestProviderPreinstallStatus.SKIPPED,
+                effectiveGuestProcessName = effectiveGuestProcessName,
                 totalProviderCount = providers.size,
                 skippedProviderCount = skippedProviders.size,
                 skippedReasons = skippedProviders.map { it.reason.name }.distinct(),
@@ -57,7 +62,7 @@ class GuestProviderPreinstaller(
         var cachedProviderCount = 0
         var failedProviderCount = 0
 
-        sameProcessProviders.forEach { provider ->
+        currentProcessProviders.forEach { provider ->
             attempted += 1
             val authorities = provider.authorities.filter { it.isNotBlank() }
             val primaryAuthority = authorities.firstOrNull()
@@ -100,13 +105,13 @@ class GuestProviderPreinstaller(
         }
 
         val status = when {
-            failedProviderCount == 0 && skippedProviders.isEmpty() -> GuestProviderPreinstallStatus.PASS
-            failedProviderCount == 0 -> GuestProviderPreinstallStatus.PARTIAL
+            failedProviderCount == 0 -> GuestProviderPreinstallStatus.PASS
             installedProviderCount == 0 && cachedProviderCount == 0 -> GuestProviderPreinstallStatus.FAILED
             else -> GuestProviderPreinstallStatus.PARTIAL
         }
         return GuestProviderPreinstallResult(
             status = status,
+            effectiveGuestProcessName = effectiveGuestProcessName,
             totalProviderCount = providers.size,
             attemptedProviderCount = attempted,
             installedProviderCount = installedProviderCount,
@@ -122,15 +127,8 @@ class GuestProviderPreinstaller(
         )
     }
 
-    private fun ResolvedComponent.runsInApplicationProcess(snapshot: VirtualPackageSnapshot): Boolean {
-        return effectiveProcessName(snapshot) == snapshot.applicationProcessName()
-    }
-
     private fun ResolvedComponent.effectiveProcessName(snapshot: VirtualPackageSnapshot): String =
-        normalizeGuestProcessName(processName, snapshot.originPackageName)
-
-    private fun VirtualPackageSnapshot.applicationProcessName(): String =
-        normalizeGuestProcessName(processName, originPackageName)
+        normalizeGuestProcessName(processName ?: snapshot.processName, snapshot.originPackageName)
 
     private fun normalizeGuestProcessName(processName: String?, packageName: String): String {
         val normalized = processName?.trim()?.takeIf { it.isNotEmpty() } ?: return packageName
@@ -148,6 +146,7 @@ data class GuestProviderPreinstallRequest(
 
 data class GuestProviderPreinstallResult(
     val status: GuestProviderPreinstallStatus,
+    val effectiveGuestProcessName: String,
     val totalProviderCount: Int,
     val attemptedProviderCount: Int = 0,
     val installedProviderCount: Int = 0,
@@ -163,6 +162,7 @@ data class GuestProviderPreinstallResult(
 ) {
     fun toEvidence(): List<BootstrapEvidence> = listOf(
         BootstrapEvidence("providerPreinstallStatus", status.name),
+        BootstrapEvidence("providerPreinstallEffectiveGuestProcessName", effectiveGuestProcessName),
         BootstrapEvidence("providerPreinstallTotalCount", totalProviderCount.toString()),
         BootstrapEvidence("providerPreinstallAttemptedCount", attemptedProviderCount.toString()),
         BootstrapEvidence("providerPreinstallInstalledCount", installedProviderCount.toString()),
@@ -193,7 +193,7 @@ data class GuestProviderPreinstallSkippedProvider(
 )
 
 enum class GuestProviderPreinstallSkipReason {
-    CUSTOM_PROCESS_NOT_BOUND
+    DIFFERENT_GUEST_PROCESS
 }
 
 enum class GuestProviderPreinstallStatus {

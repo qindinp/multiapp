@@ -262,7 +262,7 @@ class EngineVirtualizationEndpointContractTest {
     }
 
     @Test
-    fun `PID runtime query uses the authoritative registry and rejects ambiguity`() {
+    fun `general PID runtime query is self-only and rejects ambiguity`() {
         val registry = EngineRuntimeRegistry().apply { register(runtime()) }
         val controlPlane = mockk<EngineProcessControlPlane>()
         every { controlPlane.authorize(INSTANCE_ID, 4321) } returns EngineProcessAuthorityDecision(
@@ -281,8 +281,13 @@ class EngineVirtualizationEndpointContractTest {
             setEndpointField(it, "processControlPlane", controlPlane)
         }
 
+        val forged = endpoint.queryRuntimeByProcessId(4322)
+        assertFalse(forged.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertEquals(
+            "runtime_process_id_not_calling_pid",
+            forged.getString(EngineRuntimeIpcContract.KEY_REASON)
+        )
         val found = endpoint.queryRuntimeByProcessId(4321)
-
         assertTrue(found.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
         assertTrue(found.getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY))
         assertEquals(INSTANCE_ID, found.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID))
@@ -301,6 +306,302 @@ class EngineVirtualizationEndpointContractTest {
         val ambiguous = endpoint.queryRuntimeByProcessId(4321)
         assertFalse(ambiguous.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
         assertEquals("runtime_process_id_ambiguous", ambiguous.getString(EngineRuntimeIpcContract.KEY_REASON))
+    }
+
+    @Test
+    fun `URI permission target resolver authorizes a cross-process primary runtime`() {
+        val caller = runtime()
+        val target = runtimeFor(
+            instanceId = "instance-target",
+            processId = 4322,
+            processSlot = "$HOST_PACKAGE:v3",
+            runtimeEpoch = 8L,
+            engineSessionId = "engine-target"
+        )
+        val registry = EngineRuntimeRegistry().apply {
+            register(caller)
+            register(target)
+        }
+        val controlPlane = mockk<EngineProcessControlPlane>()
+        every { controlPlane.authorize(any(), any()) } returns deniedProcessAuthority()
+        every {
+            controlPlane.authorize(caller.instanceId, CALLING_PID)
+        } returns primaryProcessAuthority(caller)
+        every {
+            controlPlane.authorize(target.instanceId, 4322)
+        } returns primaryProcessAuthority(target)
+        val endpoint = uriPermissionEndpoint(registry, controlPlane)
+
+        val response = endpoint.resolveUriPermissionCheckTarget(caller.instanceId, 4322)
+
+        assertTrue(response.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertTrue(response.getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY))
+        assertEquals(target.instanceId, response.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID))
+        assertEquals(4322, response.getInt(EngineRuntimeIpcContract.KEY_PROCESS_ID))
+        assertEquals(target.processSlot, response.getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT))
+        assertEquals(
+            "uri_permission_target_primary_runtime_authorized",
+            response.getString(EngineRuntimeIpcContract.KEY_REASON)
+        )
+    }
+
+    @Test
+    fun `URI permission check authorizes caller separately from cross-instance target`() {
+        val caller = runtime()
+        val target = runtimeFor(
+            instanceId = "instance-uri-target",
+            processId = 4322,
+            processSlot = "$HOST_PACKAGE:v3",
+            runtimeEpoch = 8L,
+            engineSessionId = "engine-uri-target"
+        )
+        val registry = EngineRuntimeRegistry().apply {
+            register(caller)
+            register(target)
+        }
+        val controlPlane = mockk<EngineProcessControlPlane>()
+        every { controlPlane.authorize(any(), any()) } returns deniedProcessAuthority()
+        every { controlPlane.authorize(caller.instanceId, CALLING_PID) } returns
+            primaryProcessAuthority(caller)
+        every { controlPlane.authorize(target.instanceId, target.processId!!) } returns
+            primaryProcessAuthority(target)
+        val providerService = mockk<VirtualProviderService>()
+        every { providerService.checkUriPermission(target.instanceId, any()) } answers {
+            val request = secondArg<VirtualProviderUriGrantRequest>()
+            VirtualProviderUriGrantResult(
+                ownerInstanceId = caller.instanceId,
+                targetInstanceId = target.instanceId,
+                guestAuthority = request.guestAuthority,
+                encodedPath = request.encodedPath,
+                modeFlags = request.modeFlags,
+                verdict = EngineResultStatus.PASS,
+                granted = true,
+                message = "provider_uri_grant_confirmed"
+            )
+        }
+        val endpoint = uriPermissionEndpoint(
+            registry = registry,
+            controlPlane = controlPlane,
+            providerService = providerService
+        )
+        val request = VirtualProviderUriGrantRequest(
+            guestAuthority = "com.example.provider",
+            encodedPath = "/items/1",
+            modeFlags = EngineProviderUriGrantModes.READ,
+            ownerInstanceId = caller.instanceId,
+            targetInstanceId = target.instanceId,
+            callingUid = HOST_UID,
+            callingPid = target.processId!!,
+            hostUid = HOST_UID
+        )
+
+        val response = endpoint.checkProviderUriPermissionForCaller(
+            caller.instanceId,
+            target.instanceId,
+            providerUriGrantRequestBundle(request)
+        )
+
+        assertEquals(
+            EngineResultStatus.PASS.name,
+            response.getString(EngineRuntimeIpcContract.KEY_VERDICT)
+        )
+        assertTrue(response.getBoolean(EngineRuntimeIpcContract.KEY_GRANTED))
+        assertEquals(
+            target.instanceId,
+            response.getString(EngineRuntimeIpcContract.KEY_TARGET_INSTANCE_ID)
+        )
+        verify(exactly = 1) {
+            providerService.checkUriPermission(
+                target.instanceId,
+                match { checked ->
+                    checked.callingPid == target.processId &&
+                        checked.callingUid == HOST_UID &&
+                        checked.hostUid == HOST_UID
+                }
+            )
+        }
+    }
+
+    @Test
+    fun `URI permission target resolver accepts self and rejects forged caller and unknown PID`() {
+        val caller = runtime()
+        val forgedCallerRuntime = runtimeFor(
+            instanceId = "instance-forged",
+            processId = 4322,
+            processSlot = "$HOST_PACKAGE:v3",
+            runtimeEpoch = 8L,
+            engineSessionId = "engine-forged"
+        )
+        val registry = EngineRuntimeRegistry().apply {
+            register(caller)
+            register(forgedCallerRuntime)
+        }
+        val controlPlane = mockk<EngineProcessControlPlane>()
+        every { controlPlane.authorize(any(), any()) } returns deniedProcessAuthority()
+        every {
+            controlPlane.authorize(caller.instanceId, CALLING_PID)
+        } returns primaryProcessAuthority(caller)
+        val endpoint = uriPermissionEndpoint(registry, controlPlane)
+
+        val self = endpoint.resolveUriPermissionCheckTarget(caller.instanceId, CALLING_PID)
+        assertTrue(self.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertEquals(caller.instanceId, self.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID))
+        assertEquals(CALLING_PID, self.getInt(EngineRuntimeIpcContract.KEY_PROCESS_ID))
+
+        val forgedCaller = endpoint.resolveUriPermissionCheckTarget(
+            forgedCallerRuntime.instanceId,
+            4333
+        )
+        assertUriPermissionTargetRejected(
+            forgedCaller,
+            "uri_permission_caller_runtime_unauthorized"
+        )
+
+        val unknownTarget = endpoint.resolveUriPermissionCheckTarget(caller.instanceId, 4999)
+        assertUriPermissionTargetRejected(
+            unknownTarget,
+            "uri_permission_target_process_not_found"
+        )
+    }
+
+    @Test
+    fun `URI permission target resolver rejects a stale primary generation`() {
+        val caller = runtime()
+        val target = runtimeFor(
+            instanceId = "instance-stale-target",
+            processId = 4322,
+            processSlot = "$HOST_PACKAGE:v3",
+            runtimeEpoch = 8L,
+            engineSessionId = "engine-stale-target"
+        )
+        val registry = EngineRuntimeRegistry().apply {
+            register(caller)
+            register(target)
+        }
+        val controlPlane = mockk<EngineProcessControlPlane>()
+        every { controlPlane.authorize(any(), any()) } returns deniedProcessAuthority()
+        every {
+            controlPlane.authorize(caller.instanceId, CALLING_PID)
+        } returns primaryProcessAuthority(caller)
+        every {
+            controlPlane.authorize(target.instanceId, 4322)
+        } returns EngineProcessAuthorityDecision(
+            allowed = true,
+            identity = EngineProcessClientIdentity(
+                instanceId = target.instanceId,
+                runtimeEpoch = target.runtimeEpoch + 1L,
+                engineSessionId = target.engineSessionId,
+                processSlot = target.processSlot,
+                processId = 4322
+            ),
+            reason = "stale_test_authority"
+        )
+        val endpoint = uriPermissionEndpoint(registry, controlPlane)
+
+        val response = endpoint.resolveUriPermissionCheckTarget(caller.instanceId, 4322)
+
+        assertUriPermissionTargetRejected(
+            response,
+            "uri_permission_target_process_not_found"
+        )
+    }
+
+    @Test
+    fun `URI permission target resolver accepts live component caller and target generations`() {
+        val caller = runtimeFor(
+            instanceId = "instance-component-caller",
+            processId = 4301,
+            processSlot = "$HOST_PACKAGE:v4",
+            runtimeEpoch = 9L,
+            engineSessionId = "engine-component-caller"
+        )
+        val target = runtimeFor(
+            instanceId = "instance-component-target",
+            processId = 4302,
+            processSlot = "$HOST_PACKAGE:v5",
+            runtimeEpoch = 10L,
+            engineSessionId = "engine-component-target"
+        )
+        val registry = EngineRuntimeRegistry().apply {
+            register(caller)
+            register(target)
+        }
+        val controlPlane = mockk<EngineProcessControlPlane>()
+        every { controlPlane.authorize(any(), any()) } returns deniedProcessAuthority()
+        val componentAuthority = mockk<EngineComponentProcessAuthority>()
+        val callerIdentity = componentProcessIdentity(
+            runtime = caller,
+            processId = CALLING_PID,
+            processSlot = "$HOST_PACKAGE:p8",
+            processStartTicks = 101L,
+            effectiveGuestProcessName = "$ORIGIN_PACKAGE:worker"
+        )
+        val targetIdentity = componentProcessIdentity(
+            runtime = target,
+            processId = 4333,
+            processSlot = "$HOST_PACKAGE:p9",
+            processStartTicks = 202L,
+            effectiveGuestProcessName = "$ORIGIN_PACKAGE:remote"
+        )
+        every {
+            componentAuthority.authorizeCaller(any(), any(), any(), any())
+        } returns null
+        every {
+            componentAuthority.authorizeCaller(
+                caller.instanceId,
+                CALLING_PID,
+                callerIdentity.processSlot,
+                callerIdentity.processStartTicks
+            )
+        } returns callerIdentity
+        every {
+            componentAuthority.authorizeCaller(
+                target.instanceId,
+                targetIdentity.processId,
+                targetIdentity.processSlot,
+                targetIdentity.processStartTicks
+            )
+        } returns targetIdentity
+        val endpoint = uriPermissionEndpoint(
+            registry = registry,
+            controlPlane = controlPlane,
+            componentAuthority = componentAuthority,
+            processName = { processId ->
+                when (processId) {
+                    callerIdentity.processId -> callerIdentity.processSlot
+                    targetIdentity.processId -> targetIdentity.processSlot
+                    else -> null
+                }
+            },
+            processStartTicks = { processId ->
+                when (processId) {
+                    callerIdentity.processId -> callerIdentity.processStartTicks
+                    targetIdentity.processId -> targetIdentity.processStartTicks
+                    else -> null
+                }
+            }
+        )
+
+        val response = endpoint.resolveUriPermissionCheckTarget(
+            caller.instanceId,
+            targetIdentity.processId
+        )
+
+        assertTrue(response.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertTrue(response.getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY))
+        assertEquals(target.instanceId, response.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID))
+        assertEquals(
+            targetIdentity.processId,
+            response.getInt(EngineRuntimeIpcContract.KEY_PROCESS_ID)
+        )
+        assertEquals(
+            targetIdentity.processSlot,
+            response.getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT)
+        )
+        assertEquals(
+            "uri_permission_target_component_runtime_authorized",
+            response.getString(EngineRuntimeIpcContract.KEY_REASON)
+        )
     }
 
     @Test
@@ -525,6 +826,22 @@ class EngineVirtualizationEndpointContractTest {
         return endpoint
     }
 
+    private fun uriPermissionEndpoint(
+        registry: EngineRuntimeRegistry,
+        controlPlane: EngineProcessControlPlane,
+        componentAuthority: EngineComponentProcessAuthority? = null,
+        providerService: VirtualProviderService? = null,
+        processName: (Int) -> String? = { null },
+        processStartTicks: (Int) -> Long? = { null }
+    ): EngineRuntimeBinderEndpoint = endpoint(virtualizationEngine = null).also { endpoint ->
+        setEndpointField(endpoint, "registry", registry)
+        setEndpointField(endpoint, "processControlPlane", controlPlane)
+        setEndpointField(endpoint, "componentProcessAuthority", componentAuthority)
+        providerService?.let { setEndpointField(endpoint, "providerService", it) }
+        setEndpointField(endpoint, "callingProcessName", processName)
+        setEndpointField(endpoint, "callingProcessStartTicks", processStartTicks)
+    }
+
     private fun setEndpointField(
         endpoint: EngineRuntimeBinderEndpoint,
         name: String,
@@ -544,6 +861,44 @@ class EngineVirtualizationEndpointContractTest {
         )
         assertEquals("caller_uid_mismatch", response.getString(EngineRuntimeIpcContract.KEY_REASON))
     }
+
+    private fun assertUriPermissionTargetRejected(response: Bundle, expectedReason: String) {
+        assertFalse(response.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertFalse(response.getBoolean(EngineRuntimeIpcContract.KEY_LIVE_AUTHORITY))
+        assertEquals(expectedReason, response.getString(EngineRuntimeIpcContract.KEY_REASON))
+    }
+
+    private fun providerUriGrantRequestBundle(request: VirtualProviderUriGrantRequest) = Bundle().apply {
+        putString(EngineRuntimeIpcContract.KEY_GUEST_AUTHORITY, request.guestAuthority)
+        putString(EngineRuntimeIpcContract.KEY_ENCODED_PATH, request.encodedPath)
+        putInt(EngineRuntimeIpcContract.KEY_MODE_FLAGS, request.modeFlags)
+        putString(EngineRuntimeIpcContract.KEY_OWNER_INSTANCE_ID, request.ownerInstanceId)
+        putString(EngineRuntimeIpcContract.KEY_TARGET_INSTANCE_ID, request.targetInstanceId)
+        putString(EngineRuntimeIpcContract.KEY_TARGET_PACKAGE_NAME, request.targetPackageName)
+        putInt(EngineRuntimeIpcContract.KEY_CALLING_UID, request.callingUid)
+        putInt(EngineRuntimeIpcContract.KEY_CALLING_PID, request.callingPid)
+        putInt(EngineRuntimeIpcContract.KEY_HOST_UID, request.hostUid)
+    }
+
+    private fun deniedProcessAuthority() = EngineProcessAuthorityDecision(
+        allowed = false,
+        identity = null,
+        reason = "test_process_authority_denied"
+    )
+
+    private fun primaryProcessAuthority(
+        runtime: VirtualInstanceRuntime
+    ) = EngineProcessAuthorityDecision(
+        allowed = true,
+        identity = EngineProcessClientIdentity(
+            instanceId = runtime.instanceId,
+            runtimeEpoch = runtime.runtimeEpoch,
+            engineSessionId = runtime.engineSessionId,
+            processSlot = runtime.processSlot,
+            processId = checkNotNull(runtime.processId)
+        ),
+        reason = "live_client_authority_confirmed"
+    )
 
     private fun assertInvalidProxySlotRequest(response: Bundle, expectedReason: String) {
         assertEquals(
@@ -621,6 +976,53 @@ class EngineVirtualizationEndpointContractTest {
         state = VirtualRuntimeState.RUNNING
     )
 
+    private fun runtimeFor(
+        instanceId: String,
+        processId: Int,
+        processSlot: String,
+        runtimeEpoch: Long,
+        engineSessionId: String
+    ): VirtualInstanceRuntime {
+        val base = runtime()
+        val virtualPackageName = "com.multiapp.instance.$instanceId"
+        val dataRoot = "/data/user/0/$HOST_PACKAGE/files/instances/$instanceId"
+        return base.copy(
+            instanceId = instanceId,
+            virtualPackageName = virtualPackageName,
+            dataRoot = dataRoot,
+            packageSnapshot = base.packageSnapshot.copy(
+                instanceId = instanceId,
+                virtualPackageName = virtualPackageName,
+                dataDir = dataRoot
+            ),
+            processSlot = processSlot,
+            proxySlot = "$HOST_PACKAGE.container.ProxyActivity$runtimeEpoch",
+            evidenceSessionId = "evidence-$instanceId",
+            runtimeEpoch = runtimeEpoch,
+            engineSessionId = engineSessionId,
+            processId = processId,
+            processName = processSlot
+        )
+    }
+
+    private fun componentProcessIdentity(
+        runtime: VirtualInstanceRuntime,
+        processId: Int,
+        processSlot: String,
+        processStartTicks: Long,
+        effectiveGuestProcessName: String
+    ) = EngineComponentProcessClientIdentity(
+        instanceId = runtime.instanceId,
+        runtimeEpoch = runtime.runtimeEpoch,
+        engineSessionId = runtime.engineSessionId,
+        processEpoch = 1L,
+        clientSessionId = "component-client-${runtime.instanceId}",
+        effectiveGuestProcessName = effectiveGuestProcessName,
+        processSlot = processSlot,
+        processId = processId,
+        processStartTicks = processStartTicks
+    )
+
     private fun evidence() = EngineEvidenceReport(
         instanceId = INSTANCE_ID,
         evidenceSessionId = "evidence-session",
@@ -650,6 +1052,9 @@ class EngineVirtualizationEndpointContractTest {
             }
             every { anyConstructed<Bundle>().getInt(any()) } answers {
                 valuesFor(self as Bundle)[firstArg()] as? Int ?: 0
+            }
+            every { anyConstructed<Bundle>().getInt(any(), any()) } answers {
+                valuesFor(self as Bundle)[firstArg()] as? Int ?: secondArg<Int>()
             }
             every { anyConstructed<Bundle>().putLong(any(), any()) } answers {
                 valuesFor(self as Bundle)[firstArg()] = secondArg<Long>()
@@ -700,6 +1105,9 @@ class EngineVirtualizationEndpointContractTest {
             }
             every { bundle.getInt(any()) } answers {
                 valuesFor(bundle)[firstArg()] as? Int ?: 0
+            }
+            every { bundle.getInt(any(), any()) } answers {
+                valuesFor(bundle)[firstArg()] as? Int ?: secondArg<Int>()
             }
             every { bundle.putLong(any(), any()) } answers {
                 valuesFor(bundle)[firstArg()] = secondArg<Long>()
