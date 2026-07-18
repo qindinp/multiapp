@@ -433,7 +433,7 @@ private class InFlightBinding(
 
     fun requireCompatibleReadyResult(result: HostedBootstrapResult) {
         val provisional = provisionalRecord?.result ?: return
-        check(provisional.hasSameRuntimeIdentity(result)) {
+        check(provisional.canTransitionToReadyResult(result)) {
             "READY virtual runtime does not match the provisional ClassLoader/Application: " +
                 "instanceId=${result.instanceId}"
         }
@@ -519,3 +519,25 @@ internal fun HostedBootstrapResult.hasSameRuntimeIdentity(other: HostedBootstrap
         processSlot == other.processSlot &&
         guestClassLoader === other.guestClassLoader &&
         guestApplication === other.guestApplication
+
+private fun HostedBootstrapResult.canTransitionToReadyResult(
+    ready: HostedBootstrapResult
+): Boolean {
+    val sameBaseIdentity = instanceId == ready.instanceId &&
+        originPackageName == ready.originPackageName &&
+        virtualPackageName == ready.virtualPackageName &&
+        processSlot == ready.processSlot &&
+        guestClassLoader === ready.guestClassLoader
+    if (!sameBaseIdentity) return false
+    if (guestApplication === ready.guestApplication) return true
+
+    // Some hot-fix frameworks replace LoadedApk.mApplication during onCreate.
+    // ApplicationStage accepts that delegate only after proving that its
+    // ContextImpl still points at the same guest LoadedApk.
+    val applicationStage = ready.stageResults.lastOrNull {
+        it.stage == RuntimeStage.APPLICATION && it.status == BootstrapStatus.SUCCESS
+    } ?: return false
+    val evidence = applicationStage.evidence.associate { it.key to it.value }
+    return evidence["loadedApkFinalApplicationStatus"] == "PASS" &&
+        evidence["loadedApkFinalApplicationSource"] == "DELEGATE"
+}

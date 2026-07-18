@@ -351,6 +351,70 @@ object IntentRemapDiagnostics {
         return if (changed) patched else args
     }
 
+    internal fun remapContentProviderIdentityArgs(
+        method: java.lang.reflect.Method,
+        args: Array<Any?>,
+        sourcePackages: Collection<String>,
+        hostPackageName: String,
+        runtimeUid: Int = Process.myUid()
+    ): Array<Any?> {
+        val aliases = sourcePackages
+            .filter { it.isNotBlank() && it != hostPackageName }
+            .toSet()
+        if (hostPackageName.isBlank() || aliases.isEmpty() || args.isEmpty()) return args
+
+        val patched = args.copyOf()
+        var changed = false
+        if (method.parameterTypes.firstOrNull() == String::class.java && patched[0] in aliases) {
+            patched[0] = hostPackageName
+            changed = true
+        }
+        for (index in patched.indices) {
+            val remapped = remapAttributionSourceLike(
+                value = patched[index],
+                aliases = aliases,
+                hostPackageName = hostPackageName,
+                runtimeUid = runtimeUid
+            )
+            if (remapped.changed) {
+                patched[index] = remapped.value
+                changed = true
+            }
+        }
+        if (changed) {
+            safeLogD("IContentProvider.${method.name} caller identity remapped to $hostPackageName")
+        }
+        return if (changed) patched else args
+    }
+
+    internal fun remapAttributionSourceToHost(
+        value: Any,
+        hostPackageName: String,
+        runtimeUid: Int = Process.myUid()
+    ): Any {
+        val observedPackageName = attributionSourcePackageName(value) ?: return value
+        return remapAttributionSourceLike(
+            value = value,
+            aliases = setOf(observedPackageName),
+            hostPackageName = hostPackageName,
+            runtimeUid = runtimeUid
+        ).value ?: value
+    }
+
+    internal fun attributionSourcePackageName(value: Any?): String? {
+        if (value == null) return null
+        return (invokeNoArg(value, "getPackageName") as? String)
+            ?: findFieldInHierarchy(value.javaClass, "packageName")
+                ?.let { field -> runCatching { field.get(value) as? String }.getOrNull() }
+    }
+
+    internal fun attributionSourceUid(value: Any?): Int? {
+        if (value == null) return null
+        return (invokeNoArg(value, "getUid") as? Int)
+            ?: findFieldInHierarchy(value.javaClass, "uid")
+                ?.let { field -> runCatching { field.get(value) as? Int }.getOrNull() }
+    }
+
     fun installAppOpsManagerPackageProxy(
         context: Context?,
         sourcePackages: Collection<String>,

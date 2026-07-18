@@ -259,8 +259,8 @@ class VirtualContextStorageTest {
 
         assertEquals(VirtualStorageDiagnosticStatus.UNSUPPORTED, diagnostic.status)
         assertEquals("", diagnostic.redirectedPath)
-        assertEquals("REDIRECTED_PATH_ESCAPES_DATA_ROOT", diagnostic.reason)
-        assertTrue(diagnostic.candidateWithinDataRoot == false)
+        assertEquals("PATH_TRAVERSAL_REJECTED", diagnostic.reason)
+        assertTrue(diagnostic.candidateWithinDataRoot == null)
         assertTrue(!diagnostic.withinDataRoot)
     }
 
@@ -372,8 +372,8 @@ class VirtualContextStorageTest {
     @Test
     fun `native private path diagnostics do not redirect non private paths`(@TempDir dataRoot: File) {
         listOf(
-            "/sdcard/Android/data/com.example.app/files/config.json",
             "/data/data/com.example.other/files/config.json",
+            "/sdcard/Download/public.txt",
             "/proc/self/maps"
         ).forEach { originalPath ->
             val diagnostic = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
@@ -391,6 +391,36 @@ class VirtualContextStorageTest {
             assertEquals("PATH_NOT_MATCHED", diagnostic.reason)
             assertTrue(!diagnostic.withinDataRoot)
         }
+    }
+
+    @Test
+    fun `native private path diagnostics redirect app scoped external storage`(@TempDir dataRoot: File) {
+        val files = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            originalPath = "/sdcard/Android/data/com.example.app/files/config.json",
+            operation = "open",
+            caller = "test"
+        )
+        val obb = VirtualStoragePathDiagnostics.diagnoseNativePrivatePath(
+            instanceId = "inst-001",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.001",
+            dataRoot = dataRoot.absolutePath,
+            originalPath = "/storage/emulated/0/Android/obb/com.example.app/main.obb",
+            operation = "stat",
+            caller = "test"
+        )
+
+        assertEquals(VirtualStorageDiagnosticStatus.REDIRECTED, files.status)
+        assertEquals(
+            File(dataRoot, "external_files/config.json").canonicalPath,
+            File(files.redirectedPath).canonicalPath
+        )
+        assertEquals(VirtualStorageDiagnosticStatus.REDIRECTED, obb.status)
+        assertEquals(File(dataRoot, "obb/main.obb").canonicalPath, File(obb.redirectedPath).canonicalPath)
     }
 
     @Test

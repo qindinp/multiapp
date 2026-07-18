@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Process
 import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.model.engine.ProviderRouteContract
+import com.multiapp.core.model.engine.ProviderStubAuthorityContract
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
@@ -29,7 +30,7 @@ class VirtualProviderManager(
             originPackageName = snapshot.originPackageName,
             virtualPackageName = snapshot.virtualPackageName,
             guestAuthority = authority,
-            proxyAuthority = proxyAuthority(snapshot, authority),
+            proxyAuthority = proxyAuthorityForProcessSlot(processSlot),
             providerClassName = provider.name,
             providerInfo = providerInfo(snapshot, provider, authority),
             policy = VirtualProviderPolicy.fromComponent(provider)
@@ -43,29 +44,31 @@ class VirtualProviderManager(
     ): VirtualProviderUriRewrite? {
         val authority = uri.authority ?: return null
         val resolution = resolve(snapshot, authority) ?: return null
-        val resolvedProcessSlot = processSlotForSnapshot(snapshot)
-        val routeToken = ProviderRouteTokenRegistry.issue(
+        val route = ProviderRouteTokenRegistry.issue(
             callerInstanceId = snapshot.instanceId,
             targetInstanceId = snapshot.instanceId,
             authority = authority,
             operation = operation,
-            processSlot = resolvedProcessSlot
-        ).token
+            processSlot = null
+        )
+        val routedResolution = resolution.copy(
+            proxyAuthority = proxyAuthorityForProcessSlot(route.processSlot)
+        )
         val rewritten = uri.buildUpon()
-            .authority(resolution.proxyAuthority)
+            .authority(routedResolution.proxyAuthority)
             .appendQueryParameter(PROXY_INSTANCE_ID, snapshot.instanceId)
             .appendQueryParameter(PROXY_GUEST_AUTHORITY, authority)
             .apply {
-                if (!resolvedProcessSlot.isNullOrBlank()) {
-                    appendQueryParameter(PROXY_PROCESS_SLOT, resolvedProcessSlot)
+                if (!route.processSlot.isNullOrBlank()) {
+                    appendQueryParameter(PROXY_PROCESS_SLOT, route.processSlot)
                 }
             }
-            .appendQueryParameter(PROXY_ROUTE_TOKEN, routeToken)
+            .appendQueryParameter(PROXY_ROUTE_TOKEN, route.token)
             .build()
         return VirtualProviderUriRewrite(
             originalUri = uri,
             rewrittenUri = rewritten,
-            resolution = resolution
+            resolution = routedResolution
         )
     }
 
@@ -75,16 +78,12 @@ class VirtualProviderManager(
         return VirtualProviderOpenResult.Resolved(resolution)
     }
 
-    private fun proxyAuthority(snapshot: VirtualPackageSnapshot, guestAuthority: String): String =
-        proxyAuthorityForProcessSlot(processSlotForSnapshot(snapshot))
-
-    private fun processSlotForSnapshot(snapshot: VirtualPackageSnapshot): String? =
-        processSlot?.takeIf { it.isNotBlank() }
-            ?: ProviderRouteTokenRegistry.processSlotForInstance(snapshot.instanceId)
-
     private fun proxyAuthorityForProcessSlot(processSlot: String?): String {
-        val index = ProxyActivitySlots.processSlotIndex(hostPackageName, processSlot) ?: return stubAuthorityPrefix
-        return "$stubAuthorityPrefix.v$index"
+        if (stubAuthorityPrefix == ProviderStubAuthorityContract.stubAuthority(hostPackageName, null)) {
+            return ProviderStubAuthorityContract.stubAuthority(hostPackageName, processSlot)
+        }
+        return ProviderStubAuthorityContract.reselectProcessSlot(stubAuthorityPrefix, processSlot)
+            ?: stubAuthorityPrefix
     }
 
     companion object {

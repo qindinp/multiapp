@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import com.multiapp.core.hook.NativeHookBridge
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
@@ -173,7 +174,7 @@ class NativeLibrariesStageTest {
             nativePrivatePathRedirectInstaller = NativePrivatePathRedirectInstaller { _, _, _, processSlot, _ ->
                 NativePrivatePathRedirectInstallResult(
                     hookInstalled = true,
-                    ruleCount = 4,
+                    ruleCount = NativeHookBridge.GUEST_APP_SCOPED_REDIRECT_RULE_COUNT,
                     reason = "PATH_HOOK_INSTALLED_NEEDS_DEVICE_IO_PROBE"
                 ).copy(
                     config = NativePrivatePathRedirectConfig.create(
@@ -201,8 +202,11 @@ class NativeLibrariesStageTest {
         val evidence = output.result.evidence.associate { it.key to it.value }
         assertEquals("PARTIAL", evidence["nativePrivatePathRedirectVerdict"])
         assertEquals("PARTIAL", evidence["nativeIoRedirectVerdict"])
-        assertEquals("4", evidence["nativePrivatePathRedirectRuleCount"])
-        assertEquals("GUEST_PRIVATE_PATHS_ONLY", evidence["nativeRedirectScope"])
+        assertEquals(
+            NativeHookBridge.GUEST_APP_SCOPED_REDIRECT_RULE_COUNT.toString(),
+            evidence["nativePrivatePathRedirectRuleCount"]
+        )
+        assertEquals("GUEST_APP_SCOPED_PRIVATE_PATHS", evidence["nativeRedirectScope"])
         assertEquals("com.multiapp.app:v3", evidence["nativeRedirectProcessSlot"])
         assertEquals("processSlot+instanceId+dataRoot", evidence["nativeRedirectBindingScope"])
         assertEquals("PARTIAL", evidence["nativeRealpathRedirectVerdict"])

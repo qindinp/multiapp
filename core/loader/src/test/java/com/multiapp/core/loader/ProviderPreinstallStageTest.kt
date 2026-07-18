@@ -12,6 +12,9 @@ import io.mockk.mockk
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class ProviderPreinstallStageTest {
 
@@ -125,6 +128,46 @@ class ProviderPreinstallStageTest {
         assertEquals(1, createCount.get())
     }
 
+    @Test
+    fun `provider callback TCCL mutation fails before the next provider can run`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val wrongClassLoader = object : ClassLoader(previous) {}
+        var secondProviderCreated = false
+        val snapshot = snapshot(
+            providers = listOf(
+                provider("com.test.minimal.FirstProvider", "com.test.minimal.first", processName = null),
+                provider("com.test.minimal.SecondProvider", "com.test.minimal.second", processName = null)
+            )
+        )
+        val runtime = VirtualProviderRuntime(
+            providerFactory = ProviderFactory { _, className ->
+                if (className.endsWith("SecondProvider")) secondProviderCreated = true
+                FakeProvider()
+            },
+            providerAttacher = ProviderAttacher { _, _, info ->
+                if (info.authority == "com.test.minimal.first") {
+                    Thread.currentThread().contextClassLoader = wrongClassLoader
+                }
+            }
+        )
+        try {
+            Thread.currentThread().contextClassLoader = guestClassLoader
+
+            val error = assertFailsWith<IllegalStateException> {
+                preinstaller(runtime).preinstall(
+                    request(snapshot, guestClassLoader = guestClassLoader)
+                )
+            }
+
+            assertTrue(error.message.orEmpty().contains("after Provider com.test.minimal.FirstProvider"))
+            assertEquals(false, secondProviderCreated)
+            assertSame(wrongClassLoader, Thread.currentThread().contextClassLoader)
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
     private fun preinstaller(runtime: VirtualProviderRuntime) = GuestProviderPreinstaller(
         providerRuntime = runtime,
         providerManagerFactory = { hostPackageName, processSlot ->
@@ -138,14 +181,14 @@ class ProviderPreinstallStageTest {
 
     private fun request(
         snapshot: VirtualPackageSnapshot,
-        effectiveGuestProcessName: String? = null
+        effectiveGuestProcessName: String? = null,
+        guestClassLoader: ClassLoader = ClassLoader.getSystemClassLoader()
     ): GuestProviderPreinstallRequest {
-        val classLoader = ClassLoader.getSystemClassLoader()
         return GuestProviderPreinstallRequest(
             hostPackageName = "com.multiapp.app",
             snapshot = snapshot,
             application = mockk<Application>(relaxed = true),
-            guestClassLoader = classLoader,
+            guestClassLoader = guestClassLoader,
             config = VirtualContextConfig(
                 instanceId = snapshot.instanceId,
                 originPackageName = snapshot.originPackageName,
@@ -153,7 +196,7 @@ class ProviderPreinstallStageTest {
                 dataDir = snapshot.dataDir,
                 sourceDir = snapshot.sourceDir,
                 nativeLibraryDir = snapshot.nativeLibraryDir,
-                classLoader = classLoader,
+                classLoader = guestClassLoader,
                 packageSnapshot = snapshot,
                 effectiveGuestProcessName = effectiveGuestProcessName
                     ?: if (snapshot.processName?.startsWith(':') == true) {

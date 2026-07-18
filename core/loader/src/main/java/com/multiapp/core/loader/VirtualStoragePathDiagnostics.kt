@@ -53,6 +53,31 @@ object VirtualStoragePathDiagnostics {
         probeName: String? = null
     ): VirtualStoragePathDiagnostic {
         val dataRootFile = File(dataRoot)
+        val normalizedOriginalPath = normalizeSeparators(originalPath)
+        val unsafeReason = when {
+            hasUnsafePathCharacter(normalizedOriginalPath) -> "PATH_CONTAINS_NUL"
+            hasParentTraversalSegment(normalizedOriginalPath) -> "PATH_TRAVERSAL_REJECTED"
+            else -> null
+        }
+        if (unsafeReason != null) {
+            return VirtualStoragePathDiagnostic(
+                kind = VirtualStorageDiagnosticKind.JAVA_ABSOLUTE_PATH,
+                status = VirtualStorageDiagnosticStatus.UNSUPPORTED,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                virtualPackageName = virtualPackageName,
+                dataRoot = dataRootFile.normalizedPath(),
+                probeName = probeName,
+                operation = null,
+                originalPath = originalPath,
+                redirectedPath = "",
+                candidateRedirectedPath = null,
+                caller = caller,
+                reason = unsafeReason,
+                withinDataRoot = false,
+                candidateWithinDataRoot = null
+            )
+        }
         val candidate = rewriteJavaAbsolutePath(
             originalPath = originalPath,
             originPackageName = originPackageName,
@@ -255,7 +280,7 @@ object VirtualStoragePathDiagnostics {
             )
         }
 
-        val remainder = guestPrivatePathRemainder(normalizedPath, originPackageName)
+        val candidate = guestAppScopedPathCandidate(normalizedPath, originPackageName, root)
             ?: return diagnostic(
                 status = VirtualStorageDiagnosticStatus.UNCHANGED,
                 redirectedPath = originalPath,
@@ -264,8 +289,6 @@ object VirtualStoragePathDiagnostics {
                 withinDataRoot = false,
                 candidateWithinDataRoot = null
             )
-
-        val candidate = childPath(root, remainder)
         if (openFlags and NATIVE_OPEN_FLAG_O_CREAT != 0) {
             val parent = candidate.parentFile ?: root
             if (!parent.isWithin(root, fileSystem)) {
@@ -308,19 +331,8 @@ object VirtualStoragePathDiagnostics {
     ): File? {
         if (originPackageName.isBlank() || dataRoot.isBlank()) return null
         val normalized = originalPath.replace('\\', '/')
-        val internalRemainder = listOf(
-            "/data/data/$originPackageName",
-            "/data/user/0/$originPackageName"
-        ).firstNotNullOfOrNull { prefix -> stripPackagePrefix(normalized, prefix) }
-        if (internalRemainder != null) {
-            return childPath(File(dataRoot), internalRemainder)
-        }
-
-        val externalRemainder = listOf(
-            "/sdcard/Android/data/$originPackageName",
-            "/storage/emulated/0/Android/data/$originPackageName"
-        ).firstNotNullOfOrNull { prefix -> stripPackagePrefix(normalized, prefix) }
-        return externalRemainder?.let { redirectExternalPath(File(dataRoot), it) }
+        if (hasUnsafePathCharacter(normalized) || hasParentTraversalSegment(normalized)) return null
+        return guestAppScopedPathCandidate(normalized, originPackageName, File(dataRoot))
     }
 
     private fun stripPackagePrefix(path: String, prefix: String): String? {
@@ -336,6 +348,33 @@ object VirtualStoragePathDiagnostics {
             "/data/data/$originPackageName",
             "/data/user/0/$originPackageName"
         ).firstNotNullOfOrNull { prefix -> stripPackagePrefix(path, prefix) }
+    }
+
+    private fun guestAppScopedPathCandidate(
+        path: String,
+        originPackageName: String,
+        dataRoot: File
+    ): File? {
+        guestPrivatePathRemainder(path, originPackageName)?.let { remainder ->
+            return childPath(dataRoot, remainder)
+        }
+        listOf(
+            "/storage/emulated/0/Android/data/$originPackageName",
+            "/sdcard/Android/data/$originPackageName",
+            "/mnt/sdcard/Android/data/$originPackageName",
+            "/storage/self/primary/Android/data/$originPackageName"
+        ).firstNotNullOfOrNull { prefix -> stripPackagePrefix(path, prefix) }?.let { remainder ->
+            return redirectExternalPath(dataRoot, remainder)
+        }
+        listOf(
+            "/storage/emulated/0/Android/obb/$originPackageName",
+            "/sdcard/Android/obb/$originPackageName",
+            "/mnt/sdcard/Android/obb/$originPackageName",
+            "/storage/self/primary/Android/obb/$originPackageName"
+        ).firstNotNullOfOrNull { prefix -> stripPackagePrefix(path, prefix) }?.let { remainder ->
+            return childPath(File(dataRoot, "obb"), remainder)
+        }
+        return null
     }
 
     private fun redirectExternalPath(dataRoot: File, remainder: String): File {

@@ -79,12 +79,7 @@ internal data class NativePrivatePathRedirectConfig(
                     originPackageName = originPackageName,
                     dataRoot = canonicalDataRoot,
                     processSlot = normalizedProcessSlot,
-                    privatePathPrefixes = listOf(
-                        "/data/data/$originPackageName",
-                        "/data/data/$originPackageName/",
-                        "/data/user/0/$originPackageName",
-                        "/data/user/0/$originPackageName/"
-                    )
+                    privatePathPrefixes = NativeHookBridge.guestAppScopedSourcePrefixes(originPackageName)
                 )
             )
         }
@@ -124,7 +119,7 @@ internal data class NativePrivatePathRedirectInstallResult(
             BootstrapEvidence("nativePrivatePathRedirectHookInstalled", hookInstalled.toString()),
             BootstrapEvidence("nativePrivatePathRedirectRuleCount", ruleCount.toString()),
             BootstrapEvidence("nativePrivatePathRedirectExpectedRuleCount", EXPECTED_RULE_COUNT.toString()),
-            BootstrapEvidence("nativeRedirectScope", "GUEST_PRIVATE_PATHS_ONLY"),
+            BootstrapEvidence("nativeRedirectScope", "GUEST_APP_SCOPED_PRIVATE_PATHS"),
             BootstrapEvidence("nativePrivatePathRedirectOperations", PATH_REDIRECT_OPERATIONS.joinToString(",")),
             BootstrapEvidence("nativeRealpathRedirectVerdict", verdict),
             BootstrapEvidence("nativeRealpathRedirectVerdictReason", nativeIoReason()),
@@ -152,7 +147,7 @@ internal data class NativePrivatePathRedirectInstallResult(
     }
 
     companion object {
-        const val EXPECTED_RULE_COUNT = 4
+        const val EXPECTED_RULE_COUNT = NativeHookBridge.GUEST_APP_SCOPED_REDIRECT_RULE_COUNT
         val PATH_REDIRECT_OPERATIONS: List<String> = listOf(
             "open",
             "openat",
@@ -203,6 +198,15 @@ internal object NativePrivatePathRedirectInstallers {
         }
 
         val bridge = bridgeProvider()
+        val storageRootsReady = listOf("external_data", "external_files", "external_cache", "obb")
+            .map { child -> File(config.dataRoot, child) }
+            .all { directory -> directory.isDirectory || directory.mkdirs() || directory.isDirectory }
+        if (!storageRootsReady) {
+            return@NativePrivatePathRedirectInstaller NativePrivatePathRedirectInstallResult.failed(
+                ruleCount = 0,
+                reason = "APP_SCOPED_STORAGE_ROOTS_UNAVAILABLE"
+            )
+        }
         val hookInstalled = bridge.initNativePathRedirectHooks(
             policy = policy,
             context = hostContext,

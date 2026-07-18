@@ -260,7 +260,14 @@ open class StubContentProvider : ContentProvider() {
     private fun dispatch(uri: Uri, operationName: String): EngineProviderDispatchResult {
         val providerCallingUid = Binder.getCallingUid()
         val providerCallingPid = Binder.getCallingPid()
-        val route = when (val routeResult = validateRouteToken(uri, operationName)) {
+        val route = when (
+            val routeResult = validateRouteToken(
+                uri,
+                operationName,
+                providerCallingUid,
+                providerCallingPid
+            )
+        ) {
             is EngineProviderRouteTokenGateResult.Valid -> routeResult
             is EngineProviderRouteTokenGateResult.Invalid -> return routeResult.result
         }
@@ -278,9 +285,7 @@ open class StubContentProvider : ContentProvider() {
                 providerCallingUid = providerCallingUid,
                 providerCallingPid = providerCallingPid,
                 hostUid = hostContext.applicationInfo.uid,
-                callerProcessSlot = route.route.processSlot.takeIf {
-                    route.route.callerInstanceId == route.route.targetInstanceId
-                },
+                callerProcessSlot = route.route.callerProcessSlot,
                 accessMode = operationName.substringAfter(':', "").takeIf { it.isNotBlank() }
             )
         )
@@ -342,8 +347,18 @@ open class StubContentProvider : ContentProvider() {
     )?.reason
         ?: "VALID"
 
-    private fun validateRouteToken(uri: Uri, operationName: String): EngineProviderRouteTokenGateResult {
-        return EngineProviderRouteTokenGate.validate(uri, operationName)
+    private fun validateRouteToken(
+        uri: Uri,
+        operationName: String,
+        providerCallingUid: Int,
+        providerCallingPid: Int
+    ): EngineProviderRouteTokenGateResult {
+        return EngineProviderRouteTokenGate.validate(
+            uri = uri,
+            operationName = operationName,
+            providerCallingUid = providerCallingUid,
+            providerCallingPid = providerCallingPid
+        )
     }
 
     private fun validateRouteTokenFields(

@@ -91,7 +91,7 @@ class VirtualProviderManagerTest {
     }
 
     @Test
-    fun `resolve targets process slot provider authority when instance process slot is known`() {
+    fun `resolve does not infer target provider slot from remembered caller slot`() {
         val snapshot = snapshot(instanceId = "provider-manager-slot-inst")
         ProviderRouteTokenRegistry.rememberProcessSlot(snapshot.instanceId, "com.multiapp.app:v3")
 
@@ -101,7 +101,7 @@ class VirtualProviderManagerTest {
         ).resolve(snapshot, "com.test.minimal.probe")
 
         assertNotNull(resolution)
-        assertEquals("com.multiapp.app.multiapp.provider.stub.v3", resolution.proxyAuthority)
+        assertEquals("com.multiapp.app.multiapp.provider.stub", resolution.proxyAuthority)
     }
 
     @Test

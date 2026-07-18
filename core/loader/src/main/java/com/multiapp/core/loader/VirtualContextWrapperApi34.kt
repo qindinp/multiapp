@@ -62,7 +62,8 @@ open class VirtualContextWrapperApi34(
             conn,
             flags = bindServiceFlagsReader(flags),
             executor = executor,
-            api = "bindService:flags-executor"
+            api = "bindService:flags-executor",
+            systemBind = { systemDispatchContext().bindService(service, flags, executor, conn) }
         )
     }
 
@@ -72,7 +73,8 @@ open class VirtualContextWrapperApi34(
             conn,
             flags = bindServiceFlagsReader(flags),
             executor = null,
-            api = "bindService:flags"
+            api = "bindService:flags",
+            systemBind = { systemDispatchContext().bindService(service, conn, flags) }
         )
     }
 
@@ -87,7 +89,8 @@ open class VirtualContextWrapperApi34(
             conn,
             flags = bindServiceFlagsReader(flags),
             executor = null,
-            api = "bindServiceAsUser:flags"
+            api = "bindServiceAsUser:flags",
+            systemBind = { systemDispatchContext().bindServiceAsUser(service, conn, flags, user) }
         )
     }
 
@@ -103,7 +106,10 @@ open class VirtualContextWrapperApi34(
             conn,
             flags = bindServiceFlagsReader(flags),
             executor = executor,
-            api = "bindIsolatedService:flags"
+            api = "bindIsolatedService:flags",
+            systemBind = {
+                systemDispatchContext().bindIsolatedService(service, flags, instanceName, executor, conn)
+            }
         )
     }
 }

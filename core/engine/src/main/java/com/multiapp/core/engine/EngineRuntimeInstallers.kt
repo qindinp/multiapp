@@ -16,6 +16,9 @@ import com.multiapp.core.loader.VirtualInstrumentationInstaller
 import com.multiapp.core.loader.VirtualPermissionCheckDispatchers
 import com.multiapp.core.loader.VirtualPackageEnabledStateDispatchers
 import com.multiapp.core.loader.VirtualUriPermissionDispatcherFactories
+import com.multiapp.core.identity.ProviderRouteToken
+import com.multiapp.core.identity.ProviderRouteTokenIssuer
+import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
 import com.multiapp.core.model.virtual.ProxySlotContract
 import java.io.File
@@ -37,6 +40,7 @@ object EngineRuntimeInstallers {
 
     fun installSystemServerClient(context: Context): Boolean {
         rememberProcessHostContext(context)
+        installProviderRouteTokenAuthority()
         VirtualActivityLaunchAllocationProviders.install(
             IpcVirtualActivityLaunchAllocationProvider()
         )
@@ -50,6 +54,24 @@ object EngineRuntimeInstallers {
             EngineOperationEvidenceSinks.install(EngineRuntimeIpcClients.evidenceSink())
         }
         return connected
+    }
+
+    private fun installProviderRouteTokenAuthority() {
+        ProviderRouteTokenRegistry.installAuthoritativeIssuer(
+            ProviderRouteTokenIssuer { caller, target, authority, operation, requestedProcessSlot ->
+                EngineRuntimeIpcClients.issueProviderRouteToken(
+                    callerInstanceId = caller,
+                    request = EngineProviderRouteTokenIssueRequest(
+                        targetInstanceId = target,
+                        guestAuthority = authority,
+                        operation = operation,
+                        requestedProcessSlot = requestedProcessSlot
+                    )
+                )?.takeIf(EngineProviderRouteTokenAuthorityResult::accepted)
+                    ?.route
+                    ?.toIdentityProviderRouteToken()
+            }
+        )
     }
 
     fun installAmsComponentDispatcher(context: Context) {
@@ -75,7 +97,7 @@ object EngineRuntimeInstallers {
                 fallback = request.fallback,
                 instanceId = request.config.instanceId,
                 activityLaunchCoordinator = EngineActivityLaunchCoordinator(
-                    hostContext = request.hostContext,
+                    hostContext = resolveProcessHostContext(request.hostContext),
                     processSlot = request.config.processSlot
                 ),
                 activityService = activityService,
@@ -131,7 +153,8 @@ object EngineRuntimeInstallers {
         return VirtualInstrumentationInstaller.install(
             processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
             activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
-            activityOperations = EngineVirtualActivityOperationsFactory.hotPath(context.filesDir)
+            activityOperations = EngineVirtualActivityOperationsFactory.hotPath(context.filesDir),
+            processHostContext = resolveProcessHostContext(context)
         )
     }
 
@@ -189,8 +212,26 @@ object EngineRuntimeInstallers {
     }
 
     private fun rememberProcessHostContext(context: Context) {
-        val applicationContext = runCatching { context.applicationContext }.getOrNull()
-        processHostContext = applicationContext ?: context
+        if (processHostContext != null) return
+        val candidate = freezeProcessHostContext(context)
+        synchronized(this) {
+            if (processHostContext == null) {
+                processHostContext = candidate
+            }
+        }
+    }
+
+    private fun freezeProcessHostContext(context: Context): Context {
+        val applicationContext = runCatching { context.applicationContext }.getOrNull() ?: context
+        val hostPackageName = runCatching { context.packageName }.getOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: return applicationContext
+        return runCatching {
+            applicationContext.createPackageContext(
+                hostPackageName,
+                Context.CONTEXT_IGNORE_SECURITY
+            )
+        }.getOrNull() ?: applicationContext
     }
 
     private fun resolveProcessHostContext(context: Context): Context {
@@ -213,3 +254,14 @@ object EngineRuntimeInstallers {
         processHostContext = null
     }
 }
+
+private fun EngineProviderRouteToken.toIdentityProviderRouteToken(): ProviderRouteToken =
+    ProviderRouteToken(
+        token = token,
+        callerInstanceId = callerInstanceId,
+        targetInstanceId = targetInstanceId,
+        authority = authority,
+        operation = operation,
+        expiresAtMillis = expiresAtMillis,
+        processSlot = processSlot
+    )

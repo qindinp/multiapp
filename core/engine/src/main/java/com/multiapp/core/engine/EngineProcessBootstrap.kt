@@ -222,6 +222,37 @@ object EngineProcessBootstrapReadiness {
             systemServiceStage?.status != EngineBootstrapStatus.FAILED &&
             providerPreinstallReady &&
             launcherReady
+        val readinessFailures = buildList {
+            if (!result.success) add("HOSTED_BOOTSTRAP_FAILED")
+            if (result.guestClassLoader == null) add("GUEST_CLASSLOADER_MISSING")
+            if (result.guestApplication == null) add("GUEST_APPLICATION_MISSING")
+            if (applicationStage == null) add("APPLICATION_STAGE_MISSING")
+            if (applicationStage?.status != EngineBootstrapStatus.SUCCESS) add("APPLICATION_STAGE_NOT_SUCCESS")
+            if (applicationStatus != "PASS") add("LOADED_APK_APPLICATION_NOT_PASS")
+            if (systemServiceStage == null) add("SYSTEM_SERVICE_STAGE_MISSING")
+            if (systemServiceStage?.status == EngineBootstrapStatus.FAILED) add("SYSTEM_SERVICE_STAGE_FAILED")
+            if (providerPreinstallStatus == null) add("PROVIDER_PREINSTALL_STATUS_MISSING")
+            if (!providerPreinstallReady) add("PROVIDER_PREINSTALL_NOT_READY")
+            if (!launcherReady) add("LAUNCHER_ACTIVITY_MISSING")
+        }
+        val readinessEvidence = linkedMapOf(
+            "identityMatches" to identityMatches.toString(),
+            "mandatoryRuntimeReady" to mandatoryRuntimeReady.toString(),
+            "readinessFailures" to readinessFailures.joinToString(","),
+            "loadedApkApplicationCreatorReady" to (applicationStatus == "PASS").toString(),
+            "providerPreinstallReady" to providerPreinstallReady.toString(),
+            "launcherActivityReady" to launcherReady.toString(),
+            "systemServiceStageReady" to
+                (systemServiceStage != null && systemServiceStage.status != EngineBootstrapStatus.FAILED).toString()
+        ).apply {
+            applicationStage?.evidence
+                ?.filterKeys { key ->
+                    key.startsWith("providerPreinstall") ||
+                        key.startsWith("loadedApkApplicationCreator") ||
+                        key == "activityThreadApplicationBindingStatus"
+                }
+                ?.forEach { (key, value) -> put(key, value) }
+        }
 
         if (!identityMatches) {
             return baseResult(
@@ -236,6 +267,7 @@ object EngineProcessBootstrapReadiness {
                 applicationStatus = applicationStatus,
                 providerPreinstallStatus = providerPreinstallStatus,
                 systemServiceProxyStatus = systemServiceProxyStatus,
+                readinessEvidence = readinessEvidence,
                 message = "hosted bootstrap identity does not match the authoritative engine runtime"
             )
         }
@@ -252,6 +284,7 @@ object EngineProcessBootstrapReadiness {
                 applicationStatus = applicationStatus,
                 providerPreinstallStatus = providerPreinstallStatus,
                 systemServiceProxyStatus = systemServiceProxyStatus,
+                readinessEvidence = readinessEvidence,
                 message = result.summary.failureReason
                     ?: "hosted bootstrap did not produce a complete guest runtime"
             )
@@ -273,6 +306,7 @@ object EngineProcessBootstrapReadiness {
             applicationStatus = applicationStatus,
             providerPreinstallStatus = providerPreinstallStatus,
             systemServiceProxyStatus = systemServiceProxyStatus,
+            readinessEvidence = readinessEvidence,
             message = if (degraded) {
                 "guest process is READY with degraded bootstrap evidence"
             } else {
@@ -293,6 +327,7 @@ object EngineProcessBootstrapReadiness {
         applicationStatus: String?,
         providerPreinstallStatus: String?,
         systemServiceProxyStatus: String?,
+        readinessEvidence: Map<String, String>,
         message: String
     ): EngineProcessBootstrapResult = EngineProcessBootstrapResult(
         state = state,
@@ -320,6 +355,6 @@ object EngineProcessBootstrapReadiness {
             "applicationStageStatus" to (result.firstStageResult(EngineBootstrapStage.APPLICATION)?.status?.name ?: "MISSING"),
             "systemServiceStageStatus" to
                 (result.firstStageResult(EngineBootstrapStage.PACKAGE_MANAGER_PROXY)?.status?.name ?: "MISSING")
-        )
+        ) + readinessEvidence
     )
 }

@@ -30,6 +30,25 @@ fun interface UriGrantsServiceManagerProxyInstallAction {
     fun install(): Boolean
 }
 
+fun interface ContentProviderIdentityProxyInstallAction {
+    fun install(
+        sourcePackages: Collection<String>,
+        hostPackageName: String,
+        runtimeUid: Int
+    ): VirtualContentProviderIdentityProxyInstallResult
+}
+
+fun interface StorageManagerProxyInstallAction {
+    fun install(
+        instanceId: String,
+        originPackageName: String,
+        virtualPackageName: String,
+        hostPackageName: String,
+        dataRoot: String,
+        processSlot: String?
+    ): VirtualStorageManagerProxyInstallResult
+}
+
 class VirtualPackageManagerProxyStage(
     private val hostContext: Context?,
     private val installer: VirtualPackageManagerGlobalInstallAction = VirtualPackageManagerGlobalInstaller(),
@@ -55,6 +74,20 @@ class VirtualPackageManagerProxyStage(
         },
     private val uriGrantsServiceManagerProxyInstaller: UriGrantsServiceManagerProxyInstallAction =
         UriGrantsServiceManagerProxyInstallAction(VirtualUriGrantsServiceProxy::install),
+    private val contentProviderIdentityProxyInstaller: ContentProviderIdentityProxyInstallAction =
+        ContentProviderIdentityProxyInstallAction(VirtualContentProviderIdentityProxy::install),
+    private val storageManagerProxyInstaller: StorageManagerProxyInstallAction =
+        StorageManagerProxyInstallAction { instanceId, origin, virtual, host, dataRoot, processSlot ->
+            VirtualStorageManagerServiceProxy.installDetailed(
+                context = hostContext,
+                instanceId = instanceId,
+                originPackageName = origin,
+                virtualPackageName = virtual,
+                hostPackageName = host,
+                dataRoot = dataRoot,
+                processSlot = processSlot
+            )
+        },
     private val runtimeUidProvider: () -> Int = {
         RuntimeUidCompat.resolve(
             runCatching { hostContext?.applicationInfo?.uid }.getOrNull()
@@ -88,13 +121,17 @@ class VirtualPackageManagerProxyStage(
         val appOpsProxyResult = installAppOpsPackageProxy(snapshot)
         val appOpsServiceManagerProxyResult = installAppOpsServiceManagerPackageProxy(snapshot)
         val uriGrantsServiceManagerProxyResult = installUriGrantsServiceManagerProxy(snapshot)
+        val contentProviderIdentityProxyResult = installContentProviderIdentityProxy(snapshot, runtimeUid)
+        val storageManagerProxyResult = installStorageManagerProxy(input, snapshot)
         val evidence = installResult.toEvidence() +
             notificationProxyResult.evidence +
             launcherAppsProxyResult.evidence +
             clipboardProxyResult.evidence +
             appOpsProxyResult.evidence +
             appOpsServiceManagerProxyResult.evidence +
-            uriGrantsServiceManagerProxyResult.evidence
+            uriGrantsServiceManagerProxyResult.evidence +
+            contentProviderIdentityProxyResult.evidence +
+            storageManagerProxyResult.evidence
         val durationMs = clock() - startMs
         val result = when (installResult.status) {
             VirtualPackageManagerGlobalInstallStatus.INSTALLED -> {
@@ -102,7 +139,9 @@ class VirtualPackageManagerProxyStage(
                     launcherAppsProxyResult.degradesStage ||
                     clipboardProxyResult.degradesStage ||
                     appOpsProxyResult.degradesStage ||
-                    appOpsServiceManagerProxyResult.degradesStage
+                    appOpsServiceManagerProxyResult.degradesStage ||
+                    contentProviderIdentityProxyResult.degradesStage ||
+                    storageManagerProxyResult.degradesStage
                 ) {
                     BootstrapResult.degraded(
                         stage = RuntimeStage.PACKAGE_MANAGER_PROXY,
@@ -383,6 +422,133 @@ class VirtualPackageManagerProxyStage(
         }
     }
 
+    private fun installContentProviderIdentityProxy(
+        snapshot: com.multiapp.core.model.virtual.VirtualPackageSnapshot,
+        runtimeUid: Int
+    ): AppOpsPackageProxyResult {
+        val sourcePackages = listOf(snapshot.originPackageName, snapshot.virtualPackageName).distinct()
+        val hostPackageName = hostContext?.packageName?.takeIf { it.isNotBlank() }
+            ?: return AppOpsPackageProxyResult(
+                evidence = contentProviderIdentityProxyEvidence(
+                    status = "SKIPPED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = "",
+                    reason = "HOST_CONTEXT_MISSING"
+                ),
+                degradesStage = false
+            )
+        return runCatching {
+            val installResult = contentProviderIdentityProxyInstaller.install(
+                sourcePackages,
+                hostPackageName,
+                runtimeUid
+            )
+            val status = when {
+                installResult.complete -> "INSTALLED"
+                installResult.activityManagerProxyInstalled -> "PARTIAL"
+                else -> "FAILED"
+            }
+            AppOpsPackageProxyResult(
+                evidence = contentProviderIdentityProxyEvidence(
+                    status = status,
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    reason = installResult.failures.joinToString("|"),
+                    activityManagerInstalled = installResult.activityManagerProxyInstalled,
+                    providerCacheInspected = installResult.providerCacheInspected,
+                    cachedProviderRecordCount = installResult.cachedProviderRecordCount,
+                    cachedProviderPatchedCount = installResult.cachedProviderPatchedCount,
+                    settingsProviderCacheInspectedCount = installResult.settingsProviderCacheInspectedCount,
+                    settingsProviderCacheClearedCount = installResult.settingsProviderCacheClearedCount
+                ),
+                degradesStage = !installResult.complete
+            )
+        }.getOrElse { error ->
+            AppOpsPackageProxyResult(
+                evidence = contentProviderIdentityProxyEvidence(
+                    status = "FAILED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    reason = error.message ?: error.javaClass.name,
+                    errorClass = error.javaClass.name
+                ),
+                degradesStage = true
+            )
+        }
+    }
+
+    private fun installStorageManagerProxy(
+        input: BootstrapStageInput,
+        snapshot: com.multiapp.core.model.virtual.VirtualPackageSnapshot
+    ): AppOpsPackageProxyResult {
+        val sourcePackages = listOf(snapshot.originPackageName, snapshot.virtualPackageName).distinct()
+        val hostPackageName = resolveSystemHostPackageName(
+            guestPackages = sourcePackages.toSet(),
+            processSlot = input.processSlot,
+            processName = runCatching { android.app.Application.getProcessName() }.getOrNull(),
+            baseOpPackageName = runCatching { hostContext?.opPackageName }.getOrNull(),
+            basePackageName = runCatching { hostContext?.packageName }.getOrNull()
+        )
+        if (hostContext == null || hostPackageName.isBlank()) {
+            return AppOpsPackageProxyResult(
+                evidence = storageManagerProxyEvidence(
+                    status = "SKIPPED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    dataRoot = snapshot.dataDir,
+                    processSlot = input.processSlot,
+                    reason = "HOST_CONTEXT_MISSING",
+                    managerStatus = "SKIPPED",
+                    serviceManagerStatus = "SKIPPED"
+                ),
+                degradesStage = false
+            )
+        }
+        return runCatching {
+            val result = storageManagerProxyInstaller.install(
+                snapshot.instanceId,
+                snapshot.originPackageName,
+                snapshot.virtualPackageName,
+                hostPackageName,
+                snapshot.dataDir,
+                input.processSlot
+            )
+            val status = when {
+                result.complete -> "INSTALLED"
+                result.installed -> "PARTIAL"
+                else -> "FAILED"
+            }
+            AppOpsPackageProxyResult(
+                evidence = storageManagerProxyEvidence(
+                    status = status,
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    dataRoot = snapshot.dataDir,
+                    processSlot = input.processSlot,
+                    reason = result.reason,
+                    managerStatus = if (result.managerPatched) "INSTALLED" else "FAILED",
+                    serviceManagerStatus = if (result.serviceManagerPatched) "INSTALLED" else "FAILED"
+                ),
+                degradesStage = !result.complete
+            )
+        }.getOrElse { error ->
+            AppOpsPackageProxyResult(
+                evidence = storageManagerProxyEvidence(
+                    status = "FAILED",
+                    sourcePackages = sourcePackages,
+                    hostPackageName = hostPackageName,
+                    dataRoot = snapshot.dataDir,
+                    processSlot = input.processSlot,
+                    reason = error.message ?: error.javaClass.name,
+                    errorClass = error.javaClass.name,
+                    managerStatus = "FAILED",
+                    serviceManagerStatus = "FAILED"
+                ),
+                degradesStage = true
+            )
+        }
+    }
+
     private fun notificationProxyEvidence(
         status: String,
         sourcePackages: List<String>,
@@ -507,6 +673,104 @@ class VirtualPackageManagerProxyStage(
         )
     )
 
+    private fun contentProviderIdentityProxyEvidence(
+        status: String,
+        sourcePackages: List<String>,
+        hostPackageName: String,
+        reason: String,
+        errorClass: String = "",
+        activityManagerInstalled: Boolean = false,
+        providerCacheInspected: Boolean = false,
+        cachedProviderRecordCount: Int = 0,
+        cachedProviderPatchedCount: Int = 0,
+        settingsProviderCacheInspectedCount: Int = 0,
+        settingsProviderCacheClearedCount: Int = 0
+    ): List<BootstrapEvidence> = listOf(
+        BootstrapEvidence("contentProviderIdentityProxyStatus", status, CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE),
+        BootstrapEvidence(
+            "contentProviderIdentityProxySourcePackages",
+            sourcePackages.joinToString(","),
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        ),
+        BootstrapEvidence(
+            "contentProviderIdentityProxyHostPackage",
+            hostPackageName,
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        ),
+        BootstrapEvidence(
+            "contentProviderIdentityProxyMode",
+            "activitymanager-holder-and-cached-provider-attribution",
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        ),
+        BootstrapEvidence("contentProviderIdentityProxyReason", reason, CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE),
+        BootstrapEvidence("contentProviderIdentityProxyErrorClass", errorClass, CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE),
+        BootstrapEvidence(
+            "contentProviderActivityManagerProxyInstalled",
+            activityManagerInstalled.toString(),
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        ),
+        BootstrapEvidence(
+            "contentProviderCacheInspected",
+            providerCacheInspected.toString(),
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        ),
+        BootstrapEvidence(
+            "contentProviderCachedRecordCount",
+            cachedProviderRecordCount.toString(),
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        ),
+        BootstrapEvidence(
+            "contentProviderCachedPatchedCount",
+            cachedProviderPatchedCount.toString(),
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        ),
+        BootstrapEvidence(
+            "settingsProviderCacheInspectedCount",
+            settingsProviderCacheInspectedCount.toString(),
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        ),
+        BootstrapEvidence(
+            "settingsProviderCacheClearedCount",
+            settingsProviderCacheClearedCount.toString(),
+            CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE
+        )
+    )
+
+    private fun storageManagerProxyEvidence(
+        status: String,
+        sourcePackages: List<String>,
+        hostPackageName: String,
+        dataRoot: String,
+        processSlot: String?,
+        reason: String,
+        errorClass: String = "",
+        managerStatus: String,
+        serviceManagerStatus: String
+    ): List<BootstrapEvidence> = listOf(
+        BootstrapEvidence("storageManagerProxyStatus", status, STORAGE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence(
+            "storageManagerProxySourcePackages",
+            sourcePackages.joinToString(","),
+            STORAGE_MANAGER_PROXY_SOURCE
+        ),
+        BootstrapEvidence("storageManagerProxyHostPackage", hostPackageName, STORAGE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence("storageManagerProxyDataRoot", dataRoot, STORAGE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence("storageManagerProxyProcessSlot", processSlot.orEmpty(), STORAGE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence(
+            "storageManagerProxyMode",
+            "mount-manager-servicemanager-instance-mkdirs",
+            STORAGE_MANAGER_PROXY_SOURCE
+        ),
+        BootstrapEvidence("storageManagerProxyReason", reason, STORAGE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence("storageManagerProxyErrorClass", errorClass, STORAGE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence("storageManagerInstanceProxyStatus", managerStatus, STORAGE_MANAGER_PROXY_SOURCE),
+        BootstrapEvidence(
+            "storageManagerServiceManagerProxyStatus",
+            serviceManagerStatus,
+            STORAGE_MANAGER_PROXY_SOURCE
+        )
+    )
+
     private data class NotificationPackageProxyResult(
         val evidence: List<BootstrapEvidence>,
         val degradesStage: Boolean
@@ -524,5 +788,7 @@ class VirtualPackageManagerProxyStage(
         const val APP_OPS_PROXY_SOURCE = "AppOpsPackageProxy"
         const val APP_OPS_SERVICE_MANAGER_PROXY_SOURCE = "AppOpsServiceManagerProxy"
         const val URI_GRANTS_SERVICE_MANAGER_PROXY_SOURCE = "UriGrantsServiceManagerProxy"
+        const val CONTENT_PROVIDER_IDENTITY_PROXY_SOURCE = "ContentProviderIdentityProxy"
+        const val STORAGE_MANAGER_PROXY_SOURCE = "StorageManagerProxy"
     }
 }

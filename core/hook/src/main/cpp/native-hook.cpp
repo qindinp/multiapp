@@ -12837,9 +12837,8 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved)
         return JNI_ERR;
     }
 
-    LOGI("JNI_OnLoad: early LSPlant init begin");
-    jboolean ok = Java_com_multiapp_core_hook_NativeHookBridge_nativeInitLsplant(env, nullptr, nullptr);
-    LOGI("JNI_OnLoad: early LSPlant init result=%d", ok == JNI_TRUE ? 1 : 0);
+    // Hook engines are enabled explicitly by the engine profile after runtime binding.
+    LOGI("JNI_OnLoad: native bridge loaded; hook engines remain profile-gated");
     return JNI_VERSION_1_6;
 }
 

@@ -1,6 +1,7 @@
 package com.multiapp.core.loader
 
 import android.app.AppOpsManager
+import android.app.Application
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.ContentResolver
@@ -210,6 +211,66 @@ class VirtualContextWrapperTest {
         assertSame(wrapper, wrapper.createWindowContext(mockk(relaxed = true), 1, null))
         assertSame(wrapper, wrapper.createWindowContext(1, null))
         assertSame(wrapper, wrapper.createDeviceContext(0))
+    }
+
+    @Test
+    fun `application context resolves the published guest Application`() {
+        val runtime = VirtualProcessRuntime()
+        val application = mockk<Application>(relaxed = true)
+        val classLoader = ClassLoader.getSystemClassLoader()
+        val stages = emptyList<BootstrapResult>()
+        runtime.rememberApplication(
+            "inst-001",
+            HostedBootstrapResult(
+                instanceId = "inst-001",
+                installId = "com.test.minimal",
+                originPackageName = "com.test.minimal",
+                virtualPackageName = "com.multiapp.instance.abc",
+                processSlot = "com.multiapp.app:v6",
+                originApkPath = "/data/minimal.apk",
+                guestClassLoader = classLoader,
+                guestApplication = application,
+                stageResults = stages,
+                summary = stages.toSummary(),
+                success = true
+            )
+        )
+        val wrapper = VirtualContextWrappers.create(
+            base = baseContext(),
+            config = config(snapshot()).copy(processSlot = "com.multiapp.app:v6"),
+            guestClassLoader = classLoader,
+            processRuntime = runtime
+        )
+
+        assertSame(application, wrapper.applicationContext)
+    }
+
+    @Test
+    fun `system identity comes from process slot after framework context becomes guest`() {
+        val base = baseContext()
+        every { base.packageName } returns "com.test.minimal"
+        every { base.opPackageName } returns "com.test.minimal"
+        val wrapper = VirtualContextWrappers.create(
+            base = base,
+            config = config(snapshot()).copy(processSlot = "com.multiapp.app:v6"),
+            guestClassLoader = ClassLoader.getSystemClassLoader()
+        )
+
+        assertEquals("com.multiapp.app", wrapper.opPackageName)
+    }
+
+    @Test
+    fun `system identity falls back to the real process when runtime config has no slot`() {
+        assertEquals(
+            "com.multiapp.app",
+            resolveSystemHostPackageName(
+                guestPackages = setOf("li.songe.gkd", "com.multiapp.instance.abc"),
+                processSlot = null,
+                processName = "com.multiapp.app:v6",
+                baseOpPackageName = "li.songe.gkd",
+                basePackageName = "li.songe.gkd"
+            )
+        )
     }
 
     @Test
@@ -1018,6 +1079,32 @@ class VirtualContextWrapperTest {
             )
         }
         verify(exactly = 0) { base.bindService(any<Intent>(), any<ServiceConnection>(), any<Int>()) }
+    }
+
+    @Test
+    fun `bindService external component uses host identity and tracked system unbind`() {
+        val base = baseContext()
+        val sourceIntent = explicitServiceIntent(
+            className = "org.chromium.content.app.SandboxedProcessService0",
+            packageName = "com.google.android.webview"
+        )
+        val connection = mockk<ServiceConnection>(relaxed = true)
+        every { base.bindService(sourceIntent, connection, Context.BIND_AUTO_CREATE) } returns true
+        val wrapper = wrapper(base = base)
+
+        assertTrue(wrapper.bindService(sourceIntent, connection, Context.BIND_AUTO_CREATE))
+
+        val mapping = assertIs<VirtualContextWrapper.StartServiceMappingResult.SystemPassthrough>(
+            wrapper.lastStartServiceMappingResult()
+        )
+        assertEquals("com.google.android.webview", mapping.targetPackageName)
+        assertNull(wrapper.lastBindServiceDispatchResult())
+        verify(exactly = 1) { base.bindService(sourceIntent, connection, Context.BIND_AUTO_CREATE) }
+
+        wrapper.unbindService(connection)
+
+        assertNull(wrapper.lastUnbindServiceDispatchResult())
+        verify(exactly = 1) { base.unbindService(connection) }
     }
 
     @Test

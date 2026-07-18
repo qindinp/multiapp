@@ -75,6 +75,8 @@ class VirtualPackageManagerProxyStageTest {
             },
             appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
             appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            contentProviderIdentityProxyInstaller = completeContentProviderIdentityProxyInstaller(),
+            storageManagerProxyInstaller = completeStorageManagerProxyInstaller(),
             runtimeUidProvider = { RUNTIME_UID },
             clock = fixedClock(100L, 109L)
         )
@@ -118,6 +120,8 @@ class VirtualPackageManagerProxyStageTest {
             },
             appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
             appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            contentProviderIdentityProxyInstaller = completeContentProviderIdentityProxyInstaller(),
+            storageManagerProxyInstaller = completeStorageManagerProxyInstaller(),
             runtimeUidProvider = { RUNTIME_UID },
             clock = fixedClock(100L, 109L)
         )
@@ -160,6 +164,8 @@ class VirtualPackageManagerProxyStageTest {
             },
             appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
             appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            contentProviderIdentityProxyInstaller = completeContentProviderIdentityProxyInstaller(),
+            storageManagerProxyInstaller = completeStorageManagerProxyInstaller(),
             runtimeUidProvider = { RUNTIME_UID },
             clock = fixedClock(100L, 109L)
         )
@@ -206,6 +212,8 @@ class VirtualPackageManagerProxyStageTest {
                 true
             },
             appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            contentProviderIdentityProxyInstaller = completeContentProviderIdentityProxyInstaller(),
+            storageManagerProxyInstaller = completeStorageManagerProxyInstaller(),
             runtimeUidProvider = { RUNTIME_UID },
             clock = fixedClock(100L, 109L)
         )
@@ -249,6 +257,8 @@ class VirtualPackageManagerProxyStageTest {
                 capturedHostPackageName = hostPackageName
                 true
             },
+            contentProviderIdentityProxyInstaller = completeContentProviderIdentityProxyInstaller(),
+            storageManagerProxyInstaller = completeStorageManagerProxyInstaller(),
             runtimeUidProvider = { RUNTIME_UID },
             clock = fixedClock(100L, 109L)
         )
@@ -291,6 +301,8 @@ class VirtualPackageManagerProxyStageTest {
                 installed = true
                 true
             },
+            contentProviderIdentityProxyInstaller = completeContentProviderIdentityProxyInstaller(),
+            storageManagerProxyInstaller = completeStorageManagerProxyInstaller(),
             runtimeUidProvider = { RUNTIME_UID },
             clock = fixedClock(100L, 109L)
         )
@@ -307,6 +319,66 @@ class VirtualPackageManagerProxyStageTest {
             evidence["uriGrantsServiceManagerProxySourcePackages"]
         )
         assertEquals("servicemanager-uri-grants-binder", evidence["uriGrantsServiceManagerProxyMode"])
+    }
+
+    @Test
+    fun `execute installs external content provider caller identity proxy`() {
+        val snapshot = snapshot()
+        val hostContext = mockk<Context>()
+        var capturedPackages = emptyList<String>()
+        var capturedHost = ""
+        var capturedUid = -1
+        every { hostContext.packageName } returns "com.multiapp.app"
+        val stage = VirtualPackageManagerProxyStage(
+            hostContext = hostContext,
+            installer = VirtualPackageManagerGlobalInstallAction { _, _, _ ->
+                installResult(
+                    status = VirtualPackageManagerGlobalInstallStatus.INSTALLED,
+                    sPackageManagerRead = true,
+                    sPackageManagerPatched = true
+                )
+            },
+            notificationPackageProxyInstaller = NotificationPackageProxyInstallAction { _, _ -> true },
+            launcherAppsPackageProxyInstaller = LauncherAppsPackageProxyInstallAction { _, _ -> true },
+            clipboardPackageProxyInstaller = ClipboardPackageProxyInstallAction { _, _ ->
+                completeClipboardProxyInstallResult()
+            },
+            appOpsPackageProxyInstaller = AppOpsPackageProxyInstallAction { _, _ -> true },
+            appOpsServiceManagerProxyInstaller = AppOpsServiceManagerProxyInstallAction { _, _ -> true },
+            contentProviderIdentityProxyInstaller = ContentProviderIdentityProxyInstallAction { packages, host, uid ->
+                capturedPackages = packages.toList()
+                capturedHost = host
+                capturedUid = uid
+                VirtualContentProviderIdentityProxyInstallResult(
+                    activityManagerProxyInstalled = true,
+                    providerCacheInspected = true,
+                    cachedProviderRecordCount = 3,
+                    cachedProviderPatchedCount = 2,
+                    settingsProviderCacheInspectedCount = 3,
+                    settingsProviderCacheClearedCount = 1
+                )
+            },
+            storageManagerProxyInstaller = completeStorageManagerProxyInstaller(),
+            runtimeUidProvider = { RUNTIME_UID },
+            clock = fixedClock(100L, 109L)
+        )
+
+        val output = stage.execute(
+            BootstrapStageInput(instanceId = snapshot.instanceId, packageSnapshot = snapshot)
+        )
+
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertEquals(listOf("com.test.minimal", "com.multiapp.instance.abc"), capturedPackages)
+        assertEquals("com.multiapp.app", capturedHost)
+        assertEquals(RUNTIME_UID, capturedUid)
+        assertEquals("INSTALLED", evidence["contentProviderIdentityProxyStatus"])
+        assertEquals("true", evidence["contentProviderActivityManagerProxyInstalled"])
+        assertEquals("true", evidence["contentProviderCacheInspected"])
+        assertEquals("3", evidence["contentProviderCachedRecordCount"])
+        assertEquals("2", evidence["contentProviderCachedPatchedCount"])
+        assertEquals("3", evidence["settingsProviderCacheInspectedCount"])
+        assertEquals("1", evidence["settingsProviderCacheClearedCount"])
     }
 
     @Test
@@ -382,6 +454,24 @@ class VirtualPackageManagerProxyStageTest {
             managerPatched = true,
             serviceManagerPatched = true
         )
+
+    private fun completeContentProviderIdentityProxyInstaller() =
+        ContentProviderIdentityProxyInstallAction { _, _, _ ->
+            VirtualContentProviderIdentityProxyInstallResult(
+                activityManagerProxyInstalled = true,
+                providerCacheInspected = true,
+                cachedProviderRecordCount = 0,
+                cachedProviderPatchedCount = 0
+            )
+        }
+
+    private fun completeStorageManagerProxyInstaller() =
+        StorageManagerProxyInstallAction { _, _, _, _, _, _ ->
+            VirtualStorageManagerProxyInstallResult(
+                managerPatched = true,
+                serviceManagerPatched = true
+            )
+        }
 
     private fun snapshot() = VirtualPackageSnapshot(
         instanceId = "inst-001",

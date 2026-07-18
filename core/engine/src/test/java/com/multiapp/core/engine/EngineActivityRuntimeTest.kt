@@ -14,11 +14,24 @@ import io.mockk.mockk
 import io.mockk.verify
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class EngineActivityRuntimeTest {
+
+    @Test
+    fun `engine activity coordinator rejects guest Context as proxy owner`() {
+        assertFailsWith<IllegalArgumentException> {
+            EngineActivityLaunchCoordinator(
+                hostContext = mockk(relaxed = true) {
+                    every { packageName } returns "com.tencent.mobileqq"
+                },
+                processSlot = "com.multiapp.app:v1"
+            )
+        }
+    }
 
     @Test
     fun `task controller persists snapshot through Activity service`() {

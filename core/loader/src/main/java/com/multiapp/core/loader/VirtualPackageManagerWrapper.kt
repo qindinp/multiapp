@@ -11,6 +11,7 @@ import android.content.pm.InstrumentationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageInstaller
 import android.content.pm.PackageManager
+import android.content.pm.PackageItemInfo
 import android.content.pm.PermissionGroupInfo
 import android.content.pm.PermissionInfo
 import android.content.pm.ProviderInfo
@@ -22,7 +23,9 @@ import android.content.res.Resources
 import android.content.res.XmlResourceParser
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
+import android.os.Process
 import android.os.UserHandle
+import androidx.annotation.Keep
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
 /** PackageManager facade for one hosted virtual package snapshot. */
@@ -224,6 +227,31 @@ class VirtualPackageManagerWrapper(
             args = arrayOf(permissionName, deviceId)
         ) as? Boolean ?: shouldShowRequestPermissionRationale(permissionName)
     }
+
+    /**
+     * Hidden framework contract used by [PackageItemInfo.loadIcon]. It is absent from the
+     * public SDK stub but abstract on the Android 16 runtime PackageManager class.
+     */
+    @Keep
+    @Suppress("unused")
+    fun loadItemIcon(itemInfo: PackageItemInfo, appInfo: ApplicationInfo?): Drawable =
+        loadFrameworkItemIcon(
+            methodName = "loadItemIcon",
+            itemInfo = itemInfo,
+            appInfo = appInfo,
+            badgeFallback = true
+        )
+
+    /** Hidden companion contract used by [PackageItemInfo.loadUnbadgedIcon]. */
+    @Keep
+    @Suppress("unused")
+    fun loadUnbadgedItemIcon(itemInfo: PackageItemInfo, appInfo: ApplicationInfo?): Drawable =
+        loadFrameworkItemIcon(
+            methodName = "loadUnbadgedItemIcon",
+            itemInfo = itemInfo,
+            appInfo = appInfo,
+            badgeFallback = false
+        )
 
     override fun addPackageToPreferred(packageName: String) = base.addPackageToPreferred(packageName)
     override fun addPermission(info: PermissionInfo): Boolean = base.addPermission(info)
@@ -435,6 +463,38 @@ class VirtualPackageManagerWrapper(
             ?: virtualApplicationInfo(packageName)
             ?: return null
         return runCatching { base.getResourcesForApplication(virtualInfo) }.getOrNull()
+    }
+
+    private fun loadFrameworkItemIcon(
+        methodName: String,
+        itemInfo: PackageItemInfo,
+        appInfo: ApplicationInfo?,
+        badgeFallback: Boolean
+    ): Drawable {
+        val virtualAppInfo = virtualApplicationInfo(appInfo)
+            ?: (itemInfo as? ApplicationInfo)?.let(::virtualApplicationInfo)
+            ?: virtualApplicationInfo(itemInfo.packageName)
+        val delegatedAppInfo = virtualAppInfo ?: appInfo
+        val delegatedItemInfo = if (itemInfo is ApplicationInfo && virtualAppInfo != null) {
+            virtualAppInfo
+        } else {
+            itemInfo
+        }
+        val delegated = invokeBasePackageManagerMethod(
+            name = methodName,
+            parameterTypes = arrayOf(PackageItemInfo::class.java, ApplicationInfo::class.java),
+            args = arrayOf(delegatedItemInfo, delegatedAppInfo)
+        ) as? Drawable
+        if (delegated != null) return delegated
+
+        val fallback = itemInfo.packageName
+            ?.let { packageName -> getDrawable(packageName, itemInfo.icon, delegatedAppInfo) }
+            ?: delegatedAppInfo?.let { info -> runCatching { getApplicationIcon(info) }.getOrNull() }
+            ?: defaultActivityIcon
+        if (!badgeFallback) return fallback
+        return runCatching { base.getUserBadgedIcon(fallback, Process.myUserHandle()) }
+            .getOrNull()
+            ?: fallback
     }
 
     private inline fun <T> virtualComponentInfo(component: ComponentName, query: () -> T?): T? {

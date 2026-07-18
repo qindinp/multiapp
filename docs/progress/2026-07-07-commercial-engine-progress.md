@@ -4797,3 +4797,104 @@ Remaining gate:
   equivalence remain incomplete.
 - No device artifact from this batch proves GKD, AstroBox, QQ, WeChat, or QQ
   Reader compatibility. Commercial status remains **BLOCK**.
+
+## Implementation Update - 2026-07-16 Host Activity Identity, Provider Target Slot, and Linker Preparation
+
+This update reconciles the current `527a6bb9` HEAD with the shared dirty tree.
+The changes below are not committed at this snapshot. They close concrete local
+wiring defects, but the APK containing all of them has no current device
+artifact, so none of the affected runtime paths is promoted to device `PASS` or
+commercial `DONE`.
+
+Implemented in the current worktree:
+
+- Activity proxy construction now keeps an independently frozen host package
+  `Context`. `EngineRuntimeInstallers` supplies that context to
+  `EngineActivityLaunchCoordinator`, and the coordinator rejects a context
+  whose package does not own the configured `processSlot` before creating a
+  proxy `ComponentName`. `VirtualInstrumentation` uses the same stable-host
+  rule. This addresses the old production path that emitted
+  `com.tencent.mobileqq/com.multiapp.app.container.ProxyActivity1` instead of
+  a component owned by `com.multiapp.app`.
+- Provider routing no longer treats the caller's process slot as the implicit
+  target Provider slot. The engine resolves the authority and authoritative
+  target process identity, signs the target `processSlot` into the one-time
+  route token, and revalidates that slot against the Binder caller when the
+  target consumes the token. Loader and Provider-hook paths use the returned
+  `route.processSlot` to select the declared slot-specific stub authority.
+- The shared `ProviderStubAuthorityContract` centralizes host authority parsing,
+  canonical stub-authority construction, and target-slot reselection. This is a
+  routing/control-plane correction; complete custom-process Provider transport,
+  observer/notify, URI-grant lifecycle, and process-death behavior remain open.
+- The Edge/Chromium failure is being handled as a general guest linker and
+  ClassLoader problem, not with an Edge-specific JNI fake. `ClassLoaderStage`
+  now carries a structured `GuestClassLoaderSpec` with guest `targetSdk`, dex,
+  native-library search, permitted paths, and namespace evidence.
+  `HostedRuntimeBootstrap` uses Android's platform `ClassLoaderFactory` when
+  available, validates namespace creation errors instead of swallowing them,
+  and keeps a JVM-test-only fallback separate from Android behavior.
+- Guest TCCL is set and identity-checked before guest `Application` and
+  Activity creation so native registration and subsequent `J.N` calls use the
+  same guest ClassLoader lineage.
+
+Evidence boundary:
+
+- Existing device artifact
+  `.tmp/manual-qq-after-ready-transition-20260716-115611` contains a later QQ
+  bootstrap with `loadedApkApplicationCreatorStatus=PASS`,
+  `applicationStatus=PASS`, `providerPreinstallStatus=PASS`, and zero Provider
+  preinstall failures. This proves that run moved beyond the earlier
+  `replaceApplication fail` and primary-process Provider bootstrap blockers; it
+  does not prove QQ reached a usable foreground Activity.
+- The same artifact records the subsequent malformed proxy component package
+  and Android's `Activity class ... does not exist` rejection. The host-context
+  correction above was made after that installed APK, so it has no matching
+  device evidence yet.
+- Existing Edge evidence records the pre-first-frame
+  `UnsatisfiedLinkError: No implementation found for boolean J.N.ZO(...)`.
+  That remains the active device failure until a newly built APK proves the
+  corrected namespace, ClassLoader identity, native registration, resumed
+  Activity, and first drawn frame.
+- Existing JUnit XML generated on 2026-07-16 shows the focused loader tests
+  passed: `ClassLoaderStageTest` 8, `HostedRuntimeBootstrapTest` 46, and
+  `ApplicationStageTest` 15 tests, with 0 failures and 0 errors. No full Gradle
+  gate or APK assembly is claimed for this current dirty-tree batch.
+- `.tmp/manual-still-failing-20260716-121645` contains no usable latest-device
+  capture because the target device was unavailable. It cannot be used to
+  confirm or reject the post-fix APK.
+
+Next evidence gate:
+
+1. Build and install one APK from the integrated worktree, then verify every
+   proxy Activity component is owned by `com.multiapp.app` while guest APIs
+   retain QQ's guest identity.
+2. For Provider calls, record the engine-resolved target `processSlot`, selected
+   stub authority, token generation, target PID, consume result, and replay
+   rejection across same-process and custom-process targets.
+3. For Edge, require structured namespace evidence plus matching guest,
+   LoadedApk, Application, Activity, TCCL, and JNI caller ClassLoader identities;
+   absence of `J.N.ZO` alone is insufficient without a resumed, drawn Activity.
+4. Re-run the complete local gate only after the shared implementation batch is
+   integrated, then collect fresh `logcat`, `exit-info`, recents, and `run-as`
+   evidence. Commercial status remains **BLOCK**.
+
+## Verification Update - 2026-07-16 Targeted Runtime Contracts
+
+Local targeted status for the current shared worktree:
+
+- The TCCL correction passed focused local tests for guest ClassLoader
+  installation/normalization and fail-closed mutation checks around Application
+  and Provider startup. This remains local contract evidence; the corrected
+  TCCL path still requires a fresh device artifact.
+- Activity launch-capability transactional ownership and consumption passed
+  focused local tests, including rollback without premature consumption,
+  single-owner fallback, authorized-preflight reuse, and replay rejection.
+- The custom-process Provider formal attach/component-authority path passed
+  focused local tests. Coverage includes target identity and endpoint Binder
+  transport, capability-bound attach, Binder-caller authority, authoritative
+  target-slot selection, and replay rejection. Fresh device verification is
+  still required, and the result does not close the full Provider data-plane or
+  lifecycle matrix.
+- No complete build or device run was performed for this documentation sync.
+  These local results do not establish QQ or Edge compatibility and do not
+  promote any device path to `PASS`. Commercial status remains **BLOCK**.

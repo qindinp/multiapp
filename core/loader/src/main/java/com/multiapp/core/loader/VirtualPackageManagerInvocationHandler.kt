@@ -199,11 +199,11 @@ class VirtualPackageManagerInvocationHandler(
             ?.let { permissions ->
                 service.getPackagesHoldingPermissions(permissions, queryFlags(args))
                     .takeIf { it.isNotEmpty() }
-                    ?.handled()
+                    ?.let { packages -> shapeListResult(method, args, packages).handled() }
             }
             ?: VirtualDispatchResult.NotHandled
 
-        "queryContentProviders" -> queryContentProviders(args)?.handled()
+        "queryContentProviders" -> queryContentProviders(method, args)?.handled()
             ?: VirtualDispatchResult.NotHandled
 
         "isInstantApp" -> packageNameArg(args, 0)
@@ -279,10 +279,16 @@ class VirtualPackageManagerInvocationHandler(
         return baseName?.takeIf { it.isNotBlank() } ?: service.getNameForUid(uid, runtimeUid)
     }
 
-    private fun queryContentProviders(args: Array<Any?>): List<Any>? {
+    private fun queryContentProviders(method: Method, args: Array<Any?>): Any? {
         val uid = intArg(args, 1) ?: return null
         return if (uid == runtimeUid) {
-            service.queryContentProviders(stringArg(args, 0), uid, runtimeUid, queryFlags(args, 2))
+            val providers = service.queryContentProviders(
+                stringArg(args, 0),
+                uid,
+                runtimeUid,
+                queryFlags(args, 2)
+            )
+            shapeListResult(method, args, providers)
         } else {
             null
         }
@@ -316,7 +322,9 @@ class VirtualPackageManagerInvocationHandler(
         val packageService = serviceForIntent(intent, resolvedType) ?: service
         val virtualActivities = packageService.queryIntentActivities(intent, queryFlags(args), resolvedType)
         if (virtualActivities.isEmpty()) return VirtualDispatchResult.NotHandled
-        if (!intent.isUnscopedLauncherIntent()) return virtualActivities.handled()
+        if (!intent.isUnscopedLauncherIntent()) {
+            return shapeListResult(method, args, virtualActivities).handled()
+        }
 
         return VirtualDispatchResult.Handled(
             mergeAggregateResult(
@@ -336,7 +344,9 @@ class VirtualPackageManagerInvocationHandler(
         val intent = intentArg(args, 0) ?: return VirtualDispatchResult.NotHandled
         val resolvedType = resolvedTypeArg(method, args)
         val packageService = serviceForIntent(intent, resolvedType) ?: service
-        return query(packageService, intent, resolvedType).takeIf { it.isNotEmpty() }?.handled()
+        return query(packageService, intent, resolvedType)
+            .takeIf { it.isNotEmpty() }
+            ?.let { items -> shapeListResult(method, args, items).handled() }
             ?: VirtualDispatchResult.NotHandled
     }
 
@@ -385,6 +395,24 @@ class VirtualPackageManagerInvocationHandler(
         return rebuildListContainer(originalResult, merged) ?: merged
     }
 
+    /** Preserve hidden IPackageManager list-container return types on Binder calls. */
+    private fun <T : Any> shapeListResult(
+        method: Method,
+        args: Array<Any?>,
+        virtualItems: List<T>
+    ): Any {
+        if (List::class.java.isAssignableFrom(method.returnType)) return virtualItems
+
+        // Use the system result only as a ParceledListSlice-shaped template. Its
+        // items belong to the real package namespace and must not leak into a
+        // package-scoped virtual query.
+        val originalContainer = invokeOriginalOrNull(method, args)
+        if (originalContainer != null && originalContainer !is List<*>) {
+            rebuildListContainer(originalContainer, virtualItems)?.let { return it }
+        }
+        return rebuildListContainer(method.returnType, virtualItems) ?: virtualItems
+    }
+
     private fun <T : Any> mergeByKey(
         originalItems: List<T>,
         virtualItems: List<T>,
@@ -419,7 +447,7 @@ class VirtualPackageManagerInvocationHandler(
     }
 
     private fun <T : Any> rebuildListContainer(originalResult: Any, merged: List<T>): Any? {
-        val listConstructor = runCatching { originalResult.javaClass.getConstructor(List::class.java) }.getOrNull()
+        val listConstructor = listContainerConstructor(originalResult.javaClass)
         if (listConstructor != null) {
             return runCatching { listConstructor.newInstance(merged) }.getOrNull()
         }
@@ -432,6 +460,17 @@ class VirtualPackageManagerInvocationHandler(
         }
         return null
     }
+
+    private fun <T : Any> rebuildListContainer(containerType: Class<*>, items: List<T>): Any? {
+        val constructor = listContainerConstructor(containerType) ?: return null
+        return runCatching { constructor.newInstance(items) }.getOrNull()
+    }
+
+    private fun listContainerConstructor(containerType: Class<*>): java.lang.reflect.Constructor<*>? =
+        runCatching { containerType.getConstructor(List::class.java) }.getOrNull()
+            ?: runCatching {
+                containerType.getDeclaredConstructor(List::class.java).apply { isAccessible = true }
+            }.getOrNull()
 
     private fun invokeObjectMethod(proxy: Any, method: Method, args: Array<Any?>?): Any? = when (method.name) {
         "toString" -> "VirtualPackageManagerInvocationHandler(proxy=${System.identityHashCode(proxy)})"

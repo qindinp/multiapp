@@ -15,6 +15,7 @@ import com.multiapp.core.model.virtual.VirtualContextConfig
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageResolver
 import java.io.File
+import java.lang.reflect.InvocationTargetException
 
 /**
  * Result of a hosted runtime bootstrap attempt.
@@ -93,8 +94,7 @@ class HostedRuntimeBootstrap(
     private val instanceManager: InstanceManager,
     private val installRecordStore: InstallRecordStore,
     private val hostContext: android.content.Context? = null,
-    private val classLoaderFactory: (apkPath: String, nativeLibDir: String?) -> ClassLoader =
-        ::createDefaultGuestClassLoader,
+    private val classLoaderFactory: ((apkPath: String, nativeLibDir: String?) -> ClassLoader)? = null,
     private val applicationClassNameResolver: (classLoader: ClassLoader, apkPath: String?) -> String? = { cl, path ->
         resolveApplicationClassNameFromManifest(hostContext, path)
     },
@@ -329,10 +329,13 @@ class HostedRuntimeBootstrap(
             .lastOrNull { it.stage == RuntimeStage.GUEST_CONTEXT }
             ?.evidence
             .orEmpty()
-        val classLoaderOutput = ClassLoaderStage(
-            classLoaderFactory = classLoaderFactory,
+        val classLoaderStage = classLoaderFactory?.let { legacyFactory ->
+            ClassLoaderStage(classLoaderFactory = legacyFactory, clock = clock)
+        } ?: ClassLoaderStage(
+            structuredClassLoaderFactory = GuestClassLoaderFactory(::createDefaultGuestClassLoader),
             clock = clock
-        ).execute(
+        )
+        val classLoaderOutput = classLoaderStage.execute(
             input = preparedContext,
             additionalEvidence = providerRoutingEvidence
         )
@@ -570,27 +573,128 @@ class HostedRuntimeBootstrap(
         private const val CATEGORY_LAUNCHER = "android.intent.category.LAUNCHER"
 
         internal fun createDefaultGuestClassLoader(
-            apkPath: String,
-            nativeLibDir: String?
-        ): ClassLoader {
-            val apkPaths = apkPath
-                .split(File.pathSeparatorChar)
-                .filter { it.isNotBlank() }
-            val librarySearchPath = NativeLibraryPaths.buildClassLoaderSearchPath(
-                apkPath = apkPaths.firstOrNull() ?: apkPath,
-                splitApkPaths = apkPaths.drop(1),
-                nativeLibraryDir = nativeLibDir
-            )
-            val classLoader = if (librarySearchPath.isNullOrBlank()) {
-                PathClassLoader(apkPath, ClassLoader.getSystemClassLoader())
+            spec: GuestClassLoaderSpec
+        ): GuestClassLoaderCreation {
+            val created = if (isAndroidRuntime()) {
+                createWithPlatformClassLoaderFactory(spec)
+                    ?: createWithVerifiedNamespaceFallback(spec)
             } else {
-                PathClassLoader(apkPath, librarySearchPath, ClassLoader.getSystemClassLoader())
+                createJvmTestClassLoader(spec)
+            }
+            return created
+        }
+
+        private fun isAndroidRuntime(): Boolean {
+            val vmName = System.getProperty("java.vm.name").orEmpty()
+            return vmName.contains("Dalvik", ignoreCase = true) ||
+                vmName.contains("ART", ignoreCase = true)
+        }
+
+        private fun createJvmTestClassLoader(spec: GuestClassLoaderSpec): GuestClassLoaderCreation {
+            val classLoader = if (spec.librarySearchPath.isNullOrBlank()) {
+                PathClassLoader(spec.dexPath, ClassLoader.getSystemClassLoader())
+            } else {
+                PathClassLoader(
+                    spec.dexPath,
+                    spec.librarySearchPath,
+                    ClassLoader.getSystemClassLoader()
+                )
             }
             initializeSharedLibraryFields(classLoader)
-            if (!librarySearchPath.isNullOrBlank()) {
-                createClassloaderNamespace(classLoader, apkPath, librarySearchPath)
+            return GuestClassLoaderCreation(
+                classLoader = classLoader,
+                namespaceVerdict = GuestClassLoaderNamespaceVerdict.NOT_APPLICABLE,
+                creationMethod = "JVM_TEST_FACTORY",
+                namespaceDetail = "linker namespace is unavailable outside Dalvik/ART"
+            )
+        }
+
+        private fun createWithPlatformClassLoaderFactory(
+            spec: GuestClassLoaderSpec
+        ): GuestClassLoaderCreation? {
+            val factoryClass = Class.forName("com.android.internal.os.ClassLoaderFactory")
+            val candidates = factoryClass.declaredMethods
+                .filter { method ->
+                    method.name == "createClassLoader" &&
+                        method.parameterTypes.take(7).toTypedArray().contentEquals(
+                            arrayOf(
+                                String::class.java,
+                                String::class.java,
+                                String::class.java,
+                                ClassLoader::class.java,
+                                Int::class.javaPrimitiveType,
+                                Boolean::class.javaPrimitiveType,
+                                String::class.java
+                            )
+                        ) &&
+                        method.parameterCount in 8..10
+                }
+                .sortedByDescending { it.parameterCount }
+            val method = candidates.firstOrNull() ?: return null
+            val parentClassLoader = platformGuestClassLoaderParent()
+            val args = platformClassLoaderFactoryArguments(
+                spec = spec,
+                parentClassLoader = parentClassLoader,
+                parameterCount = method.parameterCount
+            )
+            val classLoader = invokeReflective(method) {
+                method.isAccessible = true
+                method.invoke(null, *args) as ClassLoader
             }
-            return classLoader
+            return GuestClassLoaderCreation(
+                classLoader = classLoader,
+                namespaceVerdict = GuestClassLoaderNamespaceVerdict.PASS,
+                creationMethod = "AOSP_CLASS_LOADER_FACTORY_${method.parameterCount}",
+                namespaceDetail = "platform factory returned a ClassLoader with an initialized namespace"
+            )
+        }
+
+        private fun createWithVerifiedNamespaceFallback(
+            spec: GuestClassLoaderSpec
+        ): GuestClassLoaderCreation {
+            val parentClassLoader = platformGuestClassLoaderParent()
+            val classLoader = if (spec.librarySearchPath.isNullOrBlank()) {
+                PathClassLoader(spec.dexPath, parentClassLoader)
+            } else {
+                PathClassLoader(
+                    spec.dexPath,
+                    spec.librarySearchPath,
+                    parentClassLoader
+                )
+            }
+            initializeSharedLibraryFields(classLoader)
+            createClassloaderNamespace(classLoader, spec)
+            return GuestClassLoaderCreation(
+                classLoader = classLoader,
+                namespaceVerdict = GuestClassLoaderNamespaceVerdict.PASS,
+                creationMethod = "VERIFIED_NAMESPACE_FALLBACK",
+                namespaceDetail = "private namespace API returned no error"
+            )
+        }
+
+        internal fun platformGuestClassLoaderParent(): ClassLoader =
+            ClassLoader.getSystemClassLoader().parent ?: ClassLoader.getSystemClassLoader()
+
+        internal fun platformClassLoaderFactoryArguments(
+            spec: GuestClassLoaderSpec,
+            parentClassLoader: ClassLoader,
+            parameterCount: Int
+        ): Array<Any?> {
+            require(parameterCount in 8..10) {
+                "Unsupported ClassLoaderFactory parameter count: $parameterCount"
+            }
+            return buildList<Any?> {
+                add(spec.dexPath)
+                add(spec.librarySearchPath)
+                add(spec.libraryPermittedPath)
+                add(parentClassLoader)
+                add(spec.targetSdkVersion)
+                add(false)
+                add(null)
+                add(emptyList<ClassLoader>())
+                if (parameterCount >= 9) add(emptyList<String>())
+                if (parameterCount >= 10) add(emptyList<ClassLoader>())
+            }.toTypedArray()
         }
 
         private fun initializeSharedLibraryFields(classLoader: ClassLoader) {
@@ -631,34 +735,52 @@ class HostedRuntimeBootstrap(
 
         private fun createClassloaderNamespace(
             classLoader: ClassLoader,
-            apkPath: String,
-            librarySearchPath: String
+            spec: GuestClassLoaderSpec
         ) {
-            runCatching {
-                val factoryClass = Class.forName("com.android.internal.os.ClassLoaderFactory")
-                val createMethod = factoryClass.getDeclaredMethod(
-                    "createClassloaderNamespace",
-                    ClassLoader::class.java,
-                    Int::class.javaPrimitiveType,
-                    String::class.java,
-                    String::class.java,
-                    Boolean::class.javaPrimitiveType,
-                    String::class.java,
-                    String::class.java
-                ).apply {
-                    isAccessible = true
-                }
+            val factoryClass = Class.forName("com.android.internal.os.ClassLoaderFactory")
+            val createMethod = factoryClass.getDeclaredMethod(
+                "createClassloaderNamespace",
+                ClassLoader::class.java,
+                Int::class.javaPrimitiveType,
+                String::class.java,
+                String::class.java,
+                Boolean::class.javaPrimitiveType,
+                String::class.java,
+                String::class.java
+            ).apply {
+                isAccessible = true
+            }
+            val errorMessage = invokeReflective(createMethod) {
                 createMethod.invoke(
                     null,
                     classLoader,
-                    android.os.Build.VERSION.SDK_INT,
-                    librarySearchPath,
-                    "/data:/mnt/expand",
+                    spec.targetSdkVersion,
+                    spec.librarySearchPath,
+                    spec.libraryPermittedPath,
                     false,
-                    apkPath,
+                    spec.dexPath,
                     ""
+                ) as? String
+            }
+            if (errorMessage != null) {
+                throw UnsatisfiedLinkError(
+                    "Unable to create namespace for guest ClassLoader: $errorMessage"
                 )
             }
+        }
+
+        private inline fun <T> invokeReflective(
+            method: java.lang.reflect.Method,
+            block: () -> T
+        ): T = try {
+            block()
+        } catch (error: InvocationTargetException) {
+            throw error.targetException ?: error
+        } catch (error: Throwable) {
+            throw IllegalStateException(
+                "Guest ClassLoader reflection failed at ${method.declaringClass.name}.${method.name}",
+                error
+            )
         }
 
         /**

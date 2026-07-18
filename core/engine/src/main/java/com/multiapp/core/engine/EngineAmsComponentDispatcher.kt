@@ -112,6 +112,15 @@ class DefaultEngineAmsComponentDispatcher(
         intent: Intent,
         foreground: Boolean
     ): VirtualContextWrapper.StartServiceMappingResult {
+        if (fallback.shouldDispatchServiceToSystemSafely(intent)) {
+            return VirtualContextWrapper.StartServiceMappingResult.SystemPassthrough(
+                sourceIntent = intent,
+                foreground = foreground,
+                targetPackageName = runCatching { intent.component?.packageName }.getOrNull()
+                    ?: runCatching { intent.`package` }.getOrNull().orEmpty(),
+                reason = "external_system_service"
+            )
+        }
         val operation = if (foreground) {
             VirtualServiceOperation.START_FOREGROUND
         } else {
@@ -133,6 +142,12 @@ class DefaultEngineAmsComponentDispatcher(
             preparation.launchTicket
         )
     }
+
+    override fun shouldDispatchServiceToSystem(intent: Intent): Boolean =
+        fallback.shouldDispatchServiceToSystemSafely(intent)
+
+    private fun VirtualAmsComponentDispatcher.shouldDispatchServiceToSystemSafely(intent: Intent): Boolean =
+        runCatching { shouldDispatchServiceToSystem(intent) }.getOrDefault(false)
 
     override fun dispatchStopService(intent: Intent): VirtualServiceStopDispatchResult? {
         val planRequest = intent.toServicePlanRequest(

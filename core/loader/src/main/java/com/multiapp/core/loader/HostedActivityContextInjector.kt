@@ -690,13 +690,6 @@ internal object HostedActivityContextInjector {
                 source = LoadedApkInstallSource.PREWARMED_GUEST
             )
         }
-        val state = LoadedApkRuntimeState(
-            packageName = config.originPackageName,
-            applicationInfo = applicationInfo,
-            resources = guestContext.resources,
-            classLoader = guestClassLoader,
-            application = guestApplication
-        )
         val guardPackageName = hostPackageName
             ?.takeIf { it.isNotBlank() }
             ?.takeUnless { it == config.originPackageName || it == config.virtualPackageName }
@@ -706,6 +699,14 @@ internal object HostedActivityContextInjector {
                 skippedReason = "HOST_PACKAGE_GUARD_UNAVAILABLE_FOR_PREWARMED_GUEST",
                 source = LoadedApkInstallSource.PREWARMED_GUEST
             )
+        val state = LoadedApkRuntimeState(
+            packageName = config.originPackageName,
+            applicationInfo = applicationInfo,
+            resources = guestContext.resources,
+            classLoader = guestClassLoader,
+            application = guestApplication,
+            binderPackageName = guardPackageName
+        )
         return runCatching {
             ActivityThreadLoadedApkInstaller.install(
                 activityThread = activityThread,

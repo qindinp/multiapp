@@ -28,6 +28,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -67,6 +68,43 @@ class FakeTestApplicationWithOnCreate : Application() {
 }
 
 class HostedRuntimeBootstrapTest {
+
+    @Test
+    fun `platform guest classloader parent matches Android application loader parent`() {
+        val expected = ClassLoader.getSystemClassLoader().parent
+            ?: ClassLoader.getSystemClassLoader()
+
+        assertSame(expected, HostedRuntimeBootstrap.platformGuestClassLoaderParent())
+    }
+
+    @Test
+    fun `platform classloader arguments support API 30 through 36 signatures`() {
+        val parent = ClassLoader.getSystemClassLoader()
+        val spec = GuestClassLoaderSpec(
+            dexPath = "/artifact/base.apk",
+            baseApkPath = "/artifact/base.apk",
+            splitApkPaths = emptyList(),
+            nativeLibraryDir = "/data/instances/inst/lib/arm64-v8a",
+            librarySearchPath = "/data/instances/inst/lib/arm64-v8a",
+            libraryPermittedPath = "/data/instances/inst",
+            targetSdkVersion = 35
+        )
+
+        (8..10).forEach { parameterCount ->
+            val args = HostedRuntimeBootstrap.platformClassLoaderFactoryArguments(
+                spec = spec,
+                parentClassLoader = parent,
+                parameterCount = parameterCount
+            )
+
+            assertEquals(parameterCount, args.size)
+            assertSame(parent, args[3])
+            assertEquals(35, args[4])
+            assertTrue(args[7] is List<*>)
+            if (parameterCount >= 9) assertTrue(args[8] is List<*>)
+            if (parameterCount >= 10) assertTrue(args[9] is List<*>)
+        }
+    }
 
     // ── Fakes ────────────────────────────────────────────────────────────
 

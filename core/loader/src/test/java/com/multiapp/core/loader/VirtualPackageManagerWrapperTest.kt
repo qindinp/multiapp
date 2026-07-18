@@ -3,6 +3,7 @@ package com.multiapp.core.loader
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageItemInfo
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.content.pm.Signature
@@ -22,6 +23,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class VirtualPackageManagerWrapperTest {
@@ -359,6 +361,58 @@ class VirtualPackageManagerWrapperTest {
         assertEquals(false, rationaleWithDeviceId)
     }
 
+    @Test
+    fun `android 16 hidden item icon methods are concrete runtime contracts`() {
+        listOf("loadItemIcon", "loadUnbadgedItemIcon").forEach { methodName ->
+            val method = VirtualPackageManagerWrapper::class.java.getDeclaredMethod(
+                methodName,
+                PackageItemInfo::class.java,
+                ApplicationInfo::class.java
+            )
+
+            assertFalse(java.lang.reflect.Modifier.isAbstract(method.modifiers))
+            assertEquals(Drawable::class.java, method.returnType)
+        }
+    }
+
+    @Test
+    fun `android 16 hidden item icon methods delegate to host with virtual application projection`() {
+        val badgedIcon = mockk<Drawable>()
+        val unbadgedIcon = mockk<Drawable>()
+        val base = mockk<PackageManager>(
+            relaxed = true,
+            moreInterfaces = arrayOf(Api36ItemIconLoader::class)
+        )
+        val iconLoader = base as Api36ItemIconLoader
+        every { iconLoader.loadItemIcon(any(), any()) } returns badgedIcon
+        every { iconLoader.loadUnbadgedItemIcon(any(), any()) } returns unbadgedIcon
+        val pm = VirtualPackageManagerWrapper(base, snapshot(), RUNTIME_UID)
+        val itemInfo = PackageItemInfo().apply {
+            packageName = "com.test.minimal"
+            icon = 7
+        }
+        val aliasAppInfo = ApplicationInfo().apply {
+            packageName = "com.multiapp.instance.abc"
+            sourceDir = "/invalid/alias.apk"
+        }
+
+        assertSame(badgedIcon, pm.loadItemIcon(itemInfo, aliasAppInfo))
+        assertSame(unbadgedIcon, pm.loadUnbadgedItemIcon(itemInfo, aliasAppInfo))
+
+        verify(exactly = 1) {
+            iconLoader.loadItemIcon(
+                itemInfo,
+                match { it.packageName == "com.test.minimal" && it.sourceDir == "/data/apks/minimal.apk" }
+            )
+        }
+        verify(exactly = 1) {
+            iconLoader.loadUnbadgedItemIcon(
+                itemInfo,
+                match { it.packageName == "com.test.minimal" && it.sourceDir == "/data/apks/minimal.apk" }
+            )
+        }
+    }
+
     private fun snapshot() = VirtualPackageSnapshot(
         instanceId = "inst-001",
         originPackageName = "com.test.minimal",
@@ -418,6 +472,11 @@ class VirtualPackageManagerWrapperTest {
         java.security.MessageDigest.getInstance("SHA-256").digest(this)
 
     private fun ByteArray.toHex(): String = joinToString("") { byte -> "%02x".format(byte) }
+
+    interface Api36ItemIconLoader {
+        fun loadItemIcon(itemInfo: PackageItemInfo, appInfo: ApplicationInfo?): Drawable
+        fun loadUnbadgedItemIcon(itemInfo: PackageItemInfo, appInfo: ApplicationInfo?): Drawable
+    }
 
     private companion object {
         const val RUNTIME_UID = 42420

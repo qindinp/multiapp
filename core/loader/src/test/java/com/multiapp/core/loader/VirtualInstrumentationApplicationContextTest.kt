@@ -15,11 +15,44 @@ import io.mockk.verify
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertIs
 import kotlin.test.assertSame
 
 class VirtualInstrumentationApplicationContextTest {
+
+    @Test
+    fun `captured process host Context wins after guest Application replaces current Application`() {
+        val base = mockk<Instrumentation>(relaxed = true)
+        val hostContext = mockk<Context>(relaxed = true) {
+            every { applicationContext } returns null
+        }
+        val guestApplication = mockk<Application>(relaxed = true)
+        val instrumentation = VirtualInstrumentation(
+            base = base,
+            processHostContext = hostContext
+        )
+
+        val resolved = instrumentation.resolveProcessHostContext { guestApplication }
+
+        assertSame(hostContext, resolved)
+    }
+
+    @Test
+    fun `late guest binding cannot replace captured process host Context`() {
+        val hostContext = mockk<Context>(relaxed = true) {
+            every { applicationContext } returns null
+        }
+        val guestContext = mockk<Context>(relaxed = true) {
+            every { applicationContext } returns null
+        }
+        val instrumentation = VirtualInstrumentation(
+            base = mockk(relaxed = true),
+            processHostContext = hostContext
+        )
+
+        instrumentation.bindProcessHostContext(guestContext)
+
+        assertSame(hostContext, instrumentation.resolveProcessHostContext())
+    }
 
     @BeforeTest
     fun setUp() {
@@ -37,7 +70,7 @@ class VirtualInstrumentationApplicationContextTest {
     }
 
     @Test
-    fun `newApplication wraps the framework guest context without breaking its base chain`() {
+    fun `newApplication preserves framework guest context for Application attach`() {
         val snapshot = snapshot()
         VirtualPackageRegistry.global.register(snapshot)
         val hostContext = contextForPackage("com.multiapp.app")
@@ -57,9 +90,7 @@ class VirtualInstrumentationApplicationContextTest {
         )
 
         assertSame(application, created)
-        val guestContext = assertIs<VirtualContextWrapper>(contextSlot.captured)
-        assertEquals(snapshot.originPackageName, guestContext.packageName)
-        assertSame(frameworkContext, guestContext.baseContext)
+        assertSame(frameworkContext, contextSlot.captured)
         verify(exactly = 1) {
             base.newApplication(classLoader, "li.songe.gkd.App", any())
         }

@@ -37,12 +37,14 @@ class EngineBinderProvider : ContentProvider() {
         owner.runtimeRegistry.invalidateEphemeralProcessStates("engine_server_process_started")
         endpoint = EngineRuntimeBinderEndpoint(
             registry = owner.runtimeRegistry,
+            hostPackageName = hostContext.packageName,
             hostUid = hostContext.applicationInfo.uid,
             serverGenerationId = owner.serverGenerationId,
             activityLaunchCapabilities = owner.activityLaunchCapabilities,
             activityService = owner.systemServer.activityService,
             activityOperationTransactions = owner.activityOperationTransactions,
             providerService = owner.systemServer.providerService,
+            providerRouteTokens = owner.providerRouteTokens,
             permissionService = owner.systemServer.permissionService,
             appOpsService = owner.systemServer.appOpsService,
             serviceService = owner.systemServer.serviceService,
@@ -52,7 +54,8 @@ class EngineBinderProvider : ContentProvider() {
             packageService = owner.systemServer.packageService,
             virtualizationEngine = owner.virtualizationEngine,
             processControlPlane = owner.processControlPlane,
-            componentProcessAuthority = owner
+            componentProcessAuthority = owner,
+            componentProcessLaunchCapabilities = owner.componentProcessLaunchCapabilities
         )
         return true
     }

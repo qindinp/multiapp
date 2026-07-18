@@ -248,6 +248,23 @@ class VirtualAmsComponentDispatcherTest {
     }
 
     @Test
+    fun `resolveStartServiceIntent delegates explicit external service to the system`() {
+        val dispatcher = dispatcher()
+        val intent = explicitIntent(
+            "com.google.android.webview",
+            "org.chromium.content.app.SandboxedProcessService0"
+        )
+
+        val result = dispatcher.resolveStartServiceIntent(intent, foreground = false)
+
+        val passthrough = assertIs<VirtualContextWrapper.StartServiceMappingResult.SystemPassthrough>(result)
+        assertSame(intent, passthrough.sourceIntent)
+        assertEquals("com.google.android.webview", passthrough.targetPackageName)
+        assertEquals("external_system_service", passthrough.reason)
+        assertFalse(passthrough.foreground)
+    }
+
+    @Test
     fun `resolveStartServiceIntent uses injected process runtime slot`() {
         val processRuntime = VirtualProcessRuntime()
         processRuntime.bindApplication("inst-001") {

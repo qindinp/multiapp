@@ -1,7 +1,8 @@
 package com.multiapp.core.engine
 
 import android.net.Uri
-import com.multiapp.core.identity.ProviderRouteToken
+import android.os.Binder
+import android.os.IBinder
 import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.model.engine.ProviderRouteContract
 
@@ -12,7 +13,9 @@ data class EngineProviderRouteToken(
     val authority: String,
     val operation: String,
     val expiresAtMillis: Long,
-    val processSlot: String? = null
+    val processSlot: String? = null,
+    val callerProcessSlot: String? = null,
+    val callerProcessId: Int? = null
 )
 
 sealed class EngineProviderRouteTokenGateResult {
@@ -37,7 +40,13 @@ object EngineProviderRouteTokenGate {
     fun validate(
         uri: Uri,
         operationName: String,
-        nowMillis: Long = System.currentTimeMillis()
+        providerCallingUid: Int,
+        providerCallingPid: Int,
+        targetProcessToken: IBinder = EngineProviderRouteProcessToken.token,
+        consume: (
+            EngineProviderRouteTokenConsumeRequest
+        ) -> EngineProviderRouteTokenAuthorityResult? =
+            EngineRuntimeIpcClients::validateAndConsumeProviderRouteToken
     ): EngineProviderRouteTokenGateResult {
         val instanceId = uri.getQueryParameter(ProviderRouteContract.PROXY_INSTANCE_ID)
         val guestAuthority = uri.getQueryParameter(ProviderRouteContract.PROXY_GUEST_AUTHORITY)
@@ -55,22 +64,32 @@ object EngineProviderRouteTokenGate {
                 EngineProviderDispatchResult.InvalidProxyUri("missing guestAuthority")
             )
         }
-        val result = ProviderRouteTokenRegistry.validateTarget(
-            token = token,
-            targetInstanceId = instanceId,
-            authority = guestAuthority,
-            operation = operationName,
-            expectedProcessSlot = expectedProcessSlot,
-            nowMillis = nowMillis
-        )
-        if (!result.isValid) {
+        val request = runCatching {
+            EngineProviderRouteTokenConsumeRequest(
+                token = token.orEmpty(),
+                targetInstanceId = instanceId,
+                guestAuthority = guestAuthority,
+                operation = operationName,
+                expectedProcessSlot = expectedProcessSlot,
+                providerCallingUid = providerCallingUid,
+                providerCallingPid = providerCallingPid,
+                targetProcessToken = targetProcessToken
+            )
+        }.getOrElse {
             return EngineProviderRouteTokenGateResult.Invalid(
-                EngineProviderDispatchResult.InvalidProxyUri("invalid route token:${result.status.name}")
+                EngineProviderDispatchResult.InvalidProxyUri("invalid route token:INVALID_REQUEST")
             )
         }
-        val route = result.route?.toEngineRoute() ?: return EngineProviderRouteTokenGateResult.Invalid(
-            EngineProviderDispatchResult.InvalidProxyUri("invalid route token:ROUTE_MISSING")
-        )
+        val result = consume(request)
+            ?: return EngineProviderRouteTokenGateResult.Invalid(
+                EngineProviderDispatchResult.InvalidProxyUri("invalid route token:ENGINE_UNAVAILABLE")
+            )
+        val route = result.route
+        if (!result.accepted || route == null) {
+            return EngineProviderRouteTokenGateResult.Invalid(
+                EngineProviderDispatchResult.InvalidProxyUri("invalid route token:${result.status}")
+            )
+        }
         return EngineProviderRouteTokenGateResult.Valid(
             route = route,
             canonicalProxyUri = canonicalProxyUri(uri, route)
@@ -157,14 +176,8 @@ object EngineProviderRouteTokenGate {
         ).joinToString("&")
     }
 
-    private fun ProviderRouteToken.toEngineRoute(): EngineProviderRouteToken =
-        EngineProviderRouteToken(
-            token = token,
-            callerInstanceId = callerInstanceId,
-            targetInstanceId = targetInstanceId,
-            authority = authority,
-            operation = operation,
-            expiresAtMillis = expiresAtMillis,
-            processSlot = processSlot
-        )
+}
+
+private object EngineProviderRouteProcessToken {
+    val token: IBinder = Binder()
 }

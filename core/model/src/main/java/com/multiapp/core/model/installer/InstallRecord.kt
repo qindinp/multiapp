@@ -3,10 +3,13 @@ package com.multiapp.core.model.installer
 import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import com.multiapp.core.model.virtual.VirtualProviderPathPattern
 import com.multiapp.core.model.virtual.VirtualProviderPathPermission
+import com.multiapp.core.model.virtual.ResolvedComponent
+import com.multiapp.core.model.virtual.toLegacyMetaDataMap
 
 data class ComponentInfo(
     val name: String,
     val exported: Boolean = false,
+    val authorities: List<String> = emptyList(),
     val permission: String? = null,
     val readPermission: String? = null,
     val writePermission: String? = null,
@@ -22,11 +25,34 @@ data class ComponentInfo(
 ) {
     init {
         require(name.isNotBlank()) { "component name must not be blank" }
+        require(authorities.none { it.isBlank() }) { "authorities must not contain blank entries" }
+        require(authorities.size == authorities.distinct().size) { "authorities must be unique" }
         require(permission == null || permission.isNotBlank()) { "permission must not be blank" }
         require(readPermission == null || readPermission.isNotBlank()) { "readPermission must not be blank" }
         require(writePermission == null || writePermission.isNotBlank()) { "writePermission must not be blank" }
     }
 }
+
+fun ComponentInfo.toResolvedComponent(): ResolvedComponent = ResolvedComponent(
+    name = name,
+    exported = exported,
+    authorities = authorities,
+    permission = permission,
+    readPermission = readPermission,
+    writePermission = writePermission,
+    grantUriPermissions = grantUriPermissions,
+    pathPermissions = pathPermissions,
+    uriPermissionPatterns = uriPermissionPatterns,
+    launchMode = launchMode,
+    processName = processName,
+    taskAffinity = taskAffinity,
+    themeId = themeId,
+    metaData = metaData.toLegacyMetaDataMap(),
+    typedMetaData = metaData,
+    targetActivityName = targetActivityName
+)
+
+fun List<ComponentInfo>.toResolvedComponents(): List<ResolvedComponent> = map(ComponentInfo::toResolvedComponent)
 
 data class InstallMetadata(
     val permissions: List<String> = emptyList(),

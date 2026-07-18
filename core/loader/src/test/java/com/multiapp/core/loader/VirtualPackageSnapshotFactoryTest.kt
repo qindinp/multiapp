@@ -236,6 +236,17 @@ class VirtualPackageSnapshotFactoryTest {
                         exported = true,
                         metaData = mapOf("mode" to VirtualMetaDataValue.string("persisted"))
                     )
+                ),
+                providers = listOf(
+                    ComponentInfo(
+                        name = "com.test.minimal.ProbeProvider",
+                        authorities = listOf(
+                            "com.test.minimal.probe",
+                            "com.test.minimal.probe.legacy"
+                        ),
+                        readPermission = "com.test.permission.READ_PROBE",
+                        writePermission = "com.test.permission.WRITE_PROBE"
+                    )
                 )
             ),
             resolvedPackage = null,
@@ -247,6 +258,12 @@ class VirtualPackageSnapshotFactoryTest {
             "persisted",
             snapshot.activities.single().typedMetaData.getValue("mode").encodedValue
         )
+        assertEquals(
+            listOf("com.test.minimal.probe", "com.test.minimal.probe.legacy"),
+            snapshot.providers.single().authorities
+        )
+        assertEquals("com.test.permission.READ_PROBE", snapshot.providers.single().readPermission)
+        assertEquals("com.test.permission.WRITE_PROBE", snapshot.providers.single().writePermission)
     }
 
     @Test

@@ -37,11 +37,17 @@ open class VirtualInstrumentation(
     private val processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val activityOperations: VirtualActivityOperations =
-        ManagerBackedVirtualActivityOperations(activityRecordManager)
+        ManagerBackedVirtualActivityOperations(activityRecordManager),
+    processHostContext: Context? = null
 ) : Instrumentation() {
 
     private val hostedRuntimeCache = ConcurrentHashMap<String, HostedActivityRuntime>()
     private val hostedActivityThreadTokens = ConcurrentHashMap<String, IBinder>()
+    private val instrumentationFallbackIdentities =
+        ConcurrentHashMap<String, VirtualActivityLaunchIdentity>()
+
+    @Volatile
+    private var processHostContext: Context? = processHostContext?.stableApplicationContext()
 
     private sealed class StartActivityIntentDecision {
         data class Launch(val intent: Intent) : StartActivityIntentDecision()
@@ -101,8 +107,22 @@ open class VirtualInstrumentation(
         ): Boolean = current != null && cached.hasSameRuntimeIdentity(current)
     }
 
+    internal fun bindProcessHostContext(context: Context?) {
+        if (context == null || processHostContext != null) return
+        val candidate = context.stableApplicationContext()
+        synchronized(this) {
+            if (processHostContext == null) {
+                processHostContext = candidate
+            }
+        }
+    }
+
+    internal fun resolveProcessHostContext(
+        currentApplicationProvider: () -> Application = ActivityThreadCompat::currentApplication
+    ): Context = processHostContext ?: currentApplicationProvider()
+
     override fun newApplication(cl: ClassLoader, className: String, context: Context): Application {
-        val applicationContext = hostedApplicationContextForFrameworkApp(context, cl, "newApplication")
+        val applicationContext = hostedApplicationContextForFrameworkApp(context, "newApplication")
         return base.newApplication(cl, className, applicationContext)
     }
 
@@ -193,6 +213,7 @@ open class VirtualInstrumentation(
         markActivityFinishedIfNeeded(activity)
         base.callActivityOnDestroy(activity)
         forgetActivityThreadToken(activity)
+        forgetInstrumentationFallbackCapability(activity)
     }
 
     override fun callActivityOnNewIntent(activity: Activity, intent: Intent) {
@@ -1012,6 +1033,9 @@ open class VirtualInstrumentation(
             val guestClassLoader = requireNotNull(result.guestClassLoader) {
                 "Hosted bootstrap returned null guestClassLoader"
             }
+            check(Thread.currentThread().contextClassLoader === guestClassLoader) {
+                "Guest Activity thread context ClassLoader mismatch; process runtime binding is invalid"
+            }
             val guestIntent = buildGuestActivityIntent(intent, instanceId, guestActivityClassName)
             val recovery = restoreActivityRecordFromProxyIntentIfMissing(
                 proxyClassName = proxyClassName,
@@ -1019,7 +1043,8 @@ open class VirtualInstrumentation(
                 guestIntent = guestIntent,
                 instanceId = instanceId,
                 guestActivityClassName = guestActivityClassName,
-                fallbackOriginPackageName = result.originPackageName ?: result.packageSnapshot?.originPackageName
+                fallbackOriginPackageName = result.originPackageName ?: result.packageSnapshot?.originPackageName,
+                authorizedPreflight = launchPreflight
             )
             require(!recovery.isRejected) {
                 "Proxy Activity record ownership rejected: ${recovery.skippedReason}"
@@ -1122,7 +1147,7 @@ open class VirtualInstrumentation(
             hostedRuntimeCache.remove(instanceId, cached)
         }
 
-        val hostApplication = ActivityThreadCompat.currentApplication()
+        val hostApplication = resolveProcessHostContext()
         if (shouldBlockForegroundRuntimeBootstrap(isMainThread(), reusableResult != null)) {
             writeForegroundBootstrapBlockedEvidence(
                 filesDir = hostApplication.filesDir,
@@ -1205,25 +1230,23 @@ open class VirtualInstrumentation(
 
     private fun injectHostedApplicationContextIfNeeded(application: Application) {
         val currentBase = runCatching { application.baseContext }.getOrNull() ?: return
-        if (currentBase is VirtualContextWrapper) return
-        val classLoader = runCatching { application.classLoader }.getOrNull()
-            ?: application.javaClass.classLoader
-            ?: VirtualInstrumentation::class.java.classLoader!!
-        val guestContext = hostedApplicationContextForFrameworkApp(
-            context = currentBase,
-            guestClassLoader = classLoader,
+        val frameworkBase = if (currentBase is VirtualContextWrapper) {
+            currentBase.baseContext
+        } else {
+            currentBase
+        }
+        val preparedContext = hostedApplicationContextForFrameworkApp(
+            context = frameworkBase,
             phase = "callApplicationOnCreate"
         )
-        if (guestContext === currentBase) return
-        replaceContextWrapperBase(application, guestContext)
+        if (preparedContext === currentBase) return
+        replaceContextWrapperBase(application, preparedContext)
     }
 
     private fun hostedApplicationContextForFrameworkApp(
         context: Context,
-        guestClassLoader: ClassLoader,
         phase: String
     ): Context {
-        if (context is VirtualContextWrapper) return context
         val packageNames = listOfNotNull(
             runCatching { context.packageName }.getOrNull(),
             runCatching { context.applicationInfo?.packageName }.getOrNull()
@@ -1241,23 +1264,6 @@ open class VirtualInstrumentation(
         }
         val hostPackageName = runCatching { hostContext.packageName }.getOrNull().orEmpty()
         val contextPatch = FrameworkApplicationContextCompat.prepare(context, hostPackageName)
-        val runtime = processRuntime.get(snapshot.instanceId)?.result
-        val config = VirtualContextConfig(
-            instanceId = snapshot.instanceId,
-            originPackageName = snapshot.originPackageName,
-            virtualPackageName = snapshot.virtualPackageName,
-            dataDir = snapshot.dataDir,
-            sourceDir = snapshot.sourceDir,
-            nativeLibraryDir = snapshot.nativeLibraryDir,
-            classLoader = runtime?.guestClassLoader ?: guestClassLoader,
-            applicationLabel = snapshot.applicationLabel,
-            packageSnapshot = snapshot,
-            splitSourceDirs = snapshot.splitSourceDirs,
-            splitPublicSourceDirs = snapshot.splitPublicSourceDirs,
-            splitNames = snapshot.splitNames,
-            isolatedSplits = snapshot.isolatedSplits,
-            processSlot = runtime?.processSlot
-        )
         Log.i(
             TAG,
             "Prepared framework Application context at $phase: instanceId=${snapshot.instanceId}, " +
@@ -1268,19 +1274,25 @@ open class VirtualInstrumentation(
                 "patchedFields=${contextPatch.patchedFields.joinToString(",")}, " +
                 "skippedFields=${contextPatch.skippedFieldReasons.joinToString(",")}"
         )
-        return VirtualContextWrappers.create(
-            base = context,
-            config = config,
-            guestClassLoader = config.classLoader,
-            processRuntime = processRuntime,
-            activityRecordManager = activityRecordManager
-        )
+        // Application.attachBaseContext() must receive the framework ContextImpl.
+        // Hot-fix frameworks and AndroidX inspect mPackageInfo/mOuterContext directly.
+        // Binder-facing identity is patched in place above; wrapping is reserved for
+        // Activity and component surfaces where the framework Context ABI is not replaced.
+        return context
     }
 
     private fun hostContextForFrameworkApplication(
         context: Context,
         snapshot: com.multiapp.core.model.virtual.VirtualPackageSnapshot
     ): Context? {
+        processHostContext?.let { capturedHostContext ->
+            if (!snapshot.matchesPackageName(
+                    runCatching { capturedHostContext.packageName }.getOrNull()
+                )
+            ) {
+                return capturedHostContext
+            }
+        }
         val currentApplication = runCatching { ActivityThreadCompat.currentApplication() }.getOrNull()
         if (currentApplication != null && !snapshot.matchesPackageName(
                 runCatching { currentApplication.packageName }.getOrNull()
@@ -1516,7 +1528,8 @@ open class VirtualInstrumentation(
             ?.takeIf { it.isNotBlank() }
             ?: fallbackOriginPackageName?.takeIf { it.isNotBlank() }
 
-        activityRecordManager.resolve(token)?.let { existing ->
+        val existing = activityRecordManager.resolve(token)
+        existing?.let {
             if (!existing.matchesRecordOwner(
                     instanceId = instanceId,
                     guestActivityClassName = guestActivityClassName,
@@ -1530,11 +1543,6 @@ open class VirtualInstrumentation(
                     isRejected = true
                 )
             }
-            return ActivityRecordRecoveryResult(
-                record = existing,
-                activityRecordFound = true,
-                skippedReason = "ALREADY_REGISTERED"
-            )
         }
 
         val launchIdentity = proxyIntent.toVirtualActivityLaunchIdentity(proxyClassName)
@@ -1542,6 +1550,27 @@ open class VirtualInstrumentation(
                 skippedReason = "ENGINE_LAUNCH_IDENTITY_MISSING",
                 isRejected = true
             )
+        if (originPackageName == null) {
+            return ActivityRecordRecoveryResult(
+                skippedReason = "ORIGIN_PACKAGE_MISSING",
+                isRejected = true
+            )
+        }
+        instrumentationFallbackIdentities[token]?.let { ownedIdentity ->
+            if (ownedIdentity != launchIdentity) {
+                return ActivityRecordRecoveryResult(
+                    record = existing,
+                    activityRecordFound = existing != null,
+                    skippedReason = "INSTRUMENTATION_FALLBACK_CAPABILITY_OWNER_MISMATCH",
+                    isRejected = true
+                )
+            }
+            return ActivityRecordRecoveryResult(
+                record = existing,
+                activityRecordFound = existing != null,
+                skippedReason = if (existing != null) "ALREADY_REGISTERED" else "ENGINE_LAUNCH_AUTHORIZED"
+            )
+        }
         val authorization = VirtualActivityLaunchAuthority.authorize(launchIdentity)
         if (!authorization.accepted) {
             return ActivityRecordRecoveryResult(
@@ -1549,13 +1578,23 @@ open class VirtualInstrumentation(
                 isRejected = true
             )
         }
-        if (originPackageName == null) {
+        val previousOwner = instrumentationFallbackIdentities.putIfAbsent(
+            token,
+            launchIdentity
+        )
+        if (previousOwner != null && previousOwner != launchIdentity) {
             return ActivityRecordRecoveryResult(
-                skippedReason = "ORIGIN_PACKAGE_MISSING",
+                record = existing,
+                activityRecordFound = existing != null,
+                skippedReason = "INSTRUMENTATION_FALLBACK_CAPABILITY_OWNER_RACE",
                 isRejected = true
             )
         }
-        return ActivityRecordRecoveryResult(skippedReason = "ENGINE_LAUNCH_AUTHORIZED")
+        return ActivityRecordRecoveryResult(
+            record = existing,
+            activityRecordFound = existing != null,
+            skippedReason = if (existing != null) "ALREADY_REGISTERED" else "ENGINE_LAUNCH_AUTHORIZED"
+        )
     }
 
     @Suppress("DEPRECATION")
@@ -1566,7 +1605,8 @@ open class VirtualInstrumentation(
         instanceId: String,
         guestActivityClassName: String,
         fallbackOriginPackageName: String? = null,
-        activityRecordManager: VirtualActivityRecordManager = this.activityRecordManager
+        activityRecordManager: VirtualActivityRecordManager = this.activityRecordManager,
+        authorizedPreflight: ActivityRecordRecoveryResult? = null
     ): ActivityRecordRecoveryResult {
         val token = proxyIntent.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
             ?.takeIf { it.isNotBlank() }
@@ -1576,7 +1616,7 @@ open class VirtualInstrumentation(
                 skippedReason = "TOKEN_MISSING",
                 isRejected = true
             )
-        val launchPreflight = validateProxyActivityLaunchBeforeBootstrap(
+        val launchPreflight = authorizedPreflight ?: validateProxyActivityLaunchBeforeBootstrap(
             proxyClassName = proxyClassName,
             proxyIntent = proxyIntent,
             instanceId = instanceId,
@@ -1943,7 +1983,7 @@ open class VirtualInstrumentation(
     }
 
     private fun currentFilesDirOrNull(): File? = runCatching {
-        ActivityThreadCompat.currentApplication().filesDir
+        resolveProcessHostContext().filesDir
     }.getOrNull()
 
     private fun writeLifecycleEvidence(activity: Activity, event: String) {
@@ -2181,6 +2221,13 @@ open class VirtualInstrumentation(
         hostedActivityThreadTokens.remove(identity.token)
     }
 
+    private fun forgetInstrumentationFallbackCapability(activity: Activity) {
+        val token = activity.intent?.getStringExtra(EXTRA_VIRTUAL_ACTIVITY_TOKEN)
+            ?.takeIf { it.isNotBlank() }
+            ?: return
+        instrumentationFallbackIdentities.remove(token)
+    }
+
     private fun dispatchActivityResultThroughActivityThread(
         recorded: VirtualActivityFinishResultRecord,
         result: ActivityResultSnapshot
@@ -2300,7 +2347,7 @@ open class VirtualInstrumentation(
         append: Boolean = false
     ) {
         runCatching {
-            val evidenceDir = File(ActivityThreadCompat.currentApplication().filesDir, EVIDENCE_DIR).apply { mkdirs() }.canonicalFile
+            val evidenceDir = File(resolveProcessHostContext().filesDir, EVIDENCE_DIR).apply { mkdirs() }.canonicalFile
             val file = File(evidenceDir, fileName).canonicalFile
             require(file.parentFile == evidenceDir) { "Activity evidence path escapes evidence dir" }
             val text = lines.joinToString("\n") { sanitizeEvidenceLine(it) }
@@ -2395,7 +2442,7 @@ open class VirtualInstrumentation(
 
     private fun writeSubstitutionFailureEvidence(instanceId: String, error: Throwable) {
         runCatching {
-            val filesDir = ActivityThreadCompat.currentApplication().filesDir
+            val filesDir = resolveProcessHostContext().filesDir
             val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }
             File(evidenceDir, HostedActivityEvidenceFiles.instrumentation(instanceId)).writeText(
                 listOf(
@@ -2412,11 +2459,21 @@ open class VirtualInstrumentation(
     }
 
     private data class HostedActivityRuntime(
-        val hostApplication: android.app.Application,
+        val hostApplication: Context,
         val result: HostedBootstrapResult
     )
 
     private class ForegroundBootstrapBlockedException(instanceId: String) : IllegalStateException(
         "RUNTIME_CACHE_MISS_ON_MAIN_THREAD: proxy Activity for $instanceId must be launched after ContainerActivity prewarm"
     )
+}
+
+private fun Context.stableApplicationContext(): Context {
+    val applicationContext = runCatching { applicationContext }.getOrNull() ?: this
+    val hostPackageName = runCatching { packageName }.getOrNull()
+        ?.takeIf { it.isNotBlank() }
+        ?: return applicationContext
+    return runCatching {
+        applicationContext.createPackageContext(hostPackageName, Context.CONTEXT_IGNORE_SECURITY)
+    }.getOrNull() ?: applicationContext
 }

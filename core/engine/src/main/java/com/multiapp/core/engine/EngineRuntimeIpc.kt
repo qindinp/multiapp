@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Binder
 import android.os.Bundle
 import android.os.IBinder
+import android.os.ParcelFileDescriptor
 import android.os.Process
 import android.os.SystemClock
 import com.multiapp.core.engine.ipc.IEngineRuntimeService
@@ -27,6 +28,7 @@ import com.multiapp.core.model.virtual.VirtualTaskRecord
 import java.io.File
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 object EngineRuntimeIpcContract {
     const val ENGINE_PROCESS_SUFFIX = ":engine"
@@ -98,6 +100,7 @@ object EngineRuntimeIpcContract {
     const val KEY_VIRTUAL_AUTHORITY = "virtualAuthority"
     const val KEY_ROUTE_TOKEN_PRESENT = "routeTokenPresent"
     const val KEY_ROUTE_TOKEN_VERIFIED = "routeTokenVerified"
+    const val KEY_ROUTE_TOKEN = "routeToken"
     const val KEY_CALLER_INSTANCE_ID = "callerInstanceId"
     const val KEY_TARGET_INSTANCE_ID = "targetInstanceId"
     const val KEY_CALLING_UID = "callingUid"
@@ -333,8 +336,15 @@ private data class EngineUriPermissionCheckTarget(
     val reason: String
 )
 
+private data class EngineProviderRouteTargetResolution(
+    val binding: EngineProviderRouteTargetBinding,
+    val liveIdentity: EngineProviderRouteProcessIdentity?,
+    val launchTicket: EngineComponentProcessLaunchTicket?
+)
+
 class EngineRuntimeBinderEndpoint(
     private val registry: EngineRuntimeRegistry,
+    private val hostPackageName: String,
     private val hostUid: Int,
     private val serverGenerationId: String = UUID.randomUUID().toString(),
     private val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry =
@@ -345,6 +355,8 @@ class EngineRuntimeBinderEndpoint(
     private val activityLaunchAllocator: EngineActivityLaunchAllocator =
         EngineActivityLaunchAllocator(registry, activityService, activityLaunchCapabilities),
     private val providerService: VirtualProviderService = DefaultVirtualSystemServer(registry).providerService,
+    private val providerRouteTokens: EngineProviderRouteTokenRegistry =
+        EngineProviderRouteTokenRegistry(),
     private val permissionService: VirtualPermissionService =
         DefaultVirtualSystemServer(registry).permissionService,
     private val appOpsService: VirtualAppOpsService = DefaultVirtualSystemServer(registry).appOpsService,
@@ -361,6 +373,8 @@ class EngineRuntimeBinderEndpoint(
         activityLaunchCapabilities = activityLaunchCapabilities
     ),
     private val componentProcessAuthority: EngineComponentProcessAuthority? = null,
+    private val componentProcessLaunchCapabilities: EngineComponentProcessLaunchCapabilityRegistry =
+        EngineComponentProcessLaunchCapabilityRegistry(),
     private val recentsRestoreCapabilityIssuer: EngineRecentsRestoreCapabilityIssuer =
         EngineRecentsRestoreCapabilityIssuer(
             runtimeRegistry = registry,
@@ -372,7 +386,9 @@ class EngineRuntimeBinderEndpoint(
     private val callingPid: () -> Int = Binder::getCallingPid,
     private val callingProcessName: (Int) -> String? = ::readAndroidProcessName,
     private val callingProcessStartTicks: (Int) -> Long? = ::readAndroidProcessStartTicks,
-    private val ipcBundleFactory: () -> Bundle = ::Bundle
+    private val ipcBundleFactory: () -> Bundle = ::Bundle,
+    private val authoritativeRuntimeStreamOpener: (VirtualInstanceRuntime) -> ParcelFileDescriptor? =
+        EngineAuthoritativeRuntimeStream::open
 ) : IEngineRuntimeService.Stub() {
 
     init {
@@ -382,56 +398,87 @@ class EngineRuntimeBinderEndpoint(
     override fun getServerGenerationId(): String =
         serverGenerationId.takeIf { callingUid() == hostUid }.orEmpty()
 
-    override fun engineInstallOrRefreshPackage(originPackageName: String): Bundle = authorizedBundle {
+    override fun engineInstallOrRefreshPackage(originPackageName: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
-            ?: return@authorizedBundle engineOperationUnavailableBundle("installOrRefreshPackage")
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("installOrRefreshPackage")
         engine.installOrRefreshPackage(originPackageName).toEngineIpcBundle()
     }
 
-    override fun engineCreateInstance(originPackageName: String): Bundle = authorizedBundle {
+    override fun engineCreateInstance(originPackageName: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
-            ?: return@authorizedBundle engineOperationUnavailableBundle("createInstance")
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("createInstance")
         engine.createInstance(originPackageName).toEngineIpcBundle()
     }
 
-    override fun engineCreateInstanceWithMetadata(request: Bundle): Bundle = authorizedBundle {
+    override fun engineCreateInstanceWithMetadata(request: Bundle): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
-            ?: return@authorizedBundle engineOperationUnavailableBundle("createInstance")
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("createInstance")
         val decoded = request.toCreateInstanceRequestOrNull()
-            ?: return@authorizedBundle engineInvalidRequestBundle("createInstance")
+            ?: return@managementAuthorizedBundle engineInvalidRequestBundle("createInstance")
         engine.createInstance(decoded).toEngineIpcBundle()
     }
 
-    override fun engineLaunchInstance(request: Bundle): Bundle = authorizedBundle {
+    override fun engineLaunchInstance(request: Bundle): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
-            ?: return@authorizedBundle engineOperationUnavailableBundle("launchInstance")
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("launchInstance")
         val decoded = request.toLaunchInstanceRequestOrNull()
-            ?: return@authorizedBundle engineInvalidRequestBundle("launchInstance")
+            ?: return@managementAuthorizedBundle engineInvalidRequestBundle("launchInstance")
         engine.launchInstance(decoded).toEngineIpcBundle()
     }
 
-    override fun engineStopInstance(instanceId: String): Bundle = authorizedBundle {
+    override fun engineStopInstance(instanceId: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
-            ?: return@authorizedBundle engineOperationUnavailableBundle("stopInstance")
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("stopInstance")
         engine.stopInstance(instanceId).toEngineIpcBundle()
     }
 
-    override fun engineDeleteInstance(instanceId: String): Bundle = authorizedBundle {
+    override fun engineDeleteInstance(instanceId: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
-            ?: return@authorizedBundle engineOperationUnavailableBundle("deleteInstance")
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("deleteInstance")
         engine.deleteInstance(instanceId).toEngineIpcBundle()
     }
 
-    override fun engineQueryRuntimeState(instanceId: String): Bundle = authorizedBundle {
+    override fun engineQueryRuntimeState(instanceId: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
-            ?: return@authorizedBundle engineOperationUnavailableBundle("queryRuntimeState")
-        engine.queryRuntimeState(instanceId)?.toAuthoritativeRuntimeBundle()
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("queryRuntimeState")
+        engine.queryRuntimeState(instanceId)?.toEngineRuntimeIdentityBundle()
             ?: engineMissingRuntimeBundle(instanceId)
     }
 
-    override fun engineExportEvidence(instanceId: String): Bundle = authorizedBundle {
+    override fun engineOpenRuntimeState(
+        instanceId: String,
+        request: Bundle
+    ): ParcelFileDescriptor? {
+        if (!isAuthorized() || instanceId.isBlank()) return null
+        val engine = virtualizationEngine ?: return null
+        val runtime = engine.queryRuntimeState(instanceId) ?: return null
+        val providerTarget = boundProviderTargetForCallingProcess(runtime)
+        val componentIdentity = if (providerTarget == null) {
+            authoritativeComponentProcessIdentity(runtime)
+        } else {
+            null
+        }
+        val requestedSlot = request.getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT)
+        val processRuntime = when {
+            providerTarget != null -> {
+                if (requestedSlot != providerTarget.binding.processSlot) return null
+                runtime.toProviderRouteProcessRuntime(providerTarget)
+            }
+            componentIdentity != null -> {
+                if (requestedSlot != componentIdentity.processSlot) return null
+                runtime.toComponentProcessRuntime(componentIdentity)
+            }
+            else -> {
+                if (!isAuthoritativeRuntimeStreamCaller(runtime, request)) return null
+                runtime
+            }
+        }
+        return authoritativeRuntimeStreamOpener(processRuntime)
+    }
+
+    override fun engineExportEvidence(instanceId: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
-            ?: return@authorizedBundle engineOperationUnavailableBundle("exportEvidence")
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("exportEvidence")
         engine.exportEvidence(instanceId).toEngineEvidenceBundle()
     }
 
@@ -572,6 +619,26 @@ class EngineRuntimeBinderEndpoint(
     override fun queryRuntime(instanceId: String): Bundle = authorizedBundle {
         val runtime = instanceId.takeIf { it.isNotBlank() }?.let(registry::get)
             ?: return@authorizedBundle missingRuntimeBundle(instanceId)
+        boundProviderTargetForCallingProcess(runtime)?.let { providerTarget ->
+            return@authorizedBundle runtime.toIpcBundle(
+                liveAuthority = true,
+                reason = "provider_route_target_process_authorized"
+            ).apply {
+                putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, providerTarget.binding.processSlot)
+                putInt(EngineRuntimeIpcContract.KEY_PROCESS_ID, providerTarget.processId)
+                putString(EngineRuntimeIpcContract.KEY_PROCESS_NAME, providerTarget.binding.processSlot)
+            }
+        }
+        authoritativeComponentProcessIdentity(runtime)?.let { componentIdentity ->
+            return@authorizedBundle runtime.toIpcBundle(
+                liveAuthority = true,
+                reason = "component_process_runtime_authorized"
+            ).apply {
+                putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, componentIdentity.processSlot)
+                putInt(EngineRuntimeIpcContract.KEY_PROCESS_ID, componentIdentity.processId)
+                putString(EngineRuntimeIpcContract.KEY_PROCESS_NAME, componentIdentity.processSlot)
+            }
+        }
         val authority = processControlPlane.authorize(instanceId, callingPid())
         runtime.toIpcBundle(
             liveAuthority = authority.allowed,
@@ -590,17 +657,34 @@ class EngineRuntimeBinderEndpoint(
                 "runtime_process_id_not_calling_pid"
             )
         }
-        val matches = registry.list().filter { runtime -> runtime.processId == processId }
-        val runtime = matches.singleOrNull()
+        val matches = registry.list().mapNotNull { runtime ->
+            authorizeServiceCaller(runtime.instanceId, callerPid)?.let { authority ->
+                val authoritativePid = when (authority) {
+                    is EngineServiceCallerAuthority.Primary -> authority.identity.processId
+                    is EngineServiceCallerAuthority.Component -> authority.identity.processId
+                }
+                (runtime to authority).takeIf { authoritativePid == processId }
+            }
+        }
+        val match = matches.singleOrNull()
             ?: return@authorizedBundle missingProcessRuntimeBundle(
                 processId,
                 if (matches.isEmpty()) "runtime_process_id_not_found" else "runtime_process_id_ambiguous"
             )
-        val authority = processControlPlane.authorize(runtime.instanceId, callerPid)
+        val (runtime, authority) = match
         runtime.toIpcBundle(
-            liveAuthority = authority.allowed,
-            reason = authority.reason
-        )
+            liveAuthority = true,
+            reason = when (authority) {
+                is EngineServiceCallerAuthority.Primary -> "primary_process_runtime_authorized"
+                is EngineServiceCallerAuthority.Component -> "component_process_runtime_authorized"
+            }
+        ).apply {
+            if (authority is EngineServiceCallerAuthority.Component) {
+                putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, authority.identity.processSlot)
+                putInt(EngineRuntimeIpcContract.KEY_PROCESS_ID, authority.identity.processId)
+                putString(EngineRuntimeIpcContract.KEY_PROCESS_NAME, authority.identity.processSlot)
+            }
+        }
     }
 
     override fun resolveUriPermissionCheckTarget(
@@ -705,9 +789,9 @@ class EngineRuntimeBinderEndpoint(
     override fun queryComponentProcessClient(
         instanceId: String,
         guestProcessName: String
-    ): Bundle = runtimeAuthorizedBundle(instanceId) {
+    ): Bundle = primaryRuntimeAuthorizedBundle(instanceId) {
         val authority = componentProcessAuthority
-            ?: return@runtimeAuthorizedBundle componentProcessRejected(
+            ?: return@primaryRuntimeAuthorizedBundle componentProcessRejected(
                 COMPONENT_PROCESS_QUERY_OPERATION,
                 instanceId,
                 "component_process_authority_unavailable"
@@ -946,9 +1030,9 @@ class EngineRuntimeBinderEndpoint(
         }
     }
 
-    override fun queryEvidence(instanceId: String): Bundle = authorizedBundle {
+    override fun queryEvidence(instanceId: String): Bundle = managementAuthorizedBundle {
         val runtime = instanceId.takeIf { it.isNotBlank() }?.let(registry::get)
-            ?: return@authorizedBundle missingRuntimeBundle(instanceId)
+            ?: return@managementAuthorizedBundle missingRuntimeBundle(instanceId)
         val report = registry.evidence(runtime.instanceId)
         Bundle().apply {
             putBoolean(EngineRuntimeIpcContract.KEY_FOUND, true)
@@ -1314,13 +1398,39 @@ class EngineRuntimeBinderEndpoint(
         message = message
     ).toProxyActivitySlotResultIpcBundle()
 
-    override fun planProvider(instanceId: String, request: Bundle): Bundle = runtimeAuthorizedBundle(instanceId) {
+    override fun planProvider(instanceId: String, request: Bundle): Bundle = authorizedBundle {
         val decodedRequest = request.toProviderPlanRequestOrNull()
-            ?: return@runtimeAuthorizedBundle invalidRequestBundle(instanceId, "invalid_provider_plan_request")
+            ?: return@authorizedBundle invalidRequestBundle(instanceId, "invalid_provider_plan_request")
+        val targetBinding = currentProviderRouteTargetBinding(
+            decodedRequest.routeToken,
+            instanceId
+        ) ?: return@authorizedBundle invalidRequestBundle(
+            instanceId,
+            "provider_plan_target_binding_stale"
+        )
+        val receipt = authorizeProviderRouteDispatch(
+            token = decodedRequest.routeToken,
+            targetBinding = targetBinding,
+            authority = decodedRequest.guestAuthority,
+            operation = decodedRequest.operation.toProviderRouteOperationName()
+        )
+        val route = receipt.route
+            ?: return@authorizedBundle invalidRequestBundle(
+                instanceId,
+                "provider_plan_route_receipt_rejected:${receipt.status.name}"
+            )
         providerService.planProvider(
             instanceId,
             decodedRequest.copy(
+                processSlot = route.processSlot,
+                routeTokenPresent = true,
+                routeTokenVerified = true,
+                callerInstanceId = route.callerInstanceId,
+                targetInstanceId = route.targetInstanceId,
+                callingUid = hostUid,
+                callingPid = route.callerProcessId ?: -1,
                 hostUid = hostUid,
+                callerProcessSlot = route.callerProcessSlot,
                 engineCallingUid = callingUid(),
                 engineCallingPid = callingPid()
             )
@@ -1336,6 +1446,127 @@ class EngineRuntimeBinderEndpoint(
                 )
             providerService.resolveProviderAuthority(callerInstanceId, decodedRequest).toIpcBundle()
         }
+
+    override fun issueProviderRouteToken(callerInstanceId: String, request: Bundle): Bundle =
+        authorizedBundle {
+            val decoded = request.toProviderRouteTokenIssueRequestOrNull()
+                ?: return@authorizedBundle providerRouteTokenFailure(
+                    "INVALID_REQUEST",
+                    "invalid provider route token issue request"
+                )
+            if (callerInstanceId.isBlank()) {
+                return@authorizedBundle providerRouteTokenFailure(
+                    "CALLER_UNAUTHORIZED",
+                    "provider route caller instance is invalid"
+                )
+            }
+            val callerAuthority = authorizeServiceCaller(callerInstanceId, callingPid())
+                ?: return@authorizedBundle providerRouteTokenFailure(
+                    "CALLER_UNAUTHORIZED",
+                    "provider route caller process is not authoritative"
+                )
+            val callerIdentity = callerAuthority.toProviderRouteProcessIdentity()
+                ?: return@authorizedBundle providerRouteTokenFailure(
+                    "CALLER_UNAUTHORIZED",
+                    "provider route caller identity is incomplete"
+                )
+            val resolveRequest = VirtualProviderAuthorityResolveRequest(
+                guestAuthority = decoded.guestAuthority,
+                operation = EngineProviderOperation.fromOperationName(decoded.operation),
+                encodedPath = "/",
+                accessMode = decoded.operation.substringAfter(':', "").takeIf { it.isNotBlank() }
+            )
+            val resolution = providerService.resolveProviderAuthority(callerInstanceId, resolveRequest)
+            val targetInstanceId = resolution.targetInstanceId
+            if (
+                !resolution.virtualAuthority || resolution.verdict == EngineResultStatus.FAIL ||
+                targetInstanceId.isNullOrBlank() || targetInstanceId != decoded.targetInstanceId
+            ) {
+                return@authorizedBundle providerRouteTokenFailure(
+                    "TARGET_UNRESOLVED",
+                    "provider route target authority was not resolved by engine"
+                )
+            }
+            val target = resolveProviderRouteTarget(
+                targetInstanceId,
+                decoded.guestAuthority
+            ) ?: return@authorizedBundle providerRouteTokenFailure(
+                "TARGET_PROCESS_UNAVAILABLE",
+                "provider route target component process could not be prepared"
+            )
+            if (
+                decoded.requestedProcessSlot != null &&
+                decoded.requestedProcessSlot != target.binding.processSlot
+            ) {
+                return@authorizedBundle providerRouteTokenFailure(
+                    "PROCESS_SLOT_MISMATCH",
+                    "provider route target process slot differs from the requested slot"
+                )
+            }
+            val route = runCatching {
+                providerRouteTokens.issue(
+                    authoritativeCallerIdentity = callerIdentity,
+                    authoritativeTargetBinding = target.binding,
+                    authoritativeTargetIdentity = target.liveIdentity,
+                    targetLaunchTicket = target.launchTicket,
+                    authority = decoded.guestAuthority,
+                    operation = decoded.operation
+                )
+            }.getOrElse { error ->
+                return@authorizedBundle providerRouteTokenFailure(
+                    "ISSUE_FAILED",
+                    "provider route token issue failed:${error.javaClass.name}"
+                )
+            }
+            EngineProviderRouteTokenAuthorityResult(
+                status = "ISSUED",
+                route = route,
+                message = "engine provider route token issued"
+            ).toProviderRouteTokenIpcBundle(ipcBundleFactory)
+        }
+
+    override fun validateAndConsumeProviderRouteToken(
+        targetInstanceId: String,
+        request: Bundle
+    ): Bundle = authorizedBundle {
+        val decoded = request.toProviderRouteTokenConsumeRequestOrNull()
+            ?: return@authorizedBundle providerRouteTokenFailure(
+                "INVALID_REQUEST",
+                "invalid provider route token consume request"
+            )
+        if (
+            targetInstanceId.isBlank() || targetInstanceId != decoded.targetInstanceId ||
+            decoded.providerCallingUid != hostUid
+        ) {
+            return@authorizedBundle providerRouteTokenFailure(
+                "TARGET_UNAUTHORIZED",
+                "provider route target or original caller uid is invalid"
+            )
+        }
+        val targetBinding = currentProviderRouteTargetBinding(
+            decoded.token,
+            targetInstanceId
+        ) ?: return@authorizedBundle providerRouteTokenFailure(
+            "TARGET_UNAUTHORIZED",
+            "provider route target binding is missing or stale"
+        )
+        if (decoded.expectedProcessSlot != targetBinding.processSlot) {
+            return@authorizedBundle providerRouteTokenFailure(
+                "PROCESS_SLOT_MISMATCH",
+                "provider route target process slot does not match Binder caller"
+            )
+        }
+        val consumed = consumeProviderRouteToken(decoded, targetBinding)
+        EngineProviderRouteTokenAuthorityResult(
+            status = if (consumed.consumed) "VALID" else consumed.status.name,
+            route = consumed.route,
+            message = if (consumed.consumed) {
+                "engine provider route token consumed"
+            } else {
+                "engine provider route token rejected:${consumed.status.name}"
+            }
+        ).toProviderRouteTokenIpcBundle(ipcBundleFactory)
+    }
 
     override fun recordProviderDispatch(instanceId: String, result: Bundle): Boolean {
         if (!isRuntimeAuthorized(instanceId)) return false
@@ -1711,7 +1942,7 @@ class EngineRuntimeBinderEndpoint(
         )
     }
 
-    override fun queryServiceRuntimeState(instanceId: String): Bundle = runtimeAuthorizedBundle(instanceId) {
+    override fun queryServiceRuntimeState(instanceId: String): Bundle = primaryRuntimeAuthorizedBundle(instanceId) {
         serviceService.queryServiceRuntimeState(instanceId).toIpcBundle()
     }
 
@@ -1966,15 +2197,24 @@ class EngineRuntimeBinderEndpoint(
     }
 
     override fun stopRuntime(instanceId: String, runtimeEpoch: Long): Boolean =
-        isAuthorized() && instanceId.isNotBlank() && runtimeEpoch > 0L &&
+        isManagementAuthorized() && instanceId.isNotBlank() && runtimeEpoch > 0L &&
             registry.stopIfEpoch(instanceId, runtimeEpoch)
 
-    private fun authorizedBundle(block: () -> Bundle): Bundle =
-        if (isAuthorized()) block() else Bundle().apply {
-            putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
-            putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
-            putString(EngineRuntimeIpcContract.KEY_REASON, "caller_uid_mismatch")
+    private fun managementAuthorizedBundle(block: () -> Bundle): Bundle =
+        when {
+            !isAuthorized() -> unauthorizedBundle("caller_uid_mismatch")
+            !isManagementAuthorized() -> unauthorizedBundle("management_caller_process_mismatch")
+            else -> block()
         }
+
+    private fun authorizedBundle(block: () -> Bundle): Bundle =
+        if (isAuthorized()) block() else unauthorizedBundle("caller_uid_mismatch")
+
+    private fun unauthorizedBundle(reason: String): Bundle = Bundle().apply {
+        putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
+        putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+        putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+    }
 
     private fun packageEnabledStateBundle(
         instanceId: String,
@@ -2049,6 +2289,25 @@ class EngineRuntimeBinderEndpoint(
                 putString(EngineRuntimeIpcContract.KEY_REASON, "caller_uid_mismatch")
             }
         }
+        val callerPid = callingPid()
+        val primaryDecision = processControlPlane.authorize(instanceId, callerPid)
+        val authority = authorizeServiceCaller(instanceId, callerPid, primaryDecision)
+        return if (authority != null) block() else {
+            missingLiveAuthorityBundle(
+                instanceId,
+                primaryDecision.reason.ifBlank { "runtime_process_not_authoritative" }
+            )
+        }
+    }
+
+    private fun primaryRuntimeAuthorizedBundle(instanceId: String, block: () -> Bundle): Bundle {
+        if (!isAuthorized()) {
+            return Bundle().apply {
+                putBoolean(EngineRuntimeIpcContract.KEY_FOUND, false)
+                putString(EngineRuntimeIpcContract.KEY_STATUS, EngineResultStatus.FAIL.name)
+                putString(EngineRuntimeIpcContract.KEY_REASON, "caller_uid_mismatch")
+            }
+        }
         val authority = processControlPlane.authorize(instanceId, callingPid())
         return if (authority.allowed) block() else {
             missingLiveAuthorityBundle(instanceId, authority.reason)
@@ -2057,11 +2316,11 @@ class EngineRuntimeBinderEndpoint(
 
     private fun authorizeServiceCaller(
         instanceId: String,
-        callerPid: Int
+        callerPid: Int,
+        primaryDecision: EngineProcessAuthorityDecision = processControlPlane.authorize(instanceId, callerPid)
     ): EngineServiceCallerAuthority? {
-        val primary = processControlPlane.authorize(instanceId, callerPid)
-        if (primary.allowed && primary.identity != null) {
-            return EngineServiceCallerAuthority.Primary(primary.identity)
+        if (primaryDecision.allowed && primaryDecision.identity != null) {
+            return EngineServiceCallerAuthority.Primary(primaryDecision.identity)
         }
         val component = componentProcessAuthority?.authorizeCaller(
             instanceId = instanceId,
@@ -2071,6 +2330,343 @@ class EngineRuntimeBinderEndpoint(
         ) ?: return null
         return EngineServiceCallerAuthority.Component(component)
     }
+
+    private fun EngineServiceCallerAuthority.toProviderRouteProcessIdentity():
+        EngineProviderRouteProcessIdentity? {
+        return when (this) {
+        is EngineServiceCallerAuthority.Primary -> {
+            val runtime = registry.get(identity.instanceId) ?: return null
+            if (!runtime.matchesPrimaryProcessIdentity(identity, identity.processId)) return null
+            EngineProviderRouteProcessIdentity(
+                instanceId = identity.instanceId,
+                runtimeEpoch = identity.runtimeEpoch,
+                engineSessionId = identity.engineSessionId,
+                processSlot = identity.processSlot,
+                processId = identity.processId,
+                effectiveGuestProcessName = runtime.packageSnapshot.processName
+                    .toServiceEffectiveGuestProcessName(runtime.originPackageName)
+            )
+        }
+        is EngineServiceCallerAuthority.Component -> {
+            val runtime = registry.get(identity.instanceId) ?: return null
+            if (!runtime.matchesComponentProcessIdentity(identity, identity.processId)) return null
+            EngineProviderRouteProcessIdentity(
+                instanceId = identity.instanceId,
+                runtimeEpoch = identity.runtimeEpoch,
+                engineSessionId = identity.engineSessionId,
+                processSlot = identity.processSlot,
+                processId = identity.processId,
+                effectiveGuestProcessName = identity.effectiveGuestProcessName,
+                processEpoch = identity.processEpoch,
+                clientSessionId = identity.clientSessionId,
+                processStartTicks = identity.processStartTicks
+            )
+        }
+        }
+    }
+
+    private fun resolveProviderRouteTarget(
+        targetInstanceId: String,
+        guestAuthority: String
+    ): EngineProviderRouteTargetResolution? {
+        val runtime = registry.get(targetInstanceId) ?: return null
+        if (runtime.state == VirtualRuntimeState.STOPPED || runtime.state == VirtualRuntimeState.DEAD) {
+            return null
+        }
+        val provider = packageService.queryProviderByAuthority(targetInstanceId, guestAuthority)
+            ?: return null
+        val applicationProcessName = runtime.packageSnapshot.processName
+            .toServiceEffectiveGuestProcessName(runtime.originPackageName)
+        val providerProcessName = provider.processName
+            .toServiceEffectiveGuestProcessName(runtime.originPackageName)
+        if (providerProcessName == applicationProcessName) {
+            val processId = runtime.processId ?: return null
+            val authority = processControlPlane.authorize(targetInstanceId, processId)
+            val identity = authority.identity
+            if (!authority.allowed || identity == null) return null
+            val targetIdentity = EngineServiceCallerAuthority.Primary(identity)
+                .toProviderRouteProcessIdentity() ?: return null
+            return EngineProviderRouteTargetResolution(
+                binding = targetIdentity.toProviderTargetBinding(),
+                liveIdentity = targetIdentity,
+                launchTicket = null
+            )
+        }
+        val componentAuthority = componentProcessAuthority ?: return null
+        val prepared = componentAuthority.prepare(targetInstanceId, providerProcessName)
+            .takeIf { result -> result.accepted && result.instanceId == targetInstanceId }
+            ?: return null
+        if (prepared.alreadyRunning) {
+            val state = prepared.processState?.takeIf { processState ->
+                processState.live && processState.effectiveGuestProcessName == providerProcessName
+            } ?: return null
+            val identity = componentAuthority.authorizeCaller(
+                instanceId = targetInstanceId,
+                callingPid = state.processId,
+                callingProcessName = callingProcessName(state.processId),
+                callingProcessStartTicks = callingProcessStartTicks(state.processId)
+            ) ?: return null
+            val targetIdentity = EngineServiceCallerAuthority.Component(identity)
+                .toProviderRouteProcessIdentity()
+                ?.takeIf { resolved ->
+                    resolved.processSlot == state.processSlot &&
+                        resolved.effectiveGuestProcessName == providerProcessName
+                } ?: return null
+            return EngineProviderRouteTargetResolution(
+                binding = targetIdentity.toProviderTargetBinding(),
+                liveIdentity = targetIdentity,
+                launchTicket = null
+            )
+        }
+        val ticket = prepared.launchTicket?.takeIf { launch ->
+            launch.instanceId == targetInstanceId &&
+                launch.effectiveGuestProcessName == providerProcessName &&
+                launch.processSlot.isNotBlank()
+        } ?: return null
+        return EngineProviderRouteTargetResolution(
+            binding = EngineProviderRouteTargetBinding(
+                instanceId = runtime.instanceId,
+                runtimeEpoch = runtime.runtimeEpoch,
+                engineSessionId = runtime.engineSessionId,
+                processSlot = ticket.processSlot,
+                effectiveGuestProcessName = providerProcessName
+            ),
+            liveIdentity = null,
+            launchTicket = ticket
+        )
+    }
+
+    private fun currentProviderRouteTargetBinding(
+        token: String?,
+        targetInstanceId: String
+    ): EngineProviderRouteTargetBinding? = providerRouteTokens.targetBinding(token)
+        ?.takeIf { binding ->
+            binding.instanceId == targetInstanceId &&
+                registry.get(binding.instanceId)?.let { runtime ->
+                    isCurrentProviderRouteTargetBindingForAnyProvider(runtime, binding)
+                } == true
+        }
+
+    private fun consumeProviderRouteToken(
+        request: EngineProviderRouteTokenConsumeRequest,
+        targetBinding: EngineProviderRouteTargetBinding
+    ): EngineProviderRouteTokenConsumeResult {
+        val callerIsCurrent: (EngineProviderRouteProcessIdentity) -> Boolean = { callerIdentity ->
+            request.providerCallingPid == callerIdentity.processId &&
+                isCurrentProviderRouteIdentity(callerIdentity)
+        }
+        val targetIdentity = authorizeServiceCaller(targetBinding.instanceId, callingPid())
+            ?.toProviderRouteProcessIdentity()
+            ?: providerRouteTargetObservation(targetBinding)?.let { observation ->
+                attachPendingProviderTarget(
+                    request = request,
+                    targetBinding = targetBinding,
+                    observation = observation
+                )
+            }
+            ?: return EngineProviderRouteTokenConsumeResult(
+                EngineProviderRouteTokenConsumeStatus.TARGET_GENERATION_MISMATCH
+            )
+        return providerRouteTokens.consume(
+            token = request.token,
+            authoritativeTargetIdentity = targetIdentity,
+            authority = request.guestAuthority,
+            operation = request.operation,
+            callerGenerationIsCurrent = callerIsCurrent
+        )
+    }
+
+    private fun authorizeProviderRouteDispatch(
+        token: String?,
+        targetBinding: EngineProviderRouteTargetBinding,
+        authority: String,
+        operation: String
+    ): EngineProviderRouteTokenConsumeResult {
+        val callerIsCurrent: (EngineProviderRouteProcessIdentity) -> Boolean =
+            ::isCurrentProviderRouteIdentity
+        val targetIdentity = authorizeServiceCaller(targetBinding.instanceId, callingPid())
+            ?.toProviderRouteProcessIdentity()
+        if (targetIdentity != null) {
+            return providerRouteTokens.authorizeConsumedDispatch(
+                token = token,
+                authoritativeTargetIdentity = targetIdentity,
+                authority = authority,
+                operation = operation,
+                callerGenerationIsCurrent = callerIsCurrent
+            )
+        }
+        providerRouteTargetObservation(targetBinding)?.let { observation ->
+            return providerRouteTokens.authorizePendingTargetDispatch(
+                token = token,
+                authoritativeTarget = observation,
+                authority = authority,
+                operation = operation,
+                callerGenerationIsCurrent = callerIsCurrent
+            )
+        }
+        return EngineProviderRouteTokenConsumeResult(
+            EngineProviderRouteTokenConsumeStatus.TARGET_GENERATION_MISMATCH
+        )
+    }
+
+    private fun attachPendingProviderTarget(
+        request: EngineProviderRouteTokenConsumeRequest,
+        targetBinding: EngineProviderRouteTargetBinding,
+        observation: EngineProviderRouteTargetProcessObservation
+    ): EngineProviderRouteProcessIdentity? {
+        val authority = componentProcessAuthority ?: return null
+        val ticket = providerRouteTokens.targetLaunchTicket(request.token)
+            ?.takeIf { launch ->
+                launch.instanceId == targetBinding.instanceId &&
+                    launch.effectiveGuestProcessName == targetBinding.effectiveGuestProcessName &&
+                    launch.processSlot == targetBinding.processSlot
+            } ?: return null
+        val attached = authority.attach(
+            attachCapability = ticket.attachCapability,
+            clientToken = request.targetProcessToken,
+            callingPid = observation.processId,
+            callingProcessName = targetBinding.processSlot,
+            callingProcessStartTicks = observation.processStartTicks
+        )
+        val attachedState = attached.processState
+        if (
+            !attached.accepted || attachedState == null || !attachedState.live ||
+            attachedState.instanceId != targetBinding.instanceId ||
+            attachedState.effectiveGuestProcessName != targetBinding.effectiveGuestProcessName ||
+            attachedState.processSlot != targetBinding.processSlot ||
+            attachedState.processId != observation.processId
+        ) {
+            return null
+        }
+        val identity = authority.authorizeCaller(
+            instanceId = targetBinding.instanceId,
+            callingPid = observation.processId,
+            callingProcessName = targetBinding.processSlot,
+            callingProcessStartTicks = observation.processStartTicks
+        ) ?: return null
+        return EngineServiceCallerAuthority.Component(identity)
+            .toProviderRouteProcessIdentity()
+            ?.takeIf { it.toProviderTargetBinding() == targetBinding }
+    }
+
+    private fun providerRouteTargetObservation(
+        binding: EngineProviderRouteTargetBinding
+    ): EngineProviderRouteTargetProcessObservation? {
+        val runtime = registry.get(binding.instanceId) ?: return null
+        val applicationProcessName = runtime.packageSnapshot.processName
+            .toServiceEffectiveGuestProcessName(runtime.originPackageName)
+        if (binding.effectiveGuestProcessName == applicationProcessName) return null
+        val targetPid = callingPid()
+        if (callingProcessName(targetPid) != binding.processSlot) return null
+        val processStartTicks = callingProcessStartTicks(targetPid)?.takeIf { it > 0L }
+            ?: return null
+        return EngineProviderRouteTargetProcessObservation(
+            binding = binding,
+            processId = targetPid,
+            processStartTicks = processStartTicks
+        )
+    }
+
+    private fun boundProviderTargetForCallingProcess(
+        runtime: VirtualInstanceRuntime
+    ): EngineProviderRouteBoundTargetProcess? {
+        val targetPid = callingPid()
+        val processSlot = callingProcessName(targetPid) ?: return null
+        val processStartTicks = callingProcessStartTicks(targetPid) ?: return null
+        return providerRouteTokens.boundTargetForProcess(
+            instanceId = runtime.instanceId,
+            processId = targetPid,
+            processSlot = processSlot,
+            processStartTicks = processStartTicks
+        )?.takeIf { target ->
+            isCurrentProviderRouteTargetBindingForAnyProvider(runtime, target.binding)
+        }
+    }
+
+    private fun isCurrentProviderRouteTargetBindingForAnyProvider(
+        runtime: VirtualInstanceRuntime,
+        binding: EngineProviderRouteTargetBinding
+    ): Boolean {
+        if (
+            runtime.state == VirtualRuntimeState.STOPPED || runtime.state == VirtualRuntimeState.DEAD ||
+            runtime.instanceId != binding.instanceId ||
+            runtime.runtimeEpoch != binding.runtimeEpoch ||
+            runtime.engineSessionId != binding.engineSessionId
+        ) {
+            return false
+        }
+        val applicationProcessName = runtime.packageSnapshot.processName
+            .toServiceEffectiveGuestProcessName(runtime.originPackageName)
+        val processDeclared = runtime.packageSnapshot.providers.any { provider ->
+            provider.processName.toServiceEffectiveGuestProcessName(runtime.originPackageName) ==
+                binding.effectiveGuestProcessName
+        }
+        if (!processDeclared) return false
+        return if (binding.effectiveGuestProcessName == applicationProcessName) {
+            binding.processSlot == runtime.processSlot
+        } else {
+            binding.processSlot != runtime.processSlot &&
+                binding.processSlot.substringBefore(':') == runtime.hostPackageName
+        }
+    }
+
+    private fun VirtualInstanceRuntime.toProviderRouteProcessRuntime(
+        target: EngineProviderRouteBoundTargetProcess
+    ): VirtualInstanceRuntime = copy(
+        processSlot = target.binding.processSlot,
+        processId = target.processId,
+        processName = target.binding.processSlot,
+        packageSnapshot = packageSnapshot.copy(
+            processName = target.binding.effectiveGuestProcessName
+        )
+    )
+
+    private fun authoritativeComponentProcessIdentity(
+        runtime: VirtualInstanceRuntime
+    ): EngineComponentProcessClientIdentity? {
+        val callerPid = callingPid()
+        val identity = componentProcessAuthority?.authorizeCaller(
+            instanceId = runtime.instanceId,
+            callingPid = callerPid,
+            callingProcessName = callingProcessName(callerPid),
+            callingProcessStartTicks = callingProcessStartTicks(callerPid)
+        ) ?: return null
+        return identity.takeIf { runtime.matchesComponentProcessIdentity(it, callerPid) }
+    }
+
+    private fun VirtualInstanceRuntime.toComponentProcessRuntime(
+        identity: EngineComponentProcessClientIdentity
+    ): VirtualInstanceRuntime = copy(
+        processSlot = identity.processSlot,
+        processId = identity.processId,
+        processName = identity.processSlot,
+        packageSnapshot = packageSnapshot.copy(
+            processName = identity.effectiveGuestProcessName
+        )
+    )
+
+    private fun EngineProviderRouteProcessIdentity.toProviderTargetBinding() =
+        EngineProviderRouteTargetBinding(
+            instanceId = instanceId,
+            runtimeEpoch = runtimeEpoch,
+            engineSessionId = engineSessionId,
+            processSlot = processSlot,
+            effectiveGuestProcessName = effectiveGuestProcessName
+        )
+
+    private fun isCurrentProviderRouteIdentity(
+        expected: EngineProviderRouteProcessIdentity
+    ): Boolean {
+        val authority = authorizeServiceCaller(expected.instanceId, expected.processId) ?: return false
+        return authority.toProviderRouteProcessIdentity() == expected
+    }
+
+    private fun providerRouteTokenFailure(status: String, message: String): Bundle =
+        EngineProviderRouteTokenAuthorityResult(
+            status = status,
+            route = null,
+            message = message
+        ).toProviderRouteTokenIpcBundle(ipcBundleFactory)
 
     private fun isLiveUriPermissionCaller(
         callerInstanceId: String,
@@ -2164,8 +2760,66 @@ class EngineRuntimeBinderEndpoint(
 
     private fun isAuthorized(): Boolean = callingUid() == hostUid
 
+    private fun isManagementAuthorized(): Boolean =
+        isAuthorized() && callingProcessName(callingPid()) == hostPackageName
+
+    private fun isAuthoritativeRuntimeStreamCaller(
+        runtime: VirtualInstanceRuntime,
+        request: Bundle
+    ): Boolean {
+        val callerPid = callingPid()
+        val callerProcessName = callingProcessName(callerPid) ?: return false
+        if (callerProcessName == runtime.hostPackageName) return true
+
+        val primaryAuthority = processControlPlane.authorize(runtime.instanceId, callerPid)
+        val primaryIdentity = primaryAuthority.identity
+        if (
+            primaryAuthority.allowed && primaryIdentity != null &&
+            runtime.matchesPrimaryProcessIdentity(primaryIdentity, callerPid) &&
+            callerProcessName == primaryIdentity.processSlot
+        ) {
+            return true
+        }
+
+        val componentIdentity = componentProcessAuthority?.authorizeCaller(
+            instanceId = runtime.instanceId,
+            callingPid = callerPid,
+            callingProcessName = callerProcessName,
+            callingProcessStartTicks = callingProcessStartTicks(callerPid)
+        )
+        if (
+            componentIdentity != null &&
+            runtime.matchesComponentProcessIdentity(componentIdentity, callerPid) &&
+            callerProcessName == componentIdentity.processSlot
+        ) {
+            return true
+        }
+
+        val requestedEpoch = request.getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH)
+        val requestedSession = request.getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID)
+        val requestedSlot = request.getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT)
+        if (
+            requestedEpoch != runtime.runtimeEpoch ||
+            requestedSession != runtime.engineSessionId ||
+            requestedSlot.isNullOrBlank() ||
+            callerProcessName != requestedSlot
+        ) {
+            return false
+        }
+        if (requestedSlot == runtime.processSlot) return true
+
+        val attachCapability = request.getString(EngineRuntimeIpcContract.KEY_ATTACH_CAPABILITY)
+            ?.takeIf { it.isNotBlank() }
+            ?: return false
+        val pending = componentProcessLaunchCapabilities.query(attachCapability).identity ?: return false
+        return pending.instanceId == runtime.instanceId &&
+            pending.runtimeEpoch == runtime.runtimeEpoch &&
+            pending.engineSessionId == runtime.engineSessionId &&
+            pending.processSlot == requestedSlot
+    }
+
     private fun isRuntimeAuthorized(instanceId: String): Boolean =
-        isAuthorized() && processControlPlane.authorize(instanceId, callingPid()).allowed
+        isAuthorized() && authorizeServiceCaller(instanceId, callingPid()) != null
 
     private fun VirtualProviderUriGrantRequest.withAuthoritativeCaller(): VirtualProviderUriGrantRequest = copy(
         callingUid = callingUid(),
@@ -2551,6 +3205,7 @@ object EngineRuntimeIpcClients {
     private val connection = EngineRuntimeServiceConnection {
         applicationContext?.let { EngineRuntimeIpcClient(it).connect() }
     }
+    private val authoritativeRuntimeCache = ConcurrentHashMap<AuthoritativeRuntimeCacheKey, VirtualInstanceRuntime>()
 
     fun install(context: Context): Boolean {
         applicationContext = context.applicationContext ?: context
@@ -2582,11 +3237,78 @@ object EngineRuntimeIpcClients {
         invokeEngineResult { service -> service.engineDeleteInstance(instanceId) }
 
     fun engineQueryRuntimeState(
-        instanceId: String
+        instanceId: String,
+        runtimeEpoch: Long? = null,
+        engineSessionId: String? = null,
+        processSlot: String? = null,
+        componentAttachCapability: String? = null
     ): com.multiapp.core.model.engine.VirtualInstanceRuntime? {
+        val cacheKey = AuthoritativeRuntimeCacheKey.create(
+            instanceId = instanceId,
+            runtimeEpoch = runtimeEpoch,
+            engineSessionId = engineSessionId,
+            processSlot = processSlot
+        )
+        cacheKey?.let(authoritativeRuntimeCache::get)?.let { cached -> return cached }
         val active = activeService() ?: return null
-        val response = runCatching { active.engineQueryRuntimeState(instanceId) }.getOrNull() ?: return null
-        return response.toAuthoritativeRuntimeOrNull()
+        val request = Bundle().apply {
+            runtimeEpoch?.takeIf { it > 0L }?.let {
+                putLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH, it)
+            }
+            engineSessionId?.takeIf { it.isNotBlank() }?.let {
+                putString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID, it)
+            }
+            processSlot?.takeIf { it.isNotBlank() }?.let {
+                putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, it)
+            }
+            componentAttachCapability?.takeIf { it.isNotBlank() }?.let {
+                putString(EngineRuntimeIpcContract.KEY_ATTACH_CAPABILITY, it)
+            }
+        }
+        val descriptor = runCatching {
+            active.engineOpenRuntimeState(instanceId, request)
+        }.getOrNull() ?: return null
+        val runtime = EngineAuthoritativeRuntimeStream.read(descriptor)?.takeIf { decoded ->
+            decoded.instanceId == instanceId &&
+                (runtimeEpoch == null || decoded.runtimeEpoch == runtimeEpoch) &&
+                (engineSessionId == null || decoded.engineSessionId == engineSessionId)
+        } ?: return null
+        if (cacheKey != null) {
+            authoritativeRuntimeCache.keys
+                .filter { key -> key.instanceId == instanceId && key != cacheKey }
+                .forEach(authoritativeRuntimeCache::remove)
+            authoritativeRuntimeCache[cacheKey] = runtime
+        }
+        return runtime
+    }
+
+    private data class AuthoritativeRuntimeCacheKey(
+        val instanceId: String,
+        val runtimeEpoch: Long,
+        val engineSessionId: String,
+        val processSlot: String
+    ) {
+        companion object {
+            fun create(
+                instanceId: String,
+                runtimeEpoch: Long?,
+                engineSessionId: String?,
+                processSlot: String?
+            ): AuthoritativeRuntimeCacheKey? {
+                if (
+                    instanceId.isBlank() || runtimeEpoch == null || runtimeEpoch <= 0L ||
+                    engineSessionId.isNullOrBlank() || processSlot.isNullOrBlank()
+                ) {
+                    return null
+                }
+                return AuthoritativeRuntimeCacheKey(
+                    instanceId = instanceId,
+                    runtimeEpoch = runtimeEpoch,
+                    engineSessionId = engineSessionId,
+                    processSlot = processSlot
+                )
+            }
+        }
     }
 
     internal fun engineExportEvidence(
@@ -3086,6 +3808,49 @@ object EngineRuntimeIpcClients {
             activeService()?.resolveProviderAuthority(callerInstanceId, request.toIpcBundle())
         }.getOrNull() ?: return null
         return response.toProviderAuthorityResolveResultOrNull()
+    }
+
+    fun issueProviderRouteToken(
+        callerInstanceId: String,
+        request: EngineProviderRouteTokenIssueRequest
+    ): EngineProviderRouteTokenAuthorityResult? {
+        if (callerInstanceId.isBlank()) return null
+        val response = runCatching {
+            activeService()?.issueProviderRouteToken(
+                callerInstanceId,
+                request.toProviderRouteTokenIpcBundle()
+            )
+        }.getOrNull() ?: return null
+        return response.toProviderRouteTokenAuthorityResultOrNull()
+            ?.takeIf { result ->
+                !result.accepted || result.route?.let { route ->
+                    route.callerInstanceId == callerInstanceId &&
+                        route.targetInstanceId == request.targetInstanceId &&
+                        route.authority == request.guestAuthority &&
+                        route.operation == normalizeProviderRouteOperation(request.operation)
+                } == true
+            }
+    }
+
+    fun validateAndConsumeProviderRouteToken(
+        request: EngineProviderRouteTokenConsumeRequest
+    ): EngineProviderRouteTokenAuthorityResult? {
+        val response = runCatching {
+            activeService()?.validateAndConsumeProviderRouteToken(
+                request.targetInstanceId,
+                request.toProviderRouteTokenIpcBundle()
+            )
+        }.getOrNull() ?: return null
+        return response.toProviderRouteTokenAuthorityResultOrNull()
+            ?.takeIf { result ->
+                !result.accepted || result.route?.let { route ->
+                    route.token == request.token &&
+                        route.targetInstanceId == request.targetInstanceId &&
+                        route.authority == request.guestAuthority &&
+                        route.operation == normalizeProviderRouteOperation(request.operation) &&
+                        route.processSlot == request.expectedProcessSlot
+                } == true
+            }
     }
 
     fun recordProviderDispatch(instanceId: String, result: VirtualProviderOperationResult): Boolean? {
@@ -4237,6 +5002,7 @@ private fun VirtualProviderDispatchPlanRequest.toIpcBundle(): Bundle = Bundle().
     putString(EngineRuntimeIpcContract.KEY_GUEST_AUTHORITY, guestAuthority)
     putString(EngineRuntimeIpcContract.KEY_PROXY_AUTHORITY, proxyAuthority)
     putString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT, processSlot)
+    putString(EngineRuntimeIpcContract.KEY_ROUTE_TOKEN, routeToken)
     putBoolean(EngineRuntimeIpcContract.KEY_ROUTE_TOKEN_PRESENT, routeTokenPresent)
     putBoolean(EngineRuntimeIpcContract.KEY_ROUTE_TOKEN_VERIFIED, routeTokenVerified)
     putString(EngineRuntimeIpcContract.KEY_CALLER_INSTANCE_ID, callerInstanceId)
@@ -4298,6 +5064,7 @@ private fun Bundle.toProviderPlanRequestOrNull(): VirtualProviderDispatchPlanReq
         guestAuthority = getString(EngineRuntimeIpcContract.KEY_GUEST_AUTHORITY).orEmpty(),
         proxyAuthority = getString(EngineRuntimeIpcContract.KEY_PROXY_AUTHORITY),
         processSlot = getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT),
+        routeToken = getString(EngineRuntimeIpcContract.KEY_ROUTE_TOKEN),
         routeTokenPresent = getBoolean(EngineRuntimeIpcContract.KEY_ROUTE_TOKEN_PRESENT),
         routeTokenVerified = getBoolean(EngineRuntimeIpcContract.KEY_ROUTE_TOKEN_VERIFIED),
         callerInstanceId = getString(EngineRuntimeIpcContract.KEY_CALLER_INSTANCE_ID),
@@ -5182,3 +5949,27 @@ private val COMPONENT_SERVICE_START_OPERATIONS = setOf(
     VirtualServiceOperation.START,
     VirtualServiceOperation.START_FOREGROUND
 )
+
+private fun EngineProviderOperation.toProviderRouteOperationName(): String = when (this) {
+    EngineProviderOperation.ACQUIRE_PROVIDER -> "acquireProvider"
+    EngineProviderOperation.QUERY -> "query"
+    EngineProviderOperation.GET_TYPE -> "getType"
+    EngineProviderOperation.INSERT -> "insert"
+    EngineProviderOperation.DELETE -> "delete"
+    EngineProviderOperation.UPDATE -> "update"
+    EngineProviderOperation.CALL -> "call"
+    EngineProviderOperation.OPEN_FILE -> "openFile"
+    EngineProviderOperation.OPEN_ASSET_FILE -> "openAssetFile"
+    EngineProviderOperation.OPEN_TYPED_ASSET_FILE -> "openTypedAssetFile"
+    EngineProviderOperation.BULK_INSERT -> "bulkInsert"
+    EngineProviderOperation.APPLY_BATCH -> "applyBatch"
+    EngineProviderOperation.NOTIFY_CHANGE -> "notifyChange"
+    EngineProviderOperation.REGISTER_CONTENT_OBSERVER -> "registerContentObserver"
+    EngineProviderOperation.UNREGISTER_CONTENT_OBSERVER -> "unregisterContentObserver"
+    EngineProviderOperation.GRANT_URI_PERMISSION -> "grantUriPermission"
+    EngineProviderOperation.REVOKE_URI_PERMISSION -> "revokeUriPermission"
+    EngineProviderOperation.CANONICALIZE -> "canonicalize"
+    EngineProviderOperation.UNCANONICALIZE -> "uncanonicalize"
+    EngineProviderOperation.REFRESH -> "refresh"
+    EngineProviderOperation.UNKNOWN -> "unknown"
+}

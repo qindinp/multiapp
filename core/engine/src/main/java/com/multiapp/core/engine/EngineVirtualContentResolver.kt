@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.OperationApplicationException
 import android.content.pm.ProviderInfo
 import android.content.res.AssetFileDescriptor
+import android.content.res.Configuration
 import android.database.Cursor
 import android.net.Uri
 import android.os.Build
@@ -17,6 +18,8 @@ import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.os.Process
 import androidx.annotation.RequiresApi
+import com.multiapp.core.common.AndroidCompat
+import com.multiapp.core.common.findField
 import com.multiapp.core.identity.ProviderRouteToken
 import com.multiapp.core.identity.ProviderRouteTokenRegistry
 import com.multiapp.core.loader.VirtualContentResolverFactory
@@ -25,9 +28,16 @@ import com.multiapp.core.model.engine.ProviderRouteContract
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.FileNotFoundException
 
-class EngineVirtualContentResolverFactory(
+internal class EngineVirtualContentResolverFactory(
     private val sdkInt: () -> Int = { Build.VERSION.SDK_INT },
-    private val resolverWrapper: (ContentProvider) -> ContentResolver = ContentResolver::wrap,
+    private val resolverWrapper: (
+        provider: ContentProvider,
+        routingResolver: ContentResolver,
+        systemResolver: ContentResolver
+    ) -> ContentResolver = EngineHybridContentResolver::install,
+    private val hostContextsFactory: (
+        VirtualContentResolverFactoryRequest
+    ) -> EngineContentResolverHostContexts = ::createEngineContentResolverHostContexts,
     private val dispatcherFactory: () -> EngineProviderDispatcher = { DefaultEngineProviderDispatcher() },
     private val authorityResolverFactory: (
         VirtualContentResolverFactoryRequest
@@ -58,16 +68,68 @@ class EngineVirtualContentResolverFactory(
 
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun createWrappedResolver(request: VirtualContentResolverFactoryRequest): ContentResolver {
+        val hostContexts = hostContextsFactory(request)
+        val systemResolver = hostContexts.systemContext.contentResolver
         val provider = EngineRoutingContentProvider(
-            hostContext = request.hostContext,
+            hostContext = hostContexts.systemContext,
             config = request.config,
             dispatcher = dispatcherFactory(),
-            authorityResolver = authorityResolverFactory(request),
-            hostUid = uidProvider(request.hostContext),
-            processId = pidProvider()
+            authorityResolver = authorityResolverFactory(
+                request.copy(hostContext = hostContexts.systemContext)
+            ),
+            hostUid = uidProvider(hostContexts.systemContext),
+            processId = pidProvider(),
+            systemResolver = systemResolver
         )
-        providerAttacher(provider, request.hostContext, request.config)
-        return resolverWrapper(provider)
+        providerAttacher(provider, hostContexts.systemContext, request.config)
+        return resolverWrapper(provider, hostContexts.routingContext.contentResolver, systemResolver)
+    }
+}
+
+internal data class EngineContentResolverHostContexts(
+    val systemContext: Context,
+    val routingContext: Context
+)
+
+internal fun createEngineContentResolverHostContexts(
+    request: VirtualContentResolverFactoryRequest
+): EngineContentResolverHostContexts {
+    val hostPackageName = request.config.processSlot
+        ?.substringBefore(':')
+        ?.takeIf { it.isNotBlank() }
+        ?: runCatching { request.hostContext.opPackageName }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?: runCatching { request.hostContext.packageName }.getOrNull().orEmpty()
+    val systemContext = request.hostContext.createHostPackageContextOrNull(hostPackageName)
+        ?: request.hostContext
+    val routingContext = request.hostContext.createHostPackageContextOrNull(hostPackageName)
+        ?: runCatching {
+            systemContext.createConfigurationContext(Configuration(systemContext.resources.configuration))
+        }.getOrNull()
+        ?: systemContext
+    return EngineContentResolverHostContexts(systemContext, routingContext)
+}
+
+private fun Context.createHostPackageContextOrNull(hostPackageName: String): Context? {
+    if (hostPackageName.isBlank()) return null
+    return runCatching { createPackageContext(hostPackageName, Context.CONTEXT_IGNORE_SECURITY) }.getOrNull()
+}
+
+internal object EngineHybridContentResolver {
+    fun install(
+        provider: ContentProvider,
+        routingResolver: ContentResolver,
+        systemResolver: ContentResolver
+    ): ContentResolver {
+        if (routingResolver === systemResolver) return ContentResolver.wrap(provider)
+        val installed = runCatching {
+            AndroidCompat.bypassHiddenApis()
+            val wrappedField = findField(ContentResolver::class.java, "mWrapped")
+                ?: return@runCatching false
+            wrappedField.isAccessible = true
+            wrappedField.set(routingResolver, provider)
+            wrappedField.get(routingResolver) === provider
+        }.getOrDefault(false)
+        return if (installed) routingResolver else ContentResolver.wrap(provider)
     }
 }
 
@@ -161,6 +223,7 @@ class EngineRoutingContentProvider internal constructor(
     },
     private val hostUid: Int,
     private val processId: Int,
+    private val systemResolver: ContentResolver? = null,
     private val routeIssuer: (
         callerInstanceId: String,
         targetInstanceId: String,
@@ -175,7 +238,11 @@ class EngineRoutingContentProvider internal constructor(
             operation = operation,
             processSlot = processSlot
         )
-    }
+    },
+    private val routeConsumer: (
+        EngineProviderRouteTokenConsumeRequest
+    ) -> EngineProviderRouteTokenAuthorityResult? =
+        EngineRuntimeIpcClients::validateAndConsumeProviderRouteToken
 ) : ContentProvider() {
     override fun onCreate(): Boolean = true
 
@@ -189,27 +256,29 @@ class EngineRoutingContentProvider internal constructor(
         return routeProvider(
             uri = uri,
             operationName = "query",
-            systemCall = { hostContext.contentResolver.query(uri, projection, selection, selectionArgs, sortOrder) },
+            systemCall = { hostResolver().query(uri, projection, selection, selectionArgs, sortOrder) },
             blocked = { null },
-            guestCall = { provider -> provider.query(uri, projection, selection, selectionArgs, sortOrder) }
+            virtualCall = { proxyUri ->
+                hostResolver().query(proxyUri, projection, selection, selectionArgs, sortOrder)
+            }
         )
     }
 
     override fun getType(uri: Uri): String? {
-        return routeProvider(uri, "getType", { hostContext.contentResolver.getType(uri) }, { null }) {
-            it.getType(uri)
+        return routeProvider(uri, "getType", { hostResolver().getType(uri) }, { null }) { proxyUri ->
+            hostResolver().getType(proxyUri)
         }
     }
 
     override fun insert(uri: Uri, values: ContentValues?): Uri? {
-        return routeProvider(uri, "insert", { hostContext.contentResolver.insert(uri, values) }, { null }) {
-            it.insert(uri, values)
+        return routeProvider(uri, "insert", { hostResolver().insert(uri, values) }, { null }) { proxyUri ->
+            hostResolver().insert(proxyUri, values)
         }
     }
 
     override fun bulkInsert(uri: Uri, values: Array<out ContentValues>): Int {
-        return routeProvider(uri, "bulkInsert", { hostContext.contentResolver.bulkInsert(uri, values) }, { 0 }) {
-            it.bulkInsert(uri, values)
+        return routeProvider(uri, "bulkInsert", { hostResolver().bulkInsert(uri, values) }, { 0 }) { proxyUri ->
+            hostResolver().bulkInsert(proxyUri, values)
         }
     }
 
@@ -228,8 +297,8 @@ class EngineRoutingContentProvider internal constructor(
     }
 
     override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int {
-        return routeProvider(uri, "delete", { hostContext.contentResolver.delete(uri, selection, selectionArgs) }, { 0 }) {
-            it.delete(uri, selection, selectionArgs)
+        return routeProvider(uri, "delete", { hostResolver().delete(uri, selection, selectionArgs) }, { 0 }) { proxyUri ->
+            hostResolver().delete(proxyUri, selection, selectionArgs)
         }
     }
 
@@ -242,9 +311,9 @@ class EngineRoutingContentProvider internal constructor(
         return routeProvider(
             uri,
             "update",
-            { hostContext.contentResolver.update(uri, values, selection, selectionArgs) },
+            { hostResolver().update(uri, values, selection, selectionArgs) },
             { 0 }
-        ) { provider -> provider.update(uri, values, selection, selectionArgs) }
+        ) { proxyUri -> hostResolver().update(proxyUri, values, selection, selectionArgs) }
     }
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
@@ -257,20 +326,22 @@ class EngineRoutingContentProvider internal constructor(
         return routeProvider(
             uri,
             "call",
-            { hostContext.contentResolver.call(authority, method, arg, extras) },
+            { hostResolver().call(authority, method, arg, extras) },
             { null }
-        ) { provider -> provider.call(authority, method, arg, extras) }
+        ) { proxyUri ->
+            hostResolver().call(proxyUri, method, arg, extras.withProviderProxyRoute(proxyUri))
+        }
     }
 
     override fun canonicalize(uri: Uri): Uri? {
-        return routeProvider(uri, "canonicalize", { hostContext.contentResolver.canonicalize(uri) }, { null }) {
-            it.canonicalize(uri)
+        return routeProvider(uri, "canonicalize", { hostResolver().canonicalize(uri) }, { null }) { proxyUri ->
+            hostResolver().canonicalize(proxyUri)
         }
     }
 
     override fun uncanonicalize(uri: Uri): Uri? {
-        return routeProvider(uri, "uncanonicalize", { hostContext.contentResolver.uncanonicalize(uri) }, { null }) {
-            it.uncanonicalize(uri)
+        return routeProvider(uri, "uncanonicalize", { hostResolver().uncanonicalize(uri) }, { null }) { proxyUri ->
+            hostResolver().uncanonicalize(proxyUri)
         }
     }
 
@@ -278,9 +349,9 @@ class EngineRoutingContentProvider internal constructor(
         return routeProvider(
             uri,
             "refresh",
-            { hostContext.contentResolver.refresh(uri, extras, cancellationSignal) },
+            { hostResolver().refresh(uri, extras, cancellationSignal) },
             { false }
-        ) { provider -> provider.refresh(uri, extras, cancellationSignal) }
+        ) { proxyUri -> hostResolver().refresh(proxyUri, extras, cancellationSignal) }
     }
 
     @Throws(FileNotFoundException::class)
@@ -288,9 +359,9 @@ class EngineRoutingContentProvider internal constructor(
         return routeProvider(
             uri,
             "openFile:$mode",
-            { hostContext.contentResolver.openFileDescriptor(uri, mode) },
+            { hostResolver().openFileDescriptor(uri, mode) },
             { throw FileNotFoundException("virtual_provider_route_blocked:${uri.authority}") }
-        ) { it.openFile(uri, mode) }
+        ) { proxyUri -> hostResolver().openFileDescriptor(proxyUri, mode) }
     }
 
     @Throws(FileNotFoundException::class)
@@ -298,9 +369,9 @@ class EngineRoutingContentProvider internal constructor(
         return routeProvider(
             uri,
             "openAssetFile:$mode",
-            { hostContext.contentResolver.openAssetFileDescriptor(uri, mode) },
+            { hostResolver().openAssetFileDescriptor(uri, mode) },
             { throw FileNotFoundException("virtual_provider_route_blocked:${uri.authority}") }
-        ) { it.openAssetFile(uri, mode) }
+        ) { proxyUri -> hostResolver().openAssetFileDescriptor(proxyUri, mode) }
     }
 
     @Throws(FileNotFoundException::class)
@@ -312,9 +383,9 @@ class EngineRoutingContentProvider internal constructor(
         return routeProvider(
             uri,
             "openTypedAssetFile",
-            { hostContext.contentResolver.openTypedAssetFileDescriptor(uri, mimeTypeFilter, opts) },
+            { hostResolver().openTypedAssetFileDescriptor(uri, mimeTypeFilter, opts) },
             { throw FileNotFoundException("virtual_provider_route_blocked:${uri.authority}") }
-        ) { it.openTypedAssetFile(uri, mimeTypeFilter, opts) }
+        ) { proxyUri -> hostResolver().openTypedAssetFileDescriptor(proxyUri, mimeTypeFilter, opts) }
     }
 
     @Throws(FileNotFoundException::class)
@@ -327,9 +398,11 @@ class EngineRoutingContentProvider internal constructor(
         return routeProvider(
             uri,
             "openTypedAssetFile",
-            { hostContext.contentResolver.openTypedAssetFileDescriptor(uri, mimeTypeFilter, opts, signal) },
+            { hostResolver().openTypedAssetFileDescriptor(uri, mimeTypeFilter, opts, signal) },
             { throw FileNotFoundException("virtual_provider_route_blocked:${uri.authority}") }
-        ) { it.openTypedAssetFile(uri, mimeTypeFilter, opts, signal) }
+        ) { proxyUri ->
+            hostResolver().openTypedAssetFileDescriptor(proxyUri, mimeTypeFilter, opts, signal)
+        }
     }
 
     private fun routeBatch(
@@ -368,7 +441,7 @@ class EngineRoutingContentProvider internal constructor(
         }
 
         if (routes.all { !it.resolution.virtualAuthority }) {
-            return hostContext.contentResolver.applyBatch(authority, operations)
+            return hostResolver().applyBatch(authority, operations)
         }
         if (routes.any { !it.resolution.virtualAuthority }) {
             throw OperationApplicationException("virtual_provider_batch_route_mixed")
@@ -379,22 +452,9 @@ class EngineRoutingContentProvider internal constructor(
             throw OperationApplicationException("virtual_provider_batch_target_mismatch")
         }
 
-        var targetProvider: ContentProvider? = null
-        routes.forEach { route ->
-            when (val result = dispatch(route.uri, "applyBatch:${route.accessMode}", targetInstanceId)) {
-                is EngineProviderDispatchResult.ProviderReady -> {
-                    val existing = targetProvider
-                    if (existing != null && existing !== result.provider) {
-                        throw OperationApplicationException("virtual_provider_batch_provider_mismatch:${route.index}")
-                    }
-                    targetProvider = result.provider
-                }
-                else -> throw OperationApplicationException(
-                    "virtual_provider_batch_route_blocked:${route.index}:${result.statusName()}"
-                )
-            }
-        }
-        return checkNotNull(targetProvider).applyBatch(authority, operations)
+        throw OperationApplicationException(
+            "virtual_provider_batch_requires_target_stub_routing:$targetInstanceId"
+        )
     }
 
     private inline fun <T> routeProvider(
@@ -402,56 +462,74 @@ class EngineRoutingContentProvider internal constructor(
         operationName: String,
         systemCall: () -> T,
         blocked: () -> T,
-        guestCall: (ContentProvider) -> T
+        virtualCall: (Uri) -> T
     ): T {
         val operation = EngineProviderOperation.fromOperationName(operationName)
         val accessMode = operationName.substringAfter(':', "").takeIf { it.isNotBlank() }
         val resolution = authorityResolver.resolve(uri, operation, accessMode)
         if (!resolution.virtualAuthority) return systemCall()
         val targetInstanceId = resolution.targetInstanceId ?: return blocked()
-        return when (val result = dispatch(uri, operationName, targetInstanceId)) {
-            is EngineProviderDispatchResult.ProviderReady -> guestCall(result.provider)
-            else -> blocked()
-        }
+        val proxyUri = proxyUriForRoute(uri, operationName, targetInstanceId) ?: return blocked()
+        return virtualCall(proxyUri)
     }
 
-    private fun dispatch(
+    private fun proxyUriForRoute(
         uri: Uri,
         operationName: String,
         targetInstanceId: String
-    ): EngineProviderDispatchResult {
+    ): Uri? {
         val authority = uri.authority?.takeIf { it.isNotBlank() }
-            ?: return EngineProviderDispatchResult.InvalidProxyUri("missing guest authority")
+            ?: return null
         if (targetInstanceId == config.instanceId && authority !in guestAuthorities()) {
-            return EngineProviderDispatchResult.InvalidProxyUri("guest authority not in package snapshot")
+            return null
         }
-        val route = routeIssuer(
-            config.instanceId,
-            targetInstanceId,
-            authority,
-            operationName,
-            config.processSlot
-        ).toEngineRoute()
-        return dispatcher.dispatch(
-            EngineProviderDispatchRequest(
-                hostPackageName = hostContext.packageName,
-                hostContext = hostContext,
-                proxyUri = uri.toProxyUri(route),
-                operationName = operationName,
-                verifiedRoute = route,
-                providerCallingUid = hostUid,
-                providerCallingPid = processId,
-                hostUid = hostUid,
-                callerProcessSlot = config.processSlot,
-                accessMode = operationName.substringAfter(':', "").takeIf { it.isNotBlank() }
-            )
-        )
+        val route = runCatching {
+            routeIssuer(
+                config.instanceId,
+                targetInstanceId,
+                authority,
+                operationName,
+                null
+            ).toEngineRoute()
+        }.getOrNull() ?: return null
+        if (
+            route.callerInstanceId != config.instanceId ||
+            route.targetInstanceId != targetInstanceId ||
+            route.authority != authority ||
+            route.operation != normalizeProviderRouteOperation(operationName) ||
+            route.processSlot.isNullOrBlank()
+        ) {
+            return null
+        }
+        return uri.toProxyUri(route)
     }
 
     private fun guestAuthorities(): Set<String> = config.packageSnapshot
         ?.providers
         .orEmpty()
         .flatMapTo(linkedSetOf()) { it.authorities }
+
+    private fun hostResolver(): ContentResolver = systemResolver ?: hostContext.contentResolver
+
+    private fun Bundle?.withProviderProxyRoute(proxyUri: Uri): Bundle =
+        Bundle(this ?: Bundle()).apply {
+            putString(
+                ProviderRouteContract.PROXY_INSTANCE_ID,
+                proxyUri.getQueryParameter(ProviderRouteContract.PROXY_INSTANCE_ID)
+            )
+            putString(
+                ProviderRouteContract.PROXY_GUEST_AUTHORITY,
+                proxyUri.getQueryParameter(ProviderRouteContract.PROXY_GUEST_AUTHORITY)
+            )
+            putString(
+                ProviderRouteContract.PROXY_PROCESS_SLOT,
+                proxyUri.getQueryParameter(ProviderRouteContract.PROXY_PROCESS_SLOT)
+            )
+            putString(
+                ProviderRouteContract.PROXY_ROUTE_TOKEN,
+                proxyUri.getQueryParameter(ProviderRouteContract.PROXY_ROUTE_TOKEN)
+            )
+        }
 
     private fun Uri.toProxyUri(route: EngineProviderRouteToken): Uri {
         val builder = buildUpon()

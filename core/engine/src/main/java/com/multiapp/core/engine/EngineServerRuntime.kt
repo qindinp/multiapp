@@ -56,6 +56,7 @@ class EngineServerRuntime private constructor(
         graph.activityOperationTransactions
     val providerProcessEndpoints: EngineProviderProcessEndpointControlPlane =
         graph.providerProcessEndpoints
+    val providerRouteTokens: EngineProviderRouteTokenRegistry = graph.providerRouteTokens
     val componentProcessSlots: EngineComponentProcessSlotAllocator = graph.componentProcessSlots
     val componentProcessClients: EngineComponentProcessClientRegistry = graph.componentProcessClients
     val componentProcessLaunchCapabilities: EngineComponentProcessLaunchCapabilityRegistry =
@@ -476,6 +477,7 @@ private class EngineServerRuntimeGraph(
     val serviceConnections: EngineServiceConnectionRegistry,
     val activityOperationTransactions: EngineActivityOperationTransactionCoordinator,
     val providerProcessEndpoints: EngineProviderProcessEndpointControlPlane,
+    val providerRouteTokens: EngineProviderRouteTokenRegistry,
     val componentProcessSlots: EngineComponentProcessSlotAllocator,
     val componentProcessClients: EngineComponentProcessClientRegistry,
     val componentProcessLaunchCapabilities: EngineComponentProcessLaunchCapabilityRegistry,
@@ -528,6 +530,7 @@ private fun createEngineServerRuntimeGraph(
         runtimeAuthority = providerEndpointRuntimeAuthority(runtimeRegistry),
         registry = providerEndpointRegistry
     )
+    val providerRouteTokens = EngineProviderRouteTokenRegistry()
     if (systemServer is DefaultVirtualSystemServer) {
         val validInstanceIds = instanceManager.listInstances()
             .mapTo(linkedSetOf()) { instance -> instance.instanceId }
@@ -549,6 +552,11 @@ private fun createEngineServerRuntimeGraph(
             identity.engineSessionId
         )
         providerProcessEndpoints.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId
+        )
+        providerRouteTokens.revokeGeneration(
             identity.instanceId,
             identity.runtimeEpoch,
             identity.engineSessionId
@@ -598,6 +606,7 @@ private fun createEngineServerRuntimeGraph(
             serviceOperationLeases.revokeInstance(instanceId)
             serviceConnections.revokeInstance(instanceId)
             providerProcessEndpoints.revokeInstance(instanceId)
+            providerRouteTokens.revokeInstance(instanceId)
             componentProcessSlots.revokeInstance(instanceId)
             componentProcessClients.revokeInstance(instanceId)
             componentProcessLaunchCapabilities.revokeInstance(instanceId)
@@ -620,6 +629,7 @@ private fun createEngineServerRuntimeGraph(
         serviceConnections = serviceConnections,
         activityOperationTransactions = activityOperationTransactions,
         providerProcessEndpoints = providerProcessEndpoints,
+        providerRouteTokens = providerRouteTokens,
         componentProcessSlots = componentProcessSlots,
         componentProcessClients = componentProcessClients,
         componentProcessLaunchCapabilities = componentProcessLaunchCapabilities,

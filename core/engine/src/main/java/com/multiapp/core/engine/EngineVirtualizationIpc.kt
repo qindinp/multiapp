@@ -169,7 +169,7 @@ internal fun EngineResult.toEngineIpcBundle(
     putString(EngineRuntimeIpcContract.KEY_MESSAGE, message)
     putBundle(
         EngineRuntimeIpcContract.KEY_ENGINE_RUNTIME,
-        runtime?.toAuthoritativeRuntimeBundle(bundleFactory)
+        runtime?.toEngineRuntimeIdentityBundle(bundleFactory)
     )
     putBundle(
         EngineRuntimeIpcContract.KEY_ENGINE_EVIDENCE,
@@ -183,7 +183,9 @@ internal fun Bundle.toEngineRemoteResultOrNull(): EngineRemoteResult? = runCatch
     val status = requiredEnum<EngineResultStatus>(EngineRuntimeIpcContract.KEY_STATUS)
     val runtimeBundle = getBundle(EngineRuntimeIpcContract.KEY_ENGINE_RUNTIME)
     val runtime = runtimeBundle?.toAuthoritativeRuntimeOrNull()
-    check(runtimeBundle == null || runtime != null)
+    val runtimeIdentity = runtime?.toEngineRuntimeIdentity()
+        ?: runtimeBundle?.toEngineRuntimeIdentityOrNull()
+    check(runtimeBundle == null || runtimeIdentity != null)
     val evidenceBundle = getBundle(EngineRuntimeIpcContract.KEY_ENGINE_EVIDENCE)
     val evidence = evidenceBundle?.toEngineEvidenceOrNull()
     check(evidenceBundle == null || evidence != null)
@@ -197,7 +199,7 @@ internal fun Bundle.toEngineRemoteResultOrNull(): EngineRemoteResult? = runCatch
             runtime = runtime,
             evidence = evidence
         ),
-        runtimeIdentity = runtime?.toEngineRuntimeIdentity()
+        runtimeIdentity = runtimeIdentity
     )
 }.getOrNull()
 
@@ -543,14 +545,20 @@ internal class IpcVirtualizationEngineCore(
             message = "engine_authority_unavailable_or_unknown_result"
         )
         val identity = remoteValue.runtimeIdentity ?: return remoteValue.result
-        val runtime = remoteValue.result.runtime?.takeIf(identity::matches)
-            ?: return EngineResult.fail(
+        val runtime = remoteValue.result.runtime
+        if (
+            remoteValue.result.instanceId?.let { it != identity.instanceId } == true ||
+            remoteValue.result.originPackageName?.let { it != identity.originPackageName } == true ||
+            runtime?.let(identity::matches) == false
+        ) {
+            return EngineResult.fail(
                 operation = operation,
                 instanceId = identity.instanceId,
                 originPackageName = remoteValue.result.originPackageName ?: originPackageName,
                 message = "authoritative_runtime_snapshot_mismatch"
             )
-        return remoteValue.result.copy(runtime = runtime)
+        }
+        return remoteValue.result
     }
 }
 

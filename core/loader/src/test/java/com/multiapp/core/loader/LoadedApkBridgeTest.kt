@@ -1,8 +1,10 @@
 package com.multiapp.core.loader
 
 import android.app.Application
+import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import android.content.res.Resources
+import io.mockk.every
 import io.mockk.mockk
 import java.io.File
 import kotlin.test.Test
@@ -25,7 +27,7 @@ class LoadedApkBridgeTest {
     }
 
     @Test
-    fun `patch replaces LoadedApk-like runtime fields`() {
+    fun `patch keeps LoadedApk package on guest identity while binder identity stays separate`() {
         val target = FakeLoadedApk()
         val appInfo = FakeProtectedStorageApplicationInfo().apply {
             packageName = "com.test.minimal"
@@ -47,7 +49,8 @@ class LoadedApkBridgeTest {
                 applicationInfo = appInfo,
                 resources = resources,
                 classLoader = classLoader,
-                application = application
+                application = application,
+                binderPackageName = "com.multiapp.app"
             )
         )
 
@@ -66,6 +69,7 @@ class LoadedApkBridgeTest {
         assertSame(classLoader, target.classLoader())
         assertSame(classLoader, target.baseClassLoader())
         assertEquals("com.test.minimal", target.packageName())
+        assertEquals("com.test.minimal", target.applicationInfo()?.packageName)
         assertEquals("/data/app/minimal.apk", target.appDir())
         assertEquals("/data/app/minimal.apk", target.resDir())
         assertEquals("/data/user/0/com.multiapp/instance/minimal/lib", target.libDir())
@@ -194,6 +198,23 @@ class LoadedApkBridgeTest {
     }
 
     @Test
+    fun `application context binding accepts only the same guest LoadedApk`() {
+        val guestLoadedApk = Any()
+        val delegate = mockk<Application>(relaxed = true) {
+            every { baseContext } returns FakeFrameworkApplicationContext(guestLoadedApk)
+        }
+
+        val accepted = LoadedApkBridge.inspectApplicationContextBinding(delegate, guestLoadedApk)
+        val rejected = LoadedApkBridge.inspectApplicationContextBinding(delegate, Any())
+
+        assertTrue(accepted.matches)
+        assertEquals("CONTEXT_PACKAGE_INFO_MATCH", accepted.reason)
+        assertEquals(FakeFrameworkApplicationContext::class.java.name, accepted.contextClassName)
+        assertEquals(false, rejected.matches)
+        assertEquals("CONTEXT_PACKAGE_INFO_MISMATCH", rejected.reason)
+    }
+
+    @Test
     fun `frameworkSafeNativeLibraryDir falls back to instance lib path when missing`() {
         val nativeLibraryDir = ApplicationInfoNativePathCompat.frameworkSafeNativeLibraryDir(
             dataDir = "/data/user/0/com.multiapp.app/files/instance_data/inst-001",
@@ -210,6 +231,11 @@ class LoadedApkBridgeTest {
         var credentialProtectedDataDir: String? = null
         var deviceProtectedDataDir: String? = null
     }
+
+    @Suppress("unused")
+    private class FakeFrameworkApplicationContext(
+        private val mPackageInfo: Any
+    ) : ContextWrapper(null)
 
     @Suppress("unused")
     private class FakeLoadedApk {

@@ -160,6 +160,34 @@ class ActivityThreadLoadedApkInstallerTest {
     }
 
     @Test
+    fun `installGuestSandbox rejects host LoadedApk returned by framework`() {
+        val hostLoadedApk = FakeLoadedApk().applyHostPackage("com.multiapp.app")
+        val activityThread = FakeActivityThread { hostLoadedApk }
+        val appInfo = ApplicationInfo().apply {
+            packageName = "com.test.minimal"
+            sourceDir = "/data/app/minimal.apk"
+            publicSourceDir = sourceDir
+        }
+
+        val result = ActivityThreadLoadedApkInstaller.installGuestSandbox(
+            activityThread = activityThread,
+            state = LoadedApkRuntimeState(
+                packageName = "com.test.minimal",
+                applicationInfo = appInfo,
+                resources = mockk(relaxed = true),
+                classLoader = ClassLoader.getSystemClassLoader(),
+                binderPackageName = "com.multiapp.app"
+            ),
+            packageAliases = listOf("com.test.minimal", "com.multiapp.instance.abc")
+        )
+
+        assertTrue(result.skipped)
+        assertEquals("HOST_LOADED_APK_GUARD:com.multiapp.app", result.skippedReason)
+        assertEquals("com.multiapp.app", hostLoadedApk.packageName())
+        assertNull(activityThread.loadedApkFrom("mPackages", "com.test.minimal"))
+    }
+
+    @Test
     fun `guest sandbox patches virtual package identity while installing origin and virtual aliases`() {
         val activityThread = FakeActivityThread()
         val appInfo = ApplicationInfo().apply {
@@ -402,7 +430,11 @@ class ActivityThreadLoadedApkInstallerTest {
         assertEquals(LoadedApkInstallSource.EXISTING_PATCH, result.source)
     }
 
-    private class FakeActivityThread {
+    private class FakeActivityThread(
+        private val loadedApkFactory: (ApplicationInfo) -> FakeLoadedApk = { applicationInfo ->
+            FakeLoadedApk().applyHostPackage(applicationInfo.packageName)
+        }
+    ) {
         private val mPackages = linkedMapOf<Any?, Any?>()
         private val mResourcePackages = linkedMapOf<Any?, Any?>()
         private var mBoundApplication: Any = FakeAppBindData(
@@ -417,7 +449,7 @@ class ActivityThreadLoadedApkInstallerTest {
         @Suppress("unused")
         fun getPackageInfoNoCheck(applicationInfo: ApplicationInfo, compatibilityInfo: Any?): FakeLoadedApk {
             createCount += 1
-            return FakeLoadedApk().applyHostPackage(applicationInfo.packageName)
+            return loadedApkFactory(applicationInfo)
         }
 
         fun loadedApkFrom(fieldName: String, packageName: String): Any? {

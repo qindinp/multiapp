@@ -36,7 +36,7 @@ class NativePrivatePathRedirectInstallerTest {
         )
 
         assertFalse(result.hookInstalled)
-        assertEquals(4, result.ruleCount)
+        assertEquals(NativeHookBridge.GUEST_APP_SCOPED_REDIRECT_RULE_COUNT, result.ruleCount)
         assertEquals("UNSUPPORTED", result.verdict)
         assertEquals(
             File(dataRoot, "files/config.json").canonicalPath,
@@ -44,6 +44,14 @@ class NativePrivatePathRedirectInstallerTest {
         )
         assertEquals(dataRoot.canonicalPath, File(bridge.translatePath("/data/data/com.example.app")).canonicalPath)
         assertEquals(dataRoot.canonicalPath, File(bridge.translatePath("/data/user/0/com.example.app")).canonicalPath)
+        assertEquals(
+            File(dataRoot, "external_cache/images").canonicalPath,
+            File(
+                bridge.translatePath(
+                    "/storage/emulated/0/Android/data/com.example.app/cache/images"
+                )
+            ).canonicalPath
+        )
         val evidence = result.evidence().associate { it.key to it.value }
         assertEquals("inst-001", evidence["nativeRedirectInstanceId"])
         assertEquals("com.multiapp.app:v0", evidence["nativeRedirectProcessSlot"])
@@ -129,7 +137,7 @@ class NativePrivatePathRedirectInstallerTest {
     fun `evidence marks realpath partial until device io probe verifies redirect`() {
         val result = NativePrivatePathRedirectInstallResult(
             hookInstalled = true,
-            ruleCount = 4,
+            ruleCount = NativeHookBridge.GUEST_APP_SCOPED_REDIRECT_RULE_COUNT,
             reason = "PATH_HOOK_INSTALLED_NEEDS_DEVICE_IO_PROBE"
         )
 
@@ -137,7 +145,7 @@ class NativePrivatePathRedirectInstallerTest {
 
         assertEquals("PARTIAL", evidence["nativePrivatePathRedirectVerdict"])
         assertEquals("PARTIAL", evidence["nativeIoRedirectVerdict"])
-        assertEquals("GUEST_PRIVATE_PATHS_ONLY", evidence["nativeRedirectScope"])
+        assertEquals("GUEST_APP_SCOPED_PRIVATE_PATHS", evidence["nativeRedirectScope"])
         assertEquals("PARTIAL", evidence["nativeRealpathRedirectVerdict"])
         assertEquals("PATH_HOOK_INSTALLED_NEEDS_DEVICE_IO_PROBE", evidence["nativeRealpathRedirectVerdictReason"])
         assertEquals("false", evidence["procMapsSpoofEnabled"])

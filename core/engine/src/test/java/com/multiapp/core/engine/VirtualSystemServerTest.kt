@@ -510,6 +510,7 @@ class VirtualSystemServerTest {
                 )
             )
         )
+        val providerProcessSlot = "${runtime.hostPackageName}:v1"
 
         val plan = server.providerService.planProvider(
             instanceId = runtime.instanceId,
@@ -517,7 +518,8 @@ class VirtualSystemServerTest {
                 target = runtime,
                 operation = EngineProviderOperation.QUERY,
                 guestAuthority = "com.test.app.provider",
-                proxyAuthority = "com.multiapp.app.multiapp.provider.stub.v0"
+                proxyAuthority = "com.multiapp.app.multiapp.provider.stub.v0",
+                processSlot = providerProcessSlot
             )
         )
 
@@ -525,7 +527,7 @@ class VirtualSystemServerTest {
         assertEquals("provider_route_planned", plan.message)
         assertEquals(1, plan.targets.size)
         assertEquals("com.test.app.DataProvider", plan.targets.single().providerClassName)
-        assertEquals(runtime.processSlot, plan.targets.single().processSlot)
+        assertEquals(providerProcessSlot, plan.targets.single().processSlot)
         assertEquals("com.test.app:provider", plan.targets.single().processName)
         assertTrue(plan.targets.single().grantUriPermissions)
         val evidence = server.evidenceService.exportReport(runtime.instanceId)
@@ -696,7 +698,16 @@ class VirtualSystemServerTest {
     @Test
     fun `provider service rejects mismatched process slot before loader dispatch`() {
         val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
-        val runtime = server.runtimeService.register(runtime())
+        val runtime = server.runtimeService.register(
+            runtime(
+                providers = listOf(
+                    ResolvedComponent(
+                        name = "com.test.app.DataProvider",
+                        authorities = listOf("com.test.app.provider")
+                    )
+                )
+            )
+        )
 
         val plan = server.providerService.planProvider(
             instanceId = runtime.instanceId,
@@ -2023,12 +2034,13 @@ class VirtualSystemServerTest {
         callingPid: Int = caller.processId ?: 4998,
         accessMode: String? = null,
         encodedPath: String = "/",
-        uriGrantPresent: Boolean = false
+        uriGrantPresent: Boolean = false,
+        processSlot: String = target.processSlot
     ) = VirtualProviderDispatchPlanRequest(
         operation = operation,
         guestAuthority = guestAuthority,
         proxyAuthority = proxyAuthority,
-        processSlot = target.processSlot,
+        processSlot = processSlot,
         routeTokenPresent = true,
         routeTokenVerified = true,
         callerInstanceId = caller.instanceId,

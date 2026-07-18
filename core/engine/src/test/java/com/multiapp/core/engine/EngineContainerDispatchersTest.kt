@@ -89,6 +89,14 @@ class EngineContainerDispatchersTest {
             "com.multiapp.app.multiapp.provider.stub",
             EngineProviderRouteSlots.stubAuthority("com.multiapp.app", "com.other:v3")
         )
+        assertEquals(
+            "com.multiapp.app.multiapp.provider.stub.v7",
+            EngineProviderRouteSlots.stubAuthority("com.multiapp.app", "com.multiapp.app:v7")
+        )
+        assertEquals(
+            "com.multiapp.app.multiapp.provider.stub",
+            EngineProviderRouteSlots.stubAuthority("com.multiapp.app", "com.multiapp.app:v8")
+        )
     }
 
     @Test
@@ -996,7 +1004,6 @@ class EngineContainerDispatchersTest {
                     ResolvedComponent(
                         name = "com.example.app.DataProvider",
                         authorities = listOf("com.example.app.provider"),
-                        processName = "com.example.app:provider",
                         readPermission = "com.example.app.READ_DATA",
                         writePermission = "com.example.app.WRITE_DATA",
                         grantUriPermissions = true

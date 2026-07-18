@@ -723,7 +723,13 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
             )
         }
         EngineRuntimeIpcClients.install(hostContext)
-        val authoritativeRuntime = EngineRuntimeIpcClients.engineQueryRuntimeState(envelope.instanceId)
+        val authoritativeRuntime = EngineRuntimeIpcClients.engineQueryRuntimeState(
+            instanceId = envelope.instanceId,
+            runtimeEpoch = envelope.runtimeEpoch,
+            engineSessionId = envelope.engineSessionId,
+            processSlot = envelope.processSlot,
+            componentAttachCapability = envelope.componentLaunchTicket?.attachCapability
+        )
             ?: return EngineProcessBootstrapIpc.resultBundle(
                 failed(envelope, EngineProcessBootstrapState.STALE, "authoritative runtime state missing")
             )
@@ -783,6 +789,61 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
             componentLaunchTicket = componentTicket
         )
         val bootstrap = runCatching {
+            // Establish VClient-style process authority before guest providers
+            // and Application.onCreate invoke virtual system services.
+            val processAttachEvidence = when (envelope.kind) {
+                EngineProcessBootstrapKind.PRIMARY_RUNTIME -> {
+                    val processIdentity = EngineProcessClientIdentity(
+                        instanceId = envelope.instanceId,
+                        runtimeEpoch = envelope.runtimeEpoch,
+                        engineSessionId = envelope.engineSessionId,
+                        processSlot = envelope.processSlot,
+                        processId = Process.myPid()
+                    )
+                    val clientAttach = EngineRuntimeIpcClients.attachClient(processIdentity, processToken)
+                    if (
+                        clientAttach == null || !clientAttach.accepted || !clientAttach.liveAuthority ||
+                        clientAttach.identity != processIdentity ||
+                        clientAttach.runtimeState != VirtualRuntimeState.CREATED
+                    ) {
+                        return@runCatching failed(
+                            envelope,
+                            EngineProcessBootstrapState.FAILED,
+                            "engine process client pre-attach failed:${clientAttach?.reason ?: "ipc_unavailable"}"
+                        )
+                    }
+                    mapOf(
+                        "engineProcessClientPreAttached" to "true",
+                        "engineProcessClientAttachIdempotent" to clientAttach.idempotent.toString(),
+                        "engineProcessClientAuthority" to "BINDER_LIVE"
+                    )
+                }
+                EngineProcessBootstrapKind.COMPONENT_RUNTIME -> {
+                    val ticket = checkNotNull(componentTicket)
+                    val clientAttach = EngineRuntimeIpcClients.attachComponentProcessClient(ticket, processToken)
+                    val processState = clientAttach?.processState
+                    if (
+                        clientAttach == null || !clientAttach.accepted || processState == null ||
+                        !processState.live ||
+                        processState.instanceId != ticket.instanceId ||
+                        processState.effectiveGuestProcessName != ticket.effectiveGuestProcessName ||
+                        processState.processSlot != ticket.processSlot ||
+                        processState.processId != Process.myPid()
+                    ) {
+                        return@runCatching failed(
+                            envelope,
+                            EngineProcessBootstrapState.FAILED,
+                            "engine component process pre-attach failed:${clientAttach?.reason ?: "ipc_unavailable"}"
+                        )
+                    }
+                    mapOf(
+                        "engineComponentProcessClientPreAttached" to "true",
+                        "engineComponentProcessClientAttachIdempotent" to clientAttach.idempotent.toString(),
+                        "engineComponentProcessClientAuthority" to "BINDER_LIVE",
+                        "effectiveGuestProcessName" to ticket.effectiveGuestProcessName
+                    )
+                }
+            }
             val runtimeEngine = hostedRuntimeEngineFrom(hostContext)
             val cached = runtimeEngine.reusableResult(
                 instanceId = envelope.instanceId,
@@ -805,9 +866,15 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                 durationMs = System.currentTimeMillis() - startedAt
             )
             if (!readiness.ready) {
-                readiness
+                readiness.copy(evidence = readiness.evidence + processAttachEvidence)
             } else {
-                val postBootstrapRuntime = EngineRuntimeIpcClients.engineQueryRuntimeState(envelope.instanceId)
+                val postBootstrapRuntime = EngineRuntimeIpcClients.engineQueryRuntimeState(
+                    instanceId = envelope.instanceId,
+                    runtimeEpoch = envelope.runtimeEpoch,
+                    engineSessionId = envelope.engineSessionId,
+                    processSlot = envelope.processSlot,
+                    componentAttachCapability = envelope.componentLaunchTicket?.attachCapability
+                )
                 val postBootstrapAuthority = EngineRuntimeIpcClients.queryRuntime(envelope.instanceId)
                 val postBootstrapDecision = EngineRuntimeAuthorityValidator.validate(
                     snapshot = postBootstrapAuthority,
@@ -845,25 +912,6 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                     )
                 when (envelope.kind) {
                     EngineProcessBootstrapKind.PRIMARY_RUNTIME -> {
-                        val processIdentity = EngineProcessClientIdentity(
-                            instanceId = envelope.instanceId,
-                            runtimeEpoch = envelope.runtimeEpoch,
-                            engineSessionId = envelope.engineSessionId,
-                            processSlot = envelope.processSlot,
-                            processId = Process.myPid()
-                        )
-                        val clientAttach = EngineRuntimeIpcClients.attachClient(processIdentity, processToken)
-                        if (
-                            clientAttach == null || !clientAttach.accepted || !clientAttach.liveAuthority ||
-                            clientAttach.identity != processIdentity ||
-                            clientAttach.runtimeState != VirtualRuntimeState.CREATED
-                        ) {
-                            return@runCatching failed(
-                                envelope,
-                                EngineProcessBootstrapState.FAILED,
-                                "engine process client attach failed:${clientAttach?.reason ?: "ipc_unavailable"}"
-                            )
-                        }
                         val ackRegistered = EngineGuestForegroundAcknowledger.global.register(
                             guestApplication = guestApplication,
                             guestClassLoader = guestClassLoader,
@@ -884,45 +932,21 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                         } else {
                             readiness.copy(
                                 evidence = readiness.evidence +
+                                    processAttachEvidence +
                                     mapOf(
                                         "guestForegroundAckRegistered" to "true",
-                                        "engineProcessClientAttached" to "true",
-                                        "engineProcessClientAttachIdempotent" to clientAttach.idempotent.toString(),
-                                        "engineProcessClientAuthority" to "BINDER_LIVE"
+                                        "engineProcessClientAttached" to "true"
                                     )
                             )
                         }
                     }
                     EngineProcessBootstrapKind.COMPONENT_RUNTIME -> {
-                        val ticket = checkNotNull(componentTicket)
-                        val clientAttach = EngineRuntimeIpcClients.attachComponentProcessClient(
-                            ticket,
-                            processToken
-                        )
-                        val processState = clientAttach?.processState
-                        if (
-                            clientAttach == null || !clientAttach.accepted || processState == null ||
-                            !processState.live ||
-                            processState.instanceId != ticket.instanceId ||
-                            processState.effectiveGuestProcessName != ticket.effectiveGuestProcessName ||
-                            processState.processSlot != ticket.processSlot ||
-                            processState.processId != Process.myPid()
-                        ) {
-                            return@runCatching failed(
-                                envelope,
-                                EngineProcessBootstrapState.FAILED,
-                                "engine component process attach failed:${clientAttach?.reason ?: "ipc_unavailable"}"
-                            )
-                        }
                         readiness.copy(
                             evidence = readiness.evidence +
+                                processAttachEvidence +
                                 mapOf(
                                     "guestForegroundAckRegistered" to "false",
-                                    "engineComponentProcessClientAttached" to "true",
-                                    "engineComponentProcessClientAttachIdempotent" to
-                                        clientAttach.idempotent.toString(),
-                                    "engineComponentProcessClientAuthority" to "BINDER_LIVE",
-                                    "effectiveGuestProcessName" to ticket.effectiveGuestProcessName
+                                    "engineComponentProcessClientAttached" to "true"
                                 )
                         )
                     }
@@ -935,13 +959,31 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                 "guest bootstrap failed: ${error.javaClass.name}:${error.message.orEmpty()}"
             )
         }
-        return EngineProcessBootstrapIpc.resultBundle(
-            bootstrap.copy(
-                clientToken = processToken,
-                processId = Process.myPid(),
-                processStartTicks = readAndroidProcessStartTicks(Process.myPid())
-            )
+        val response = bootstrap.copy(
+            clientToken = processToken,
+            processId = Process.myPid(),
+            processStartTicks = readAndroidProcessStartTicks(Process.myPid())
         )
+        runCatching {
+            val fields = linkedMapOf<String, Any?>(
+                "status" to response.state.name,
+                "stage" to "PROCESS_BOOTSTRAP",
+                "verdict" to response.verdict.name,
+                "instanceId" to response.instanceId,
+                "processId" to response.processId,
+                "processStartTicks" to response.processStartTicks,
+                "processName" to response.processName,
+                "message" to response.message
+            )
+            response.toOperationEvidence().entries.forEach { (key, value) -> fields[key] = value }
+            ContainerRuntimeEvidenceWriter.write(
+                context = hostContext,
+                instanceId = response.instanceId,
+                component = "process-bootstrap",
+                fields = fields
+            )
+        }
+        return EngineProcessBootstrapIpc.resultBundle(response)
     }
 
     override fun query(

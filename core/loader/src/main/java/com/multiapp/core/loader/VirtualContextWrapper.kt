@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.app.Application
 import android.content.Context
 import android.content.ContentResolver
 import android.content.ContextWrapper
@@ -29,6 +30,8 @@ import com.multiapp.core.model.virtual.VirtualContextConfig
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.concurrent.Executor
 
 /**
@@ -83,6 +86,13 @@ open class VirtualContextWrapper(
         data class Blocked(
             override val sourceIntent: Intent,
             override val foreground: Boolean,
+            val reason: String
+        ) : StartServiceMappingResult()
+
+        data class SystemPassthrough(
+            override val sourceIntent: Intent,
+            override val foreground: Boolean,
+            val targetPackageName: String,
             val reason: String
         ) : StartServiceMappingResult()
     }
@@ -152,6 +162,10 @@ open class VirtualContextWrapper(
     private var lastBroadcastReceiverRegistrationResult: BroadcastReceiverRegistrationResult? = null
 
     private var lastStorageEvidence: VirtualStorageEvidence? = null
+
+    private val systemServiceConnections = Collections.newSetFromMap(
+        IdentityHashMap<ServiceConnection, Boolean>()
+    )
 
     override fun getContentResolver(): ContentResolver = guestContentResolver
 
@@ -321,6 +335,14 @@ open class VirtualContextWrapper(
         )
     )
 
+    private val systemHostPackageName: String = resolveSystemHostPackageName(
+        guestPackages = setOf(config.originPackageName, config.virtualPackageName),
+        processSlot = config.processSlot,
+        processName = runCatching { Application.getProcessName() }.getOrNull(),
+        baseOpPackageName = runCatching { base.opPackageName }.getOrNull(),
+        basePackageName = runCatching { base.packageName }.getOrNull()
+    )
+
     private val virtualPackageManager: PackageManager? by lazy(LazyThreadSafetyMode.NONE) {
         config.packageSnapshot?.let { snapshot ->
             VirtualPackageManagerWrapper(
@@ -333,8 +355,8 @@ open class VirtualContextWrapper(
 
     private val proxyActivityRegistry by lazy(LazyThreadSafetyMode.NONE) {
         com.multiapp.core.model.virtual.ProxyActivityRegistry(
-            ProxyActivitySlots.classNamesForProcessSlot(base.packageName, config.processSlot),
-            ProxyActivitySlots.launchModeByClassName(base.packageName),
+            ProxyActivitySlots.classNamesForProcessSlot(systemHostPackageName, config.processSlot),
+            ProxyActivitySlots.launchModeByClassName(systemHostPackageName),
             ProviderBackedProxyActivitySlotAssignmentStore
         )
     }
@@ -345,7 +367,7 @@ open class VirtualContextWrapper(
     private val defaultAmsDispatcher: VirtualAmsComponentDispatcher by lazy(LazyThreadSafetyMode.NONE) {
         val fallback = DefaultVirtualAmsComponentDispatcher(
             hostContext = base,
-            hostPackageName = base.packageName,
+            hostPackageName = systemHostPackageName,
             packageSnapshot = config.packageSnapshot,
             instanceId = config.instanceId,
             processSlot = config.processSlot,
@@ -368,12 +390,10 @@ open class VirtualContextWrapper(
 
     override fun getPackageName(): String = config.originPackageName
 
-    override fun getOpPackageName(): String = runCatching { base.opPackageName }
-        .getOrNull()
-        ?.takeIf { it.isNotBlank() }
-        ?: base.packageName
+    override fun getOpPackageName(): String = systemHostPackageName
 
-    override fun getApplicationContext(): Context = this
+    override fun getApplicationContext(): Context =
+        processRuntime.get(config.instanceId)?.result?.guestApplication ?: this
 
     override fun getBaseContext(): Context = base
 
@@ -404,34 +424,26 @@ open class VirtualContextWrapper(
             IntentRemapDiagnostics.installAppOpsManagerPackageProxy(
                 appOpsManager = service,
                 sourcePackages = listOf(config.originPackageName, config.virtualPackageName),
-                hostPackageName = base.packageName
+                hostPackageName = systemHostPackageName
             )
         }
         if (name == Context.LAUNCHER_APPS_SERVICE) {
             val sourcePackages = listOf(config.originPackageName, config.virtualPackageName)
-            val hostPackageName = listOf(
-                runCatching { base.opPackageName }.getOrNull(),
-                runCatching { base.packageName }.getOrNull()
-            ).firstOrNull { !it.isNullOrBlank() && it !in sourcePackages }
-            if (hostPackageName != null) {
+            if (systemHostPackageName.isNotBlank() && systemHostPackageName !in sourcePackages) {
                 VirtualLauncherAppsServiceProxy.install(
                     context = base,
                     sourcePackages = sourcePackages,
-                    hostPackageName = hostPackageName
+                    hostPackageName = systemHostPackageName
                 )
             }
         }
         if (name == Context.CLIPBOARD_SERVICE) {
             val sourcePackages = listOf(config.originPackageName, config.virtualPackageName)
-            val hostPackageName = listOf(
-                runCatching { base.opPackageName }.getOrNull(),
-                runCatching { base.packageName }.getOrNull()
-            ).firstOrNull { !it.isNullOrBlank() && it !in sourcePackages }
-            if (hostPackageName != null) {
+            if (systemHostPackageName.isNotBlank() && systemHostPackageName !in sourcePackages) {
                 VirtualClipboardServiceProxy.install(
                     context = base,
                     sourcePackages = sourcePackages,
-                    hostPackageName = hostPackageName
+                    hostPackageName = systemHostPackageName
                 )
             }
         }
@@ -555,6 +567,16 @@ open class VirtualContextWrapper(
                 )
                 null
             }
+            is StartServiceMappingResult.SystemPassthrough -> {
+                val startResult = runCatching { base.startService(result.sourceIntent) }
+                recordStartServiceEvidence(
+                    api = "startService",
+                    result = result,
+                    returnValue = startResult.getOrNull(),
+                    error = startResult.exceptionOrNull()
+                )
+                startResult.getOrNull()
+            }
         }
     }
 
@@ -581,11 +603,27 @@ open class VirtualContextWrapper(
                 )
                 null
             }
+            is StartServiceMappingResult.SystemPassthrough -> {
+                val startResult = runCatching { base.startForegroundService(resolved.sourceIntent) }
+                recordStartForegroundServiceEvidence(
+                    api = "startForegroundService",
+                    result = resolved,
+                    returnValue = startResult.getOrNull(),
+                    error = startResult.exceptionOrNull()
+                )
+                startResult.getOrNull()
+            }
         }
     }
 
     override fun stopService(service: Intent): Boolean {
-        val result = componentDispatcher().dispatchStopService(service) ?: return false.also {
+        val dispatcher = componentDispatcher()
+        if (dispatcher.shouldDispatchServiceToSystem(service)) {
+            val stopResult = runCatching { base.stopService(service) }
+            recordSystemStopServiceEvidence(service, stopResult.getOrNull(), stopResult.exceptionOrNull())
+            return stopResult.getOrDefault(false)
+        }
+        val result = dispatcher.dispatchStopService(service) ?: return false.also {
             lastStopServiceDispatchResult = null
             recordStopServiceEvidence("stopService", service, null)
         }
@@ -595,7 +633,14 @@ open class VirtualContextWrapper(
     }
 
     override fun bindService(service: Intent, conn: ServiceConnection, flags: Int): Boolean {
-        return dispatchBindServiceIntent(service, conn, flags = flags, executor = null, api = "bindService:int")
+        return dispatchBindServiceIntent(
+            service,
+            conn,
+            flags = flags,
+            executor = null,
+            api = "bindService:int",
+            systemBind = { base.bindService(service, conn, flags) }
+        )
     }
 
     override fun bindService(
@@ -604,7 +649,14 @@ open class VirtualContextWrapper(
         executor: Executor,
         conn: ServiceConnection
     ): Boolean {
-        return dispatchBindServiceIntent(service, conn, flags = flags, executor = executor, api = "bindService:executor")
+        return dispatchBindServiceIntent(
+            service,
+            conn,
+            flags = flags,
+            executor = executor,
+            api = "bindService:executor",
+            systemBind = { base.bindService(service, flags, executor, conn) }
+        )
     }
 
     override fun bindServiceAsUser(
@@ -613,7 +665,14 @@ open class VirtualContextWrapper(
         flags: Int,
         user: UserHandle
     ): Boolean {
-        return dispatchBindServiceIntent(service, conn, flags = flags, executor = null, api = "bindServiceAsUser:int")
+        return dispatchBindServiceIntent(
+            service,
+            conn,
+            flags = flags,
+            executor = null,
+            api = "bindServiceAsUser:int",
+            systemBind = { base.bindServiceAsUser(service, conn, flags, user) }
+        )
     }
 
     override fun bindIsolatedService(
@@ -623,10 +682,26 @@ open class VirtualContextWrapper(
         executor: Executor,
         conn: ServiceConnection
     ): Boolean {
-        return dispatchBindServiceIntent(service, conn, flags = flags, executor = executor, api = "bindIsolatedService:int")
+        return dispatchBindServiceIntent(
+            service,
+            conn,
+            flags = flags,
+            executor = executor,
+            api = "bindIsolatedService:int",
+            systemBind = { base.bindIsolatedService(service, flags, instanceName, executor, conn) }
+        )
     }
 
     override fun unbindService(conn: ServiceConnection) {
+        val systemBound = synchronized(systemServiceConnections) {
+            systemServiceConnections.remove(conn)
+        }
+        if (systemBound) {
+            val unbindResult = runCatching { base.unbindService(conn) }
+            recordSystemUnbindServiceEvidence(unbindResult.exceptionOrNull())
+            unbindResult.exceptionOrNull()?.let { throw it }
+            return
+        }
         val result = componentDispatcher().dispatchUnbindService(conn)
         lastUnbindServiceDispatchResult = result
         recordUnbindServiceEvidence("unbindService", result)
@@ -639,11 +714,22 @@ open class VirtualContextWrapper(
         conn: ServiceConnection,
         flags: Int,
         executor: Executor?,
-        api: String
+        api: String,
+        systemBind: () -> Boolean
     ): Boolean {
         val dispatcher = componentDispatcher()
         val mapping = dispatcher.resolveStartServiceIntent(service, foreground = false)
         lastStartServiceMappingResult = mapping
+        if (mapping is StartServiceMappingResult.SystemPassthrough) {
+            val bindResult = runCatching(systemBind)
+            val bound = bindResult.getOrDefault(false)
+            if (bound) {
+                synchronized(systemServiceConnections) { systemServiceConnections.add(conn) }
+            }
+            lastBindServiceDispatchResult = null
+            recordSystemBindServiceEvidence(api, mapping, flags, bound, bindResult.exceptionOrNull())
+            return bound
+        }
         if (mapping is StartServiceMappingResult.Blocked) {
             val blocked = VirtualServiceBindDispatchResult.Blocked(
                 sourceIntent = service,
@@ -1312,14 +1398,17 @@ open class VirtualContextWrapper(
         returnValue: ComponentName?,
         error: Throwable?
     ) {
-        val serviceResolved = result is StartServiceMappingResult.Remapped
+        val systemPassthrough = result is StartServiceMappingResult.SystemPassthrough
+        val serviceResolved = result !is StartServiceMappingResult.Blocked
         val reason = when (result) {
             is StartServiceMappingResult.Remapped -> result.startRequest.reason
             is StartServiceMappingResult.Blocked -> result.reason
+            is StartServiceMappingResult.SystemPassthrough -> result.reason
         }
         val proxyStarted = returnValue != null
         val status = when {
             error != null -> "SERVICE_START_FAILED"
+            systemPassthrough && proxyStarted -> "SERVICE_SYSTEM_STARTED"
             proxyStarted -> "SERVICE_PROXY_STARTED"
             else -> "SERVICE_START_BLOCKED"
         }
@@ -1331,7 +1420,7 @@ open class VirtualContextWrapper(
                 virtualPackageName = config.virtualPackageName,
                 api = api,
                 status = status,
-                hostFallback = false,
+                hostFallback = systemPassthrough,
                 fields = buildMap {
                     put("returnValue", returnValue?.let { "${it.packageName}/${it.className}" } ?: "null")
                     put("proxyStarted", proxyStarted)
@@ -1346,11 +1435,17 @@ open class VirtualContextWrapper(
                     )
                     put(
                         "proxyComponent",
-                        (result as? StartServiceMappingResult.Remapped)?.proxyIntent?.componentNameForEvidence().orEmpty()
+                        when (result) {
+                            is StartServiceMappingResult.Remapped -> result.proxyIntent.componentNameForEvidence()
+                            is StartServiceMappingResult.SystemPassthrough ->
+                                result.sourceIntent.componentNameForEvidence()
+                            is StartServiceMappingResult.Blocked -> ""
+                        }
                     )
                     put(
                         "capabilityVerdict",
                         when {
+                            systemPassthrough && proxyStarted -> "PASS"
                             proxyStarted -> "PARTIAL"
                             serviceResolved -> "PARTIAL"
                             else -> "UNSUPPORTED"
@@ -1370,6 +1465,7 @@ open class VirtualContextWrapper(
         val reason = when (mapping) {
             is StartServiceMappingResult.Remapped -> mapping.startRequest.reason
             is StartServiceMappingResult.Blocked -> mapping.reason
+            is StartServiceMappingResult.SystemPassthrough -> mapping.reason
         }
         val status = when (dispatchResult) {
             is VirtualServiceBindDispatchResult.Bound -> "BIND_CONNECTED"
@@ -1391,7 +1487,7 @@ open class VirtualContextWrapper(
                 virtualPackageName = config.virtualPackageName,
                 api = api,
                 status = status,
-                hostFallback = false,
+                hostFallback = mapping is StartServiceMappingResult.SystemPassthrough,
                 fields = buildMap {
                     put("returnValue", dispatchResult is VirtualServiceBindDispatchResult.Bound)
                     put("serviceResolved", serviceResolved)
@@ -1492,6 +1588,91 @@ open class VirtualContextWrapper(
         )
     }
 
+    private fun recordSystemBindServiceEvidence(
+        api: String,
+        mapping: StartServiceMappingResult.SystemPassthrough,
+        flags: Int,
+        bound: Boolean,
+        error: Throwable?
+    ) {
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.BIND_SERVICE_OVERLOAD,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = api,
+                status = when {
+                    error != null -> "BIND_SYSTEM_FAILED"
+                    bound -> "BIND_SYSTEM_CONNECTED"
+                    else -> "BIND_SYSTEM_REJECTED"
+                },
+                hostFallback = true,
+                fields = linkedMapOf(
+                    "returnValue" to bound,
+                    "serviceResolved" to bound,
+                    "reason" to mapping.reason,
+                    "targetPackageName" to mapping.targetPackageName,
+                    "componentName" to mapping.sourceIntent.componentNameForEvidence(),
+                    "bindFlags" to flags,
+                    "autoCreate" to (flags and Context.BIND_AUTO_CREATE != 0),
+                    "errorClass" to error?.javaClass?.name.orEmpty(),
+                    "errorMessage" to error?.message.orEmpty(),
+                    "capabilityVerdict" to if (bound) "PASS" else "PARTIAL"
+                )
+            )
+        )
+    }
+
+    private fun recordSystemStopServiceEvidence(
+        intent: Intent,
+        stopped: Boolean?,
+        error: Throwable?
+    ) {
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.STOP_SERVICE,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = "stopService",
+                status = when {
+                    error != null -> "STOP_SYSTEM_FAILED"
+                    stopped == true -> "STOP_SYSTEM_DISPATCHED"
+                    else -> "STOP_SYSTEM_NOT_RUNNING"
+                },
+                hostFallback = true,
+                fields = linkedMapOf(
+                    "returnValue" to (stopped ?: false),
+                    "intentComponent" to intent.componentNameForEvidence(),
+                    "errorClass" to error?.javaClass?.name.orEmpty(),
+                    "errorMessage" to error?.message.orEmpty(),
+                    "capabilityVerdict" to if (error == null) "PASS" else "PARTIAL"
+                )
+            )
+        )
+    }
+
+    private fun recordSystemUnbindServiceEvidence(error: Throwable?) {
+        GlobalVirtualAmsApiEvidenceRecorder.record(
+            VirtualAmsApiEvidenceRecord(
+                component = VirtualAmsApiEvidenceComponent.UNBIND_SERVICE_OVERLOAD,
+                instanceId = config.instanceId,
+                originPackageName = config.originPackageName,
+                virtualPackageName = config.virtualPackageName,
+                api = "unbindService",
+                status = if (error == null) "UNBIND_SYSTEM_DISPATCHED" else "UNBIND_SYSTEM_FAILED",
+                hostFallback = true,
+                fields = linkedMapOf(
+                    "returnValue" to "void",
+                    "errorClass" to error?.javaClass?.name.orEmpty(),
+                    "errorMessage" to error?.message.orEmpty(),
+                    "capabilityVerdict" to if (error == null) "PASS" else "PARTIAL"
+                )
+            )
+        )
+    }
+
     private fun recordStopServiceEvidence(
         api: String,
         intent: Intent,
@@ -1566,14 +1747,17 @@ open class VirtualContextWrapper(
         returnValue: ComponentName?,
         error: Throwable?
     ) {
-        val serviceResolved = result is StartServiceMappingResult.Remapped
+        val systemPassthrough = result is StartServiceMappingResult.SystemPassthrough
+        val serviceResolved = result !is StartServiceMappingResult.Blocked
         val reason = when (result) {
             is StartServiceMappingResult.Remapped -> result.startRequest.reason
             is StartServiceMappingResult.Blocked -> result.reason
+            is StartServiceMappingResult.SystemPassthrough -> result.reason
         }
         val proxyStarted = returnValue != null
         val status = when {
             error != null -> "FOREGROUND_SERVICE_START_FAILED"
+            systemPassthrough && proxyStarted -> "FOREGROUND_SERVICE_SYSTEM_STARTED"
             proxyStarted -> "FOREGROUND_SERVICE_PROXY_STARTED"
             else -> "FOREGROUND_SERVICE_BLOCKED"
         }
@@ -1585,7 +1769,7 @@ open class VirtualContextWrapper(
                 virtualPackageName = config.virtualPackageName,
                 api = api,
                 status = status,
-                hostFallback = false,
+                hostFallback = systemPassthrough,
                 fields = buildMap {
                     put("returnValue", returnValue?.let { "${it.packageName}/${it.className}" } ?: "null")
                     put("proxyStarted", proxyStarted)
@@ -1597,7 +1781,12 @@ open class VirtualContextWrapper(
                     )
                     put(
                         "proxyComponent",
-                        (result as? StartServiceMappingResult.Remapped)?.proxyIntent?.componentNameForEvidence().orEmpty()
+                        when (result) {
+                            is StartServiceMappingResult.Remapped -> result.proxyIntent.componentNameForEvidence()
+                            is StartServiceMappingResult.SystemPassthrough ->
+                                result.sourceIntent.componentNameForEvidence()
+                            is StartServiceMappingResult.Blocked -> ""
+                        }
                     )
                     put("serviceResolved", serviceResolved)
                     put("reason", reason)
@@ -1607,6 +1796,7 @@ open class VirtualContextWrapper(
                     put(
                         "capabilityVerdict",
                         when {
+                            systemPassthrough && proxyStarted -> "PASS"
                             proxyStarted -> "PARTIAL"
                             serviceResolved -> "PARTIAL"
                             else -> "UNSUPPORTED"
@@ -1618,6 +1808,8 @@ open class VirtualContextWrapper(
     }
 
     private fun componentDispatcher(): VirtualAmsComponentDispatcher = amsDispatcher ?: defaultAmsDispatcher
+
+    protected fun systemDispatchContext(): Context = base
 
     private fun recordStorage(
         operation: StorageOperation,
@@ -1698,3 +1890,17 @@ open class VirtualContextWrapper(
         return VirtualDynamicReceiverFilter(actions = actions, categories = categories, dataSchemes = schemes)
     }
 }
+
+internal fun resolveSystemHostPackageName(
+    guestPackages: Set<String>,
+    processSlot: String?,
+    processName: String?,
+    baseOpPackageName: String?,
+    basePackageName: String?
+): String = sequenceOf(
+    processSlot?.substringBefore(':'),
+    processName?.substringBefore(':'),
+    baseOpPackageName,
+    basePackageName
+).firstOrNull { candidate -> !candidate.isNullOrBlank() && candidate !in guestPackages }
+    ?: basePackageName.orEmpty()

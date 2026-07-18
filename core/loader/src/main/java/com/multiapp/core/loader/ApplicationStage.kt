@@ -16,7 +16,22 @@ class ApplicationStage(
     private val activityRecordManager: VirtualActivityRecordManager = VirtualActivityRecordManager.global,
     private val runtimePublisher: (String, HostedBootstrapResult) -> Unit = { _, _ -> },
     private val clock: () -> Long = System::currentTimeMillis,
-    private val effectiveGuestProcessName: String? = null
+    private val effectiveGuestProcessName: String? = null,
+    private val finalApplicationBindingInspector: (
+        application: Application,
+        expectedLoadedApk: Any
+    ) -> LoadedApkApplicationContextBinding = LoadedApkBridge::inspectApplicationContextBinding,
+    private val loadedApkClassLoaderInspector: (Any) -> ClassLoader? = LoadedApkBridge::classLoader,
+    private val applicationClassLoaderInspector: (Application) -> ClassLoader? = { application ->
+        application.javaClass.classLoader
+    },
+    private val applicationContextClassLoaderInspector: (Application) -> ClassLoader? = { application ->
+        runCatching { application.classLoader }.getOrNull()
+    },
+    private val frameworkContextClassLoaderReplacementInspector: (
+        candidate: ClassLoader?,
+        guestClassLoader: ClassLoader
+    ) -> Boolean = ::isAospWarningContextClassLoader
 ) {
     fun execute(input: BootstrapStageInput): BootstrapStageOutput {
         val startMs = clock()
@@ -70,6 +85,7 @@ class ApplicationStage(
         var creationForRollback: GuestApplicationCreateResult? = null
         var runtimePublishedBeforeOnCreate = false
         var providerPreinstallEvidence = emptyList<BootstrapEvidence>()
+        var applicationClassLoaderEvidence = emptyList<BootstrapEvidence>()
         fun progress(status: String, detail: String, extra: Map<String, String> = emptyMap()) {
             HostedRuntimeProgressEvidenceWriter.write(
                 context = hostContext,
@@ -85,75 +101,144 @@ class ApplicationStage(
                     "virtualPackageName" to instance.virtualPackageName,
                     "effectiveGuestProcessName" to currentGuestProcessName,
                     "processSlot" to input.processSlot.orEmpty(),
+                    "threadContextClassLoaderIdentity" to
+                        System.identityHashCode(Thread.currentThread().contextClassLoader).toString(),
+                    "guestClassLoaderIdentity" to System.identityHashCode(guestClassLoader).toString(),
                     "threadName" to Thread.currentThread().name,
                     "elapsedMs" to (System.currentTimeMillis() - startMs).toString()
-                ) + extra
+                ) + applicationClassLoaderEvidence.associate { it.key to it.value } + extra
             )
         }
 
         return runCatching {
             applicationThreadRunner.run {
-                applicationThread = currentApplicationThreadEvidence()
-                val context = hostContext
-                    ?: throw IllegalStateException("hostContext is required for Application creation")
-                progress("STARTED", "guest Application creation started")
-                val virtualContextConfig = VirtualContextConfig(
-                    instanceId = input.instanceId,
-                    originPackageName = instance.originPackageName,
-                    virtualPackageName = instance.virtualPackageName,
-                    dataDir = instance.dataRoot,
-                    sourceDir = originApkPath,
-                    nativeLibraryDir = input.nativeLibraryDir,
-                    classLoader = guestClassLoader,
-                    applicationLabel = packageSnapshot.applicationLabel,
-                    packageSnapshot = packageSnapshot,
-                    splitSourceDirs = packageSnapshot.splitSourceDirs,
-                    splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
-                    splitNames = packageSnapshot.splitNames,
-                    isolatedSplits = packageSnapshot.isolatedSplits,
-                    processSlot = input.processSlot,
-                    effectiveGuestProcessName = currentGuestProcessName
-                )
-                val creation = guestApplicationCreator.create(
-                    GuestApplicationCreateRequest(
-                        applicationClassName = appClassName,
-                        applicationClassSource = appClassSource,
-                        hostContext = context,
-                        virtualContextConfig = virtualContextConfig,
-                        guestClassLoader = guestClassLoader,
-                        processRuntime = processRuntime,
-                        activityRecordManager = activityRecordManager,
-                        progress = { status, detail, extra -> progress(status, detail, extra) }
+                val currentThread = Thread.currentThread()
+                val previousContextClassLoader = currentThread.contextClassLoader
+                var guestContextClassLoaderCommitted = false
+                try {
+                    currentThread.contextClassLoader = guestClassLoader
+                    check(currentThread.contextClassLoader === guestClassLoader) {
+                        "Guest Application thread context ClassLoader mismatch"
+                    }
+                    applicationThread = currentApplicationThreadEvidence()
+                    val context = hostContext
+                        ?: throw IllegalStateException("hostContext is required for Application creation")
+                    progress("STARTED", "guest Application creation started")
+                    val virtualContextConfig = VirtualContextConfig(
+                        instanceId = input.instanceId,
+                        originPackageName = instance.originPackageName,
+                        virtualPackageName = instance.virtualPackageName,
+                        dataDir = instance.dataRoot,
+                        sourceDir = originApkPath,
+                        nativeLibraryDir = input.nativeLibraryDir,
+                        classLoader = guestClassLoader,
+                        applicationLabel = packageSnapshot.applicationLabel,
+                        packageSnapshot = packageSnapshot,
+                        splitSourceDirs = packageSnapshot.splitSourceDirs,
+                        splitPublicSourceDirs = packageSnapshot.splitPublicSourceDirs,
+                        splitNames = packageSnapshot.splitNames,
+                        isolatedSplits = packageSnapshot.isolatedSplits,
+                        processSlot = input.processSlot,
+                        effectiveGuestProcessName = currentGuestProcessName
                     )
-                )
-                creationForRollback = creation
-                progress(
-                    "APPLICATION_ATTACHED",
-                    "guest Application attachBaseContext returned",
-                    mapOf("attachedContextPackageName" to creation.attachedContextPackageName.orEmpty())
-                )
-                publishRuntimeBeforeOnCreate(input, creation.application)
-                runtimePublishedBeforeOnCreate = true
-                progress("RUNTIME_PUBLISHED", "runtime published before Application.onCreate")
-                val providerPreinstallResult = providerPreinstaller.preinstall(
-                    GuestProviderPreinstallRequest(
-                        hostPackageName = runCatching { context.packageName }.getOrNull().orEmpty(),
-                        snapshot = packageSnapshot,
-                        application = creation.application,
-                        guestClassLoader = guestClassLoader,
-                        config = virtualContextConfig
+                    val creation = guestApplicationCreator.create(
+                        GuestApplicationCreateRequest(
+                            applicationClassName = appClassName,
+                            applicationClassSource = appClassSource,
+                            hostContext = context,
+                            virtualContextConfig = virtualContextConfig,
+                            guestClassLoader = guestClassLoader,
+                            processRuntime = processRuntime,
+                            activityRecordManager = activityRecordManager,
+                            progress = { status, detail, extra -> progress(status, detail, extra) }
+                        )
                     )
-                )
-                providerPreinstallEvidence = providerPreinstallResult.toEvidence()
-                progress(
-                    "PROVIDER_PREINSTALL_FINISHED",
-                    "current guest process provider preinstall finished before Application.onCreate",
-                    providerPreinstallEvidence.associate { it.key to it.value }
-                )
-                progress("ON_CREATE_STARTED", "guest Application.onCreate started")
-                applicationOnCreateInvoker(creation.application)
-                progress("ON_CREATE_FINISHED", "guest Application.onCreate returned")
-                creation
+                    creationForRollback = creation
+                    normalizeThreadContextClassLoaderAfterApplicationAttach(
+                        currentThread = currentThread,
+                        creation = creation,
+                        guestClassLoader = guestClassLoader,
+                        requestedApplicationClassName = appClassName,
+                        progress = ::progress,
+                        evidenceSink = { applicationClassLoaderEvidence = it }
+                    )
+                    progress(
+                        "APPLICATION_ATTACHED",
+                        "guest Application attachBaseContext returned",
+                        mapOf("attachedContextPackageName" to creation.attachedContextPackageName.orEmpty())
+                    )
+                    publishRuntimeBeforeOnCreate(input, creation.application)
+                    runtimePublishedBeforeOnCreate = true
+                    progress("RUNTIME_PUBLISHED", "runtime published before Application.onCreate")
+                    verifyClassLoaderOwnershipAtCheckpoint(
+                        currentThread = currentThread,
+                        creation = creation,
+                        guestClassLoader = guestClassLoader,
+                        requestedApplicationClassName = appClassName,
+                        evidencePrefix = "providerPreinstall",
+                        checkpointLabel = "before Provider preinstall",
+                        progress = ::progress,
+                        evidenceSink = { evidence ->
+                            applicationClassLoaderEvidence = applicationClassLoaderEvidence + evidence
+                        }
+                    )
+                    val providerPreinstallResult = providerPreinstaller.preinstall(
+                        GuestProviderPreinstallRequest(
+                            hostPackageName = runCatching { context.packageName }.getOrNull().orEmpty(),
+                            snapshot = packageSnapshot,
+                            application = creation.application,
+                            guestClassLoader = guestClassLoader,
+                            config = virtualContextConfig
+                        )
+                    )
+                    providerPreinstallEvidence = providerPreinstallResult.toEvidence()
+                    verifyClassLoaderOwnershipAtCheckpoint(
+                        currentThread = currentThread,
+                        creation = creation,
+                        guestClassLoader = guestClassLoader,
+                        requestedApplicationClassName = appClassName,
+                        evidencePrefix = "providerPostinstall",
+                        checkpointLabel = "after Provider preinstall",
+                        progress = ::progress,
+                        evidenceSink = { evidence ->
+                            applicationClassLoaderEvidence = applicationClassLoaderEvidence + evidence
+                        }
+                    )
+                    progress(
+                        "PROVIDER_PREINSTALL_FINISHED",
+                        "current guest process provider preinstall finished before Application.onCreate",
+                        providerPreinstallEvidence.associate { it.key to it.value }
+                    )
+                    progress("ON_CREATE_STARTED", "guest Application.onCreate started")
+                    applicationOnCreateInvoker(creation.application)
+                    progress("ON_CREATE_FINISHED", "guest Application.onCreate returned")
+                    finalizeApplicationAfterOnCreate(creation).also { finalized ->
+                        verifyClassLoaderOwnershipAtCheckpoint(
+                            currentThread = currentThread,
+                            creation = finalized,
+                            guestClassLoader = guestClassLoader,
+                            requestedApplicationClassName = appClassName,
+                            evidencePrefix = "applicationOnCreate",
+                            checkpointLabel = "after Application.onCreate",
+                            progress = ::progress,
+                            evidenceSink = { evidence ->
+                                applicationClassLoaderEvidence = applicationClassLoaderEvidence + evidence
+                            }
+                        )
+                        progress(
+                            "APPLICATION_FINALIZED",
+                            "resolved final guest Application from LoadedApk",
+                            finalized.evidence.takeLastWhile {
+                                it.key.startsWith("loadedApkFinalApplication")
+                            }.associate { it.key to it.value }
+                        )
+                        guestContextClassLoaderCommitted = true
+                    }
+                } finally {
+                    if (!guestContextClassLoaderCommitted) {
+                        currentThread.contextClassLoader = previousContextClassLoader
+                    }
+                }
             }
         }.fold(
             onSuccess = { creation ->
@@ -183,7 +268,7 @@ class ApplicationStage(
                             BootstrapEvidence("virtualPackageName", instance.virtualPackageName),
                             BootstrapEvidence("effectiveGuestProcessName", currentGuestProcessName),
                             BootstrapEvidence("processSlot", input.processSlot.orEmpty())
-                        ) + creation.evidence + providerPreinstallEvidence,
+                        ) + creation.evidence + applicationClassLoaderEvidence + providerPreinstallEvidence,
                         durationMs = clock() - startMs
                     ),
                     terminalFailure = false
@@ -198,12 +283,13 @@ class ApplicationStage(
                 }?.value
                 val failureEvidence = creationEvidence.filterNot {
                     it.key == "loadedApkApplicationCreatorStatus"
-                } + listOfNotNull(
+                } + applicationClassLoaderEvidence + listOfNotNull(
                     creatorAttemptStatus?.let {
                         BootstrapEvidence("loadedApkApplicationCreatorAttemptStatus", it)
                     },
                     BootstrapEvidence("loadedApkApplicationCreatorStatus", "FAIL"),
                     BootstrapEvidence("reflectiveApplicationFallbackEnabled", "false"),
+                    BootstrapEvidence("applicationThreadContextClassLoaderRollback", "PASS"),
                     rollbackResult?.let {
                         BootstrapEvidence(
                             "applicationRuntimeRollbackStatus",
@@ -232,6 +318,256 @@ class ApplicationStage(
             }
         )
     }
+
+    private fun normalizeThreadContextClassLoaderAfterApplicationAttach(
+        currentThread: Thread,
+        creation: GuestApplicationCreateResult,
+        guestClassLoader: ClassLoader,
+        requestedApplicationClassName: String,
+        progress: (status: String, detail: String, extra: Map<String, String>) -> Unit,
+        evidenceSink: (List<BootstrapEvidence>) -> Unit
+    ) {
+        val loadedApk = creation.loadedApk
+        val loadedApkClassLoader = loadedApk?.let(loadedApkClassLoaderInspector)
+        val applicationClassLoader = applicationClassLoaderInspector(creation.application)
+        val threadContextClassLoaderBefore = currentThread.contextClassLoader
+        val loadedApkOwnershipMatches = loadedApk == null || loadedApkClassLoader === guestClassLoader
+        val applicationOwnershipMatches = loadedApk == null || applicationClassLoaderMatches(
+            application = creation.application,
+            requestedApplicationClassName = requestedApplicationClassName,
+            actualClassLoader = applicationClassLoader,
+            guestClassLoader = guestClassLoader
+        )
+        val contextClassLoaderUnchanged = threadContextClassLoaderBefore === guestClassLoader
+        val frameworkReplacementRecognized = !contextClassLoaderUnchanged && loadedApk != null &&
+            frameworkContextClassLoaderReplacementInspector(
+                threadContextClassLoaderBefore,
+                guestClassLoader
+            )
+        val inspectedEvidence = buildList {
+            add(BootstrapEvidence("loadedApkClassLoaderOwnershipStatus", status(loadedApk, loadedApkOwnershipMatches)))
+            add(BootstrapEvidence("applicationClassLoaderOwnershipStatus", status(loadedApk, applicationOwnershipMatches)))
+            add(
+                BootstrapEvidence(
+                    "threadContextClassLoaderReplacementStatus",
+                    when {
+                        contextClassLoaderUnchanged -> "UNCHANGED"
+                        frameworkReplacementRecognized -> "AOSP_WARNING_CONTEXT_CLASS_LOADER"
+                        else -> "UNRECOGNIZED"
+                    }
+                )
+            )
+            addAll(classLoaderEvidence("guestClassLoader", guestClassLoader))
+            addAll(classLoaderEvidence("loadedApkClassLoader", loadedApkClassLoader))
+            addAll(classLoaderEvidence("applicationClassLoader", applicationClassLoader))
+            addAll(classLoaderEvidence("threadContextClassLoaderBefore", threadContextClassLoaderBefore))
+        }
+        evidenceSink(inspectedEvidence)
+        progress(
+            "CLASS_LOADER_OWNERSHIP_INSPECTED",
+            "LoadedApk, Application, and thread ClassLoader ownership inspected",
+            inspectedEvidence.associate { it.key to it.value }
+        )
+
+        if (loadedApk == null) {
+            check(threadContextClassLoaderBefore === guestClassLoader) {
+                "Guest Application creator changed the guest thread context ClassLoader without LoadedApk ownership proof"
+            }
+        } else {
+            check(loadedApkOwnershipMatches) {
+                "LoadedApk.mClassLoader does not match the guest ClassLoader"
+            }
+            check(applicationOwnershipMatches) {
+                "Guest Application class is not owned by the guest ClassLoader"
+            }
+            check(contextClassLoaderUnchanged || frameworkReplacementRecognized) {
+                "LoadedApk.makeApplication installed an unrecognized thread context ClassLoader"
+            }
+            // LoadedApk.initializeJavaContextClassLoader() may install a framework wrapper.
+            // Normalize only the known AOSP wrapper after durable ownership checks pass.
+            if (frameworkReplacementRecognized) {
+                currentThread.contextClassLoader = guestClassLoader
+            }
+        }
+        check(currentThread.contextClassLoader === guestClassLoader) {
+            "Guest Application thread context ClassLoader normalization failed"
+        }
+
+        val normalizationStatus = if (threadContextClassLoaderBefore === guestClassLoader) {
+            "NOT_REQUIRED"
+        } else {
+            "PASS"
+        }
+        val finalEvidence = inspectedEvidence +
+            BootstrapEvidence("threadContextClassLoaderNormalizationStatus", normalizationStatus) +
+            classLoaderEvidence("threadContextClassLoaderAfter", currentThread.contextClassLoader)
+        evidenceSink(finalEvidence)
+        progress(
+            if (normalizationStatus == "PASS") {
+                "TCCL_NORMALIZED_AFTER_APPLICATION_ATTACH"
+            } else {
+                "TCCL_VERIFIED_AFTER_APPLICATION_ATTACH"
+            },
+            if (normalizationStatus == "PASS") {
+                "framework thread context ClassLoader normalized after guest ownership verification"
+            } else {
+                "guest thread context ClassLoader remained stable after LoadedApk.makeApplication"
+            },
+            finalEvidence.associate { it.key to it.value }
+        )
+    }
+
+    private fun verifyClassLoaderOwnershipAtCheckpoint(
+        currentThread: Thread,
+        creation: GuestApplicationCreateResult,
+        guestClassLoader: ClassLoader,
+        requestedApplicationClassName: String,
+        evidencePrefix: String,
+        checkpointLabel: String,
+        progress: (status: String, detail: String, extra: Map<String, String>) -> Unit,
+        evidenceSink: (List<BootstrapEvidence>) -> Unit
+    ) {
+        val loadedApk = creation.loadedApk
+        val loadedApkClassLoader = loadedApk?.let(loadedApkClassLoaderInspector)
+        val applicationClassLoader = applicationClassLoaderInspector(creation.application)
+        val loadedApkOwnershipMatches = loadedApk == null || loadedApkClassLoader === guestClassLoader
+        val applicationOwnershipMatches = loadedApk == null || applicationClassLoaderMatches(
+            application = creation.application,
+            requestedApplicationClassName = requestedApplicationClassName,
+            actualClassLoader = applicationClassLoader,
+            guestClassLoader = guestClassLoader
+        )
+        val threadOwnershipMatches = currentThread.contextClassLoader === guestClassLoader
+        val prerequisitesMatch = loadedApkOwnershipMatches &&
+            applicationOwnershipMatches &&
+            threadOwnershipMatches
+        val applicationBinding = if (loadedApk != null && prerequisitesMatch) {
+            finalApplicationBindingInspector(creation.application, loadedApk)
+        } else {
+            null
+        }
+        val applicationContextClassLoader = if (applicationBinding?.matches == true) {
+            applicationContextClassLoaderInspector(creation.application)
+        } else {
+            null
+        }
+        val applicationContextClassLoaderMatches = loadedApk == null ||
+            applicationContextClassLoader === guestClassLoader
+        val applicationBindingMatches = loadedApk == null || applicationBinding?.matches == true
+        val evidence = buildList {
+            add(
+                BootstrapEvidence(
+                    "${evidencePrefix}LoadedApkClassLoaderStatus",
+                    status(loadedApk, loadedApkOwnershipMatches)
+                )
+            )
+            add(
+                BootstrapEvidence(
+                    "${evidencePrefix}ApplicationClassLoaderStatus",
+                    status(loadedApk, applicationOwnershipMatches)
+                )
+            )
+            add(
+                BootstrapEvidence(
+                    "${evidencePrefix}ThreadContextClassLoaderStatus",
+                    if (threadOwnershipMatches) "PASS" else "FAIL"
+                )
+            )
+            add(
+                BootstrapEvidence(
+                    "${evidencePrefix}ApplicationContextBindingStatus",
+                    status(loadedApk, applicationBindingMatches)
+                )
+            )
+            add(
+                BootstrapEvidence(
+                    "${evidencePrefix}ApplicationContextBindingReason",
+                    applicationBinding?.reason ?: if (loadedApk == null) {
+                        "LOADED_APK_REFERENCE_UNAVAILABLE"
+                    } else {
+                        "CLASS_LOADER_PREREQUISITE_FAILED"
+                    }
+                )
+            )
+            add(
+                BootstrapEvidence(
+                    "${evidencePrefix}ApplicationContextClassLoaderStatus",
+                    status(loadedApk, applicationContextClassLoaderMatches)
+                )
+            )
+            addAll(classLoaderEvidence("${evidencePrefix}ApplicationContextClassLoader", applicationContextClassLoader))
+            addAll(classLoaderEvidence("${evidencePrefix}ThreadContextClassLoader", currentThread.contextClassLoader))
+        }
+        evidenceSink(evidence)
+        val ownershipVerified = prerequisitesMatch &&
+            applicationBindingMatches &&
+            applicationContextClassLoaderMatches
+        val progressCheckpoint = checkpointLabel
+            .uppercase()
+            .replace(Regex("[^A-Z0-9]+"), "_")
+            .trim('_')
+        progress(
+            if (ownershipVerified) {
+                "CLASS_LOADER_OWNERSHIP_VERIFIED_$progressCheckpoint"
+            } else {
+                "CLASS_LOADER_OWNERSHIP_FAILED_$progressCheckpoint"
+            },
+            if (ownershipVerified) {
+                "guest ClassLoader ownership verified $checkpointLabel"
+            } else {
+                "guest ClassLoader ownership check failed $checkpointLabel"
+            },
+            evidence.associate { it.key to it.value }
+        )
+        check(loadedApkOwnershipMatches) {
+            "LoadedApk.mClassLoader changed $checkpointLabel"
+        }
+        check(applicationOwnershipMatches) {
+            "Guest Application ClassLoader changed $checkpointLabel"
+        }
+        check(threadOwnershipMatches) {
+            "Guest thread context ClassLoader changed $checkpointLabel"
+        }
+        check(applicationBindingMatches) {
+            "Guest Application Context is not bound to the guest LoadedApk $checkpointLabel: " +
+                applicationBinding?.reason.orEmpty()
+        }
+        check(applicationContextClassLoaderMatches) {
+            "Guest Application Context ClassLoader changed $checkpointLabel"
+        }
+    }
+
+    private fun applicationClassLoaderMatches(
+        application: Application,
+        requestedApplicationClassName: String,
+        actualClassLoader: ClassLoader?,
+        guestClassLoader: ClassLoader
+    ): Boolean {
+        if (actualClassLoader === guestClassLoader) return true
+        return requestedApplicationClassName == Application::class.java.name &&
+            application.javaClass === Application::class.java &&
+            actualClassLoader === Application::class.java.classLoader
+    }
+
+    private fun status(loadedApk: Any?, matches: Boolean): String = when {
+        loadedApk == null -> "SKIPPED_NO_LOADED_APK"
+        matches -> "PASS"
+        else -> "FAIL"
+    }
+
+    private fun classLoaderEvidence(prefix: String, classLoader: ClassLoader?): List<BootstrapEvidence> {
+        val parent = classLoader?.let { runCatching { it.parent }.getOrNull() }
+        return listOf(
+            BootstrapEvidence("${prefix}Class", classLoader?.javaClass?.name ?: "BOOT_CLASS_LOADER"),
+            BootstrapEvidence("${prefix}Identity", classLoader.identity()),
+            BootstrapEvidence("${prefix}ParentClass", parent?.javaClass?.name ?: "BOOT_CLASS_LOADER"),
+            BootstrapEvidence("${prefix}ParentIdentity", parent.identity())
+        )
+    }
+
+    private fun ClassLoader?.identity(): String = this?.let {
+        System.identityHashCode(it).toString()
+    } ?: "BOOT"
 
     private fun resolveGuestProcessName(
         requestedProcessName: String?,
@@ -319,6 +655,38 @@ class ApplicationStage(
         )
     }
 
+    private fun finalizeApplicationAfterOnCreate(
+        creation: GuestApplicationCreateResult
+    ): GuestApplicationCreateResult {
+        val loadedApk = creation.loadedApk ?: return creation.copy(
+            evidence = creation.evidence + listOf(
+                BootstrapEvidence("loadedApkFinalApplicationStatus", "SKIPPED"),
+                BootstrapEvidence("loadedApkFinalApplicationSource", "CREATOR"),
+                BootstrapEvidence("loadedApkFinalApplicationReason", "LOADED_APK_REFERENCE_UNAVAILABLE")
+            )
+        )
+        val finalApplication = LoadedApkBridge.application(loadedApk)
+            ?: throw IllegalStateException("LoadedApk.mApplication is null after Application.onCreate")
+        val source = if (finalApplication === creation.application) "ORIGINAL" else "DELEGATE"
+        val binding = finalApplicationBindingInspector(finalApplication, loadedApk)
+        check(binding.matches) {
+            "Final Application is not bound to the guest LoadedApk: ${binding.reason}"
+        }
+        return creation.copy(
+            application = finalApplication,
+            attachedContextPackageName = runCatching { finalApplication.packageName }.getOrNull()
+                ?: creation.attachedContextPackageName,
+            evidence = creation.evidence + listOf(
+                BootstrapEvidence("loadedApkFinalApplicationStatus", "PASS"),
+                BootstrapEvidence("loadedApkFinalApplicationSource", source),
+                BootstrapEvidence("loadedApkFinalApplicationClass", finalApplication.javaClass.name),
+                BootstrapEvidence("loadedApkFinalApplicationContextClass", binding.contextClassName.orEmpty()),
+                BootstrapEvidence("loadedApkFinalApplicationContextWrapperDepth", binding.wrapperDepth.toString()),
+                BootstrapEvidence("loadedApkFinalApplicationReason", binding.reason)
+            )
+        )
+    }
+
     private data class ApplicationThreadEvidence(
         val name: String,
         val hasLooper: Boolean,
@@ -326,6 +694,12 @@ class ApplicationStage(
         val looperProbeSkippedReason: String?
     )
 }
+
+private fun isAospWarningContextClassLoader(
+    candidate: ClassLoader?,
+    guestClassLoader: ClassLoader
+): Boolean = candidate !== guestClassLoader &&
+    candidate?.javaClass?.name == "android.app.LoadedApk\$WarningContextClassLoader"
 
 class LoadedApkGuestApplicationCreator(
     private val activityThreadProvider: () -> Any = { ActivityThreadCompat.currentActivityThread() },
@@ -402,7 +776,14 @@ class LoadedApkGuestApplicationCreator(
             applicationInfo = applicationInfo,
             resources = resourceBundle.resources,
             classLoader = request.guestClassLoader,
-            application = null
+            application = null,
+            binderPackageName = resolveSystemHostPackageName(
+                guestPackages = setOf(snapshot.originPackageName, snapshot.virtualPackageName),
+                processSlot = request.virtualContextConfig.processSlot,
+                processName = runCatching { Application.getProcessName() }.getOrNull(),
+                baseOpPackageName = runCatching { request.hostContext.opPackageName }.getOrNull(),
+                basePackageName = runCatching { request.hostContext.packageName }.getOrNull()
+            )
         )
         val aliases = listOf(snapshot.originPackageName, snapshot.virtualPackageName)
         val installResult = loadedApkInstaller(activityThread, state, aliases)
@@ -484,6 +865,7 @@ class LoadedApkGuestApplicationCreator(
                 BootstrapEvidence("loadedApkApplicationCreatorPatchedFields", installResult.patchResult.patchedFields.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationCreatorSkippedFields", installResult.patchResult.skippedFieldReasons.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationCreatorInstalledAliasCount", installResult.installedAliasCount.toString()),
+                BootstrapEvidence("loadedApkBinderPackageName", state.binderPackageName),
                 BootstrapEvidence(
                     "loadedApkApplicationInfoProcessName",
                     request.virtualContextConfig.effectiveGuestProcessName
@@ -497,7 +879,8 @@ class LoadedApkGuestApplicationCreator(
                 BootstrapEvidence("activityThreadApplicationBindingPatchedFields", bindResult.activityThreadPatchedFields.joinToString(",")),
                 BootstrapEvidence("loadedApkApplicationOnCreateDeferred", "true")
             ),
-            rollbackHandle = bindResult.rollbackHandle
+            rollbackHandle = bindResult.rollbackHandle,
+            loadedApk = loadedApk
         )
     }
 
@@ -548,7 +931,8 @@ data class GuestApplicationCreateResult(
     val application: Application,
     val attachedContextPackageName: String?,
     val evidence: List<BootstrapEvidence> = emptyList(),
-    val rollbackHandle: ActivityThreadLoadedApkRollbackHandle? = null
+    val rollbackHandle: ActivityThreadLoadedApkRollbackHandle? = null,
+    val loadedApk: Any? = null
 )
 
 class LoadedApkApplicationCreationException(

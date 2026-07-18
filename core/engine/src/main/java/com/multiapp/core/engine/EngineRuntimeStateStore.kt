@@ -90,18 +90,18 @@ data class EngineRuntimeStateRecord(
             splitNames = splitNames,
             isolatedSplits = isolatedSplits,
             dataDir = packageDataDir,
-            nativeLibraryDir = nativeLibraryDir,
-            applicationClassName = applicationClassName,
-            processName = packageProcessName,
-            taskAffinity = taskAffinity,
+            nativeLibraryDir = nativeLibraryDir.normalizedOptionalManifestValue(),
+            applicationClassName = applicationClassName.normalizedOptionalManifestValue(),
+            processName = packageProcessName.normalizedOptionalManifestValue(),
+            taskAffinity = taskAffinity.normalizedOptionalManifestValue(),
             themeId = themeId,
             metaData = metaData,
             typedMetaData = typedMetaData,
-            launcherActivityName = launcherActivityName,
-            activities = activities,
-            services = services,
-            receivers = receivers,
-            providers = providers,
+            launcherActivityName = launcherActivityName.normalizedOptionalManifestValue(),
+            activities = activities.map(ResolvedComponent::normalizedManifestOptionals),
+            services = services.map(ResolvedComponent::normalizedManifestOptionals),
+            receivers = receivers.map(ResolvedComponent::normalizedManifestOptionals),
+            providers = providers.map(ResolvedComponent::normalizedManifestOptionals),
             permissions = permissions,
             originCertSha256 = originCertSha256,
             signerSha256Digests = signerSha256Digests,
@@ -156,18 +156,18 @@ data class EngineRuntimeStateRecord(
                 splitNames = snapshot.splitNames,
                 isolatedSplits = snapshot.isolatedSplits,
                 packageDataDir = snapshot.dataDir,
-                nativeLibraryDir = snapshot.nativeLibraryDir,
-                applicationClassName = snapshot.applicationClassName,
-                packageProcessName = snapshot.processName,
-                taskAffinity = snapshot.taskAffinity,
+                nativeLibraryDir = snapshot.nativeLibraryDir.normalizedOptionalManifestValue(),
+                applicationClassName = snapshot.applicationClassName.normalizedOptionalManifestValue(),
+                packageProcessName = snapshot.processName.normalizedOptionalManifestValue(),
+                taskAffinity = snapshot.taskAffinity.normalizedOptionalManifestValue(),
                 themeId = snapshot.themeId,
                 metaData = snapshot.metaData,
                 typedMetaData = snapshot.typedMetaData,
-                launcherActivityName = snapshot.launcherActivityName,
-                activities = snapshot.activities,
-                services = snapshot.services,
-                receivers = snapshot.receivers,
-                providers = snapshot.providers,
+                launcherActivityName = snapshot.launcherActivityName.normalizedOptionalManifestValue(),
+                activities = snapshot.activities.map(ResolvedComponent::normalizedManifestOptionals),
+                services = snapshot.services.map(ResolvedComponent::normalizedManifestOptionals),
+                receivers = snapshot.receivers.map(ResolvedComponent::normalizedManifestOptionals),
+                providers = snapshot.providers.map(ResolvedComponent::normalizedManifestOptionals),
                 permissions = snapshot.permissions,
                 originCertSha256 = snapshot.originCertSha256,
                 signerSha256Digests = snapshot.signerSha256Digests,
@@ -178,6 +178,21 @@ data class EngineRuntimeStateRecord(
         }
     }
 }
+
+private fun String?.normalizedOptionalManifestValue(): String? =
+    this?.trim()?.takeIf(String::isNotEmpty)
+
+private fun ResolvedComponent.normalizedManifestOptionals(): ResolvedComponent = copy(
+    launchMode = launchMode.normalizedOptionalManifestValue(),
+    processName = processName.normalizedOptionalManifestValue(),
+    taskAffinity = taskAffinity.normalizedOptionalManifestValue(),
+    screenOrientation = screenOrientation.normalizedOptionalManifestValue(),
+    configChanges = configChanges.normalizedOptionalManifestValue(),
+    permission = permission.normalizedOptionalManifestValue(),
+    readPermission = readPermission.normalizedOptionalManifestValue(),
+    writePermission = writePermission.normalizedOptionalManifestValue(),
+    targetActivityName = targetActivityName.normalizedOptionalManifestValue()
+)
 
 interface EngineRuntimeStateStore {
     fun put(record: EngineRuntimeStateRecord)
@@ -355,7 +370,8 @@ class FileBackedEngineRuntimeStateStore(
             properties.setProperty(prefix + RUNTIME_EPOCH, record.runtimeEpoch.toString())
             properties.setProperty(prefix + ENGINE_SESSION_ID, record.engineSessionId)
             record.processId?.let { properties.setProperty(prefix + PROCESS_ID, it.toString()) }
-            record.runtimeProcessName?.let { properties.setProperty(prefix + RUNTIME_PROCESS_NAME, it) }
+            record.runtimeProcessName.normalizedOptionalManifestValue()
+                ?.let { properties.setProperty(prefix + RUNTIME_PROCESS_NAME, it) }
             properties.setProperty(prefix + STATE, record.state.name)
             properties.setProperty(prefix + APPLICATION_LABEL, record.applicationLabel)
             properties.setProperty(prefix + VERSION_CODE, record.versionCode.toString())
@@ -371,14 +387,19 @@ class FileBackedEngineRuntimeStateStore(
             properties.setProperty(prefix + SPLIT_NAMES, record.splitNames.encodeStringList())
             properties.setProperty(prefix + ISOLATED_SPLITS, record.isolatedSplits.toString())
             properties.setProperty(prefix + PACKAGE_DATA_DIR, record.packageDataDir)
-            record.nativeLibraryDir?.let { properties.setProperty(prefix + NATIVE_LIBRARY_DIR, it) }
-            record.applicationClassName?.let { properties.setProperty(prefix + APPLICATION_CLASS_NAME, it) }
-            record.packageProcessName?.let { properties.setProperty(prefix + PACKAGE_PROCESS_NAME, it) }
-            record.taskAffinity?.let { properties.setProperty(prefix + TASK_AFFINITY, it) }
+            record.nativeLibraryDir.normalizedOptionalManifestValue()
+                ?.let { properties.setProperty(prefix + NATIVE_LIBRARY_DIR, it) }
+            record.applicationClassName.normalizedOptionalManifestValue()
+                ?.let { properties.setProperty(prefix + APPLICATION_CLASS_NAME, it) }
+            record.packageProcessName.normalizedOptionalManifestValue()
+                ?.let { properties.setProperty(prefix + PACKAGE_PROCESS_NAME, it) }
+            record.taskAffinity.normalizedOptionalManifestValue()
+                ?.let { properties.setProperty(prefix + TASK_AFFINITY, it) }
             properties.setProperty(prefix + THEME_ID, record.themeId.toString())
             properties.storeStringMap(prefix + META_DATA, record.metaData)
             properties.storeVirtualMetaData(prefix + TYPED_META_DATA, record.typedMetaData)
-            record.launcherActivityName?.let { properties.setProperty(prefix + LAUNCHER_ACTIVITY_NAME, it) }
+            record.launcherActivityName.normalizedOptionalManifestValue()
+                ?.let { properties.setProperty(prefix + LAUNCHER_ACTIVITY_NAME, it) }
             properties.storeComponents(prefix + ACTIVITIES, record.activities)
             properties.storeComponents(prefix + SERVICES, record.services)
             properties.storeComponents(prefix + RECEIVERS, record.receivers)
@@ -481,7 +502,8 @@ class FileBackedEngineRuntimeStateStore(
                 runtimeEpoch = properties.required(prefix + RUNTIME_EPOCH).toLong(),
                 engineSessionId = properties.required(prefix + ENGINE_SESSION_ID),
                 processId = properties.getProperty(prefix + PROCESS_ID)?.toIntOrNull(),
-                runtimeProcessName = properties.getProperty(prefix + RUNTIME_PROCESS_NAME),
+                runtimeProcessName = properties.getProperty(prefix + RUNTIME_PROCESS_NAME)
+                    .normalizedOptionalManifestValue(),
                 state = enumValueOf(properties.required(prefix + STATE)),
                 applicationLabel = properties.required(prefix + APPLICATION_LABEL),
                 versionCode = properties.required(prefix + VERSION_CODE).toLong(),
@@ -489,7 +511,8 @@ class FileBackedEngineRuntimeStateStore(
                 targetSdk = properties.required(prefix + TARGET_SDK).toInt(),
                 minSdk = properties.required(prefix + MIN_SDK).toInt(),
                 sourceDir = properties.required(prefix + SOURCE_DIR),
-                sourceSha256 = properties.getProperty(prefix + SOURCE_SHA256),
+                sourceSha256 = properties.getProperty(prefix + SOURCE_SHA256)
+                    .normalizedOptionalManifestValue(),
                 publicSourceDir = properties.required(prefix + PUBLIC_SOURCE_DIR),
                 splitSourceDirs = properties.getProperty(prefix + SPLIT_SOURCE_DIRS).decodeStringList(),
                 splitSha256s = properties.getProperty(prefix + SPLIT_SHA256S).decodeStringList(),
@@ -497,20 +520,26 @@ class FileBackedEngineRuntimeStateStore(
                 splitNames = properties.getProperty(prefix + SPLIT_NAMES).decodeStringList(),
                 isolatedSplits = properties.getProperty(prefix + ISOLATED_SPLITS).toBoolean(),
                 packageDataDir = properties.required(prefix + PACKAGE_DATA_DIR),
-                nativeLibraryDir = properties.getProperty(prefix + NATIVE_LIBRARY_DIR),
-                applicationClassName = properties.getProperty(prefix + APPLICATION_CLASS_NAME),
-                packageProcessName = properties.getProperty(prefix + PACKAGE_PROCESS_NAME),
-                taskAffinity = properties.getProperty(prefix + TASK_AFFINITY),
+                nativeLibraryDir = properties.getProperty(prefix + NATIVE_LIBRARY_DIR)
+                    .normalizedOptionalManifestValue(),
+                applicationClassName = properties.getProperty(prefix + APPLICATION_CLASS_NAME)
+                    .normalizedOptionalManifestValue(),
+                packageProcessName = properties.getProperty(prefix + PACKAGE_PROCESS_NAME)
+                    .normalizedOptionalManifestValue(),
+                taskAffinity = properties.getProperty(prefix + TASK_AFFINITY)
+                    .normalizedOptionalManifestValue(),
                 themeId = properties.getProperty(prefix + THEME_ID).orEmpty().toIntOrNull() ?: 0,
                 metaData = properties.decodeStringMap(prefix + META_DATA),
                 typedMetaData = properties.decodeVirtualMetaData(prefix + TYPED_META_DATA),
-                launcherActivityName = properties.getProperty(prefix + LAUNCHER_ACTIVITY_NAME),
+                launcherActivityName = properties.getProperty(prefix + LAUNCHER_ACTIVITY_NAME)
+                    .normalizedOptionalManifestValue(),
                 activities = properties.decodeComponents(prefix + ACTIVITIES),
                 services = properties.decodeComponents(prefix + SERVICES),
                 receivers = properties.decodeComponents(prefix + RECEIVERS),
                 providers = properties.decodeComponents(prefix + PROVIDERS),
                 permissions = properties.getProperty(prefix + PERMISSIONS).decodeStringList(),
-                originCertSha256 = properties.getProperty(prefix + ORIGIN_CERT_SHA256),
+                originCertSha256 = properties.getProperty(prefix + ORIGIN_CERT_SHA256)
+                    .normalizedOptionalManifestValue(),
                 signerSha256Digests = properties.getProperty(prefix + SIGNER_SHA256_DIGESTS).decodeStringList(),
                 hasMultipleSigners = properties.getProperty(prefix + HAS_MULTIPLE_SIGNERS).toBoolean()
             )
@@ -589,21 +618,30 @@ class FileBackedEngineRuntimeStateStore(
             setProperty(itemPrefix + COMPONENT_INTENT_FILTERS, component.intentFilters.encodeStringList())
             storeResolvedIntentFilters(itemPrefix + COMPONENT_RESOLVED_INTENT_FILTERS, component.resolvedIntentFilters)
             setProperty(itemPrefix + COMPONENT_AUTHORITIES, component.authorities.encodeStringList())
-            component.launchMode?.let { setProperty(itemPrefix + COMPONENT_LAUNCH_MODE, it) }
-            component.processName?.let { setProperty(itemPrefix + COMPONENT_PROCESS_NAME, it) }
-            component.taskAffinity?.let { setProperty(itemPrefix + COMPONENT_TASK_AFFINITY, it) }
+            component.launchMode.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_LAUNCH_MODE, it) }
+            component.processName.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_PROCESS_NAME, it) }
+            component.taskAffinity.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_TASK_AFFINITY, it) }
             setProperty(itemPrefix + COMPONENT_THEME_ID, component.themeId.toString())
-            component.screenOrientation?.let { setProperty(itemPrefix + COMPONENT_SCREEN_ORIENTATION, it) }
-            component.configChanges?.let { setProperty(itemPrefix + COMPONENT_CONFIG_CHANGES, it) }
-            component.permission?.let { setProperty(itemPrefix + COMPONENT_PERMISSION, it) }
-            component.readPermission?.let { setProperty(itemPrefix + COMPONENT_READ_PERMISSION, it) }
-            component.writePermission?.let { setProperty(itemPrefix + COMPONENT_WRITE_PERMISSION, it) }
+            component.screenOrientation.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_SCREEN_ORIENTATION, it) }
+            component.configChanges.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_CONFIG_CHANGES, it) }
+            component.permission.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_PERMISSION, it) }
+            component.readPermission.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_READ_PERMISSION, it) }
+            component.writePermission.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_WRITE_PERMISSION, it) }
             setProperty(itemPrefix + COMPONENT_GRANT_URI_PERMISSIONS, component.grantUriPermissions.toString())
             storeProviderPathPermissions(itemPrefix + COMPONENT_PATH_PERMISSIONS, component.pathPermissions)
             storeProviderPathPatterns(itemPrefix + COMPONENT_URI_PERMISSION_PATTERNS, component.uriPermissionPatterns)
             storeStringMap(itemPrefix + COMPONENT_META_DATA, component.metaData)
             storeVirtualMetaData(itemPrefix + COMPONENT_TYPED_META_DATA, component.typedMetaData)
-            component.targetActivityName?.let { setProperty(itemPrefix + COMPONENT_TARGET_ACTIVITY_NAME, it) }
+            component.targetActivityName.normalizedOptionalManifestValue()
+                ?.let { setProperty(itemPrefix + COMPONENT_TARGET_ACTIVITY_NAME, it) }
         }
     }
 
@@ -618,21 +656,30 @@ class FileBackedEngineRuntimeStateStore(
                 intentFilters = getProperty(itemPrefix + COMPONENT_INTENT_FILTERS).decodeStringList(),
                 resolvedIntentFilters = decodeResolvedIntentFilters(itemPrefix + COMPONENT_RESOLVED_INTENT_FILTERS),
                 authorities = getProperty(itemPrefix + COMPONENT_AUTHORITIES).decodeStringList(),
-                launchMode = getProperty(itemPrefix + COMPONENT_LAUNCH_MODE),
-                processName = getProperty(itemPrefix + COMPONENT_PROCESS_NAME),
-                taskAffinity = getProperty(itemPrefix + COMPONENT_TASK_AFFINITY),
+                launchMode = getProperty(itemPrefix + COMPONENT_LAUNCH_MODE)
+                    .normalizedOptionalManifestValue(),
+                processName = getProperty(itemPrefix + COMPONENT_PROCESS_NAME)
+                    .normalizedOptionalManifestValue(),
+                taskAffinity = getProperty(itemPrefix + COMPONENT_TASK_AFFINITY)
+                    .normalizedOptionalManifestValue(),
                 themeId = getProperty(itemPrefix + COMPONENT_THEME_ID).orEmpty().toIntOrNull() ?: 0,
-                screenOrientation = getProperty(itemPrefix + COMPONENT_SCREEN_ORIENTATION),
-                configChanges = getProperty(itemPrefix + COMPONENT_CONFIG_CHANGES),
-                permission = getProperty(itemPrefix + COMPONENT_PERMISSION),
-                readPermission = getProperty(itemPrefix + COMPONENT_READ_PERMISSION),
-                writePermission = getProperty(itemPrefix + COMPONENT_WRITE_PERMISSION),
+                screenOrientation = getProperty(itemPrefix + COMPONENT_SCREEN_ORIENTATION)
+                    .normalizedOptionalManifestValue(),
+                configChanges = getProperty(itemPrefix + COMPONENT_CONFIG_CHANGES)
+                    .normalizedOptionalManifestValue(),
+                permission = getProperty(itemPrefix + COMPONENT_PERMISSION)
+                    .normalizedOptionalManifestValue(),
+                readPermission = getProperty(itemPrefix + COMPONENT_READ_PERMISSION)
+                    .normalizedOptionalManifestValue(),
+                writePermission = getProperty(itemPrefix + COMPONENT_WRITE_PERMISSION)
+                    .normalizedOptionalManifestValue(),
                 grantUriPermissions = getProperty(itemPrefix + COMPONENT_GRANT_URI_PERMISSIONS).toBoolean(),
                 pathPermissions = decodeProviderPathPermissions(itemPrefix + COMPONENT_PATH_PERMISSIONS),
                 uriPermissionPatterns = decodeProviderPathPatterns(itemPrefix + COMPONENT_URI_PERMISSION_PATTERNS),
                 metaData = decodeStringMap(itemPrefix + COMPONENT_META_DATA),
                 typedMetaData = decodeVirtualMetaData(itemPrefix + COMPONENT_TYPED_META_DATA),
                 targetActivityName = getProperty(itemPrefix + COMPONENT_TARGET_ACTIVITY_NAME)
+                    .normalizedOptionalManifestValue()
             )
         }
     }

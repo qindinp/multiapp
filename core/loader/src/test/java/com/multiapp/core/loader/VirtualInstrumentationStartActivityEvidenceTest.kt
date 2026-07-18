@@ -875,6 +875,147 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     }
 
     @Test
+    fun `activity record recovery reuses the already authorized substitution preflight`() {
+        var authorizationCalls = 0
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                authorizationCalls += 1
+                if (authorizationCalls == 1) {
+                    VirtualActivityLaunchAuthorityResult(true, "launch_capability_authorized")
+                } else {
+                    VirtualActivityLaunchAuthorityResult(false, "launch_capability_replayed")
+                }
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+        val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
+        val recordManager = VirtualActivityRecordManager()
+        val proxyIntent = proxyIntentForRecordRecovery()
+        val guestIntent = guestIntentForRecovery()
+        val preflight = instrumentation.validateProxyActivityLaunchBeforeBootstrap(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntent,
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            activityRecordManager = recordManager
+        )
+
+        val result = instrumentation.restoreActivityRecordFromProxyIntentIfMissing(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntent,
+            guestIntent = guestIntent,
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            activityRecordManager = recordManager,
+            authorizedPreflight = preflight
+        )
+
+        assertEquals(1, authorizationCalls)
+        assertTrue(result.activityRecordRecovered)
+        assertNotNull(recordManager.resolve("token-001"))
+    }
+
+    @Test
+    fun `instrumentation fallback owns one capability consumption after metadata is complete`() {
+        var authorizationCalls = 0
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                authorizationCalls += 1
+                if (authorizationCalls == 1) {
+                    VirtualActivityLaunchAuthorityResult(true, "launch_capability_authorized")
+                } else {
+                    VirtualActivityLaunchAuthorityResult(false, "launch_capability_replayed")
+                }
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+        val instrumentation = VirtualInstrumentation(mockk<Instrumentation>(relaxed = true))
+        val recordManager = VirtualActivityRecordManager()
+
+        val incomplete = instrumentation.validateProxyActivityLaunchBeforeBootstrap(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntentForRecordRecovery(originPackageName = null),
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            activityRecordManager = recordManager
+        )
+        val preflight = instrumentation.validateProxyActivityLaunchBeforeBootstrap(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntentForRecordRecovery(),
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            activityRecordManager = recordManager
+        )
+        val recovered = instrumentation.restoreActivityRecordFromProxyIntentIfMissing(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntentForRecordRecovery(),
+            guestIntent = guestIntentForRecovery(),
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity",
+            activityRecordManager = recordManager,
+            authorizedPreflight = preflight
+        )
+
+        assertTrue(incomplete.isRejected)
+        assertEquals("ORIGIN_PACKAGE_MISSING", incomplete.skippedReason)
+        assertEquals("ENGINE_LAUNCH_AUTHORIZED", preflight.skippedReason)
+        assertEquals(1, authorizationCalls)
+        assertTrue(recovered.activityRecordRecovered)
+    }
+
+    @Test
+    fun `instrumentation fallback consumes once even when activity record was pre-registered`() {
+        var authorizationCalls = 0
+        VirtualActivityLaunchAuthority.install(
+            validator = VirtualActivityLaunchValidator {
+                authorizationCalls += 1
+                if (authorizationCalls == 1) {
+                    VirtualActivityLaunchAuthorityResult(true, "launch_capability_authorized")
+                } else {
+                    VirtualActivityLaunchAuthorityResult(false, "launch_capability_replayed")
+                }
+            },
+            resumeObserver = VirtualActivityResumeObserver { _, _ -> }
+        )
+        val recordManager = VirtualActivityRecordManager()
+        recordManager.registerLaunch(
+            record = VirtualActivityRecord(
+                token = "token-001",
+                instanceId = "inst-001",
+                originPackageName = "com.test.minimal",
+                guestActivityClassName = "com.test.minimal.MainActivity",
+                proxyActivityClassName = "com.multiapp.app.container.ProxyActivity0"
+            ),
+            intentFlags = 0,
+            dataIntent = null
+        )
+        val instrumentation = VirtualInstrumentation(
+            base = mockk<Instrumentation>(relaxed = true),
+            activityRecordManager = recordManager
+        )
+        val proxyIntent = proxyIntentForRecordRecovery()
+
+        val first = instrumentation.validateProxyActivityLaunchBeforeBootstrap(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntent,
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity"
+        )
+        val repeated = instrumentation.validateProxyActivityLaunchBeforeBootstrap(
+            proxyClassName = "com.multiapp.app.container.ProxyActivity0",
+            proxyIntent = proxyIntent,
+            instanceId = "inst-001",
+            guestActivityClassName = "com.test.minimal.MainActivity"
+        )
+
+        assertEquals(1, authorizationCalls)
+        assertTrue(first.activityRecordFound)
+        assertEquals("ALREADY_REGISTERED", first.skippedReason)
+        assertTrue(repeated.activityRecordFound)
+        assertEquals("ALREADY_REGISTERED", repeated.skippedReason)
+    }
+
+    @Test
     fun `activity record recovery defaults to instrumentation record manager`() {
         val recordManager = VirtualActivityRecordManager()
         val instrumentation = VirtualInstrumentation(
@@ -1194,7 +1335,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         result: HostedBootstrapResult
     ) {
         val runtimeClass = Class.forName("${VirtualInstrumentation::class.java.name}\$HostedActivityRuntime")
-        val constructor = runtimeClass.getDeclaredConstructor(Application::class.java, HostedBootstrapResult::class.java)
+        val constructor = runtimeClass.getDeclaredConstructor(Context::class.java, HostedBootstrapResult::class.java)
         constructor.isAccessible = true
         val runtime = constructor.newInstance(hostApplication, result)
         val cacheField = VirtualInstrumentation::class.java.getDeclaredField("hostedRuntimeCache")

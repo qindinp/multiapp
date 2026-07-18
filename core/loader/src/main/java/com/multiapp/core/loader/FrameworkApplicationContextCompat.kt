@@ -33,20 +33,23 @@ internal object FrameworkApplicationContextCompat {
         return patchTarget(
             target = unwrapResult.context,
             hostPackageName = hostPackageName,
-            wrapperDepth = unwrapResult.wrapperDepth
+            wrapperDepth = unwrapResult.wrapperDepth,
+            runtimeUid = RuntimeUidCompat.resolve()
         )
     }
 
     internal fun patchTarget(
         target: Any,
         hostPackageName: String,
-        wrapperDepth: Int = 0
+        wrapperDepth: Int = 0,
+        runtimeUid: Int = RuntimeUidCompat.resolve()
     ): FrameworkApplicationContextPatchResult {
         val patched = mutableListOf<String>()
         val skipped = mutableListOf<String>()
         patchField(target, "mBasePackageName", hostPackageName, "ContextImpl", patched, skipped)
         patchField(target, "mOpPackageName", hostPackageName, "ContextImpl", patched, skipped)
         patchField(target, "mPackageManager", null, "ContextImpl", patched, skipped)
+        patchAttributionSource(target, hostPackageName, runtimeUid, patched, skipped)
 
         val contentResolver = readField(target, "mContentResolver")
         if (contentResolver == null) {
@@ -68,6 +71,45 @@ internal object FrameworkApplicationContextCompat {
             patchedFields = patched,
             skippedFieldReasons = skipped
         )
+    }
+
+    private fun patchAttributionSource(
+        target: Any,
+        hostPackageName: String,
+        runtimeUid: Int,
+        patched: MutableList<String>,
+        skipped: MutableList<String>
+    ) {
+        val evidenceName = "ContextImpl.mAttributionSource"
+        val field = findFieldInHierarchy(target.javaClass, "mAttributionSource")
+        if (field == null) {
+            skipped += "$evidenceName:FIELD_NOT_FOUND"
+            return
+        }
+        val current = runCatching { field.get(target) }.getOrNull()
+        if (current == null) {
+            skipped += "$evidenceName:SOURCE_UNAVAILABLE"
+            return
+        }
+        val remapped = IntentRemapDiagnostics.remapAttributionSourceToHost(
+            value = current,
+            hostPackageName = hostPackageName,
+            runtimeUid = runtimeUid
+        )
+        runCatching { field.set(target, remapped) }
+            .onFailure { error ->
+                skipped += "$evidenceName:SET_FAILED:${error.javaClass.simpleName}"
+            }
+            .onSuccess {
+                val installed = runCatching { field.get(target) }.getOrNull()
+                val packageName = IntentRemapDiagnostics.attributionSourcePackageName(installed)
+                val uid = IntentRemapDiagnostics.attributionSourceUid(installed)
+                if (packageName == hostPackageName && uid == runtimeUid) {
+                    patched += evidenceName
+                } else {
+                    skipped += "$evidenceName:VERIFY_FAILED:${packageName.orEmpty()}:${uid ?: -1}"
+                }
+            }
     }
 
     private fun unwrap(context: Context): ContextUnwrapResult {
@@ -172,7 +214,12 @@ internal data class FrameworkApplicationContextPatchResult(
 ) {
     val binderIdentityReady: Boolean
         get() = "ContextImpl.mBasePackageName" in patchedFields &&
-            "ContextImpl.mOpPackageName" in patchedFields
+            "ContextImpl.mOpPackageName" in patchedFields &&
+            "ContentResolver.mPackageName" in patchedFields &&
+            (
+                "ContextImpl.mAttributionSource" in patchedFields ||
+                    "ContextImpl.mAttributionSource:FIELD_NOT_FOUND" in skippedFieldReasons
+                )
 
     companion object {
         fun skipped(targetClassName: String, reason: String) =

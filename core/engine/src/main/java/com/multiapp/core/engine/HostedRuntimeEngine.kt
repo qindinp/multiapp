@@ -241,7 +241,10 @@ class DefaultHostedRuntimeEngine @Inject constructor(
         instanceId: String,
         expectedProcessSlot: String?,
         effectiveGuestProcessName: String?
-    ): ProcessSpecificHostedRuntimeView? = EngineRuntimeIpcClients.engineQueryRuntimeState(instanceId)
+    ): ProcessSpecificHostedRuntimeView? = EngineRuntimeIpcClients.engineQueryRuntimeState(
+        instanceId = instanceId,
+        processSlot = expectedProcessSlot
+    )
         ?.takeIf { runtime ->
             runtime.instanceId == instanceId &&
                 runtime.state != VirtualRuntimeState.STOPPED &&

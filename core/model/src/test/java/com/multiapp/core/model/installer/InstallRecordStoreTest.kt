@@ -40,6 +40,10 @@ class InstallRecordStoreTest {
             providers = listOf(
                 ComponentInfo(
                     name = "com.example.provider.DataProvider",
+                    authorities = listOf(
+                        "com.example.provider.data",
+                        "com.example.provider.legacy"
+                    ),
                     permission = "com.example.provider.ACCESS",
                     readPermission = "com.example.provider.READ",
                     writePermission = "com.example.provider.WRITE",
@@ -63,6 +67,7 @@ class InstallRecordStoreTest {
         assertTrue(store.save(record).isSuccess)
 
         val provider = assertNotNull(store.load(record.packageName)).providers.single()
+        assertEquals(record.providers.single().authorities, provider.authorities)
         assertEquals("com.example.provider.ACCESS", provider.permission)
         assertEquals("com.example.provider.READ", provider.readPermission)
         assertEquals("com.example.provider.WRITE", provider.writePermission)

@@ -273,21 +273,23 @@ class NativeHookBridgeTest {
             "/sandbox/example"
         )
 
-        assertEquals(4, ruleCount)
-        assertEquals(4, bridge.getRedirectionCount())
+        assertEquals(NativeHookBridge.GUEST_APP_SCOPED_REDIRECT_RULE_COUNT, ruleCount)
+        assertEquals(NativeHookBridge.GUEST_APP_SCOPED_REDIRECT_RULE_COUNT, bridge.getRedirectionCount())
     }
 
     @Test
-    fun `setupGuestPrivatePathRedirections leaves external and obb paths unchanged`() {
+    fun `setupGuestPrivatePathRedirections isolates app scoped external and obb paths`() {
         bridge.setupGuestPrivatePathRedirections("com.example.app", "inst_001", "/sandbox/example")
 
         val externalStorage = "/storage/emulated/0/Android/data/com.example.app/files/photo.jpg"
         val sdcard = "/sdcard/Android/data/com.example.app/files/photo.jpg"
         val obb = "/storage/emulated/0/Android/obb/com.example.app/main.obb"
 
-        assertEquals(externalStorage, bridge.translatePath(externalStorage))
-        assertEquals(sdcard, bridge.translatePath(sdcard))
-        assertEquals(obb, bridge.translatePath(obb))
+        assertEquals("/sandbox/example/external_files/photo.jpg", bridge.translatePath(externalStorage))
+        assertEquals("/sandbox/example/external_files/photo.jpg", bridge.translatePath(sdcard))
+        assertEquals("/sandbox/example/obb/main.obb", bridge.translatePath(obb))
+        val sibling = "/storage/emulated/0/Android/data/com.example.application/files/photo.jpg"
+        assertEquals(sibling, bridge.translatePath(sibling))
     }
 
     @Test

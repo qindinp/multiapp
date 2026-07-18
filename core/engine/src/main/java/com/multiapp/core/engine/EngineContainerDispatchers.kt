@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import com.multiapp.core.loader.VirtualProviderDispatcher
-import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.loader.VirtualActivityRecordManager
 import com.multiapp.core.loader.VirtualProcessRuntime
 import com.multiapp.core.loader.VirtualServiceDispatcher
@@ -13,6 +12,7 @@ import com.multiapp.core.loader.VirtualServiceManager
 import com.multiapp.core.loader.VirtualServiceStartRequest
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.ProviderRouteContract
+import com.multiapp.core.model.engine.ProviderStubAuthorityContract
 
 internal const val EXTRA_ENGINE_COMPONENT_PROCESS_LAUNCH_TICKET =
     "multiapp.engine.componentProcessLaunchTicket"
@@ -116,6 +116,7 @@ class DefaultEngineProviderDispatcher private constructor(
                 guestAuthority = guestAuthority,
                 proxyAuthority = proxyUri.authority?.takeIf { it.isNotBlank() },
                 processSlot = processSlot,
+                routeToken = routeToken,
                 routeTokenPresent = routeToken != null,
                 routeTokenVerified = verifiedRoute != null,
                 callerInstanceId = verifiedRoute?.callerInstanceId,
@@ -174,11 +175,8 @@ private data class EngineProviderPlanRoute(
 )
 
 object EngineProviderRouteSlots {
-    fun stubAuthority(hostPackageName: String, processSlot: String?): String {
-        val base = "$hostPackageName.multiapp.provider.stub"
-        val index = ProxyActivitySlots.processSlotIndex(hostPackageName, processSlot) ?: return base
-        return "$base.v$index"
-    }
+    fun stubAuthority(hostPackageName: String, processSlot: String?): String =
+        ProviderStubAuthorityContract.stubAuthority(hostPackageName, processSlot)
 }
 
 data class EngineServiceDispatchRequest(

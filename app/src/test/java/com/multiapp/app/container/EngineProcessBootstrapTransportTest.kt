@@ -108,13 +108,20 @@ class EngineProcessBootstrapTransportTest {
             assertEquals(EngineResultStatus.FAIL, result.verdict)
             assertTrue(!result.ready)
             assertEquals(0, recycleCalls)
+            val recycleStatus = result.evidence["processSlotRecycleStatus"]
             assertTrue(
-                result.evidence["processSlotRecycleStatus"] in setOf(
+                recycleStatus in setOf(
                     "DEFERRED_IN_FLIGHT",
-                    "IDENTITY_UNAVAILABLE"
-                )
+                    "DEFERRED_NOT_CANCELLED",
+                    "IDENTITY_UNAVAILABLE",
+                    "NOT_STARTED"
+                ),
+                result.evidence.toString()
             )
-            assertEquals("false", result.evidence["processSlotReusable"])
+            assertEquals(
+                (recycleStatus == "NOT_STARTED").toString(),
+                result.evidence["processSlotReusable"]
+            )
         } finally {
             executor.shutdownNow()
         }

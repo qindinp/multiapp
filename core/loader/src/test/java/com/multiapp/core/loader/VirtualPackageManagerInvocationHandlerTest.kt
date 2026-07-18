@@ -265,6 +265,33 @@ class VirtualPackageManagerInvocationHandlerTest {
     }
 
     @Test
+    fun `scoped intent query preserves hidden PMS slice shape without leaking real package results`() {
+        val original = FakeResolveInfoSliceApiImpl()
+        val handler = VirtualPackageManagerInvocationHandler(
+            originalPackageManager = original,
+            service = VirtualPackageService(snapshot(), RUNTIME_UID),
+            runtimeUid = RUNTIME_UID
+        )
+        val method = FakeResolveInfoSliceApi::class.java.getMethod(
+            "queryIntentActivities",
+            Intent::class.java,
+            Int::class.javaPrimitiveType!!
+        )
+
+        val result = handler.invoke(
+            proxy = Any(),
+            method = method,
+            args = arrayOf(scopedLauncherIntent(), 0)
+        ) as FakeResolveInfoSlice
+
+        assertEquals(
+            listOf("com.test.minimal/com.test.minimal.MainActivity"),
+            result.getList().map { "${it.activityInfo.packageName}/${it.activityInfo.name}" }
+        )
+        assertEquals(listOf("queryIntentActivities:${Intent.ACTION_MAIN}"), original.calls)
+    }
+
+    @Test
     fun `virtual enabled settings fail closed without delegating to original PMS`() {
         val original = FakePackageManagerApiImpl()
         val handler = VirtualPackageManagerInvocationHandler(
@@ -844,6 +871,32 @@ class VirtualPackageManagerInvocationHandlerTest {
         fun getList(): List<PackageInfo> = mList
     }
 
+    private interface FakeResolveInfoSliceApi {
+        fun queryIntentActivities(intent: Intent, flags: Int): FakeResolveInfoSlice
+    }
+
+    private class FakeResolveInfoSliceApiImpl : FakeResolveInfoSliceApi {
+        val calls = mutableListOf<String>()
+
+        override fun queryIntentActivities(intent: Intent, flags: Int): FakeResolveInfoSlice {
+            calls += "queryIntentActivities:${intent.action}"
+            return FakeResolveInfoSlice(
+                listOf(
+                    ResolveInfo().apply {
+                        activityInfo = ActivityInfo().apply {
+                            packageName = "com.test.minimal"
+                            name = "com.test.minimal.RealInstalledActivity"
+                        }
+                    }
+                )
+            )
+        }
+    }
+
+    private class FakeResolveInfoSlice(private var mList: List<ResolveInfo>) {
+        fun getList(): List<ResolveInfo> = mList
+    }
+
     private class FakeResolver(snapshots: List<VirtualPackageSnapshot>) : VirtualPackageManagerServiceResolver {
         private val services = snapshots.associate { snapshot ->
             snapshot.originPackageName to VirtualPackageService(snapshot, RUNTIME_UID)
@@ -866,6 +919,14 @@ class VirtualPackageManagerInvocationHandlerTest {
     private fun launcherIntent() = mockk<Intent> {
         every { component } returns null
         every { `package` } returns null
+        every { action } returns Intent.ACTION_MAIN
+        every { categories } returns setOf(Intent.CATEGORY_LAUNCHER)
+        every { scheme } returns null
+    }
+
+    private fun scopedLauncherIntent() = mockk<Intent> {
+        every { component } returns null
+        every { `package` } returns "com.test.minimal"
         every { action } returns Intent.ACTION_MAIN
         every { categories } returns setOf(Intent.CATEGORY_LAUNCHER)
         every { scheme } returns null

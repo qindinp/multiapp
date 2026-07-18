@@ -20,6 +20,13 @@ import java.io.File
 object ActivityThreadLaunchRecordPatcher {
     private const val TAG = "ActivityLaunchPatcher"
     private const val EVIDENCE_DIR = "hosted_launch_evidence"
+    private const val RECORD_PATCH_CAPABILITY_OWNER = "ACTIVITY_THREAD_RECORD_PATCHER"
+    private const val INSTRUMENTATION_FALLBACK_CAPABILITY_OWNER = "VIRTUAL_INSTRUMENTATION_FALLBACK"
+    private const val LOADED_APK_BINDING_RECORD_PATCHED = "RECORD_PATCHED"
+    private const val LOADED_APK_BINDING_FRAMEWORK_DERIVED = "FRAMEWORK_DERIVED_FROM_ACTIVITY_INFO"
+    private val ACTIVITY_INFO_FIELDS = listOf("activityInfo", "mActivityInfo", "info", "mInfo")
+    private val INTENT_FIELDS = listOf("intent", "mIntent")
+    private val LOADED_APK_FIELDS = listOf("packageInfo", "mPackageInfo", "loadedApk", "mLoadedApk")
 
     fun patchMessage(
         message: Message,
@@ -60,16 +67,20 @@ object ActivityThreadLaunchRecordPatcher {
             guestActivityClassName = callbackResults.firstNotNullOfOrNull { it.guestActivityClassName },
             token = callbackResults.firstNotNullOfOrNull { it.token },
             loadedApkSource = callbackResults.firstNotNullOfOrNull { it.loadedApkSource },
+            loadedApkBindingMode = callbackResults.firstNotNullOfOrNull { it.loadedApkBindingMode },
             launchAuthorityStatus = callbackResults.firstNotNullOfOrNull { it.launchAuthorityStatus },
             launchAuthorityReason = callbackResults.firstNotNullOfOrNull { it.launchAuthorityReason },
             launchRecoveryStatus = callbackResults.firstNotNullOfOrNull { it.launchRecoveryStatus },
-            launchRecoveryReason = callbackResults.firstNotNullOfOrNull { it.launchRecoveryReason }
+            launchRecoveryReason = callbackResults.firstNotNullOfOrNull { it.launchRecoveryReason },
+            rolledBackFields = callbackResults.flatMap { it.rolledBackFields }.distinct(),
+            launchCapabilityOwner = callbackResults.firstNotNullOfOrNull { it.launchCapabilityOwner }
         ).also { writeEvidence(it) }
     }
 
     internal fun patchLaunchRecord(
         record: Any,
-        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global
+        processRuntime: VirtualProcessRuntime = VirtualProcessRuntime.global,
+        activityThreadProvider: () -> Any = ActivityThreadCompat::currentActivityThread
     ): ActivityThreadLaunchRecordPatchResult {
         val proxyIntent = readFirstField(record, listOf("intent", "mIntent")) as? Intent
             ?: return ActivityThreadLaunchRecordPatchResult(
@@ -100,11 +111,9 @@ object ActivityThreadLaunchRecordPatcher {
             )
         }
         var launchIdentity = proxyIntent.toVirtualActivityLaunchIdentity(proxyActivityClassName)
-        var launchAuthorization = launchIdentity?.let(VirtualActivityLaunchAuthority::authorize)
         var recoveryStatus: String? = null
         var recoveryReason: String? = null
-        if (launchIdentity == null || launchAuthorization?.accepted != true) {
-            val originalFailureReason = launchAuthorization?.reason ?: "activity_launch_identity_missing"
+        if (launchIdentity == null) {
             val recoveryRequest = recoveryRequest(proxyIntent, spec, proxyActivityClassName)
             val recovery = recoveryRequest?.let(VirtualActivityLaunchRecovery::recover)
             val recoveredIdentity = recovery?.identity?.takeIf { identity ->
@@ -116,45 +125,23 @@ object ActivityThreadLaunchRecordPatcher {
                 applyRecoveredIdentity(proxyIntent, recoveredIdentity)
                 spec = LaunchSpec.from(proxyIntent) ?: spec
                 launchIdentity = recoveredIdentity
-                launchAuthorization = VirtualActivityLaunchAuthority.authorize(recoveredIdentity)
-                recoveryStatus = if (launchAuthorization.accepted) "PASS" else "FAIL"
-                recoveryReason = if (launchAuthorization.accepted) {
-                    recovery.reason
-                } else {
-                    "${recovery.reason}:${launchAuthorization.reason}"
-                }
+                recoveryStatus = "PENDING"
+                recoveryReason = recovery.reason
             } else {
                 recoveryStatus = "FAIL"
                 recoveryReason = recovery?.reason ?: "activity_launch_recovery_request_invalid"
             }
-            if (launchIdentity == null || launchAuthorization?.accepted != true) {
-                val missingIdentity = launchIdentity == null
+            if (launchIdentity == null) {
                 return skippedPrelaunchPatch(
                     record = record,
                     spec = spec,
-                    reason = if (missingIdentity) {
-                        "ENGINE_LAUNCH_IDENTITY_MISSING"
-                    } else {
-                        "ENGINE_LAUNCH_REJECTED:${launchAuthorization?.reason ?: originalFailureReason}"
-                    },
+                    reason = "ENGINE_LAUNCH_IDENTITY_MISSING",
                     launchAuthorityStatus = "FAIL",
-                    launchAuthorityReason = launchAuthorization?.reason ?: originalFailureReason,
+                    launchAuthorityReason = "activity_launch_identity_missing",
                     launchRecoveryStatus = recoveryStatus,
                     launchRecoveryReason = recoveryReason
                 )
             }
-        }
-        val authorizedLaunch = requireNotNull(launchAuthorization)
-        if (!authorizedLaunch.accepted) {
-            return skippedPrelaunchPatch(
-                record = record,
-                spec = spec,
-                reason = "ENGINE_LAUNCH_REJECTED:${authorizedLaunch.reason}",
-                launchAuthorityStatus = "FAIL",
-                launchAuthorityReason = authorizedLaunch.reason,
-                launchRecoveryStatus = recoveryStatus,
-                launchRecoveryReason = recoveryReason
-            )
         }
 
         val snapshot = VirtualPackageRegistry.global.getByInstanceId(spec.instanceId)
@@ -162,8 +149,8 @@ object ActivityThreadLaunchRecordPatcher {
                 record = record,
                 spec = spec,
                 reason = "PACKAGE_SNAPSHOT_MISSING",
-                launchAuthorityStatus = "PASS",
-                launchAuthorityReason = authorizedLaunch.reason,
+                launchAuthorityStatus = "NOT_CONSUMED",
+                launchAuthorityReason = "runtime_not_ready:package_snapshot_missing",
                 launchRecoveryStatus = recoveryStatus,
                 launchRecoveryReason = recoveryReason
             )
@@ -183,8 +170,8 @@ object ActivityThreadLaunchRecordPatcher {
                 record = record,
                 spec = spec,
                 reason = "PACKAGE_SNAPSHOT_SOURCE_DIR_MISSING",
-                launchAuthorityStatus = "PASS",
-                launchAuthorityReason = authorizedLaunch.reason,
+                launchAuthorityStatus = "NOT_CONSUMED",
+                launchAuthorityReason = "runtime_not_ready:package_snapshot_source_dir_missing",
                 launchRecoveryStatus = recoveryStatus,
                 launchRecoveryReason = recoveryReason
             )
@@ -195,31 +182,133 @@ object ActivityThreadLaunchRecordPatcher {
                 record = record,
                 spec = spec,
                 reason = "GUEST_CLASS_LOADER_MISSING",
-                launchAuthorityStatus = "PASS",
-                launchAuthorityReason = authorizedLaunch.reason,
+                launchAuthorityStatus = "NOT_CONSUMED",
+                launchAuthorityReason = "runtime_not_ready:guest_class_loader_missing",
                 launchRecoveryStatus = recoveryStatus,
                 launchRecoveryReason = recoveryReason
             )
-        val state = buildRuntimeState(spec, proxyIntent, snapshot, classLoader, runtimeResult)
+        var state = buildRuntimeState(
+            spec,
+            proxyIntent,
+            snapshot,
+            classLoader,
+            runtimeResult,
+            activityThreadProvider
+        )
         if (state.loadedApk == null) {
             return skippedPrelaunchPatch(
                 record = record,
                 spec = spec,
                 reason = state.loadedApkSkippedReason ?: "LOADED_APK_PRELAUNCH_UNAVAILABLE",
-                launchAuthorityStatus = "PASS",
-                launchAuthorityReason = authorizedLaunch.reason,
+                launchAuthorityStatus = "NOT_CONSUMED",
+                launchAuthorityReason = "runtime_not_ready:${state.loadedApkSkippedReason.orEmpty()}",
                 launchRecoveryStatus = recoveryStatus,
                 launchRecoveryReason = recoveryReason
             )
         }
-        val patch = ActivityClientRecordBridge.patch(
-            record = record,
-            state = ActivityClientRecordRuntimeState(
-                activityInfo = state.activityInfo,
-                intent = state.guestIntent,
-                loadedApk = state.loadedApk
+        var patchAttempt = patchLaunchRecordTransaction(record, state)
+        if (!patchAttempt.complete) {
+            return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = patchAttempt.failureReason ?: "LAUNCH_RECORD_PATCH_INCOMPLETE",
+                launchAuthorityStatus = "NOT_CONSUMED",
+                launchAuthorityReason = "record_patch_not_committed",
+                launchRecoveryStatus = recoveryStatus,
+                launchRecoveryReason = recoveryReason,
+                skippedFields = patchAttempt.patch.skippedFields,
+                rolledBackFields = patchAttempt.rolledBackFields,
+                loadedApkSource = state.loadedApkSource,
+                launchCapabilityOwner = INSTRUMENTATION_FALLBACK_CAPABILITY_OWNER
             )
-        )
+        }
+
+        var activePatchApplied = true
+        var authorizedLaunch = VirtualActivityLaunchAuthority.authorize(requireNotNull(launchIdentity))
+        if (!authorizedLaunch.accepted) {
+            var rolledBackFields = rollbackLaunchRecord(patchAttempt)
+            activePatchApplied = false
+            val originalFailureReason = authorizedLaunch.reason
+            val recoveryRequest = recoveryRequest(proxyIntent, spec, proxyActivityClassName)
+            val recovery = recoveryRequest?.let(VirtualActivityLaunchRecovery::recover)
+            val recoveredIdentity = recovery?.identity?.takeIf { identity ->
+                identity.instanceId == spec.instanceId &&
+                    identity.processSlot == recoveryRequest.processSlot &&
+                    identity.proxyActivityClassName == proxyActivityClassName
+            }
+            if (recovery?.recovered == true && recoveredIdentity != null) {
+                applyRecoveredIdentity(proxyIntent, recoveredIdentity)
+                spec = LaunchSpec.from(proxyIntent) ?: spec
+                launchIdentity = recoveredIdentity
+                state = buildRuntimeState(
+                    spec,
+                    proxyIntent,
+                    snapshot,
+                    classLoader,
+                    runtimeResult,
+                    activityThreadProvider
+                )
+                if (state.loadedApk == null) {
+                    return skippedPrelaunchPatch(
+                        record = record,
+                        spec = spec,
+                        reason = state.loadedApkSkippedReason ?: "LOADED_APK_PRELAUNCH_UNAVAILABLE",
+                        launchAuthorityStatus = "NOT_CONSUMED",
+                        launchAuthorityReason = "runtime_not_ready_after_recovery:${state.loadedApkSkippedReason.orEmpty()}",
+                        launchRecoveryStatus = "FAIL",
+                        launchRecoveryReason = recovery.reason,
+                        rolledBackFields = rolledBackFields,
+                        launchCapabilityOwner = INSTRUMENTATION_FALLBACK_CAPABILITY_OWNER
+                    )
+                }
+                patchAttempt = patchLaunchRecordTransaction(record, state)
+                activePatchApplied = patchAttempt.complete
+                if (!patchAttempt.complete) {
+                    return skippedPrelaunchPatch(
+                        record = record,
+                        spec = spec,
+                        reason = patchAttempt.failureReason ?: "LAUNCH_RECORD_PATCH_INCOMPLETE_AFTER_RECOVERY",
+                        launchAuthorityStatus = "NOT_CONSUMED",
+                        launchAuthorityReason = "record_patch_not_committed_after_recovery",
+                        launchRecoveryStatus = "PARTIAL",
+                        launchRecoveryReason = recovery.reason,
+                        skippedFields = patchAttempt.patch.skippedFields,
+                        rolledBackFields = (rolledBackFields + patchAttempt.rolledBackFields).distinct(),
+                        loadedApkSource = state.loadedApkSource,
+                        launchCapabilityOwner = INSTRUMENTATION_FALLBACK_CAPABILITY_OWNER
+                    )
+                }
+                authorizedLaunch = VirtualActivityLaunchAuthority.authorize(recoveredIdentity)
+                recoveryStatus = if (authorizedLaunch.accepted) "PASS" else "FAIL"
+                recoveryReason = if (authorizedLaunch.accepted) {
+                    recovery.reason
+                } else {
+                    "${recovery.reason}:${authorizedLaunch.reason}"
+                }
+            } else {
+                recoveryStatus = "FAIL"
+                recoveryReason = recovery?.reason ?: "activity_launch_recovery_request_invalid"
+            }
+            if (!authorizedLaunch.accepted) {
+                if (activePatchApplied) {
+                    rolledBackFields = (rolledBackFields + rollbackLaunchRecord(patchAttempt)).distinct()
+                    activePatchApplied = false
+                }
+                return skippedPrelaunchPatch(
+                    record = record,
+                    spec = spec,
+                    reason = "ENGINE_LAUNCH_REJECTED:${authorizedLaunch.reason}",
+                    launchAuthorityStatus = "FAIL",
+                    launchAuthorityReason = authorizedLaunch.reason.ifBlank { originalFailureReason },
+                    launchRecoveryStatus = recoveryStatus,
+                    launchRecoveryReason = recoveryReason,
+                    rolledBackFields = rolledBackFields
+                )
+            }
+        } else if (recoveryStatus == "PENDING") {
+            recoveryStatus = "PASS"
+        }
+        val patch = patchAttempt.patch
         val result = ActivityThreadLaunchRecordPatchResult(
             targetClassName = record.javaClass.name,
             observedProxyLaunch = true,
@@ -230,10 +319,12 @@ object ActivityThreadLaunchRecordPatcher {
             guestActivityClassName = spec.guestActivityClassName,
             token = spec.token,
             loadedApkSource = state.loadedApkSource,
+            loadedApkBindingMode = patchAttempt.loadedApkBindingMode,
             launchAuthorityStatus = "PASS",
             launchAuthorityReason = authorizedLaunch.reason,
             launchRecoveryStatus = recoveryStatus,
-            launchRecoveryReason = recoveryReason
+            launchRecoveryReason = recoveryReason,
+            launchCapabilityOwner = RECORD_PATCH_CAPABILITY_OWNER
         )
         safeLogInfo(
             "Prepatched launch record: target=${result.targetClassName}, instance=${spec.instanceId}, " +
@@ -243,12 +334,148 @@ object ActivityThreadLaunchRecordPatcher {
         return result.also { writeEvidence(it) }
     }
 
+    private fun patchLaunchRecordTransaction(
+        record: Any,
+        state: LaunchRuntimeState
+    ): LaunchRecordPatchAttempt {
+        val loadedApkField = LOADED_APK_FIELDS.firstNotNullOfOrNull { name ->
+            findFieldInHierarchy(record.javaClass, name)
+        }
+        val frameworkDerivesLoadedApk = loadedApkField == null && isFrameworkLaunchTransactionItem(record)
+        if (loadedApkField == null && !frameworkDerivesLoadedApk) {
+            return LaunchRecordPatchAttempt(
+                patch = ActivityClientRecordPatchResult(
+                    targetClassName = record.javaClass.name,
+                    skippedFields = listOf("packageInfo"),
+                    skippedReason = "REQUIRED_FIELD_MISSING:packageInfo"
+                ),
+                failureReason = "LAUNCH_RECORD_PATCH_INCOMPLETE:REQUIRED_FIELD_MISSING:packageInfo"
+            )
+        }
+        val requiredFields = mutableListOf(
+            RequiredRecordField("activityInfo", ACTIVITY_INFO_FIELDS, state.activityInfo),
+            RequiredRecordField("intent", INTENT_FIELDS, state.guestIntent)
+        )
+        if (loadedApkField != null) {
+            requiredFields += RequiredRecordField(
+                "packageInfo",
+                listOf(loadedApkField.name),
+                requireNotNull(state.loadedApk)
+            )
+        }
+        val snapshots = mutableListOf<RecordFieldSnapshot>()
+        for (required in requiredFields) {
+            val field = required.aliases.firstNotNullOfOrNull { name ->
+                findFieldInHierarchy(record.javaClass, name)
+            } ?: return LaunchRecordPatchAttempt(
+                patch = ActivityClientRecordPatchResult(
+                    targetClassName = record.javaClass.name,
+                    skippedFields = listOf(required.canonicalName),
+                    skippedReason = "REQUIRED_FIELD_MISSING:${required.canonicalName}"
+                ),
+                failureReason = "LAUNCH_RECORD_PATCH_INCOMPLETE:REQUIRED_FIELD_MISSING:${required.canonicalName}"
+            )
+            val originalValue = runCatching { field.get(record) }.getOrElse { error ->
+                return LaunchRecordPatchAttempt(
+                    patch = ActivityClientRecordPatchResult(
+                        targetClassName = record.javaClass.name,
+                        skippedFields = listOf(field.name),
+                        skippedReason = "REQUIRED_FIELD_READ_FAILED:${field.name}:${error.javaClass.name}"
+                    ),
+                    failureReason = "LAUNCH_RECORD_PATCH_INCOMPLETE:REQUIRED_FIELD_READ_FAILED:${field.name}"
+                )
+            }
+            snapshots += RecordFieldSnapshot(
+                canonicalName = required.canonicalName,
+                owner = record,
+                field = field,
+                originalValue = originalValue,
+                expectedValue = required.value
+            )
+        }
+
+        val rawPatch = ActivityClientRecordBridge.patch(
+            record = record,
+            state = ActivityClientRecordRuntimeState(
+                activityInfo = state.activityInfo,
+                intent = state.guestIntent,
+                loadedApk = state.loadedApk
+            )
+        )
+        val patch = if (frameworkDerivesLoadedApk) {
+            rawPatch.copy(skippedFields = rawPatch.skippedFields - "packageInfo")
+        } else {
+            rawPatch
+        }
+        val patchedNames = patch.patchedFields.toSet()
+        val failedFields = snapshots.filter { snapshot ->
+            snapshot.field.name !in patchedNames ||
+                runCatching { snapshot.field.get(record) === snapshot.expectedValue }.getOrDefault(false).not()
+        }
+        if (failedFields.isEmpty()) {
+            return LaunchRecordPatchAttempt(
+                patch = patch,
+                snapshots = snapshots,
+                complete = true,
+                loadedApkBindingMode = if (frameworkDerivesLoadedApk) {
+                    LOADED_APK_BINDING_FRAMEWORK_DERIVED
+                } else {
+                    LOADED_APK_BINDING_RECORD_PATCHED
+                }
+            )
+        }
+
+        val rolledBackFields = rollbackLaunchRecordSnapshots(snapshots)
+        val failedNames = failedFields.joinToString(",") { it.canonicalName }
+        return LaunchRecordPatchAttempt(
+            patch = patch.copy(
+                patchedFields = emptyList(),
+                skippedFields = (patch.skippedFields + failedFields.map { it.field.name }).distinct(),
+                skippedReason = "REQUIRED_FIELD_PATCH_FAILED:$failedNames"
+            ),
+            failureReason = "LAUNCH_RECORD_PATCH_INCOMPLETE:REQUIRED_FIELD_PATCH_FAILED:$failedNames",
+            rolledBackFields = rolledBackFields
+        )
+    }
+
+    private fun rollbackLaunchRecord(attempt: LaunchRecordPatchAttempt): List<String> {
+        check(attempt.complete && attempt.snapshots.isNotEmpty()) {
+            "Cannot rollback an incomplete launch record transaction"
+        }
+        return rollbackLaunchRecordSnapshots(attempt.snapshots)
+    }
+
+    private fun rollbackLaunchRecordSnapshots(snapshots: List<RecordFieldSnapshot>): List<String> {
+        val failures = mutableListOf<String>()
+        snapshots.asReversed().forEach { snapshot ->
+            runCatching { snapshot.field.set(snapshot.owner, snapshot.originalValue) }
+                .onFailure { failures += "${snapshot.field.name}:write" }
+        }
+        snapshots.forEach { snapshot ->
+            val restored = runCatching {
+                snapshot.field.get(snapshot.owner) === snapshot.originalValue
+            }.getOrDefault(false)
+            if (!restored) failures += "${snapshot.field.name}:verify"
+        }
+        check(failures.isEmpty()) {
+            "LAUNCH_RECORD_ROLLBACK_FAILED:${failures.distinct().joinToString(",")}"
+        }
+        return snapshots.map { it.field.name }
+    }
+
+    private fun isFrameworkLaunchTransactionItem(record: Any): Boolean {
+        val className = record.javaClass.name
+        return className == "android.app.servertransaction.LaunchActivityItem" ||
+            record.javaClass.simpleName.endsWith("LaunchActivityItem")
+    }
+
     private fun buildRuntimeState(
         spec: LaunchSpec,
         proxyIntent: Intent,
         snapshot: VirtualPackageSnapshot,
         classLoader: ClassLoader,
-        runtimeResult: HostedBootstrapResult?
+        runtimeResult: HostedBootstrapResult?,
+        activityThreadProvider: () -> Any
     ): LaunchRuntimeState {
         val hostApplication = runCatching { ActivityThreadCompat.currentApplication() }.getOrNull()
         val processSlot = runtimeResult?.processSlot
@@ -302,7 +529,8 @@ object ActivityThreadLaunchRecordPatcher {
             spec = spec,
             snapshot = snapshot,
             runtimeResult = runtimeResult,
-            classLoader = classLoader
+            classLoader = classLoader,
+            activityThreadProvider = activityThreadProvider
         )
         return LaunchRuntimeState(
             activityInfo = activityInfo,
@@ -310,7 +538,7 @@ object ActivityThreadLaunchRecordPatcher {
             loadedApk = loadedApk?.loadedApk,
             loadedApkSource = loadedApk?.source?.name,
             loadedApkSkippedReason = loadedApk?.skippedReason
-                ?: "PREWARMED_LOADED_APK_NOT_FOUND"
+                ?: if (loadedApk == null) "PREWARMED_LOADED_APK_NOT_FOUND" else null
         )
     }
 
@@ -321,19 +549,30 @@ object ActivityThreadLaunchRecordPatcher {
         launchAuthorityStatus: String? = null,
         launchAuthorityReason: String? = null,
         launchRecoveryStatus: String? = null,
-        launchRecoveryReason: String? = null
+        launchRecoveryReason: String? = null,
+        skippedFields: List<String> = emptyList(),
+        rolledBackFields: List<String> = emptyList(),
+        loadedApkSource: String? = null,
+        launchCapabilityOwner: String? = when (launchAuthorityStatus) {
+            "NOT_CONSUMED" -> INSTRUMENTATION_FALLBACK_CAPABILITY_OWNER
+            else -> null
+        }
     ): ActivityThreadLaunchRecordPatchResult {
         val result = ActivityThreadLaunchRecordPatchResult(
             targetClassName = record.javaClass.name,
             observedProxyLaunch = true,
+            skippedFields = skippedFields,
             skippedReason = reason,
             instanceId = spec.instanceId,
             guestActivityClassName = spec.guestActivityClassName,
             token = spec.token,
+            loadedApkSource = loadedApkSource,
             launchAuthorityStatus = launchAuthorityStatus,
             launchAuthorityReason = launchAuthorityReason,
             launchRecoveryStatus = launchRecoveryStatus,
-            launchRecoveryReason = launchRecoveryReason
+            launchRecoveryReason = launchRecoveryReason,
+            rolledBackFields = rolledBackFields,
+            launchCapabilityOwner = launchCapabilityOwner
         )
         safeLogWarning(
             "Skipped prelaunch guest record patch: instance=${spec.instanceId}, " +
@@ -425,10 +664,11 @@ object ActivityThreadLaunchRecordPatcher {
         spec: LaunchSpec,
         snapshot: VirtualPackageSnapshot,
         runtimeResult: HostedBootstrapResult?,
-        classLoader: ClassLoader
+        classLoader: ClassLoader,
+        activityThreadProvider: () -> Any
     ): ActivityThreadLoadedApkInstallResult? {
         val aliases = listOf(spec.originPackageName, snapshot.virtualPackageName)
-        val activityThread = runCatching { ActivityThreadCompat.currentActivityThread() }
+        val activityThread = runCatching(activityThreadProvider)
             .onFailure { error ->
                 safeLogWarning("Unable to inspect prewarmed LoadedApk for ${spec.guestActivityClassName}", error)
             }
@@ -461,6 +701,17 @@ object ActivityThreadLaunchRecordPatcher {
                 targetClassName = loadedApk.javaClass.name,
                 packageAliases = aliases,
                 skippedReason = "PREWARMED_LOADED_APK_CLASS_LOADER_MISMATCH",
+                source = LoadedApkInstallSource.PREWARMED_GUEST
+            )
+        }
+        val loadedApkPackageName = LoadedApkBridge.inspect(loadedApk).packageName
+        if (loadedApkPackageName != spec.originPackageName) {
+            return ActivityThreadLoadedApkInstaller.skippedInstallResult(
+                targetClassName = loadedApk.javaClass.name,
+                packageAliases = aliases,
+                skippedReason =
+                    "PREWARMED_LOADED_APK_PACKAGE_MISMATCH:" +
+                        "${loadedApkPackageName.orEmpty()}!=${spec.originPackageName}",
                 source = LoadedApkInstallSource.PREWARMED_GUEST
             )
         }
@@ -558,10 +809,13 @@ object ActivityThreadLaunchRecordPatcher {
                     "skippedFields=${result.skippedFields.joinToString(",")}",
                     "skippedReason=${result.skippedReason.orEmpty()}",
                     "loadedApkSource=${result.loadedApkSource.orEmpty()}",
+                    "loadedApkBindingMode=${result.loadedApkBindingMode.orEmpty()}",
                     "launchAuthorityStatus=${result.launchAuthorityStatus.orEmpty()}",
                     "launchAuthorityReason=${result.launchAuthorityReason.orEmpty()}",
                     "launchRecoveryStatus=${result.launchRecoveryStatus.orEmpty()}",
                     "launchRecoveryReason=${result.launchRecoveryReason.orEmpty()}",
+                    "rolledBackFields=${result.rolledBackFields.joinToString(",")}",
+                    "launchCapabilityOwner=${result.launchCapabilityOwner.orEmpty()}",
                     "patchedRecordCount=${result.patchedRecordCount}"
                 ).joinToString("\n")
             )
@@ -571,8 +825,11 @@ object ActivityThreadLaunchRecordPatcher {
     internal fun launchRecordVerdict(result: ActivityThreadLaunchRecordPatchResult): String {
         val patchedLaunchIdentity = result.patchedFields.any { it == "intent" || it == "mIntent" } &&
             result.patchedFields.any { it == "activityInfo" || it == "mActivityInfo" || it == "info" || it == "mInfo" }
-        val loadedApkReady = !result.loadedApkSource.isNullOrBlank() ||
-            result.patchedFields.any { it == "packageInfo" || it == "mPackageInfo" || it == "loadedApk" || it == "mLoadedApk" }
+        val loadedApkPatched = result.patchedFields.any {
+            it == "packageInfo" || it == "mPackageInfo" || it == "loadedApk" || it == "mLoadedApk"
+        }
+        val loadedApkReady = !result.loadedApkSource.isNullOrBlank() &&
+            (loadedApkPatched || result.loadedApkBindingMode == LOADED_APK_BINDING_FRAMEWORK_DERIVED)
         return if (patchedLaunchIdentity && loadedApkReady && result.launchAuthorityStatus == "PASS") {
             "PASS"
         } else {
@@ -620,6 +877,29 @@ object ActivityThreadLaunchRecordPatcher {
         val loadedApkSource: String?,
         val loadedApkSkippedReason: String?
     )
+
+    private data class RequiredRecordField(
+        val canonicalName: String,
+        val aliases: List<String>,
+        val value: Any
+    )
+
+    private data class RecordFieldSnapshot(
+        val canonicalName: String,
+        val owner: Any,
+        val field: java.lang.reflect.Field,
+        val originalValue: Any?,
+        val expectedValue: Any
+    )
+
+    private data class LaunchRecordPatchAttempt(
+        val patch: ActivityClientRecordPatchResult,
+        val snapshots: List<RecordFieldSnapshot> = emptyList(),
+        val complete: Boolean = false,
+        val failureReason: String? = null,
+        val rolledBackFields: List<String> = emptyList(),
+        val loadedApkBindingMode: String? = null
+    )
 }
 
 data class ActivityThreadLaunchRecordPatchResult(
@@ -633,8 +913,11 @@ data class ActivityThreadLaunchRecordPatchResult(
     val guestActivityClassName: String? = null,
     val token: String? = null,
     val loadedApkSource: String? = null,
+    val loadedApkBindingMode: String? = null,
     val launchAuthorityStatus: String? = null,
     val launchAuthorityReason: String? = null,
     val launchRecoveryStatus: String? = null,
-    val launchRecoveryReason: String? = null
+    val launchRecoveryReason: String? = null,
+    val rolledBackFields: List<String> = emptyList(),
+    val launchCapabilityOwner: String? = null
 )

@@ -3,10 +3,19 @@ package com.multiapp.app.container
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityResult
 import com.multiapp.core.model.virtual.VirtualIntentSnapshot
+import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class ProxyActivityEvidenceTest {
+    @Test
+    fun `proxy activity never owns or consumes launch capability fallback`() {
+        assertFalse(ProxyActivityCapabilityPolicy.PROXY_MAY_CONSUME_CAPABILITY)
+        assertEquals("VIRTUAL_INSTRUMENTATION_FALLBACK", ProxyActivityCapabilityPolicy.CAPABILITY_OWNER)
+        assertEquals("finishUnsubstitutedProxy", ProxyActivityCapabilityPolicy.UNSUBSTITUTED_ACTION)
+    }
+
     @Test
     fun `evidence lines include consumed pending new intent and result`() {
         val lines = ProxyActivityEvidence(

@@ -8,7 +8,6 @@ import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
 import com.multiapp.core.engine.EngineActivityTaskController
 import com.multiapp.core.engine.EngineActivityTaskControllers
-import com.multiapp.core.engine.EngineGuestActivityLaunchBridge
 import com.multiapp.core.engine.EngineProxyActivityObserveRequest
 import com.multiapp.core.engine.EngineProxyActivityRecords
 import com.multiapp.core.model.virtual.VirtualActivityState
@@ -17,7 +16,8 @@ abstract class ProxyActivityBase : Activity() {
 
     companion object {
         private const val TAG = "ProxyActivity"
-        private const val FALLBACK_ACTION_FINISH_UNSUBSTITUTED = "finishUnsubstitutedProxy"
+        private const val FALLBACK_ACTION_FINISH_UNSUBSTITUTED =
+            ProxyActivityCapabilityPolicy.UNSUBSTITUTED_ACTION
         private const val EXTRA_PROXY_RECOVERY_ATTEMPT = "multiapp.proxyRecoveryAttempt"
 
         const val EXTRA_VIRTUAL_ACTIVITY_TOKEN = "multiapp.virtualActivityToken"
@@ -69,19 +69,6 @@ abstract class ProxyActivityBase : Activity() {
         val tokenForEvidence = EvidenceSanitizer.redactTokenForEvidence(token)
         val guestActivity = proxyIntent.getStringExtra(EXTRA_GUEST_ACTIVITY_CLASS_NAME).orEmpty()
         val originPackage = proxyIntent.getStringExtra(EXTRA_ORIGIN_PACKAGE_NAME).orEmpty()
-        val launchAuthorization = EngineGuestActivityLaunchBridge.authorizeProxyIntent(
-            proxyIntent = proxyIntent,
-            proxyActivityClassName = javaClass.name
-        )
-        if (!launchAuthorization.accepted) {
-            Log.e(
-                TAG,
-                "Unsubstituted proxy launch rejected: proxy=${javaClass.name}, " +
-                    "instanceId=${instanceId.orEmpty()}, reason=${launchAuthorization.reason}"
-            )
-            finish()
-            return
-        }
         if (!instanceId.isNullOrBlank()) {
             restoreActivityTaskState(instanceId, lifecycleEvent)
         }
@@ -108,9 +95,10 @@ abstract class ProxyActivityBase : Activity() {
         Log.i(
             TAG,
             "Proxy resumed: proxy=${javaClass.name}, lifecycle=$lifecycleEvent, instanceId=$instanceId, " +
-                "token=$tokenForEvidence, origin=$originPackage, guest=$guestActivity, " +
-                "recordFound=${observation.recordFound}, recordRecovered=${observation.recordRecovered}, " +
-                "recoveryAttempt=$recoveryAttempt, fallbackAction=$fallbackAction"
+            "token=$tokenForEvidence, origin=$originPackage, guest=$guestActivity, " +
+            "recordFound=${observation.recordFound}, recordRecovered=${observation.recordRecovered}, " +
+            "recoveryAttempt=$recoveryAttempt, fallbackAction=$fallbackAction, " +
+            "capabilityOwner=${ProxyActivityCapabilityPolicy.CAPABILITY_OWNER}"
         )
         val taskDescriptionLabel = ProxyTaskDescriptions.label(
             originPackageName = originPackage,
@@ -316,6 +304,12 @@ abstract class ProxyActivityBase : Activity() {
         }
     }
 
+}
+
+internal object ProxyActivityCapabilityPolicy {
+    const val CAPABILITY_OWNER = "VIRTUAL_INSTRUMENTATION_FALLBACK"
+    const val PROXY_MAY_CONSUME_CAPABILITY = false
+    const val UNSUBSTITUTED_ACTION = "finishUnsubstitutedProxy"
 }
 
 class ProxyActivity0 : ProxyActivityBase()

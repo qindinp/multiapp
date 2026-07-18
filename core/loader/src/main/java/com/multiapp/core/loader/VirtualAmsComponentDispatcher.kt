@@ -41,6 +41,8 @@ interface VirtualAmsComponentDispatcher {
         foreground: Boolean
     ): VirtualContextWrapper.StartServiceMappingResult
 
+    fun shouldDispatchServiceToSystem(intent: Intent): Boolean = false
+
     fun dispatchStopService(intent: Intent): VirtualServiceStopDispatchResult?
 
     fun dispatchBindService(
@@ -239,6 +241,14 @@ class DefaultVirtualAmsComponentDispatcher(
         intent: Intent,
         foreground: Boolean
     ): VirtualContextWrapper.StartServiceMappingResult {
+        if (shouldDispatchServiceToSystem(intent)) {
+            return VirtualContextWrapper.StartServiceMappingResult.SystemPassthrough(
+                sourceIntent = intent,
+                foreground = foreground,
+                targetPackageName = intent.externalServiceTargetPackage().orEmpty(),
+                reason = "external_system_service"
+            )
+        }
         val snapshot = packageSnapshot ?: return VirtualContextWrapper.StartServiceMappingResult.Blocked(
             sourceIntent = intent,
             foreground = foreground,
@@ -264,6 +274,24 @@ class DefaultVirtualAmsComponentDispatcher(
             proxyIntent = proxyIntent
         )
     }
+
+    override fun shouldDispatchServiceToSystem(intent: Intent): Boolean {
+        val snapshot = packageSnapshot ?: return false
+        val targetPackageName = intent.externalServiceTargetPackage()
+            ?: hostContext?.packageManager
+                ?.resolveService(intent, android.content.pm.PackageManager.MATCH_DEFAULT_ONLY)
+                ?.serviceInfo
+                ?.packageName
+                ?.takeIf { it.isNotBlank() }
+            ?: return false
+        return targetPackageName != snapshot.originPackageName &&
+            targetPackageName != snapshot.virtualPackageName &&
+            targetPackageName != hostPackageName
+    }
+
+    private fun Intent.externalServiceTargetPackage(): String? =
+        runCatching { component?.packageName }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: runCatching { `package` }.getOrNull()?.takeIf { it.isNotBlank() }
 
     override fun dispatchStopService(intent: Intent): VirtualServiceStopDispatchResult? {
         val snapshot = packageSnapshot ?: return null

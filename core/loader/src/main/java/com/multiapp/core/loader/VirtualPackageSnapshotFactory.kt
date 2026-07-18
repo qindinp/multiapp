@@ -1,10 +1,9 @@
 package com.multiapp.core.loader
 
 import com.multiapp.core.model.instance.VirtualInstanceRecord
-import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.installer.InstallRecord
+import com.multiapp.core.model.installer.toResolvedComponents
 import com.multiapp.core.model.virtual.ResolvedPackage
-import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.toLegacyMetaDataMap
 
@@ -63,24 +62,4 @@ internal object VirtualPackageSnapshotFactory {
         )
     }
 
-    private fun List<ComponentInfo>.toResolvedComponents(): List<ResolvedComponent> =
-        map { component ->
-            ResolvedComponent(
-                name = component.name,
-                exported = component.exported,
-                launchMode = component.launchMode,
-                processName = component.processName,
-                taskAffinity = component.taskAffinity,
-                themeId = component.themeId,
-                permission = component.permission,
-                readPermission = component.readPermission,
-                writePermission = component.writePermission,
-                grantUriPermissions = component.grantUriPermissions,
-                pathPermissions = component.pathPermissions,
-                uriPermissionPatterns = component.uriPermissionPatterns,
-                metaData = component.metaData.toLegacyMetaDataMap(),
-                typedMetaData = component.metaData,
-                targetActivityName = component.targetActivityName
-            )
-        }
 }

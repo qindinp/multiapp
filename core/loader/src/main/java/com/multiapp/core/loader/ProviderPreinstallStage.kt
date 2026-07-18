@@ -63,6 +63,7 @@ class GuestProviderPreinstaller(
         var failedProviderCount = 0
 
         currentProcessProviders.forEach { provider ->
+            requireGuestThreadContextClassLoader(request, provider, "before")
             attempted += 1
             val authorities = provider.authorities.filter { it.isNotBlank() }
             val primaryAuthority = authorities.firstOrNull()
@@ -73,14 +74,16 @@ class GuestProviderPreinstaller(
                 failedReasons += "${primaryAuthority.orEmpty()}:RESOLUTION_NOT_FOUND"
                 return@forEach
             }
-            when (val result = providerRuntime.getOrCreate(
+            val result = providerRuntime.getOrCreate(
                 VirtualProviderCreateRequest(
                     resolution = resolution,
                     guestContext = request.application,
                     guestClassLoader = request.guestClassLoader,
                     config = request.config
                 )
-            )) {
+            )
+            requireGuestThreadContextClassLoader(request, provider, "after")
+            when (result) {
                 is VirtualProviderRuntimeResult.Created -> {
                     installedProviderCount += 1
                     installed += authorities
@@ -125,6 +128,16 @@ class GuestProviderPreinstaller(
             skippedReasons = skippedProviders.map { it.reason.name }.distinct(),
             skippedProviders = skippedProviders
         )
+    }
+
+    private fun requireGuestThreadContextClassLoader(
+        request: GuestProviderPreinstallRequest,
+        provider: ResolvedComponent,
+        phase: String
+    ) {
+        check(Thread.currentThread().contextClassLoader === request.guestClassLoader) {
+            "Guest thread context ClassLoader changed $phase Provider ${provider.name} preinstall"
+        }
     }
 
     private fun ResolvedComponent.effectiveProcessName(snapshot: VirtualPackageSnapshot): String =

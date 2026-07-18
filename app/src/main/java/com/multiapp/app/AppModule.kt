@@ -156,6 +156,7 @@ object AppModule {
                         ComponentInfo(
                             name = name,
                             exported = provider.exported,
+                            authorities = providerAuthorities(provider.authorities),
                             permission = provider.permission,
                             readPermission = provider.readPermission,
                             writePermission = provider.writePermission,
@@ -196,6 +197,7 @@ object AppModule {
                 ComponentInfo(
                     name = name,
                     exported = component.exported,
+                    authorities = providerAuthorities(provider?.authority),
                     permission = component.componentPermission(),
                     readPermission = provider?.readPermission?.takeIf { it.isNotBlank() },
                     writePermission = provider?.writePermission?.takeIf { it.isNotBlank() },
@@ -241,10 +243,18 @@ object AppModule {
                     metaData = component.metaData.toVirtualMetaDataMap(),
                     targetActivityName = normalizeManifestComponentName(packageName, component.targetActivityName)
                 )
+            }
+        }
     }
-}
 
-    }
+    internal fun providerAuthorities(authority: String?): List<String> = authority
+        ?.split(';')
+        .orEmpty()
+        .asSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .distinct()
+        .toList()
 
     private fun normalizeManifestComponentName(packageName: String, name: String?): String? {
         if (name.isNullOrBlank()) return null

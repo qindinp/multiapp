@@ -96,7 +96,7 @@ object ActivityThreadLoadedApkInstaller {
             loadedApk = loadedApk,
             state = state,
             packageAliases = packageAliases,
-            hostPackageName = null,
+            hostPackageName = state.binderPackageName.takeUnless { it == state.packageName },
             source = LoadedApkInstallSource.GUEST_SANDBOX
         )
     }

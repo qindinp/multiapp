@@ -214,6 +214,73 @@ class VirtualProcessRuntimeTest {
     }
 
     @Test
+    fun `READY accepts a verified LoadedApk Application delegate transition`() {
+        val runtime = VirtualProcessRuntime(clock = { 1000L })
+        val provisional = hostedResult(
+            instanceId = "inst-001",
+            success = true,
+            guestClassLoader = ClassLoader.getSystemClassLoader()
+        )
+        val delegate = mockk<Application>(relaxed = true)
+        val ready = provisional.copy(
+            guestApplication = delegate,
+            stageResults = listOf(
+                BootstrapResult.success(
+                    stage = RuntimeStage.APPLICATION,
+                    evidence = listOf(
+                        BootstrapEvidence("loadedApkApplicationCreatorStatus", "PASS"),
+                        BootstrapEvidence("loadedApkFinalApplicationStatus", "PASS"),
+                        BootstrapEvidence("loadedApkFinalApplicationSource", "DELEGATE"),
+                        BootstrapEvidence("loadedApkFinalApplicationReason", "CONTEXT_PACKAGE_INFO_MATCH")
+                    )
+                )
+            )
+        )
+
+        val result = runtime.bindApplication("inst-001") {
+            runtime.rememberApplication("inst-001", provisional)
+            ready
+        }
+
+        assertSame(delegate, result.guestApplication)
+        assertSame(result, runtime.reusableResult("inst-001"))
+        assertEquals(VirtualProcessRuntimeState.READY, runtime.state("inst-001"))
+    }
+
+    @Test
+    fun `READY rejects an unverified Application delegate transition`() {
+        val runtime = VirtualProcessRuntime(clock = { 1000L })
+        val provisional = hostedResult(
+            instanceId = "inst-001",
+            success = true,
+            guestClassLoader = ClassLoader.getSystemClassLoader()
+        )
+        val ready = provisional.copy(
+            guestApplication = mockk<Application>(relaxed = true),
+            stageResults = listOf(
+                BootstrapResult.success(
+                    stage = RuntimeStage.APPLICATION,
+                    evidence = listOf(
+                        BootstrapEvidence("loadedApkApplicationCreatorStatus", "PASS"),
+                        BootstrapEvidence("loadedApkFinalApplicationStatus", "SKIPPED"),
+                        BootstrapEvidence("loadedApkFinalApplicationSource", "DELEGATE")
+                    )
+                )
+            )
+        )
+
+        assertFailsWith<IllegalStateException> {
+            runtime.bindApplication("inst-001") {
+                runtime.rememberApplication("inst-001", provisional)
+                ready
+            }
+        }
+
+        assertEquals(VirtualProcessRuntimeState.FAILED, runtime.state("inst-001"))
+        assertNull(runtime.reusableResult("inst-001"))
+    }
+
+    @Test
     fun `READY rejects a different ClassLoader than provisional runtime`() {
         val runtime = VirtualProcessRuntime(clock = { 1000L })
         val provisional = hostedResult(

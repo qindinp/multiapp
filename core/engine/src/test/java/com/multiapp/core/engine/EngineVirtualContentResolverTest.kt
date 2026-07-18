@@ -78,9 +78,12 @@ class EngineVirtualContentResolverTest {
         var wrappedProvider: ContentProvider? = null
         val api29Factory = EngineVirtualContentResolverFactory(
             sdkInt = { 29 },
-            resolverWrapper = { provider ->
+            resolverWrapper = { provider, _, _ ->
                 wrappedProvider = provider
                 resolver
+            },
+            hostContextsFactory = {
+                EngineContentResolverHostContexts(context, context)
             },
             dispatcherFactory = { mockk(relaxed = true) },
             uidProvider = { 1000 },
@@ -89,7 +92,7 @@ class EngineVirtualContentResolverTest {
         )
         val api28Factory = EngineVirtualContentResolverFactory(
             sdkInt = { 28 },
-            resolverWrapper = { error("API 28 must not wrap a provider") }
+            resolverWrapper = { _, _, _ -> error("API 28 must not wrap a provider") }
         )
         val request = VirtualContentResolverFactoryRequest(context, config())
 
@@ -99,9 +102,67 @@ class EngineVirtualContentResolverTest {
     }
 
     @Test
-    fun `wrapped provider routes query through verified engine dispatch`() {
+    fun `resolver factory keeps system acquisition separate from routed data calls`() {
+        val requestContext = mockk<Context>(relaxed = true)
+        val systemContext = mockk<Context>(relaxed = true)
+        val routingContext = mockk<Context>(relaxed = true)
+        val systemResolver = mockk<ContentResolver>(relaxed = true)
+        val routingResolver = mockk<ContentResolver>(relaxed = true)
+        val resultResolver = mockk<ContentResolver>(relaxed = true)
+        every { systemContext.contentResolver } returns systemResolver
+        every { routingContext.contentResolver } returns routingResolver
+        every { systemContext.applicationInfo.uid } returns 1000
+        var capturedRoutingResolver: ContentResolver? = null
+        var capturedSystemResolver: ContentResolver? = null
+        val factory = EngineVirtualContentResolverFactory(
+            sdkInt = { 36 },
+            resolverWrapper = { _, routed, system ->
+                capturedRoutingResolver = routed
+                capturedSystemResolver = system
+                resultResolver
+            },
+            hostContextsFactory = {
+                EngineContentResolverHostContexts(systemContext, routingContext)
+            },
+            dispatcherFactory = { mockk(relaxed = true) },
+            uidProvider = { 1000 },
+            pidProvider = { 3001 },
+            providerAttacher = { _, _, _ -> }
+        )
+
+        assertSame(
+            resultResolver,
+            factory.create(VirtualContentResolverFactoryRequest(requestContext, config()))
+        )
+        assertSame(routingResolver, capturedRoutingResolver)
+        assertSame(systemResolver, capturedSystemResolver)
+    }
+
+    @Test
+    fun `host resolver contexts use real process package instead of guest identity`() {
+        val guestContext = mockk<Context>()
+        val systemContext = mockk<Context>()
+        val routingContext = mockk<Context>()
+        every {
+            guestContext.createPackageContext("com.multiapp.app", Context.CONTEXT_IGNORE_SECURITY)
+        } returnsMany listOf(systemContext, routingContext)
+
+        val contexts = createEngineContentResolverHostContexts(
+            VirtualContentResolverFactoryRequest(guestContext, config())
+        )
+
+        assertSame(systemContext, contexts.systemContext)
+        assertSame(routingContext, contexts.routingContext)
+        verify(exactly = 2) {
+            guestContext.createPackageContext("com.multiapp.app", Context.CONTEXT_IGNORE_SECURITY)
+        }
+    }
+
+    @Test
+    fun `wrapped provider issues route then calls target stub without consuming in caller`() {
         val hostContext = mockk<Context>(relaxed = true)
         every { hostContext.packageName } returns "com.multiapp.app"
+        val hostResolver = mockk<ContentResolver>()
         val guestUri = mockk<Uri>(relaxed = true)
         val proxyUri = mockk<Uri>(relaxed = true)
         val builder = mockk<Uri.Builder>(relaxed = true)
@@ -114,74 +175,50 @@ class EngineVirtualContentResolverTest {
         every { builder.build() } returns proxyUri
 
         val cursor = mockk<Cursor>(relaxed = true)
-        val guestProvider = mockk<ContentProvider>(relaxed = true)
         every {
-            guestProvider.query(guestUri, any(), any(), any(), any())
+            hostResolver.query(proxyUri, null, null, null, null)
         } returns cursor
-        val dispatchRequest = slot<EngineProviderDispatchRequest>()
-        val dispatcher = mockk<EngineProviderDispatcher>()
-        every { dispatcher.dispatch(capture(dispatchRequest)) } returns EngineProviderDispatchResult.ProviderReady(
-            resolution = EngineProviderResolution(
-                instanceId = "inst-001",
-                originPackageName = "com.example",
-                virtualPackageName = "com.multiapp.instance.inst001",
-                guestAuthority = "com.example.provider",
-                proxyAuthority = "com.multiapp.app.multiapp.provider.stub.v1",
-                providerClassName = "com.example.DataProvider",
-                policy = EngineProviderPolicy(
-                    exported = false,
-                    permission = null,
-                    grantUriPermissions = false,
-                    status = "INTERNAL_ONLY",
-                    reason = "self",
-                    routingScope = "INSTANCE",
-                    processWideProviderHook = false,
-                    authorityRewriteEntry = "EngineVirtualContentResolver"
-                )
-            ),
-            provider = guestProvider,
-            cached = true,
-            evidence = EngineProviderEvidence(
-                instanceId = "inst-001",
-                guestAuthority = "com.example.provider",
-                proxyAuthority = "com.multiapp.app.multiapp.provider.stub.v1",
-                providerClassName = "com.example.DataProvider",
-                operation = EngineProviderOperation.QUERY,
-                success = true
-            )
-        )
+        val dispatcher = mockk<EngineProviderDispatcher>(relaxed = true)
+        var callerConsumeCount = 0
         val bridge = EngineRoutingContentProvider(
             hostContext = hostContext,
             config = config(),
             dispatcher = dispatcher,
             hostUid = 1000,
             processId = 3001,
+            systemResolver = hostResolver,
             routeIssuer = { caller, target, authority, operation, processSlot ->
                 ProviderRouteToken(
-                    token = "route-token",
+                    token = "route-token-${"a".repeat(40)}",
                     callerInstanceId = caller,
                     targetInstanceId = target,
                     authority = authority,
                     operation = operation,
                     expiresAtMillis = Long.MAX_VALUE,
-                    processSlot = processSlot
+                    processSlot = "com.multiapp.app:v4"
                 )
+            },
+            routeConsumer = {
+                callerConsumeCount++
+                error("caller must not consume a target Provider route token")
             }
         )
 
         val actual = bridge.query(guestUri, null, null, null, null)
 
         assertSame(cursor, actual)
-        assertEquals("query", dispatchRequest.captured.operationName)
-        assertEquals("inst-001", dispatchRequest.captured.verifiedRoute?.callerInstanceId)
-        assertEquals("inst-001", dispatchRequest.captured.verifiedRoute?.targetInstanceId)
-        assertEquals(1000, dispatchRequest.captured.providerCallingUid)
-        assertEquals(3001, dispatchRequest.captured.providerCallingPid)
-        assertEquals("com.multiapp.app:v1", dispatchRequest.captured.callerProcessSlot)
+        assertEquals(0, callerConsumeCount)
         verify {
-            builder.appendQueryParameter(ProviderRouteContract.PROXY_ROUTE_TOKEN, "route-token")
+            builder.encodedAuthority(
+                EngineProviderRouteSlots.stubAuthority("com.multiapp.app", "com.multiapp.app:v4")
+            )
+            builder.appendQueryParameter(
+                ProviderRouteContract.PROXY_ROUTE_TOKEN,
+                "route-token-${"a".repeat(40)}"
+            )
         }
-        verify(exactly = 1) { guestProvider.query(guestUri, any(), any(), any(), any()) }
+        verify(exactly = 1) { hostResolver.query(proxyUri, null, null, null, null) }
+        verify(exactly = 0) { dispatcher.dispatch(any()) }
     }
 
     @Test
@@ -201,13 +238,15 @@ class EngineVirtualContentResolverTest {
             config = config(),
             dispatcher = dispatcher,
             hostUid = 1000,
-            processId = 3001
+            processId = 3001,
+            systemResolver = hostResolver
         )
 
         val actual = bridge.query(systemUri, null, null, null, null)
 
         assertSame(cursor, actual)
         verify(exactly = 1) { hostResolver.query(systemUri, null, null, null, null) }
+        verify(exactly = 0) { hostContext.contentResolver }
         verify(exactly = 0) { dispatcher.dispatch(any()) }
     }
 
@@ -239,6 +278,7 @@ class EngineVirtualContentResolverTest {
     fun `wrapped provider routes external virtual authority to engine resolved owner`() {
         val hostContext = mockk<Context>(relaxed = true)
         every { hostContext.packageName } returns "com.multiapp.app"
+        val hostResolver = mockk<ContentResolver>()
         val uri = mockk<Uri>(relaxed = true)
         val proxyUri = mockk<Uri>(relaxed = true)
         val builder = mockk<Uri.Builder>(relaxed = true)
@@ -251,15 +291,8 @@ class EngineVirtualContentResolverTest {
         every { builder.appendQueryParameter(any(), any()) } returns builder
         every { builder.build() } returns proxyUri
         val cursor = mockk<Cursor>(relaxed = true)
-        val guestProvider = mockk<ContentProvider>(relaxed = true)
-        every { guestProvider.query(uri, any(), any(), any(), any()) } returns cursor
-        val request = slot<EngineProviderDispatchRequest>()
-        val dispatcher = mockk<EngineProviderDispatcher>()
-        every { dispatcher.dispatch(capture(request)) } returns readyProvider(
-            guestProvider,
-            instanceId = "owner-2",
-            authority = "com.other.provider"
-        )
+        every { hostResolver.query(proxyUri, null, null, null, null) } returns cursor
+        val dispatcher = mockk<EngineProviderDispatcher>(relaxed = true)
         val bridge = EngineRoutingContentProvider(
             hostContext = hostContext,
             config = config(),
@@ -276,23 +309,23 @@ class EngineVirtualContentResolverTest {
             },
             hostUid = 1000,
             processId = 3001,
+            systemResolver = hostResolver,
             routeIssuer = { caller, target, authority, operation, processSlot ->
                 ProviderRouteToken(
-                    token = "cross-route-token",
+                    token = "cross-route-token-${"b".repeat(40)}",
                     callerInstanceId = caller,
                     targetInstanceId = target,
                     authority = authority,
                     operation = operation,
                     expiresAtMillis = Long.MAX_VALUE,
-                    processSlot = processSlot
+                    processSlot = "com.multiapp.app:v5"
                 )
             }
         )
 
         assertSame(cursor, bridge.query(uri, null, null, null, null))
-        assertEquals("inst-001", request.captured.verifiedRoute?.callerInstanceId)
-        assertEquals("owner-2", request.captured.verifiedRoute?.targetInstanceId)
-        verify(exactly = 0) { hostContext.contentResolver }
+        verify(exactly = 1) { hostResolver.query(proxyUri, null, null, null, null) }
+        verify(exactly = 0) { dispatcher.dispatch(any()) }
     }
 
     @Test
@@ -325,7 +358,7 @@ class EngineVirtualContentResolverTest {
     }
 
     @Test
-    fun `applyBatch validates every operation then invokes one resolved guest provider`() {
+    fun `applyBatch validates ownership then fails closed until target stub operation rewrite exists`() {
         val hostContext = mockk<Context>(relaxed = true)
         every { hostContext.packageName } returns "com.multiapp.app"
         val uri = mockk<Uri>(relaxed = true)
@@ -347,16 +380,7 @@ class EngineVirtualContentResolverTest {
         every { write.isWriteOperation } returns true
         every { write.isReadOperation } returns false
         val operations = arrayListOf(read, write)
-        val expected = arrayOf(mockk<ContentProviderResult>(), mockk<ContentProviderResult>())
-        val guestProvider = mockk<ContentProvider>()
-        every { guestProvider.applyBatch("com.other.provider", operations) } returns expected
-        val requests = mutableListOf<EngineProviderDispatchRequest>()
-        val dispatcher = mockk<EngineProviderDispatcher>()
-        every { dispatcher.dispatch(capture(requests)) } returns readyProvider(
-            guestProvider,
-            instanceId = "owner-2",
-            authority = "com.other.provider"
-        )
+        val dispatcher = mockk<EngineProviderDispatcher>(relaxed = true)
         val bridge = EngineRoutingContentProvider(
             hostContext = hostContext,
             config = config(),
@@ -375,7 +399,7 @@ class EngineVirtualContentResolverTest {
             processId = 3001,
             routeIssuer = { caller, target, authority, operation, processSlot ->
                 ProviderRouteToken(
-                    token = "batch-$operation",
+                    token = "batch-$operation-${"c".repeat(40)}",
                     callerInstanceId = caller,
                     targetInstanceId = target,
                     authority = authority,
@@ -383,13 +407,14 @@ class EngineVirtualContentResolverTest {
                     expiresAtMillis = Long.MAX_VALUE,
                     processSlot = processSlot
                 )
-            }
+            },
+            routeConsumer = ::acceptRouteForTest
         )
 
-        assertSame(expected, bridge.applyBatch("com.other.provider", operations))
-        assertEquals(listOf("applyBatch:r", "applyBatch:w"), requests.map { it.operationName })
-        assertTrue(requests.all { it.verifiedRoute?.targetInstanceId == "owner-2" })
-        verify(exactly = 1) { guestProvider.applyBatch("com.other.provider", operations) }
+        assertFailsWith<OperationApplicationException> {
+            bridge.applyBatch("com.other.provider", operations)
+        }
+        verify(exactly = 0) { dispatcher.dispatch(any()) }
         verify(exactly = 0) { hostContext.contentResolver }
     }
 
@@ -431,6 +456,22 @@ class EngineVirtualContentResolverTest {
         verify(exactly = 0) { dispatcher.dispatch(any()) }
         verify(exactly = 0) { hostContext.contentResolver }
     }
+
+    private fun acceptRouteForTest(
+        request: EngineProviderRouteTokenConsumeRequest
+    ): EngineProviderRouteTokenAuthorityResult = EngineProviderRouteTokenAuthorityResult(
+        status = "VALID",
+        route = EngineProviderRouteToken(
+            token = request.token,
+            callerInstanceId = "inst-001",
+            targetInstanceId = request.targetInstanceId,
+            authority = request.guestAuthority,
+            operation = request.operation.substringBefore(':'),
+            expiresAtMillis = Long.MAX_VALUE,
+            processSlot = request.expectedProcessSlot
+        ),
+        message = "test route consumed"
+    )
 
     private fun readyProvider(
         provider: ContentProvider,

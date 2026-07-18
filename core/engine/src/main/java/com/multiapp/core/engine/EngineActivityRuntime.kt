@@ -63,6 +63,17 @@ class EngineActivityLaunchCoordinator(
     private val proxyIntentFactory: (VirtualActivityManager, VirtualActivityRecord, Intent) -> Intent =
         { manager, record, sourceIntent -> manager.createProxyIntent(record, sourceIntent) }
 ) {
+    private val hostPackageName = hostContext.packageName
+
+    init {
+        require(hostPackageName.isNotBlank()) { "host Context packageName must not be blank" }
+        processSlot?.let { slot ->
+            require(slot.substringBefore(':') == hostPackageName) {
+                "host Context packageName must own the configured process slot"
+            }
+        }
+    }
+
     fun remap(
         sourceIntent: Intent,
         plan: VirtualActivityDispatchPlan
@@ -101,7 +112,7 @@ class EngineActivityLaunchCoordinator(
         val identity = checkNotNull(allocation.launchIdentity)
         val proxyActivityClassName = checkNotNull(allocation.proxyActivityClassName)
         val allocatedProcessSlot = EngineProxyActivitySlots.processSlotForClassName(
-            hostPackageName = hostContext.packageName,
+            hostPackageName = hostPackageName,
             className = proxyActivityClassName
         )
         if (allocatedProcessSlot != target.processSlot) {
@@ -117,13 +128,13 @@ class EngineActivityLaunchCoordinator(
         return runCatching {
             val registry = ProxyActivityRegistry(
                 listOf(proxyActivityClassName),
-                ProxyActivitySlots.launchModeByClassName(hostContext.packageName),
+                ProxyActivitySlots.launchModeByClassName(hostPackageName),
                 PreassignedProxyActivitySlotStore(assignmentKey, proxyActivityClassName)
             )
             val manager = VirtualActivityManager(
                 context = hostContext,
                 proxyActivityRegistry = registry,
-                hostPackageName = hostContext.packageName,
+                hostPackageName = hostPackageName,
                 activityRecordManager = activityRecordManager
             )
             val record = manager.allocateGuestActivity(

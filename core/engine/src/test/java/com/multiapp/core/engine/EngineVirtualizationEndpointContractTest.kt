@@ -1,6 +1,7 @@
 package com.multiapp.core.engine
 
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EnginePackageInstallRequest
@@ -27,6 +28,7 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
+import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -84,6 +86,46 @@ class EngineVirtualizationEndpointContractTest {
 
         assertEquals(expected, result?.result)
         verify(exactly = 1) { engine.createInstance(ORIGIN_PACKAGE) }
+    }
+
+    @Test
+    fun `component process cannot invoke management control plane`() {
+        val engine = mockk<VirtualizationEngine>(relaxed = true)
+        val endpoint = endpoint(
+            virtualizationEngine = engine,
+            callerProcessName = "$HOST_PACKAGE:v4"
+        )
+
+        val responses = listOf(
+            endpoint.engineInstallOrRefreshPackage(ORIGIN_PACKAGE),
+            endpoint.engineCreateInstance(ORIGIN_PACKAGE),
+            endpoint.engineCreateInstanceWithMetadata(createRequest().toEngineIpcBundle(bundles::create)),
+            endpoint.engineLaunchInstance(launchRequest().toEngineIpcBundle(bundles::create)),
+            endpoint.engineStopInstance(INSTANCE_ID),
+            endpoint.engineDeleteInstance(INSTANCE_ID),
+            endpoint.engineQueryRuntimeState(INSTANCE_ID),
+            endpoint.engineExportEvidence(INSTANCE_ID),
+            endpoint.queryEvidence(INSTANCE_ID)
+        )
+
+        responses.forEach { response ->
+            assertFalse(response.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+            assertEquals(
+                "management_caller_process_mismatch",
+                response.getString(EngineRuntimeIpcContract.KEY_REASON)
+            )
+        }
+        assertFalse(endpoint.stopRuntime(INSTANCE_ID, 1L))
+        verify(exactly = 0) {
+            engine.installOrRefreshPackage(any<String>())
+            engine.createInstance(any<String>())
+            engine.createInstance(any<CreateInstanceRequest>())
+            engine.launchInstance(any())
+            engine.stopInstance(any())
+            engine.deleteInstance(any())
+            engine.queryRuntimeState(any())
+            engine.exportEvidence(any())
+        }
     }
 
     @Test
@@ -182,7 +224,7 @@ class EngineVirtualizationEndpointContractTest {
     }
 
     @Test
-    fun `query endpoint returns the complete authoritative runtime`() {
+    fun `query endpoint returns only lightweight runtime identity`() {
         val engine = mockk<VirtualizationEngine>()
         val runtime = runtime()
         every { engine.queryRuntimeState(INSTANCE_ID) } returns runtime
@@ -192,6 +234,27 @@ class EngineVirtualizationEndpointContractTest {
         assertTrue(decoded.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
         assertEquals(INSTANCE_ID, decoded.getString(EngineRuntimeIpcContract.KEY_INSTANCE_ID))
         assertEquals(runtime.runtimeEpoch, decoded.getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH))
+        assertNull(decoded.getBundle("packageSnapshot"))
+        verify(exactly = 1) { engine.queryRuntimeState(INSTANCE_ID) }
+    }
+
+    @Test
+    fun `runtime stream endpoint returns descriptor to the host process without bundling snapshot`() {
+        val engine = mockk<VirtualizationEngine>()
+        val runtime = runtime()
+        val descriptor = mockk<ParcelFileDescriptor>()
+        every { engine.queryRuntimeState(INSTANCE_ID) } returns runtime
+        val endpoint = endpoint(engine).also {
+            setEndpointField(it, "callingProcessName", { _: Int -> HOST_PACKAGE })
+            setEndpointField(it, "authoritativeRuntimeStreamOpener", { value: VirtualInstanceRuntime ->
+                assertEquals(runtime, value)
+                descriptor
+            })
+        }
+
+        val result = endpoint.engineOpenRuntimeState(INSTANCE_ID, bundles.create())
+
+        assertSame(descriptor, result)
         verify(exactly = 1) { engine.queryRuntimeState(INSTANCE_ID) }
     }
 
@@ -302,6 +365,17 @@ class EngineVirtualizationEndpointContractTest {
                     virtualPackageName = "com.multiapp.instance.other"
                 )
             )
+        )
+        every { controlPlane.authorize("instance-other", 4321) } returns EngineProcessAuthorityDecision(
+            allowed = true,
+            identity = EngineProcessClientIdentity(
+                instanceId = "instance-other",
+                runtimeEpoch = 7L,
+                engineSessionId = "engine-session",
+                processSlot = "$HOST_PACKAGE:v2",
+                processId = 4321
+            ),
+            reason = "live_runtime_authority_confirmed"
         )
         val ambiguous = endpoint.queryRuntimeByProcessId(4321)
         assertFalse(ambiguous.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
@@ -791,6 +865,7 @@ class EngineVirtualizationEndpointContractTest {
     private fun endpoint(
         virtualizationEngine: VirtualizationEngine?,
         callerUid: Int = HOST_UID,
+        callerProcessName: String? = HOST_PACKAGE,
         activityService: VirtualActivityService? = null,
         packageService: VirtualPackageService? = null,
         processIdentity: EngineProcessClientIdentity? = null
@@ -805,11 +880,15 @@ class EngineVirtualizationEndpointContractTest {
         }
         val endpoint = unsafeClass.getMethod("allocateInstance", Class::class.java)
             .invoke(unsafe, EngineRuntimeBinderEndpoint::class.java) as EngineRuntimeBinderEndpoint
+        setEndpointField(endpoint, "hostPackageName", HOST_PACKAGE)
         setEndpointField(endpoint, "hostUid", HOST_UID)
         setEndpointField(endpoint, "serverGenerationId", "server-generation-test")
         setEndpointField(endpoint, "virtualizationEngine", virtualizationEngine)
         setEndpointField(endpoint, "callingUid", { callerUid })
         setEndpointField(endpoint, "callingPid", { CALLING_PID })
+        setEndpointField(endpoint, "callingProcessName", { _: Int -> callerProcessName })
+        setEndpointField(endpoint, "callingProcessStartTicks", { _: Int -> 1L })
+        setEndpointField(endpoint, "providerRouteTokens", EngineProviderRouteTokenRegistry())
         setEndpointField(
             endpoint,
             "processControlPlane",

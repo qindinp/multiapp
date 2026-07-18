@@ -61,6 +61,75 @@ class EngineRuntimeStateStoreTest {
     }
 
     @Test
+    fun `runtime state canonicalizes blank optional manifest fields`(@TempDir tempDir: File) {
+        val file = File(tempDir, "engine_runtime_state.properties")
+        val base = runtime()
+        val activity = base.packageSnapshot.activities.first().copy(
+            launchMode = "",
+            processName = " ",
+            taskAffinity = "",
+            screenOrientation = " ",
+            configChanges = "",
+            permission = " ",
+            readPermission = "",
+            writePermission = " ",
+            targetActivityName = ""
+        )
+        val input = base.copy(
+            packageSnapshot = base.packageSnapshot.copy(
+                nativeLibraryDir = " ",
+                applicationClassName = "",
+                processName = " ",
+                taskAffinity = "",
+                launcherActivityName = " ",
+                activities = listOf(activity)
+            )
+        )
+
+        val record = EngineRuntimeStateRecord.from(input)
+        FileBackedEngineRuntimeStateStore(file).put(record)
+        Properties().apply {
+            file.inputStream().use(::load)
+            val prefix = "${input.instanceId}."
+            setProperty(prefix + "nativeLibraryDir", "")
+            setProperty(prefix + "applicationClassName", " ")
+            setProperty(prefix + "packageProcessName", "")
+            setProperty(prefix + "taskAffinity", " ")
+            setProperty(prefix + "launcherActivityName", "")
+            setProperty(prefix + "activities.0.launchMode", "")
+            setProperty(prefix + "activities.0.processName", " ")
+            setProperty(prefix + "activities.0.taskAffinity", "")
+            setProperty(prefix + "activities.0.screenOrientation", " ")
+            setProperty(prefix + "activities.0.configChanges", "")
+            setProperty(prefix + "activities.0.permission", " ")
+            setProperty(prefix + "activities.0.readPermission", "")
+            setProperty(prefix + "activities.0.writePermission", " ")
+            setProperty(prefix + "activities.0.targetActivityName", "")
+            file.outputStream().use { output -> store(output, "legacy blank optionals") }
+        }
+        val restored = FileBackedEngineRuntimeStateStore(file).get(input.instanceId)?.toRuntime()
+        val restoredSnapshot = restored?.packageSnapshot
+        val restoredActivity = restoredSnapshot?.activities?.single()
+
+        assertNull(record.taskAffinity)
+        assertNull(record.activities.single().taskAffinity)
+        assertNull(restoredSnapshot?.nativeLibraryDir)
+        assertNull(restoredSnapshot?.applicationClassName)
+        assertNull(restoredSnapshot?.processName)
+        assertNull(restoredSnapshot?.taskAffinity)
+        assertNull(restoredSnapshot?.launcherActivityName)
+        assertNull(restoredActivity?.launchMode)
+        assertNull(restoredActivity?.processName)
+        assertNull(restoredActivity?.taskAffinity)
+        assertNull(restoredActivity?.screenOrientation)
+        assertNull(restoredActivity?.configChanges)
+        assertNull(restoredActivity?.permission)
+        assertNull(restoredActivity?.readPermission)
+        assertNull(restoredActivity?.writePermission)
+        assertNull(restoredActivity?.targetActivityName)
+    }
+
+    @Test
     fun `file backed runtime state reads legacy filters without structured authority fields`(
         @TempDir tempDir: File
     ) {

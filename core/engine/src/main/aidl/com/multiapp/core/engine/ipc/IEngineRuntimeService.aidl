@@ -2,6 +2,7 @@ package com.multiapp.core.engine.ipc;
 
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.ParcelFileDescriptor;
 
 interface IEngineRuntimeService {
     String getServerGenerationId();
@@ -12,6 +13,7 @@ interface IEngineRuntimeService {
     Bundle engineStopInstance(String instanceId);
     Bundle engineDeleteInstance(String instanceId);
     Bundle engineQueryRuntimeState(String instanceId);
+    ParcelFileDescriptor engineOpenRuntimeState(String instanceId, in Bundle request);
     Bundle engineExportEvidence(String instanceId);
     Bundle attachClient(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, IBinder clientToken);
     Bundle processRestarted(String instanceId, long runtimeEpoch, String engineSessionId, String processSlot, int processId, IBinder clientToken);
@@ -44,6 +46,8 @@ interface IEngineRuntimeService {
     Bundle reserveProxyActivitySlot(in Bundle request);
     Bundle compareAndSetProxyActivitySlot(in Bundle request);
     Bundle resolveProviderAuthority(String callerInstanceId, in Bundle request);
+    Bundle issueProviderRouteToken(String callerInstanceId, in Bundle request);
+    Bundle validateAndConsumeProviderRouteToken(String targetInstanceId, in Bundle request);
     Bundle planProvider(String instanceId, in Bundle request);
     boolean recordProviderDispatch(String instanceId, in Bundle result);
     Bundle queryProviderRuntimeState(String instanceId);

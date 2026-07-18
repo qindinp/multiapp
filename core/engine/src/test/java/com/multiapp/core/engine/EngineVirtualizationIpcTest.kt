@@ -162,7 +162,7 @@ class EngineVirtualizationIpcTest {
     }
 
     @Test
-    fun `engine result round trip carries complete authoritative runtime snapshot`() {
+    fun `engine result round trip carries lightweight authoritative runtime identity`() {
         val bundles = MockBundleFactory()
         val runtime = runtime()
         val remote = EngineResult.pass(
@@ -176,7 +176,7 @@ class EngineVirtualizationIpcTest {
         assertEquals(EngineResultStatus.PASS, remote?.result?.status)
         assertEquals(evidence(), remote?.result?.evidence)
         assertTrue(requireNotNull(remote?.runtimeIdentity).matches(runtime))
-        assertEquals(runtime, remote.result.runtime)
+        assertNull(remote.result.runtime)
     }
 
     @Test
@@ -272,7 +272,7 @@ class EngineVirtualizationIpcTest {
     }
 
     @Test
-    fun `remote runtime identity must match the runtime delivered by authority`() {
+    fun `remote runtime identity validates optional runtime delivered by authority`() {
         val bundles = MockBundleFactory()
         val expected = runtime()
         val remote = RecordingRemote().apply {

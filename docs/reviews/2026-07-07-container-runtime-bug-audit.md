@@ -3177,3 +3177,93 @@ commercial review.
   evidence remain incomplete.
 - The passing local gate is not named-app device compatibility evidence. Review
   decision remains **BLOCK**.
+
+## Review Update - 2026-07-16 Host Identity, Authoritative Provider Target Slot, and Edge Linker Chain
+
+Review basis: current HEAD `527a6bb9` plus the shared uncommitted worktree. This
+review distinguishes previously captured device behavior from fixes that exist
+only in the newer local tree. The decision remains **BLOCK**.
+
+### Findings addressed in the current tree
+
+- The QQ device artifact
+  `.tmp/manual-qq-after-ready-transition-20260716-115611` exposed a second
+  Activity remap entry point that still created the proxy component with the
+  guest package: `com.tencent.mobileqq/com.multiapp.app.container.ProxyActivity1`.
+  Android correctly rejected it with `Activity class ... does not exist`.
+  `EngineActivityLaunchCoordinator` now receives a frozen host package Context,
+  verifies that the host package owns the runtime `processSlot`, and uses that
+  identity for proxy construction. `VirtualInstrumentation` follows the same
+  stable-host rule.
+- Provider route issue now resolves the authority and target process through
+  the engine, then binds the route token to the authoritative target
+  `processSlot`, endpoint generation, authority, operation, caller, and target.
+  The target consumes the token only after its Binder PID and process slot are
+  revalidated. Caller slot is no longer accepted as target-slot authority.
+- Slot-specific Provider stub authority selection now follows the
+  engine-returned `route.processSlot` through a shared
+  `ProviderStubAuthorityContract`, including hook and loader paths. This closes
+  the identified wrong-slot wiring, not the complete custom-process Provider
+  data plane.
+- Edge's `J.N.ZO` failure is treated as a ClassLoader/linker-namespace defect.
+  The current tree supplies guest `targetSdk`, dex/native search and permitted
+  paths to a structured ClassLoader creation path, checks platform namespace
+  errors, records ClassLoader identities, and installs guest TCCL before
+  Application and Activity creation. No app-specific JNI implementation or
+  forced raw `dlopen` workaround was added.
+
+### Evidence interpretation
+
+- A later QQ bootstrap in
+  `.tmp/manual-qq-after-ready-transition-20260716-115611` reports
+  `loadedApkApplicationCreatorStatus=PASS`, `applicationStatus=PASS`,
+  `providerPreinstallStatus=PASS`, and zero Provider preinstall failures. The
+  QQ runtime therefore moved beyond its earlier `replaceApplication fail` and
+  primary-process Provider bootstrap blockers in that run.
+- That result is not QQ compatibility proof. The same installed build failed at
+  the malformed proxy Activity package, and the host-identity correction was
+  implemented afterward.
+- Existing Edge device evidence still ends in
+  `UnsatisfiedLinkError: No implementation found for boolean J.N.ZO(...)`
+  before a usable first frame. The namespace/TCCL implementation has not been
+  exercised by a fresh device build.
+- Existing loader JUnit XML from 2026-07-16 records 69 focused tests with 0
+  failures and 0 errors across `ClassLoaderStageTest`,
+  `HostedRuntimeBootstrapTest`, and `ApplicationStageTest`. This is local
+  contract evidence only. No complete Gradle gate or APK build is claimed for
+  the current dirty-tree batch.
+- `.tmp/manual-still-failing-20260716-121645` is not valid runtime evidence; the
+  target device was unavailable, so it contains no observation of the latest
+  local implementation.
+
+### Still BLOCK
+
+- There is no latest-device artifact proving the Activity proxy package fix,
+  authoritative Provider target-slot route, Edge namespace creation, durable
+  JNI registration, resumed Activity, or first drawn frame.
+- QQ crossing Application/Provider bootstrap does not prove login, foreground
+  Activity, storage/native behavior, process death, multi-instance recents, or
+  long-running stability.
+- Complete custom-process Provider transport, observer/notify and URI-grant
+  lifecycle, remaining Service/Broadcast semantics, runtime permission,
+  storage/native/linker parity, Activity task/window equivalence, and API
+  28-36/HyperOS recovery evidence remain incomplete.
+- The next integrated build must produce fresh `logcat`, `exit-info`, recents,
+  hosted-launch evidence, instance state, and structured namespace/ClassLoader
+  identity evidence before any device `PASS` or commercial `DONE` statement.
+  Review decision remains **BLOCK**.
+
+### Targeted verification addendum - 2026-07-16
+
+- TCCL/ClassLoader ownership and mutation boundaries are **LOCAL TARGETED
+  PASS**. The corrected runtime path is still **DEVICE PENDING**.
+- Activity launch-capability transactional consumption, rollback, fallback
+  ownership, and replay rejection are **LOCAL TARGETED PASS**. This is not a
+  named-app or device verdict.
+- Custom-process Provider formal attach/component authority, endpoint Binder
+  transport, target-slot authority, and token replay rejection are **LOCAL
+  TARGETED PASS**. The production device path is still **DEVICE PENDING**, and
+  complete Provider lifecycle/data-plane coverage remains open.
+- No full build or device run was performed for this documentation-only sync.
+  Nothing here proves QQ or Edge compatibility or a device `PASS`; review
+  decision remains **BLOCK**.

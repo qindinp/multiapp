@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.CancellationSignal
 import com.multiapp.core.hook.HookEngine
+import com.multiapp.core.model.engine.ProviderStubAuthorityContract
 import java.security.SecureRandom
 import java.util.Base64
 import timber.log.Timber
@@ -36,6 +37,16 @@ data class ProviderRouteToken(
     val processSlot: String? = null
 )
 
+fun interface ProviderRouteTokenIssuer {
+    fun issue(
+        callerInstanceId: String,
+        targetInstanceId: String,
+        authority: String,
+        operation: String,
+        processSlot: String?
+    ): ProviderRouteToken?
+}
+
 enum class ProviderRouteTokenValidationStatus {
     VALID,
     MISSING_TOKEN,
@@ -60,6 +71,7 @@ object ProviderRouteTokenRegistry {
     const val DEFAULT_TTL_MILLIS = 2 * 60 * 1000L
 
     private const val TOKEN_BYTE_COUNT = 32
+    private const val MIN_TOKEN_LENGTH = 40
     private const val MAX_ROUTE_TOKENS = 2048
 
     private val random = SecureRandom()
@@ -67,6 +79,20 @@ object ProviderRouteTokenRegistry {
     private val lock = Any()
     private val routes = LinkedHashMap<String, ProviderRouteToken>()
     private val processSlotsByInstance = linkedMapOf<String, String>()
+
+    @Volatile
+    private var authoritativeIssuer: ProviderRouteTokenIssuer? = null
+
+    /**
+     * Switches production issuance to the engine-owned authority. Local tokens
+     * are test-only and are discarded before the authoritative issuer is visible.
+     */
+    fun installAuthoritativeIssuer(issuer: ProviderRouteTokenIssuer) {
+        synchronized(lock) {
+            routes.clear()
+            authoritativeIssuer = issuer
+        }
+    }
 
     fun issue(
         callerInstanceId: String,
@@ -84,14 +110,28 @@ object ProviderRouteTokenRegistry {
         require(normalizedOperation.isNotBlank()) { "operation must not be blank" }
         require(ttlMillis > 0L) { "ttlMillis must be positive" }
 
-        synchronized(lock) {
+        // A caller slot is not necessarily the slot that owns the target provider.
+        // Only the engine may resolve a target slot from package/component state.
+        val normalizedProcessSlot = processSlot?.trim()?.takeIf { it.isNotEmpty() }
+
+        authoritativeIssuer?.let { issuer ->
+            return issueAuthoritatively(
+                issuer = issuer,
+                callerInstanceId = callerInstanceId,
+                targetInstanceId = targetInstanceId,
+                authority = authority,
+                normalizedOperation = normalizedOperation,
+                normalizedProcessSlot = normalizedProcessSlot,
+                nowMillis = nowMillis
+            )
+        }
+
+        val issuerInstalledDuringIssue = synchronized(lock) {
+            val issuer = authoritativeIssuer
+            if (issuer != null) return@synchronized issuer
+
             pruneExpiredLocked(nowMillis)
             val token = nextTokenLocked()
-            val normalizedProcessSlot = processSlot?.takeIf { it.isNotBlank() }
-                ?: processSlotsByInstance[callerInstanceId]
-            if (!normalizedProcessSlot.isNullOrBlank()) {
-                processSlotsByInstance[callerInstanceId] = normalizedProcessSlot
-            }
             val route = ProviderRouteToken(
                 token = token,
                 callerInstanceId = callerInstanceId,
@@ -105,6 +145,15 @@ object ProviderRouteTokenRegistry {
             trimLocked()
             return route
         }
+        return issueAuthoritatively(
+            issuer = issuerInstalledDuringIssue,
+            callerInstanceId = callerInstanceId,
+            targetInstanceId = targetInstanceId,
+            authority = authority,
+            normalizedOperation = normalizedOperation,
+            normalizedProcessSlot = normalizedProcessSlot,
+            nowMillis = nowMillis
+        )
     }
 
     fun validate(
@@ -226,7 +275,59 @@ object ProviderRouteTokenRegistry {
         synchronized(lock) {
             routes.clear()
             processSlotsByInstance.clear()
+            authoritativeIssuer = null
         }
+    }
+
+    private fun issueAuthoritatively(
+        issuer: ProviderRouteTokenIssuer,
+        callerInstanceId: String,
+        targetInstanceId: String,
+        authority: String,
+        normalizedOperation: String,
+        normalizedProcessSlot: String?,
+        nowMillis: Long
+    ): ProviderRouteToken {
+        val route = try {
+            issuer.issue(
+                callerInstanceId = callerInstanceId,
+                targetInstanceId = targetInstanceId,
+                authority = authority,
+                operation = normalizedOperation,
+                processSlot = normalizedProcessSlot
+            )
+        } catch (error: Throwable) {
+            throw IllegalStateException("Authoritative provider route token issuer failed", error)
+        } ?: throw IllegalStateException("Authoritative provider route token issuer returned null")
+
+        check(route.token.isNotBlank()) {
+            "Authoritative provider route token must not be blank"
+        }
+        check(route.token.length >= MIN_TOKEN_LENGTH) {
+            "Authoritative provider route token is too short"
+        }
+        check(route.callerInstanceId == callerInstanceId) {
+            "Authoritative provider route callerInstanceId mismatch"
+        }
+        check(route.targetInstanceId == targetInstanceId) {
+            "Authoritative provider route targetInstanceId mismatch"
+        }
+        check(route.authority == authority) {
+            "Authoritative provider route authority mismatch"
+        }
+        check(route.operation == normalizedOperation) {
+            "Authoritative provider route operation mismatch"
+        }
+        check(route.processSlot?.isNotBlank() == true) {
+            "Authoritative provider route processSlot is missing"
+        }
+        check(normalizedProcessSlot == null || route.processSlot == normalizedProcessSlot) {
+            "Authoritative provider route processSlot mismatch"
+        }
+        check(route.expiresAtMillis > nowMillis) {
+            "Authoritative provider route token is expired"
+        }
+        return route
     }
 
     private fun nextTokenLocked(): String {
@@ -560,7 +661,8 @@ class ContentProviderHook : HookPoint {
                                 instanceId = instanceId,
                                 guestAuthority = uri.authority.orEmpty(),
                                 operation = "call",
-                                routeToken = rewrittenUri.getQueryParameter(PROXY_ROUTE_TOKEN)
+                                routeToken = rewrittenUri.getQueryParameter(PROXY_ROUTE_TOKEN),
+                                routeProcessSlot = rewrittenUri.getQueryParameter(PROXY_PROCESS_SLOT)
                             )
                             newArgs
                         } else {
@@ -588,7 +690,14 @@ class ContentProviderHook : HookPoint {
                     beforeCallback = { _, args ->
                         val authority = args.firstOrNull() as? String
                             ?: return@hookMethodPassThrough null
-                        val rewritten = authorityMap[authority] ?: return@hookMethodPassThrough null
+                        val mappedAuthority = authorityMap[authority] ?: return@hookMethodPassThrough null
+                        val route = issueRouteToken(instanceId, authority, "call")
+                        val rewritten = checkNotNull(
+                            ProviderStubAuthorityContract.reselectProcessSlot(
+                                mappedAuthority,
+                                route.processSlot
+                            )
+                        ) { "Provider authority map does not contain a canonical stub authority" }
                         Timber.tag(TAG).d(
                             "call(authority) rewrite: %s -> %s",
                             authority, rewritten
@@ -599,7 +708,9 @@ class ContentProviderHook : HookPoint {
                             original = args.getOrNull(3) as? Bundle,
                             instanceId = instanceId,
                             guestAuthority = authority,
-                            operation = "call"
+                            operation = "call",
+                            routeToken = route.token,
+                            routeProcessSlot = route.processSlot
                         )
                         newArgs
                     }
@@ -1077,12 +1188,19 @@ class ContentProviderHook : HookPoint {
             instanceId: String,
             guestAuthority: String,
             operation: String,
-            routeToken: String? = null
+            routeToken: String? = null,
+            routeProcessSlot: String? = null
         ): Bundle = Bundle(original ?: Bundle()).apply {
-            val token = routeToken ?: issueRouteToken(instanceId, guestAuthority, operation).token
+            val issuedRoute = if (routeToken == null) {
+                issueRouteToken(instanceId, guestAuthority, operation)
+            } else {
+                null
+            }
+            val token = routeToken ?: checkNotNull(issuedRoute).token
+            val targetProcessSlot = routeProcessSlot ?: issuedRoute?.processSlot
             putString(PROXY_INSTANCE_ID, instanceId)
             putString(PROXY_GUEST_AUTHORITY, guestAuthority)
-            ProviderRouteTokenRegistry.processSlotForInstance(instanceId)?.let { processSlot ->
+            targetProcessSlot?.let { processSlot ->
                 putString(PROXY_PROCESS_SLOT, processSlot)
             }
             putString(PROXY_ROUTE_TOKEN, token)
@@ -1101,12 +1219,20 @@ class ContentProviderHook : HookPoint {
             operation: String = "query"
         ): Uri {
             val authority = uri.authority ?: return uri
-            val newAuthority = authorityMap[authority] ?: return uri
-            val routeToken = if (!routeTokenRequiredForOperation(operation)) {
+            val mappedAuthority = authorityMap[authority] ?: return uri
+            val route = if (!routeTokenRequiredForOperation(operation)) {
                 null
             } else {
-                issueRouteToken(instanceId, authority, operation).token
+                issueRouteToken(instanceId, authority, operation)
             }
+            val newAuthority = route?.let { issued ->
+                checkNotNull(
+                    ProviderStubAuthorityContract.reselectProcessSlot(
+                        mappedAuthority,
+                        issued.processSlot
+                    )
+                ) { "Provider authority map does not contain a canonical stub authority" }
+            } ?: mappedAuthority
 
             return uri.buildUpon()
                 .encodedAuthority(newAuthority)
@@ -1115,7 +1241,8 @@ class ContentProviderHook : HookPoint {
                         encodedQuery = uri.encodedQuery,
                         instanceId = instanceId,
                         guestAuthority = authority,
-                        routeToken = routeToken
+                        routeToken = route?.token,
+                        processSlot = route?.processSlot
                     )
                 )
                 .build()
@@ -1128,9 +1255,9 @@ class ContentProviderHook : HookPoint {
             encodedQuery: String?,
             instanceId: String,
             guestAuthority: String,
-            routeToken: String? = null
+            routeToken: String? = null,
+            processSlot: String? = ProviderRouteTokenRegistry.processSlotForInstance(instanceId)
         ): String {
-            val processSlot = ProviderRouteTokenRegistry.processSlotForInstance(instanceId)
             val routeParameters = listOfNotNull(
                 "$PROXY_INSTANCE_ID=$instanceId",
                 "$PROXY_GUEST_AUTHORITY=$guestAuthority",
@@ -1151,7 +1278,7 @@ class ContentProviderHook : HookPoint {
                 targetInstanceId = instanceId,
                 authority = guestAuthority,
                 operation = operation,
-                processSlot = ProviderRouteTokenRegistry.processSlotForInstance(instanceId)
+                processSlot = null
             )
 
         internal fun rewriteEncodedQueryWithoutProxyParameters(encodedQuery: String?): String? {

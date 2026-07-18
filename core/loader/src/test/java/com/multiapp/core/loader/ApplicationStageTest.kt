@@ -33,6 +33,378 @@ import kotlin.test.assertTrue
 class ApplicationStageTest {
 
     @Test
+    fun `Application creation runs with the guest thread context ClassLoader`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        var observed: ClassLoader? = null
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> Application::class.java.name },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    observed = Thread.currentThread().contextClassLoader
+                    GuestApplicationCreateResult(
+                        application = DefaultApplicationFallback(),
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName
+                    )
+                },
+                applicationOnCreateInvoker = {},
+                clock = fixedClock(10L, 12L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+            assertSame(guestClassLoader, observed)
+            assertSame(guestClassLoader, Thread.currentThread().contextClassLoader)
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
+    fun `Application creation rejects TCCL replacement and restores previous loader`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val wrongClassLoader = object : ClassLoader(previous) {}
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> Application::class.java.name },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    Thread.currentThread().contextClassLoader = wrongClassLoader
+                    GuestApplicationCreateResult(
+                        application = DefaultApplicationFallback(),
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName
+                    )
+                },
+                applicationOnCreateInvoker = {},
+                clock = fixedClock(20L, 22L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.FAILED, output.result.status)
+            assertTrue(output.result.message.contains("changed the guest thread context ClassLoader"))
+            assertSame(previous, Thread.currentThread().contextClassLoader)
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
+    fun `LoadedApk Application creation normalizes framework TCCL after ownership verification`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val frameworkClassLoader = object : ClassLoader(previous) {}
+        val application = DefaultApplicationFallback()
+        val loadedApk = FinalizingLoadedApk(application)
+        var onCreateClassLoader: ClassLoader? = null
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> "com.example.GuestApplication" },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    Thread.currentThread().contextClassLoader = frameworkClassLoader
+                    GuestApplicationCreateResult(
+                        application = application,
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName,
+                        loadedApk = loadedApk
+                    )
+                },
+                applicationOnCreateInvoker = {
+                    onCreateClassLoader = Thread.currentThread().contextClassLoader
+                },
+                finalApplicationBindingInspector = { finalApplication, expectedLoadedApk ->
+                    assertSame(application, finalApplication)
+                    assertSame(loadedApk, expectedLoadedApk)
+                    LoadedApkApplicationContextBinding(
+                        matches = true,
+                        contextClassName = "android.app.ContextImpl",
+                        wrapperDepth = 0,
+                        reason = "CONTEXT_PACKAGE_INFO_MATCH"
+                    )
+                },
+                loadedApkClassLoaderInspector = { guestClassLoader },
+                applicationClassLoaderInspector = { guestClassLoader },
+                applicationContextClassLoaderInspector = { guestClassLoader },
+                frameworkContextClassLoaderReplacementInspector = { candidate, _ ->
+                    candidate === frameworkClassLoader
+                },
+                clock = fixedClock(30L, 32L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+            assertSame(guestClassLoader, onCreateClassLoader)
+            assertSame(guestClassLoader, Thread.currentThread().contextClassLoader)
+            val evidence = output.result.evidence.associate { it.key to it.value }
+            assertEquals("PASS", evidence["loadedApkClassLoaderOwnershipStatus"])
+            assertEquals("PASS", evidence["applicationClassLoaderOwnershipStatus"])
+            assertEquals("PASS", evidence["threadContextClassLoaderNormalizationStatus"])
+            assertEquals("PASS", evidence["providerPreinstallThreadContextClassLoaderStatus"])
+            assertEquals("PASS", evidence["providerPostinstallThreadContextClassLoaderStatus"])
+            assertEquals("PASS", evidence["applicationOnCreateThreadContextClassLoaderStatus"])
+            assertEquals("PASS", evidence["applicationOnCreateApplicationContextBindingStatus"])
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
+    fun `LoadedApk Application creation rejects unrecognized TCCL replacement`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val unknownClassLoader = object : ClassLoader(previous) {}
+        val application = DefaultApplicationFallback()
+        val loadedApk = FinalizingLoadedApk(application)
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> "com.example.GuestApplication" },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    Thread.currentThread().contextClassLoader = unknownClassLoader
+                    GuestApplicationCreateResult(
+                        application = application,
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName,
+                        loadedApk = loadedApk
+                    )
+                },
+                applicationOnCreateInvoker = {},
+                loadedApkClassLoaderInspector = { guestClassLoader },
+                applicationClassLoaderInspector = { guestClassLoader },
+                clock = fixedClock(33L, 35L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.FAILED, output.result.status)
+            assertTrue(output.result.message.contains("unrecognized thread context ClassLoader"))
+            assertEquals(
+                "UNRECOGNIZED",
+                output.result.evidence.associate { it.key to it.value }[
+                    "threadContextClassLoaderReplacementStatus"
+                ]
+            )
+            assertSame(previous, Thread.currentThread().contextClassLoader)
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
+    fun `default framework Application is valid with guest LoadedApk`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val application = Application()
+        val loadedApk = FinalizingLoadedApk(application)
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> null },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    GuestApplicationCreateResult(
+                        application = application,
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName,
+                        loadedApk = loadedApk
+                    )
+                },
+                applicationOnCreateInvoker = {},
+                finalApplicationBindingInspector = { _, _ -> matchingApplicationBinding() },
+                loadedApkClassLoaderInspector = { guestClassLoader },
+                applicationContextClassLoaderInspector = { guestClassLoader },
+                clock = fixedClock(36L, 38L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+            val evidence = output.result.evidence.associate { it.key to it.value }
+            assertEquals("PASS", evidence["applicationClassLoaderOwnershipStatus"])
+            assertEquals("PASS", evidence["providerPreinstallApplicationContextBindingStatus"])
+            assertEquals("PASS", evidence["applicationOnCreateApplicationContextClassLoaderStatus"])
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
+    fun `Application onCreate TCCL mutation fails final runtime ownership`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val wrongClassLoader = object : ClassLoader(previous) {}
+        val application = DefaultApplicationFallback()
+        val loadedApk = FinalizingLoadedApk(application)
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> "com.example.GuestApplication" },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    GuestApplicationCreateResult(
+                        application = application,
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName,
+                        loadedApk = loadedApk
+                    )
+                },
+                applicationOnCreateInvoker = {
+                    Thread.currentThread().contextClassLoader = wrongClassLoader
+                },
+                finalApplicationBindingInspector = { _, _ -> matchingApplicationBinding() },
+                loadedApkClassLoaderInspector = { guestClassLoader },
+                applicationClassLoaderInspector = { guestClassLoader },
+                applicationContextClassLoaderInspector = { guestClassLoader },
+                clock = fixedClock(39L, 41L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.FAILED, output.result.status)
+            assertTrue(output.result.message.contains("changed after Application.onCreate"))
+            assertEquals(
+                "FAIL",
+                output.result.evidence.associate { it.key to it.value }[
+                    "applicationOnCreateThreadContextClassLoaderStatus"
+                ]
+            )
+            assertSame(previous, Thread.currentThread().contextClassLoader)
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
+    fun `Provider preinstall rejects Application Context bound to another LoadedApk`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val application = DefaultApplicationFallback()
+        val loadedApk = FinalizingLoadedApk(application)
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> "com.example.GuestApplication" },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    GuestApplicationCreateResult(
+                        application = application,
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName,
+                        loadedApk = loadedApk
+                    )
+                },
+                applicationOnCreateInvoker = {},
+                finalApplicationBindingInspector = { _, _ ->
+                    LoadedApkApplicationContextBinding(
+                        matches = false,
+                        contextClassName = "android.app.ContextImpl",
+                        wrapperDepth = 0,
+                        reason = "CONTEXT_PACKAGE_INFO_MISMATCH"
+                    )
+                },
+                loadedApkClassLoaderInspector = { guestClassLoader },
+                applicationClassLoaderInspector = { guestClassLoader },
+                clock = fixedClock(42L, 44L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.FAILED, output.result.status)
+            assertTrue(output.result.message.contains("not bound to the guest LoadedApk before Provider preinstall"))
+            assertEquals(
+                "FAIL",
+                output.result.evidence.associate { it.key to it.value }[
+                    "providerPreinstallApplicationContextBindingStatus"
+                ]
+            )
+            assertSame(previous, Thread.currentThread().contextClassLoader)
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
+    fun `LoadedApk Application creation rejects mismatched durable ClassLoader ownership`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val wrongClassLoader = object : ClassLoader(previous) {}
+        val loadedApk = Any()
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> "com.example.GuestApplication" },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    GuestApplicationCreateResult(
+                        application = DefaultApplicationFallback(),
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName,
+                        loadedApk = loadedApk
+                    )
+                },
+                applicationOnCreateInvoker = {},
+                loadedApkClassLoaderInspector = { wrongClassLoader },
+                applicationClassLoaderInspector = { guestClassLoader },
+                clock = fixedClock(40L, 42L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.FAILED, output.result.status)
+            assertTrue(output.result.message.contains("LoadedApk.mClassLoader does not match"))
+            assertEquals(
+                "FAIL",
+                output.result.evidence.associate { it.key to it.value }["loadedApkClassLoaderOwnershipStatus"]
+            )
+            assertSame(previous, Thread.currentThread().contextClassLoader)
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
+    fun `Provider preinstall rejects TCCL mutation after Application attach normalization`() {
+        val previous = Thread.currentThread().contextClassLoader
+        val guestClassLoader = object : ClassLoader(previous) {}
+        val frameworkClassLoader = object : ClassLoader(previous) {}
+        val wrongClassLoader = object : ClassLoader(previous) {}
+        val loadedApk = Any()
+        try {
+            val stage = ApplicationStage(
+                hostContext = mockk(relaxed = true),
+                applicationClassNameResolver = { _, _ -> "com.example.GuestApplication" },
+                guestApplicationCreator = GuestApplicationCreator { request ->
+                    Thread.currentThread().contextClassLoader = frameworkClassLoader
+                    GuestApplicationCreateResult(
+                        application = DefaultApplicationFallback(),
+                        attachedContextPackageName = request.virtualContextConfig.originPackageName,
+                        loadedApk = loadedApk
+                    )
+                },
+                runtimePublisher = { _, _ ->
+                    Thread.currentThread().contextClassLoader = wrongClassLoader
+                },
+                applicationOnCreateInvoker = {},
+                loadedApkClassLoaderInspector = { guestClassLoader },
+                applicationClassLoaderInspector = { guestClassLoader },
+                frameworkContextClassLoaderReplacementInspector = { candidate, _ ->
+                    candidate === frameworkClassLoader
+                },
+                clock = fixedClock(50L, 52L)
+            )
+
+            val output = stage.execute(stageInput().copy(guestClassLoader = guestClassLoader))
+
+            assertEquals(BootstrapStatus.FAILED, output.result.status)
+            assertTrue(output.result.message.contains("changed before Provider preinstall"))
+            assertEquals(
+                "FAIL",
+                output.result.evidence.associate { it.key to it.value }[
+                    "providerPreinstallThreadContextClassLoaderStatus"
+                ]
+            )
+            assertSame(previous, Thread.currentThread().contextClassLoader)
+        } finally {
+            Thread.currentThread().contextClassLoader = previous
+        }
+    }
+
+    @Test
     fun `execute creates default Application when resolver returns null`() {
         DefaultApplicationFallback.reset()
         var createRequest: GuestApplicationCreateRequest? = null
@@ -331,6 +703,100 @@ class ApplicationStageTest {
     }
 
     @Test
+    fun `application delegate installed by hot fix framework becomes final runtime application`() {
+        val original = mockk<Application>(relaxed = true)
+        val delegate = mockk<Application>(relaxed = true) {
+            every { packageName } returns "com.example.app"
+        }
+        val loadedApk = FinalizingLoadedApk(original)
+        var publishedApplication: Application? = null
+        val stage = ApplicationStage(
+            hostContext = mockk(relaxed = true),
+            applicationClassNameResolver = { _, _ -> original.javaClass.name },
+            guestApplicationCreator = GuestApplicationCreator {
+                GuestApplicationCreateResult(
+                    application = original,
+                    attachedContextPackageName = "com.example.app",
+                    evidence = listOf(BootstrapEvidence("loadedApkApplicationCreatorStatus", "PASS")),
+                    loadedApk = loadedApk
+                )
+            },
+            applicationOnCreateInvoker = { application ->
+                assertSame(original, application)
+                loadedApk.mApplication = delegate
+            },
+            runtimePublisher = { _, result -> publishedApplication = result.guestApplication },
+            finalApplicationBindingInspector = { application, expectedLoadedApk ->
+                assertSame(loadedApk, expectedLoadedApk)
+                assertTrue(application === original || application === delegate)
+                matchingApplicationBinding()
+            },
+            loadedApkClassLoaderInspector = { ClassLoader.getSystemClassLoader() },
+            applicationClassLoaderInspector = { ClassLoader.getSystemClassLoader() },
+            applicationContextClassLoaderInspector = { ClassLoader.getSystemClassLoader() },
+            clock = fixedClock(740L, 751L)
+        )
+
+        val output = stage.execute(stageInput())
+
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        assertSame(original, publishedApplication, "onCreate must see the provisional proxy Application")
+        assertSame(delegate, output.context.guestApplication)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("PASS", evidence["loadedApkFinalApplicationStatus"])
+        assertEquals("DELEGATE", evidence["loadedApkFinalApplicationSource"])
+        assertEquals("CONTEXT_PACKAGE_INFO_MATCH", evidence["loadedApkFinalApplicationReason"])
+    }
+
+    @Test
+    fun `application delegate is rejected when its ContextImpl belongs to another LoadedApk`() {
+        val original = mockk<Application>(relaxed = true)
+        val delegate = mockk<Application>(relaxed = true)
+        val loadedApk = FinalizingLoadedApk(original)
+        var rollbackCalls = 0
+        val stage = ApplicationStage(
+            hostContext = mockk(relaxed = true),
+            applicationClassNameResolver = { _, _ -> original.javaClass.name },
+            guestApplicationCreator = GuestApplicationCreator {
+                GuestApplicationCreateResult(
+                    application = original,
+                    attachedContextPackageName = "com.example.app",
+                    evidence = listOf(BootstrapEvidence("loadedApkApplicationCreatorStatus", "PASS")),
+                    rollbackHandle = ActivityThreadLoadedApkRollbackHandle {
+                        rollbackCalls += 1
+                        ActivityThreadLoadedApkRollbackResult(true, emptyList(), emptyList())
+                    },
+                    loadedApk = loadedApk
+                )
+            },
+            applicationOnCreateInvoker = { loadedApk.mApplication = delegate },
+            finalApplicationBindingInspector = { application, _ ->
+                if (application === original) {
+                    matchingApplicationBinding()
+                } else {
+                    LoadedApkApplicationContextBinding(
+                        matches = false,
+                        contextClassName = "android.app.ContextImpl",
+                        wrapperDepth = 0,
+                        reason = "CONTEXT_PACKAGE_INFO_MISMATCH"
+                    )
+                }
+            },
+            loadedApkClassLoaderInspector = { ClassLoader.getSystemClassLoader() },
+            applicationClassLoaderInspector = { ClassLoader.getSystemClassLoader() },
+            applicationContextClassLoaderInspector = { ClassLoader.getSystemClassLoader() },
+            clock = fixedClock(760L, 773L)
+        )
+
+        val output = stage.execute(stageInput())
+
+        assertEquals(BootstrapStatus.FAILED, output.result.status)
+        assertNull(output.context.guestApplication)
+        assertTrue(output.result.message.contains("CONTEXT_PACKAGE_INFO_MISMATCH"))
+        assertEquals(1, rollbackCalls)
+    }
+
+    @Test
     fun `loadedApk application creator installs sandbox and calls makeApplication`() {
         val snapshot = packageSnapshot()
         val application = TestApplication()
@@ -398,7 +864,9 @@ class ApplicationStageTest {
         )
 
         assertSame(application, result.application)
+        assertSame(loadedApk, result.loadedApk)
         assertEquals(snapshot.originPackageName, capturedState?.packageName)
+        assertEquals("com.multiapp.app", capturedState?.binderPackageName)
         assertEquals(TestApplication::class.java.name, capturedState?.applicationInfo?.className)
         assertEquals("com.example.app:remote", capturedState?.applicationInfo?.processName)
         assertEquals(listOf(snapshot.originPackageName, snapshot.virtualPackageName), capturedAliases?.toList())
@@ -408,6 +876,7 @@ class ApplicationStageTest {
         assertEquals("LOADED_APK_MAKE_APPLICATION", evidence["applicationCreator"])
         assertEquals("PASS", evidence["loadedApkApplicationCreatorStatus"])
         assertEquals("GUEST_SANDBOX", evidence["loadedApkApplicationCreatorSource"])
+        assertEquals("com.multiapp.app", evidence["loadedApkBinderPackageName"])
         assertEquals("PASS", evidence["activityThreadApplicationBindingStatus"])
         assertEquals("com.example.app:remote", evidence["loadedApkApplicationInfoProcessName"])
         assertEquals("true", evidence["loadedApkApplicationOnCreateDeferred"])
@@ -623,12 +1092,24 @@ class ApplicationStageTest {
         providers = providers
     )
 
+    private fun matchingApplicationBinding() = LoadedApkApplicationContextBinding(
+        matches = true,
+        contextClassName = "android.app.ContextImpl",
+        wrapperDepth = 0,
+        reason = "CONTEXT_PACKAGE_INFO_MATCH"
+    )
+
     private fun fixedClock(vararg values: Long): () -> Long {
         var index = 0
         return {
             values.getOrElse(index++) { values.last() }
         }
     }
+
+    @Suppress("unused")
+    private class FinalizingLoadedApk(
+        var mApplication: Application?
+    )
 }
 
 class ProviderDispatchApplication : Application() {

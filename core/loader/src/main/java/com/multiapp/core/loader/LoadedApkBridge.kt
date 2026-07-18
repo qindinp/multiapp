@@ -1,9 +1,13 @@
 package com.multiapp.core.loader
 
 import android.app.Application
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import android.content.res.Resources
 import java.io.File
+import java.util.Collections
+import java.util.IdentityHashMap
 
 /**
  * Minimal reflection bridge for objects that behave like Android LoadedApk.
@@ -50,6 +54,85 @@ object LoadedApkBridge {
 
     fun classLoader(target: Any): ClassLoader? =
         readField(target, "mClassLoader") as? ClassLoader
+
+    internal fun inspectApplicationContextBinding(
+        application: Application,
+        expectedLoadedApk: Any
+    ): LoadedApkApplicationContextBinding {
+        val visited = Collections.newSetFromMap(IdentityHashMap<Context, Boolean>())
+        var context = runCatching { application.baseContext }
+            .getOrElse { error ->
+                return LoadedApkApplicationContextBinding(
+                    matches = false,
+                    contextClassName = null,
+                    wrapperDepth = 0,
+                    reason = "BASE_CONTEXT_READ_FAILED:${error.javaClass.simpleName}"
+                )
+            }
+            ?: return LoadedApkApplicationContextBinding(
+                matches = false,
+                contextClassName = null,
+                wrapperDepth = 0,
+                reason = "BASE_CONTEXT_MISSING"
+            )
+        var wrapperDepth = 0
+        while (visited.add(context)) {
+            val packageInfo = readFieldResult(context, "mPackageInfo")
+            if (packageInfo.found) {
+                return when {
+                    packageInfo.error != null -> LoadedApkApplicationContextBinding(
+                        matches = false,
+                        contextClassName = context.javaClass.name,
+                        wrapperDepth = wrapperDepth,
+                        reason = "CONTEXT_PACKAGE_INFO_READ_FAILED:${packageInfo.error.javaClass.simpleName}"
+                    )
+                    packageInfo.value === expectedLoadedApk -> LoadedApkApplicationContextBinding(
+                        matches = true,
+                        contextClassName = context.javaClass.name,
+                        wrapperDepth = wrapperDepth,
+                        reason = "CONTEXT_PACKAGE_INFO_MATCH"
+                    )
+                    else -> LoadedApkApplicationContextBinding(
+                        matches = false,
+                        contextClassName = context.javaClass.name,
+                        wrapperDepth = wrapperDepth,
+                        reason = "CONTEXT_PACKAGE_INFO_MISMATCH"
+                    )
+                }
+            }
+            val wrapper = context as? ContextWrapper
+            if (wrapper == null) {
+                return LoadedApkApplicationContextBinding(
+                    matches = false,
+                    contextClassName = context.javaClass.name,
+                    wrapperDepth = wrapperDepth,
+                    reason = "CONTEXT_PACKAGE_INFO_FIELD_MISSING"
+                )
+            }
+            context = runCatching { wrapper.baseContext }
+                .getOrElse { error ->
+                    return LoadedApkApplicationContextBinding(
+                        matches = false,
+                        contextClassName = wrapper.javaClass.name,
+                        wrapperDepth = wrapperDepth,
+                        reason = "CONTEXT_UNWRAP_FAILED:${error.javaClass.simpleName}"
+                    )
+                }
+                ?: return LoadedApkApplicationContextBinding(
+                    matches = false,
+                    contextClassName = wrapper.javaClass.name,
+                    wrapperDepth = wrapperDepth,
+                    reason = "CONTEXT_BASE_MISSING"
+                )
+            wrapperDepth += 1
+        }
+        return LoadedApkApplicationContextBinding(
+            matches = false,
+            contextClassName = context.javaClass.name,
+            wrapperDepth = wrapperDepth,
+            reason = "CONTEXT_WRAPPER_CYCLE"
+        )
+    }
 
     internal fun snapshot(target: Any): LoadedApkStateSnapshot {
         val values = linkedMapOf<String, Any?>()
@@ -295,6 +378,13 @@ internal data class LoadedApkConsistencyResult(
     val failureReasons: List<String>
 )
 
+data class LoadedApkApplicationContextBinding(
+    val matches: Boolean,
+    val contextClassName: String?,
+    val wrapperDepth: Int,
+    val reason: String
+)
+
 data class LoadedApkInspection(
     val targetClassName: String,
     val packageName: String?,
@@ -309,7 +399,8 @@ data class LoadedApkRuntimeState(
     val applicationInfo: ApplicationInfo,
     val resources: Resources,
     val classLoader: ClassLoader,
-    val application: Application? = null
+    val application: Application? = null,
+    val binderPackageName: String = packageName
 )
 
 data class LoadedApkSkippedField(

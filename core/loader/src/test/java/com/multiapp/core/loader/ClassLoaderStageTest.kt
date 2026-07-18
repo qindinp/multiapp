@@ -11,6 +11,78 @@ import kotlin.test.assertTrue
 class ClassLoaderStageTest {
 
     @Test
+    fun `structured factory receives guest target sdk and namespace paths`() {
+        var capturedSpec: GuestClassLoaderSpec? = null
+        val classLoader = ClassLoader.getSystemClassLoader()
+        val installRecord = installRecord(
+            originApkPath = "/artifact/base.apk",
+            splitApkPaths = listOf("/artifact/feature.apk")
+        )
+        val stage = ClassLoaderStage(
+            structuredClassLoaderFactory = GuestClassLoaderFactory { spec ->
+                capturedSpec = spec
+                GuestClassLoaderCreation(
+                    classLoader = classLoader,
+                    namespaceVerdict = GuestClassLoaderNamespaceVerdict.PASS,
+                    creationMethod = "TEST_PLATFORM_FACTORY"
+                )
+            },
+            clock = fixedClock(50L, 55L)
+        )
+
+        val output = stage.execute(
+            BootstrapStageInput(
+                instanceId = "inst-001",
+                installRecord = installRecord,
+                originApkPath = installRecord.originApkPath,
+                nativeLibraryDir = "/data/instances/inst-001/lib/arm64-v8a"
+            )
+        )
+
+        val spec = requireNotNull(capturedSpec)
+        assertEquals(35, spec.targetSdkVersion)
+        assertEquals("/artifact/base.apk", spec.baseApkPath)
+        assertEquals(listOf("/artifact/feature.apk"), spec.splitApkPaths)
+        assertTrue(spec.librarySearchPath.orEmpty().contains("/data/instances/inst-001/lib/arm64-v8a"))
+        assertTrue(
+            spec.libraryPermittedPath.replace('\\', '/')
+                .contains("/data/instances/inst-001/lib/arm64-v8a")
+        )
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("PASS", evidence["namespaceVerdict"])
+        assertEquals("35", evidence["namespaceTargetSdk"])
+        assertEquals("TEST_PLATFORM_FACTORY", evidence["namespaceCreationMethod"])
+        assertEquals(classLoader.parent?.javaClass?.name.orEmpty(), evidence["classLoaderParentClass"])
+        assertEquals(
+            classLoader.parent?.let(System::identityHashCode)?.toString().orEmpty(),
+            evidence["classLoaderParentIdentity"]
+        )
+    }
+
+    @Test
+    fun `structured namespace failure is terminal`() {
+        val installRecord = installRecord("/artifact/base.apk")
+        val stage = ClassLoaderStage(
+            structuredClassLoaderFactory = GuestClassLoaderFactory {
+                throw UnsatisfiedLinkError("namespace rejected")
+            },
+            clock = fixedClock(60L, 67L)
+        )
+
+        val output = stage.execute(
+            BootstrapStageInput(
+                instanceId = "inst-001",
+                installRecord = installRecord,
+                originApkPath = installRecord.originApkPath
+            )
+        )
+
+        assertEquals(BootstrapStatus.FAILED, output.result.status)
+        assertEquals("ClassLoader creation failed: namespace rejected", output.result.message)
+        assertTrue(output.isTerminalFailure)
+    }
+
+    @Test
     fun `execute creates classloader and stores it in context`() {
         val classLoader = ClassLoader.getSystemClassLoader()
         val stage = ClassLoaderStage(

@@ -550,6 +550,7 @@ data class VirtualProviderDispatchPlanRequest(
     val guestAuthority: String,
     val proxyAuthority: String? = null,
     val processSlot: String? = null,
+    val routeToken: String? = null,
     val routeTokenPresent: Boolean = false,
     val routeTokenVerified: Boolean = false,
     val callerInstanceId: String? = null,
@@ -568,6 +569,7 @@ data class VirtualProviderDispatchPlanRequest(
         require(guestAuthority.isNotBlank()) { "guestAuthority must not be blank" }
         require(proxyAuthority == null || proxyAuthority.isNotBlank()) { "proxyAuthority must not be blank" }
         require(processSlot == null || processSlot.isNotBlank()) { "processSlot must not be blank" }
+        require(routeToken == null || routeToken.isNotBlank()) { "routeToken must not be blank" }
         require(callerInstanceId == null || callerInstanceId.isNotBlank()) {
             "callerInstanceId must not be blank"
         }
@@ -2541,19 +2543,6 @@ internal class RegistryBackedVirtualProviderService(
                 guestAuthority = request.guestAuthority,
                 message = "runtime_not_found:$instanceId"
             )
-        if (request.processSlot != null && request.processSlot != runtime.processSlot) {
-            val plan = VirtualProviderDispatchPlan(
-                instanceId = runtime.instanceId,
-                operation = request.operation,
-                verdict = EngineResultStatus.FAIL,
-                guestAuthority = request.guestAuthority,
-                supportedOperations = supportedProviderOperations,
-                unsupportedOperations = unsupportedProviderOperations,
-                message = "provider_process_slot_mismatch:expected=${request.processSlot}:actual=${runtime.processSlot}"
-            )
-            recordPlanEvidence(plan, runtime, request)
-            return plan
-        }
         if (request.operation == EngineProviderOperation.UNKNOWN) {
             val plan = VirtualProviderDispatchPlan(
                 instanceId = runtime.instanceId,
@@ -2581,6 +2570,19 @@ internal class RegistryBackedVirtualProviderService(
             return plan
         }
         val provider = packageService.queryProviderByAuthority(runtime.instanceId, request.guestAuthority)
+        if (provider != null && !provider.matchesAuthoritativeProviderSlot(runtime, request.processSlot)) {
+            val plan = VirtualProviderDispatchPlan(
+                instanceId = runtime.instanceId,
+                operation = request.operation,
+                verdict = EngineResultStatus.FAIL,
+                guestAuthority = request.guestAuthority,
+                supportedOperations = supportedProviderOperations,
+                unsupportedOperations = unsupportedProviderOperations,
+                message = "provider_process_slot_mismatch:slot=${request.processSlot}:componentProcess=${provider.processName}"
+            )
+            recordPlanEvidence(plan, runtime, request)
+            return plan
+        }
         val target = provider?.toProviderTarget(runtime, request)
         val authorization = if (provider != null && target != null) {
             authorizeProvider(runtime, target, provider, request)
@@ -3626,6 +3628,28 @@ internal class RegistryBackedVirtualProviderService(
             writePermission = writePermission ?: permission,
             grantUriPermissions = grantUriPermissions || uriPermissionPatterns.isNotEmpty()
         )
+
+    private fun ResolvedComponent.matchesAuthoritativeProviderSlot(
+        runtime: VirtualInstanceRuntime,
+        requestedProcessSlot: String?
+    ): Boolean {
+        val applicationProcessName = runtime.packageSnapshot.processName
+            ?.normalizeProviderGuestProcessName(runtime.originPackageName)
+            ?: runtime.originPackageName
+        val providerProcessName = processName
+            ?.normalizeProviderGuestProcessName(runtime.originPackageName)
+            ?: applicationProcessName
+        return if (providerProcessName == applicationProcessName) {
+            requestedProcessSlot == null || requestedProcessSlot == runtime.processSlot
+        } else {
+            !requestedProcessSlot.isNullOrBlank() &&
+                requestedProcessSlot != runtime.processSlot &&
+                requestedProcessSlot.substringBefore(':') == runtime.hostPackageName
+        }
+    }
+
+    private fun String.normalizeProviderGuestProcessName(packageName: String): String =
+        if (startsWith(':')) packageName + this else this
 }
 
 internal class RegistryBackedVirtualServiceService(

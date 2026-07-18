@@ -17,9 +17,9 @@ import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
-import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.VirtualInstallService
+import com.multiapp.core.model.installer.toResolvedComponents
 import com.multiapp.core.model.virtual.ProxyActivityRegistry
 import com.multiapp.core.model.virtual.findActivityRuntimeComponent
 import com.multiapp.core.model.virtual.ResolvedComponent
@@ -841,25 +841,6 @@ internal class DefaultVirtualizationEngineCore(
             hasMultipleSigners = installRecord.hasMultipleSigners
         )
     }
-
-    private fun List<ComponentInfo>.toResolvedComponents(): List<ResolvedComponent> =
-        map { component ->
-            ResolvedComponent(
-                name = component.name,
-                exported = component.exported,
-                permission = component.permission,
-                readPermission = component.readPermission,
-                writePermission = component.writePermission,
-                grantUriPermissions = component.grantUriPermissions,
-                launchMode = component.launchMode,
-                processName = component.processName,
-                taskAffinity = component.taskAffinity,
-                themeId = component.themeId,
-                metaData = component.metaData.toLegacyMetaDataMap(),
-                typedMetaData = component.metaData,
-                targetActivityName = component.targetActivityName
-            )
-        }
 
     private fun launcherComponent(snapshot: VirtualPackageSnapshot): ResolvedComponent? {
         val launcherName = snapshot.launcherActivityName?.takeIf { it.isNotBlank() }

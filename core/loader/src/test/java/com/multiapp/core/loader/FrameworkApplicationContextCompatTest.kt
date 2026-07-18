@@ -13,13 +13,16 @@ class FrameworkApplicationContextCompatTest {
 
         val result = FrameworkApplicationContextCompat.patchTarget(
             target = target,
-            hostPackageName = "com.multiapp.app"
+            hostPackageName = "com.multiapp.app",
+            runtimeUid = 42420
         )
 
         assertEquals("com.multiapp.app", target.mBasePackageName)
         assertEquals("com.multiapp.app", target.mOpPackageName)
         assertNull(target.mPackageManager)
         assertEquals("com.multiapp.app", target.mContentResolver.mPackageName)
+        assertEquals("com.multiapp.app", target.mAttributionSource.packageName)
+        assertEquals(42420, target.mAttributionSource.uid)
         assertEquals("li.songe.gkd", target.mPackageInfo.packageName)
         assertTrue(result.binderIdentityReady)
         assertTrue(result.skippedFieldReasons.isEmpty())
@@ -56,6 +59,12 @@ class FrameworkApplicationContextCompatTest {
         val mContentResolver = FakeContentResolver()
 
         @JvmField
+        var mAttributionSource = FakeAttributionSourceState().apply {
+            uid = 42420
+            packageName = "li.songe.gkd"
+        }
+
+        @JvmField
         val mPackageInfo = FakeLoadedApk()
     }
 
@@ -66,5 +75,16 @@ class FrameworkApplicationContextCompatTest {
 
     private class FakeLoadedApk {
         val packageName: String = "li.songe.gkd"
+    }
+
+    private class FakeAttributionSourceState {
+        @JvmField
+        var uid: Int = -1
+
+        @JvmField
+        var packageName: String? = null
+
+        @JvmField
+        var next: FakeAttributionSourceState? = null
     }
 }

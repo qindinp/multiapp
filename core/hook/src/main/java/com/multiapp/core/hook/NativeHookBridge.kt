@@ -42,6 +42,7 @@ class NativeHookBridge {
 
     companion object {
         private const val TAG = "NativeHook"
+        const val GUEST_APP_SCOPED_REDIRECT_RULE_COUNT = 36
         internal const val PROC_SELF_MAPS = "/proc/self/maps"
         private const val PROC_SELF_CMDLINE = "/proc/self/cmdline"
         private const val PROC_SELF_STATUS = "/proc/self/status"
@@ -64,6 +65,35 @@ class NativeHookBridge {
             "com.stub.StubApplication",
             "com.secneo.apkwrapper.ApplicationWrapper"
         )
+
+        fun guestAppScopedSourcePrefixes(guestPackageName: String): List<String> {
+            if (guestPackageName.isBlank()) return emptyList()
+            val prefixes = mutableListOf<String>()
+            fun addBoundaryPair(prefix: String) {
+                prefixes += prefix
+                prefixes += "$prefix/"
+            }
+
+            addBoundaryPair("/data/data/$guestPackageName")
+            addBoundaryPair("/data/user/0/$guestPackageName")
+            listOf(
+                "/storage/emulated/0/Android/data/$guestPackageName",
+                "/sdcard/Android/data/$guestPackageName",
+                "/mnt/sdcard/Android/data/$guestPackageName",
+                "/storage/self/primary/Android/data/$guestPackageName"
+            ).forEach { root ->
+                addBoundaryPair(root)
+                addBoundaryPair("$root/files")
+                addBoundaryPair("$root/cache")
+            }
+            listOf(
+                "/storage/emulated/0/Android/obb/$guestPackageName",
+                "/sdcard/Android/obb/$guestPackageName",
+                "/mnt/sdcard/Android/obb/$guestPackageName",
+                "/storage/self/primary/Android/obb/$guestPackageName"
+            ).forEach(::addBoundaryPair)
+            return prefixes
+        }
 
         @Volatile private var nativeLibLoaded = false
 
@@ -1109,21 +1139,41 @@ class NativeHookBridge {
             return 0
         }
         val targetRootWithoutSlash = dataRoot.trimEnd('/', '\\')
-        val targetRoot = "$targetRootWithoutSlash/"
         var ruleCount = 0
-        if (addScopedPathRedirection("/data/data/$guestPackageName", targetRootWithoutSlash, processSlot, instanceId, dataRoot)) {
-            ruleCount++
+        fun addBoundaryPair(source: String, target: String) {
+            val normalizedTarget = target.trimEnd('/', '\\')
+            if (addScopedPathRedirection(source, normalizedTarget, processSlot, instanceId, dataRoot)) {
+                ruleCount++
+            }
+            if (addScopedPathRedirection("$source/", "$normalizedTarget/", processSlot, instanceId, dataRoot)) {
+                ruleCount++
+            }
         }
-        if (addScopedPathRedirection("/data/data/$guestPackageName/", targetRoot, processSlot, instanceId, dataRoot)) {
-            ruleCount++
+
+        addBoundaryPair("/data/data/$guestPackageName", targetRootWithoutSlash)
+        addBoundaryPair("/data/user/0/$guestPackageName", targetRootWithoutSlash)
+        listOf(
+            "/storage/emulated/0/Android/data/$guestPackageName",
+            "/sdcard/Android/data/$guestPackageName",
+            "/mnt/sdcard/Android/data/$guestPackageName",
+            "/storage/self/primary/Android/data/$guestPackageName"
+        ).forEach { sourceRoot ->
+            addBoundaryPair(sourceRoot, "$targetRootWithoutSlash/external_data")
+            addBoundaryPair("$sourceRoot/files", "$targetRootWithoutSlash/external_files")
+            addBoundaryPair("$sourceRoot/cache", "$targetRootWithoutSlash/external_cache")
         }
-        if (addScopedPathRedirection("/data/user/0/$guestPackageName", targetRootWithoutSlash, processSlot, instanceId, dataRoot)) {
-            ruleCount++
+        listOf(
+            "/storage/emulated/0/Android/obb/$guestPackageName",
+            "/sdcard/Android/obb/$guestPackageName",
+            "/mnt/sdcard/Android/obb/$guestPackageName",
+            "/storage/self/primary/Android/obb/$guestPackageName"
+        ).forEach { sourceRoot ->
+            addBoundaryPair(sourceRoot, "$targetRootWithoutSlash/obb")
         }
-        if (addScopedPathRedirection("/data/user/0/$guestPackageName/", targetRoot, processSlot, instanceId, dataRoot)) {
-            ruleCount++
-        }
-        Timber.tag(TAG).d("Guest private path redirections set for $guestPackageName ($instanceId/$processSlot)")
+        Timber.tag(TAG).d(
+            "Guest app-scoped path redirections set for $guestPackageName " +
+                "($instanceId/$processSlot): $ruleCount/$GUEST_APP_SCOPED_REDIRECT_RULE_COUNT"
+        )
         return ruleCount
     }
 

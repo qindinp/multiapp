@@ -198,6 +198,29 @@ class VirtualPackageServiceTest {
         assertEquals(emptyList(), malformedAuthority)
     }
 
+    @Test
+    fun `duplicate provider authority resolves to first manifest declaration`() {
+        val base = runtime()
+        val sharedAuthority = "com.test.app.fileprovider"
+        val first = ResolvedComponent(
+            name = "android.support.v4.content.FileProvider",
+            authorities = listOf(sharedAuthority)
+        )
+        val second = ResolvedComponent(
+            name = "androidx.core.content.FileProvider",
+            authorities = listOf(sharedAuthority)
+        )
+        val runtime = base.copy(
+            packageSnapshot = base.packageSnapshot.copy(providers = listOf(first, second))
+        )
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        server.runtimeService.register(runtime)
+
+        val resolved = server.packageService.queryProviderByAuthority(runtime.instanceId, sharedAuthority)
+
+        assertEquals(first.name, resolved?.name)
+    }
+
     private fun runtime() = VirtualInstanceRuntime(
         instanceId = "instance-1",
         hostPackageName = "com.multiapp.app",

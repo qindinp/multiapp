@@ -1,6 +1,8 @@
 package com.multiapp.core.engine
 
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
+import com.google.gson.Gson
 import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
@@ -15,6 +17,122 @@ import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.virtual.VirtualProviderPathPattern
 import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
 import com.multiapp.core.model.virtual.VirtualProviderPathPermission
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.util.concurrent.Executor
+import java.util.concurrent.Executors
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+import timber.log.Timber
+
+/**
+ * Binder carries only this descriptor. The complete package snapshot is streamed so large
+ * manifests cannot cross Binder's transaction-size limit.
+ */
+internal object EngineAuthoritativeRuntimeStream {
+    private val writerExecutor: Executor = Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "multiapp-runtime-snapshot").apply { isDaemon = true }
+    }
+
+    fun open(runtime: VirtualInstanceRuntime): ParcelFileDescriptor? = runCatching {
+        val payload = EngineAuthoritativeRuntimePayloadCodec.encode(runtime)
+        check(payload.size <= MAX_RUNTIME_STREAM_BYTES) { "authoritative runtime stream exceeds limit" }
+        val pipe = ParcelFileDescriptor.createReliablePipe()
+        try {
+            writerExecutor.execute {
+                runCatching {
+                    ParcelFileDescriptor.AutoCloseOutputStream(pipe[1]).use { raw ->
+                        GZIPOutputStream(raw).use { compressed -> compressed.write(payload) }
+                    }
+                }.onFailure { error ->
+                    runCatching { pipe[1].closeWithError(error.message ?: error.javaClass.name) }
+                }
+            }
+        } catch (error: Throwable) {
+            runCatching { pipe[0].close() }
+            runCatching { pipe[1].close() }
+            throw error
+        }
+        pipe[0]
+    }.onFailure { error ->
+        Timber.e(error, "Failed to open authoritative runtime stream")
+    }.getOrNull()
+
+    fun read(descriptor: ParcelFileDescriptor): VirtualInstanceRuntime? = runCatching {
+        val payload = ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { raw ->
+            GZIPInputStream(raw).use(::readBoundedRuntimeStream)
+        }
+        EngineAuthoritativeRuntimePayloadCodec.decode(payload)
+            ?: error("authoritative runtime payload failed validation")
+    }.onFailure { error ->
+        Timber.e(error, "Failed to read authoritative runtime stream")
+    }.getOrNull()
+
+    private fun readBoundedRuntimeStream(input: GZIPInputStream): ByteArray {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(STREAM_BUFFER_SIZE)
+        var total = 0
+        while (true) {
+            val read = input.read(buffer)
+            if (read < 0) break
+            total += read
+            check(total <= MAX_RUNTIME_STREAM_BYTES) { "authoritative runtime stream exceeds limit" }
+            output.write(buffer, 0, read)
+        }
+        return output.toByteArray()
+    }
+
+    private const val STREAM_BUFFER_SIZE = 16 * 1024
+}
+
+/**
+ * Versioned, framework-independent payload used inside the runtime FD.
+ *
+ * Do not use Bundle/Parcel here. Large manifests make nested Bundles expensive and some vendor
+ * frameworks reject or lazily unparcel them even when Binder only transports a file descriptor.
+ */
+internal object EngineAuthoritativeRuntimePayloadCodec {
+    private val gson = Gson()
+
+    fun encode(runtime: VirtualInstanceRuntime): ByteArray {
+        val validated = EngineRuntimeStateRecord.from(runtime)
+            .toRuntime()
+            .requireValidAuthoritativeRuntime()
+        val json = gson.toJson(EngineRuntimeStateRecord.from(validated)).toByteArray(Charsets.UTF_8)
+        check(json.size <= MAX_RUNTIME_STREAM_BYTES) { "authoritative runtime payload exceeds limit" }
+        return ByteArrayOutputStream(RUNTIME_PAYLOAD_HEADER_BYTES + json.size).use { bytes ->
+            DataOutputStream(bytes).use { output ->
+                output.writeInt(RUNTIME_PAYLOAD_MAGIC)
+                output.writeInt(RUNTIME_PAYLOAD_SCHEMA_VERSION)
+                output.writeInt(json.size)
+                output.write(json)
+            }
+            bytes.toByteArray()
+        }
+    }
+
+    fun decode(payload: ByteArray): VirtualInstanceRuntime? = runCatching {
+        check(payload.size in RUNTIME_PAYLOAD_HEADER_BYTES..MAX_RUNTIME_STREAM_BYTES)
+        DataInputStream(payload.inputStream()).use { input ->
+            check(input.readInt() == RUNTIME_PAYLOAD_MAGIC) { "invalid authoritative runtime magic" }
+            check(input.readInt() == RUNTIME_PAYLOAD_SCHEMA_VERSION) {
+                "unsupported authoritative runtime schema"
+            }
+            val jsonSize = input.readInt()
+            check(jsonSize in 1..MAX_RUNTIME_STREAM_BYTES)
+            check(jsonSize == payload.size - RUNTIME_PAYLOAD_HEADER_BYTES) {
+                "authoritative runtime payload length mismatch"
+            }
+            val json = ByteArray(jsonSize)
+            input.readFully(json)
+            check(input.read() == -1) { "unexpected authoritative runtime payload suffix" }
+            gson.fromJson(String(json, Charsets.UTF_8), EngineRuntimeStateRecord::class.java)
+                .toRuntime()
+                .requireValidAuthoritativeRuntime()
+        }
+    }.getOrNull()
+}
 
 /** Strict, framework-only codec used to move the complete engine runtime across Binder. */
 internal fun VirtualInstanceRuntime.toAuthoritativeRuntimeBundle(
@@ -76,6 +194,165 @@ internal fun Bundle.toAuthoritativeRuntimeOrNull(): VirtualInstanceRuntime? = ru
     check(runtime.authoritativeRuntimeTextSize() <= MAX_TOTAL_TEXT_LENGTH)
     runtime
 }.getOrNull()
+
+private fun VirtualInstanceRuntime.requireValidAuthoritativeRuntime(): VirtualInstanceRuntime {
+    instanceId.requireBoundedText()
+    hostPackageName.requireBoundedText()
+    originPackageName.requireBoundedText()
+    virtualPackageName.requireBoundedText()
+    dataRoot.requireBoundedText(MAX_PATH_LENGTH)
+    processSlot.requireBoundedText()
+    proxySlot.requireBoundedText()
+    evidenceSessionId.requireBoundedText()
+    engineSessionId.requireBoundedText()
+    processName.requireOptionalBoundedText()
+    check(runtimeEpoch > 0L)
+    processId?.let { value -> check(value > 0) }
+
+    packageSnapshot.requireValidAuthoritativeSnapshot()
+    check(packageSnapshot.instanceId == instanceId)
+    check(packageSnapshot.originPackageName == originPackageName)
+    check(packageSnapshot.virtualPackageName == virtualPackageName)
+    check(packageSnapshot.dataDir == dataRoot)
+    check(authoritativeRuntimeTextSize() <= MAX_TOTAL_TEXT_LENGTH)
+    return this
+}
+
+private fun VirtualPackageSnapshot.requireValidAuthoritativeSnapshot() {
+    instanceId.requireBoundedText()
+    originPackageName.requireBoundedText()
+    virtualPackageName.requireBoundedText()
+    applicationLabel.requireBoundedText()
+    versionName.requireBoundedText()
+    sourceDir.requireBoundedText(MAX_PATH_LENGTH)
+    publicSourceDir.requireBoundedText(MAX_PATH_LENGTH)
+    dataDir.requireBoundedText(MAX_PATH_LENGTH)
+    nativeLibraryDir.requireOptionalBoundedText(MAX_PATH_LENGTH)
+    applicationClassName.requireOptionalBoundedText()
+    processName.requireOptionalBoundedText()
+    taskAffinity.requireOptionalBoundedText()
+    launcherActivityName.requireOptionalBoundedText()
+    check(versionCode > 0L)
+    check(targetSdk > 0)
+    check(minSdk > 0)
+    sourceSha256?.also(::requireDigest)
+    originCertSha256?.also(::requireDigest)
+    splitSourceDirs.requireBoundedTextList(MAX_SPLIT_COUNT, MAX_PATH_LENGTH)
+    splitSha256s.requireDigestList(MAX_SPLIT_COUNT)
+    splitPublicSourceDirs.requireBoundedTextList(MAX_SPLIT_COUNT, MAX_PATH_LENGTH)
+    splitNames.requireBoundedTextList(MAX_SPLIT_COUNT)
+    nativeLibraries.requireBoundedTextList(MAX_NATIVE_ENTRY_COUNT)
+    abiList.requireBoundedTextList(MAX_NATIVE_ENTRY_COUNT)
+    permissions.requireBoundedTextList(MAX_PERMISSION_COUNT)
+    signerSha256Digests.requireDigestList(MAX_SIGNER_COUNT)
+    check(splitPublicSourceDirs.isEmpty() || splitPublicSourceDirs.size == splitSourceDirs.size)
+    check(splitNames.isEmpty() || splitNames.size == splitSourceDirs.size)
+    check(splitSha256s.isEmpty() || splitSha256s.size == splitSourceDirs.size)
+    metaData.requireValidStringMap()
+    typedMetaData.requireValidTypedMetaData()
+    activities.requireValidComponents()
+    services.requireValidComponents()
+    receivers.requireValidComponents()
+    providers.requireValidComponents()
+    check(activities.hasUniqueComponentNames())
+    check(services.hasUniqueComponentNames())
+    check(receivers.hasUniqueComponentNames())
+    check(providers.hasUniqueComponentNames())
+}
+
+private fun List<ResolvedComponent>.requireValidComponents() {
+    check(size <= MAX_COMPONENT_COUNT)
+    forEach { component ->
+        component.name.requireBoundedText()
+        component.launchMode.requireOptionalBoundedText()
+        component.processName.requireOptionalBoundedText()
+        component.taskAffinity.requireOptionalBoundedText()
+        component.screenOrientation.requireOptionalBoundedText()
+        component.configChanges.requireOptionalBoundedText()
+        component.permission.requireOptionalBoundedText()
+        component.readPermission.requireOptionalBoundedText()
+        component.writePermission.requireOptionalBoundedText()
+        component.targetActivityName.requireOptionalBoundedText()
+        component.intentFilters.requireBoundedTextList(MAX_FILTER_COUNT)
+        component.authorities.requireBoundedTextList(MAX_AUTHORITY_COUNT)
+        check(component.authorities.size == component.authorities.distinct().size)
+        check(component.resolvedIntentFilters.size <= MAX_FILTER_COUNT)
+        component.resolvedIntentFilters.forEach(ResolvedIntentFilter::requireValidAuthoritativeFilter)
+        component.metaData.requireValidStringMap()
+        component.typedMetaData.requireValidTypedMetaData()
+        check(component.pathPermissions.size <= MAX_PATH_POLICY_COUNT)
+        component.pathPermissions.forEach(VirtualProviderPathPermission::requireValidAuthoritativePolicy)
+        check(component.uriPermissionPatterns.size <= MAX_PATH_POLICY_COUNT)
+        component.uriPermissionPatterns.forEach(VirtualProviderPathPattern::requireValidAuthoritativePattern)
+    }
+}
+
+private fun ResolvedIntentFilter.requireValidAuthoritativeFilter() {
+    actions.requireBoundedTextList(MAX_FILTER_VALUE_COUNT)
+    categories.requireBoundedTextList(MAX_FILTER_VALUE_COUNT)
+    dataSchemes.requireBoundedTextList(MAX_FILTER_VALUE_COUNT)
+    dataMimeTypes.requireBoundedTextList(MAX_FILTER_VALUE_COUNT)
+    dataAuthorities.requireBoundedTextList(MAX_FILTER_VALUE_COUNT)
+    dataPaths.requireBoundedTextList(MAX_FILTER_VALUE_COUNT)
+    check(authorityEntries.size <= MAX_FILTER_VALUE_COUNT)
+    authorityEntries.forEach { authority ->
+        authority.host.requireBoundedText()
+        authority.port?.let { port -> check(port >= 0) }
+    }
+    check(pathPatterns.size <= MAX_FILTER_VALUE_COUNT)
+    pathPatterns.forEach { pattern -> pattern.path.requireBoundedText(MAX_PATH_LENGTH) }
+}
+
+private fun VirtualProviderPathPermission.requireValidAuthoritativePolicy() {
+    pattern.requireValidAuthoritativePattern()
+    readPermission.requireOptionalBoundedText()
+    writePermission.requireOptionalBoundedText()
+    check(readPermission != null || writePermission != null)
+}
+
+private fun VirtualProviderPathPattern.requireValidAuthoritativePattern() {
+    path.requireBoundedText(MAX_PATH_LENGTH)
+}
+
+private fun Map<String, String>.requireValidStringMap() {
+    check(size <= MAX_META_DATA_COUNT)
+    forEach { (key, value) ->
+        key.requireBoundedText()
+        value.requireBoundedText(MAX_META_DATA_VALUE_LENGTH, allowEmpty = true)
+    }
+}
+
+private fun Map<String, VirtualMetaDataValue>.requireValidTypedMetaData() {
+    check(size <= MAX_META_DATA_COUNT)
+    forEach { (key, value) ->
+        key.requireBoundedText()
+        value.type.name
+        value.encodedValue.requireBoundedText(MAX_META_DATA_VALUE_LENGTH, allowEmpty = true)
+        check(value.type == VirtualMetaDataValueType.STRING || value.encodedValue.isNotBlank())
+    }
+}
+
+private fun String.requireBoundedText(
+    maxLength: Int = MAX_IDENTITY_LENGTH,
+    allowEmpty: Boolean = false
+) {
+    check(length <= maxLength && '\u0000' !in this)
+    check(allowEmpty || isNotBlank())
+}
+
+private fun String?.requireOptionalBoundedText(maxLength: Int = MAX_IDENTITY_LENGTH) {
+    this?.requireBoundedText(maxLength)
+}
+
+private fun List<String>.requireBoundedTextList(maxCount: Int, maxLength: Int = MAX_IDENTITY_LENGTH) {
+    check(size <= maxCount)
+    forEach { value -> value.requireBoundedText(maxLength) }
+}
+
+private fun List<String>.requireDigestList(maxCount: Int) {
+    check(size <= maxCount)
+    forEach(::requireDigest)
+}
 
 private fun VirtualPackageSnapshot.toBundle(bundleFactory: () -> Bundle): Bundle = bundleFactory().apply {
     putInt(RuntimeCodecKeys.SCHEMA_VERSION, PACKAGE_SNAPSHOT_SCHEMA_VERSION)
@@ -166,8 +443,6 @@ private fun Bundle.toPackageSnapshotOrNull(): VirtualPackageSnapshot? = runCatch
     check(snapshot.services.hasUniqueComponentNames())
     check(snapshot.receivers.hasUniqueComponentNames())
     check(snapshot.providers.hasUniqueComponentNames())
-    val authorities = snapshot.providers.flatMap { it.authorities }
-    check(authorities.size == authorities.distinct().size)
     snapshot
 }.getOrNull()
 
@@ -764,6 +1039,10 @@ private val TYPED_META_DATA_ENTRY_FIELDS = setOf(
     RuntimeCodecKeys.VALUE
 )
 
+private const val RUNTIME_PAYLOAD_MAGIC = 0x4D415254
+private const val RUNTIME_PAYLOAD_SCHEMA_VERSION = 1
+private const val RUNTIME_PAYLOAD_HEADER_BYTES = 12
+private const val MAX_RUNTIME_STREAM_BYTES = 32 * 1024 * 1024
 private const val AUTHORITATIVE_RUNTIME_SCHEMA_VERSION = 1
 private const val PACKAGE_SNAPSHOT_SCHEMA_VERSION = 2
 private const val MAX_IDENTITY_LENGTH = 1_024
