@@ -1,14 +1,14 @@
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
 
 android {
     namespace = "com.multiapp.core.hook"
-    compileSdk = 36
-    ndkVersion = "29.0.13599879"
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         minSdk = 28
@@ -26,6 +26,7 @@ android {
     externalNativeBuild {
         cmake {
             path("src/main/cpp/CMakeLists.txt")
+            version = "4.1.2"
         }
     }
 
@@ -47,7 +48,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
 }
 
 dependencies {
@@ -68,6 +68,7 @@ dependencies {
 
     testImplementation(libs.junit5.api)
     testRuntimeOnly(libs.junit5.engine)
+    testRuntimeOnly(libs.junit5.launcher)
     testImplementation(libs.coroutines.test)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlin.test)

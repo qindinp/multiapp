@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
@@ -8,12 +7,13 @@ plugins {
 
 android {
     namespace = "com.multiapp.app"
-    compileSdk = 36
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "com.multiapp.app"
         minSdk = 28
-        targetSdk = 36
+        targetSdk = 37
         versionCode = 1
         versionName = "1.0.0-alpha01"
 
@@ -37,10 +37,6 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = "17"
     }
 
     buildFeatures {
@@ -67,7 +63,7 @@ ksp {
 
 // 将 core:stub 生成的 loader.dex 复制到 app 模块的 assets 目录
 // AAR 不包含 assets，所以需要显式复制到 app 模块确保打包进 APK
-val copyLoaderDex by tasks.registering(Copy::class) {
+val copyLoaderDex = tasks.register<Copy>("copyLoaderDex") {
     // 必须依赖 generateLoaderDex，否则会复制旧版 loader.dex
     dependsOn(":core:stub:generateLoaderDex")
     from("${project(":core:stub").projectDir}/src/main/assets/loader.dex")
@@ -81,7 +77,7 @@ tasks.configureEach {
     }
 }
 
-val verifyEngineBoundary by tasks.registering {
+val verifyEngineBoundary = tasks.register("verifyEngineBoundary") {
     group = "verification"
     description = "Reject app and feature imports that bypass the virtualization engine facade."
     val sourceRoots = buildList {
@@ -172,6 +168,7 @@ dependencies {
     // Testing
     testImplementation(libs.junit5.api)
     testRuntimeOnly(libs.junit5.engine)
+    testRuntimeOnly(libs.junit5.launcher)
     testImplementation(libs.coroutines.test)
     testImplementation(libs.mockk)
     testImplementation(libs.turbine)

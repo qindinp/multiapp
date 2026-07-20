@@ -3,6 +3,7 @@ package com.multiapp.core.stub
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.reflect.TypeToken
+import com.multiapp.core.common.ConfigEncryptor
 import com.multiapp.core.manifest.ComponentExtractor
 import com.multiapp.core.manifest.ManifestGenerator
 import com.multiapp.core.manifest.ManifestParser
@@ -127,8 +128,15 @@ class StubBuilderTest {
                 json, object : TypeToken<Map<String, Any>>() {}.type
             )
 
+            assertTrue(ConfigEncryptor.hasEncryptedFields(map))
+            val decrypted = ConfigEncryptor.decryptSensitiveFields(
+                map,
+                defaultConfig.stubPackageName,
+                defaultConfig.instanceId
+            )
+
             @Suppress("UNCHECKED_CAST")
-            val identity = map["deviceIdentity"] as Map<String, Any>
+            val identity = decrypted["deviceIdentity"] as Map<String, Any?>
             assertEquals("123456789012345", identity["imei"])
             assertEquals("abcdef123456", identity["androidId"])
             assertEquals("AA:BB:CC:DD:EE:FF", identity["macAddress"])
@@ -966,7 +974,7 @@ class StubBuilderTest {
                 exported = true
             )
 
-            every { generator.generateBytes(any(), any(), any(), any()) } returns "manifest".toByteArray()
+            every { generator.generateBytes(any(), any(), any(), any(), any()) } returns "manifest".toByteArray()
 
             // Use spyk to force getLoaderDex to throw (since loader.dex actually exists on disk)
             val spyBuilder = spyk(stubBuilder)
@@ -987,6 +995,26 @@ class StubBuilderTest {
     // =====================================================================
     // Helper methods
     // =====================================================================
+
+    private fun StubBuilder.assembleApk(
+        outputFile: File,
+        manifestBytes: ByteArray,
+        loaderDex: ByteArray,
+        originApk: File,
+        configFile: File,
+        iconFile: File?,
+        patchedDexFiles: List<File> = emptyList()
+    ) = assembleApk(
+        outputFile = outputFile,
+        manifestBytes = manifestBytes,
+        loaderDex = loaderDex,
+        originApk = originApk,
+        originalApk = null,
+        configFile = configFile,
+        config = defaultConfig,
+        iconFile = iconFile,
+        patchedDexFiles = patchedDexFiles
+    )
 
     /**
      * Creates a minimal valid ZIP file with the given entries.
@@ -1058,15 +1086,16 @@ class StubBuilderTest {
             exported = true
         )
 
-        every { generator.generateBytes(any(), any(), any(), any()) } returns buildMockManifestXml(config).toByteArray()
+        every { generator.generateBytes(any(), any(), any(), any(), any()) } returns buildMockManifestXml(config).toByteArray()
 
         val loaderDexContent = "mock-loader-dex-content".toByteArray()
         every { spyBuilder["getLoaderDex"]() } returns loaderDexContent
 
         every { spyBuilder.signApk(any(), any()) } answers {
+            val input = firstArg<java.io.File>()
             val output = secondArg<java.io.File>()
             output.parentFile?.mkdirs()
-            output.createNewFile()
+            input.copyTo(output, overwrite = true)
         }
 
         return block(spyBuilder)

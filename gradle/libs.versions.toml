@@ -1,11 +1,11 @@
 [versions]
-agp = "8.7.3"
-kotlin = "2.0.21"
-ksp = "2.0.21-1.0.28"
+agp = "9.3.0"
+kotlin = "2.2.10"
+ksp = "2.3.10"
 compose-bom = "2024.12.01"
-hilt = "2.53.1"
+hilt = "2.60.1"
 hilt-navigation = "1.2.0"
-room = "2.6.1"
+room = "2.8.4"
 lifecycle = "2.8.7"
 navigation = "2.8.5"
 coroutines = "1.9.0"
@@ -19,17 +19,18 @@ gson = "2.11.0"
 hiddenapibypass = "6.1"
 lsplant = "6.4"
 shadowhook = "1.1.1"
-apksig = "8.7.3"
+apksig = "9.3.0"
 apkparser = "2.6.10"
 dexlib2 = "2.5.2"
 junit5 = "5.10.2"
+junit-platform = "1.10.2"
 robolectric = "4.14.1"
 mockk = "1.13.9"
 turbine = "1.0.0"
 coroutines-test = "1.9.0"
 kotlin-test = "2.0.21"
 security-crypto = "1.1.0-alpha06"
-detekt = "1.23.7"
+detekt = "1.23.8"
 androidx-test-core = "1.6.1"
 androidx-test-runner = "1.6.2"
 androidx-test-rules = "1.6.1"
@@ -70,6 +71,7 @@ apkparser = { group = "net.dongliu", name = "apk-parser", version.ref = "apkpars
 dexlib2 = { group = "org.smali", name = "dexlib2", version.ref = "dexlib2" }
 junit5-api = { group = "org.junit.jupiter", name = "junit-jupiter-api", version.ref = "junit5" }
 junit5-engine = { group = "org.junit.jupiter", name = "junit-jupiter-engine", version.ref = "junit5" }
+junit5-launcher = { group = "org.junit.platform", name = "junit-platform-launcher", version.ref = "junit-platform" }
 mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
 mockk-android = { group = "io.mockk", name = "mockk-android", version.ref = "mockk" }
 turbine = { group = "app.cash.turbine", name = "turbine", version.ref = "turbine" }
@@ -88,7 +90,6 @@ hilt-android-testing = { group = "com.google.dagger", name = "hilt-android-testi
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
-kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }

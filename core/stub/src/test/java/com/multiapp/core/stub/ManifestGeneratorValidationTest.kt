@@ -226,16 +226,33 @@ class ManifestGeneratorValidationTest {
             0x0101021c, // versionName
             0x0101020c, // minSdkVersion
             0x01010270, // targetSdkVersion
+            0x01010000, // theme
             0x01010003, // name
             0x01010001, // label
+            0x01010002, // icon
             0x0101000f, // debuggable
             0x01010010, // exported
             0x01010011, // process
             0x01010018, // authorities
             0x0101057a, // appComponentFactory
             0x01010006, // permission
+            0x01010007, // readPermission
+            0x01010008, // writePermission
             0x0101000e, // enabled
-            0x01010419, // extractNativeLibs
+            0x010104ea, // extractNativeLibs
+            0x0101001b, // grantUriPermissions
+            0x01010025, // resource
+            0x01010024, // value
+            0x0101001d, // launchMode
+            0x0101001f, // configChanges
+            0x0101001e, // screenOrientation
+            0x0101022b, // windowSoftInputMode
+            0x01010012, // taskAffinity
+            0x01010016, // stateNotNeeded
+            0x0101022d, // noHistory
+            0x01010204, // allowTaskReparenting
+            0x01010015, // clearTaskOnLaunch
+            0x01010014, // finishOnTaskLaunch
             0           // 无映射
         )
 

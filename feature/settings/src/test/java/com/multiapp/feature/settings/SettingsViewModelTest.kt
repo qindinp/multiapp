@@ -1,7 +1,10 @@
 package com.multiapp.feature.settings
 
+import io.mockk.every
+import io.mockk.mockk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.*
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
@@ -13,12 +16,17 @@ import org.junit.jupiter.api.Test
 class SettingsViewModelTest {
 
     private lateinit var viewModel: SettingsViewModel
+    private lateinit var settingsRepository: SettingsRepository
     private val testDispatcher = UnconfinedTestDispatcher()
 
     @BeforeEach
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
-        viewModel = SettingsViewModel()
+        settingsRepository = mockk(relaxed = true)
+        every { settingsRepository.themeMode } returns flowOf(ThemeMode.SYSTEM)
+        every { settingsRepository.language } returns flowOf(Language.SYSTEM)
+        every { settingsRepository.getCacheSize() } returns 0L
+        viewModel = SettingsViewModel(settingsRepository)
     }
 
     @AfterEach

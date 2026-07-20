@@ -622,7 +622,7 @@ open class ContainerActivity : Activity() {
         return runCatching {
             activityManager.appTasks
                 .flatMap { task ->
-                    val taskInfo = task.taskInfo
+                    val taskInfo = task.taskInfo ?: return@flatMap emptyList()
                     listOfNotNull(
                         taskInfo.baseActivity?.className,
                         taskInfo.topActivity?.className

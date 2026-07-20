@@ -1,6 +1,5 @@
 plugins {
     alias(libs.plugins.android.library)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ksp)
     alias(libs.plugins.hilt)
 }
@@ -26,6 +25,7 @@ dependencies {
 
     testImplementation(libs.junit5.api)
     testRuntimeOnly(libs.junit5.engine)
+    testRuntimeOnly(libs.junit5.launcher)
     testImplementation(libs.coroutines.test)
     testImplementation(libs.mockk)
     testImplementation(libs.kotlin.test)
@@ -33,8 +33,12 @@ dependencies {
 
 android {
     namespace = "com.multiapp.core.stub"
-    compileSdk = 36
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
     defaultConfig { minSdk = 28 }
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
     buildTypes {
         release {
             consumerProguardFiles("proguard-rules.pro")
@@ -44,28 +48,27 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions { jvmTarget = "17" }
 }
 
 // 声明一个 configuration 来获取 :core:loader 的运行时 classpath
-val loaderRuntimeFiles by configurations.creating {
+val loaderRuntimeFiles = configurations.create("loaderRuntimeFiles") {
     isCanBeConsumed = false
     isCanBeResolved = true
 }
 
 dependencies {
     // 这些是 :core:loader 的外部依赖，用于 loader.dex 编译
-    loaderRuntimeFiles(libs.gson)
-    loaderRuntimeFiles(libs.apksig)
-    loaderRuntimeFiles(libs.apkparser)
-    loaderRuntimeFiles(libs.timber)
-    loaderRuntimeFiles(libs.coroutines.core)
-    loaderRuntimeFiles(libs.coroutines.android)
-    loaderRuntimeFiles(libs.hiddenapibypass)
-    loaderRuntimeFiles(libs.shadowhook)
+    add(loaderRuntimeFiles.name, libs.gson)
+    add(loaderRuntimeFiles.name, libs.apksig)
+    add(loaderRuntimeFiles.name, libs.apkparser)
+    add(loaderRuntimeFiles.name, libs.timber)
+    add(loaderRuntimeFiles.name, libs.coroutines.core)
+    add(loaderRuntimeFiles.name, libs.coroutines.android)
+    add(loaderRuntimeFiles.name, libs.hiddenapibypass)
+    add(loaderRuntimeFiles.name, libs.shadowhook)
 }
 
-val generateLoaderDex by tasks.registering {
+val generateLoaderDex = tasks.register("generateLoaderDex") {
     description = "Compile :core:loader classes into a DEX for StubBuilder"
     group = "build"
 
@@ -163,7 +166,7 @@ val generateLoaderDex by tasks.registering {
 
         val d8Exe = if (System.getProperty("os.name").lowercase().contains("windows"))
             "d8.bat" else "d8"
-        val d8Path = File(sdkDir, "build-tools/36.0.0/$d8Exe").absolutePath
+        val d8Path = File(sdkDir, "build-tools/37.0.0/$d8Exe").absolutePath
         check(File(d8Path).exists()) { "d8 not found at $d8Path" }
 
         // 4. 用 d8 一步编译所有 class 为 DEX
@@ -175,9 +178,9 @@ val generateLoaderDex by tasks.registering {
         val argFile = File(temporaryDir, "classes.txt")
         argFile.writeText(classFiles.joinToString("\n"))
 
-        exec {
+        providers.exec {
             commandLine(d8Path, "--min-api", "28", "--output", assetsDir.absolutePath, "@${argFile.absolutePath}")
-        }
+        }.result.get().assertNormalExitValue()
         argFile.delete()
         stagingDir.deleteRecursively()
 

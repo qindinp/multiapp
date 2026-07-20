@@ -1,11 +1,11 @@
 plugins {
     id("com.android.library")
-    id("org.jetbrains.kotlin.android")
 }
 
 android {
     namespace = "com.multiapp.core.workprofile"
-    compileSdk = 34
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         minSdk = 26
@@ -27,9 +27,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     
-    kotlinOptions {
-        jvmTarget = "17"
-    }
 }
 
 dependencies {

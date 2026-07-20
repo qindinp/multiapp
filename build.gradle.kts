@@ -2,7 +2,6 @@
 plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.android.library) apply false
-    alias(libs.plugins.kotlin.android) apply false
     alias(libs.plugins.kotlin.compose) apply false
     alias(libs.plugins.ksp) apply false
     alias(libs.plugins.hilt) apply false
@@ -44,11 +43,11 @@ subprojects {
                 group = "verification"
                 description = "Generate JaCoCo coverage report for debug variant"
 
-                val execFiles = fileTree(buildDir) {
+                val execFiles = fileTree(layout.buildDirectory) {
                     include("**/testDebugUnitTest.exec")
                 }
 
-                val classFiles = fileTree(buildDir) {
+                val classFiles = fileTree(layout.buildDirectory) {
                     include(
                         "tmp/kotlin-classes/debug/**/*.class",
                         "intermediates/javac/debug/**/*.class"

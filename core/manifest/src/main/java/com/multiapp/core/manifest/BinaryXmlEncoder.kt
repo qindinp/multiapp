@@ -59,11 +59,11 @@ class BinaryXmlEncoder {
             "launchMode" to 0x0101001d,
             "configChanges" to 0x0101001f,
             "screenOrientation" to 0x0101001e,
-            "windowSoftInputMode" to 0x01010020,
+            "windowSoftInputMode" to 0x0101022b,
             "taskAffinity" to 0x01010012,
             "stateNotNeeded" to 0x01010016,
-            "noHistory" to 0x01010019,
-            "allowTaskReparenting" to 0x01010021,
+            "noHistory" to 0x0101022d,
+            "allowTaskReparenting" to 0x01010204,
             "clearTaskOnLaunch" to 0x01010015,
             "finishOnTaskLaunch" to 0x01010014
         )

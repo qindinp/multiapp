@@ -1,7 +1,11 @@
 package com.multiapp.core.stub
 
 import com.multiapp.core.manifest.DeviceIdentityConfig
+import com.multiapp.core.manifest.ComponentExtractor
+import com.multiapp.core.manifest.ManifestGenerator
+import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.manifest.StubConfig
+import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -16,7 +20,11 @@ class StubBuildE2ETest {
 
     @BeforeEach
     fun setup() {
-        stubBuilder = StubBuilder()
+        stubBuilder = StubBuilder(
+            parser = mockk<ManifestParser>(relaxed = true),
+            generator = mockk<ManifestGenerator>(relaxed = true),
+            extractor = mockk<ComponentExtractor>(relaxed = true)
+        )
     }
 
     @Test
@@ -51,6 +59,7 @@ class StubBuildE2ETest {
     @Test
     fun `extractLauncherIcon handles missing icon gracefully`() {
         val tempFile = File.createTempFile("test", ".apk")
+        java.util.zip.ZipOutputStream(tempFile.outputStream()).use { }
         tempFile.deleteOnExit()
 
         val outputDir = File.createTempFile("output", "")
