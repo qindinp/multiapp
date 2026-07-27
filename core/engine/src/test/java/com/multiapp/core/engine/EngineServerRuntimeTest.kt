@@ -68,11 +68,50 @@ class EngineServerRuntimeTest {
         assertSame(systemServer, engineCore.systemServer)
         assertSame(activityLaunchCapabilities, engineCore.activityLaunchCapabilities)
         assertSame(processDeathRegistry, engineCore.processDeathRegistry)
+        assertSame(owner.systemServiceProxies, engineCore.systemServiceProxyRegistry)
         assertSame(runtimeRegistry, controlPlaneRegistry)
         assertSame(processDeathRegistry, controlPlaneDeathRegistry)
         assertSame(activityLaunchCapabilities, controlPlaneCapabilities)
         assertSame(createdProcessControlPlane, owner.processControlPlane)
         assertEquals(1, processControlPlaneCreationCount)
+    }
+
+    @Test
+    fun `system service registry is reflected by capabilities and cleared on stop`() {
+        val runtimeRegistry = EngineRuntimeRegistry()
+        val owner = EngineServerRuntime.createForTest(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = mockk<InstanceManager>(relaxed = true),
+            virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = runtimeRegistry,
+            systemServer = DefaultVirtualSystemServer(runtimeRegistry)
+        )
+        val runtime = runtimeRegistry.register(providerRuntime())
+        val bound = owner.systemServiceProxies.bind(
+            EngineSystemServiceBindRequest(
+                instanceId = runtime.instanceId,
+                serviceId = EngineSystemServiceId.NOTIFICATION,
+                runtimeEpoch = runtime.runtimeEpoch,
+                engineSessionId = runtime.engineSessionId,
+                processSlot = runtime.processSlot,
+                apiLevel = 37,
+                adapterId = "notification-adapter",
+                adapterInstalled = true
+            )
+        )
+
+        val report = owner.virtualizationEngine.queryCapabilities(runtime.instanceId)
+
+        assertEquals(EngineResultStatus.PARTIAL, bound.verdict)
+        assertTrue(
+            report.capability("system-service:notification")
+                ?.message
+                .orEmpty()
+                .contains("notification-adapter")
+        )
+        owner.virtualizationEngine.stopInstance(runtime.instanceId)
+        assertTrue(owner.systemServiceProxies.snapshot(runtime.instanceId).isEmpty())
     }
 
     @Test

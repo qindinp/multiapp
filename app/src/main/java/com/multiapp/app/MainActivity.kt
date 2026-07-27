@@ -44,7 +44,7 @@ class MainActivity : ComponentActivity() {
 
     @Suppress("DEPRECATION")
     private fun requestHighestRefreshRate() {
-        val currentDisplay = display ?: windowManager.defaultDisplay
+        val currentDisplay = windowManager.defaultDisplay
         val currentMode = currentDisplay.mode
         val preferredMode = currentDisplay.supportedModes
             .asSequence()

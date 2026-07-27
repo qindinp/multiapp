@@ -72,4 +72,7 @@ interface IEngineRuntimeService {
     Bundle queryBroadcastRuntimeState(String instanceId);
     boolean recordOperationEvidence(String instanceId, in Bundle evidence);
     boolean stopRuntime(String instanceId, long runtimeEpoch);
+    Bundle engineQueryCapabilities(String instanceId);
+    Bundle engineClearInstanceData(String instanceId);
+    Bundle engineRefreshPackage(in Bundle request);
 }

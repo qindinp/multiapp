@@ -92,6 +92,12 @@ interface InstanceManager {
     fun deleteInstance(instanceId: String): Boolean
 
     /**
+     * Atomically replace the instance data root while preserving the instance record.
+     */
+    fun clearInstanceData(instanceId: String): Result<InstanceDataRoot> =
+        Result.failure(UnsupportedOperationException("instance data clearing is unavailable"))
+
+    /**
      * Record a launch for the given instance.
      *
      * Increments [VirtualInstanceRecord.launchCount] and updates

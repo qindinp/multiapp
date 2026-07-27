@@ -60,6 +60,14 @@ interface VirtualInstallService {
         )
     }
 
+    /**
+     * Atomically replace an existing package generation with metadata from
+     * [app]. Implementations must reject downgrades, changed content under the
+     * same version code, and signer discontinuity.
+     */
+    fun refreshInstallRecord(app: VirtualApp): Result<ImportResult> =
+        Result.failure(UnsupportedOperationException("package refresh is unavailable"))
+
     fun getInstallRecord(packageName: String): InstallRecord?
     fun listInstallRecords(): List<InstallRecord>
     fun deleteInstallRecord(packageName: String): Boolean

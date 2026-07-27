@@ -3,6 +3,7 @@ package com.multiapp.core.engine
 import android.content.Context
 import android.os.Bundle
 import com.multiapp.core.model.engine.EngineEvidenceMode
+import com.multiapp.core.model.engine.EngineCapabilityReport
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineEvidenceReport
@@ -112,7 +113,7 @@ internal fun Bundle.toCreateInstanceRequestOrNull(): CreateInstanceRequest? = ru
     )
 }.getOrNull()
 
-private fun EnginePackageInstallRequest.toEngineIpcBundle(
+internal fun EnginePackageInstallRequest.toEngineIpcBundle(
     bundleFactory: () -> Bundle
 ): Bundle = bundleFactory().apply {
     putString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME, originPackageName)
@@ -135,7 +136,7 @@ private fun EnginePackageInstallRequest.toEngineIpcBundle(
     putBoolean(KEY_ISOLATED_SPLITS, isolatedSplits)
 }
 
-private fun Bundle.toEnginePackageInstallRequestOrNull(): EnginePackageInstallRequest? = runCatching {
+internal fun Bundle.toEnginePackageInstallRequestOrNull(): EnginePackageInstallRequest? = runCatching {
     EnginePackageInstallRequest(
         originPackageName = requiredString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME),
         originApkPath = requiredString(KEY_ORIGIN_APK_PATH),
@@ -338,8 +339,14 @@ internal fun Bundle.toEngineEvidenceOrNull(): EngineEvidenceReport? = runCatchin
     )
 }.getOrNull()
 
-internal fun engineOperationUnavailableBundle(operation: String): Bundle =
-    EngineResult.fail(operation = operation, message = "engine_server_owner_unavailable").toEngineIpcBundle()
+internal fun engineOperationUnavailableBundle(
+    operation: String,
+    instanceId: String? = null
+): Bundle = EngineResult.fail(
+    operation = operation,
+    instanceId = instanceId,
+    message = "engine_server_owner_unavailable"
+).toEngineIpcBundle()
 
 internal fun engineInvalidRequestBundle(operation: String): Bundle =
     EngineResult.fail(operation = operation, message = "invalid_engine_ipc_request").toEngineIpcBundle()
@@ -398,19 +405,25 @@ private inline fun <reified T : Enum<T>> Bundle.requiredEnum(key: String): T =
 
 internal interface EngineVirtualizationRemote {
     fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult?
+    fun refreshPackage(request: EnginePackageInstallRequest): EngineRemoteResult? = null
     fun createInstance(originPackageName: String): EngineRemoteResult?
     fun createInstance(request: CreateInstanceRequest): EngineRemoteResult? =
         createInstance(request.originPackageName)
     fun launchInstance(request: LaunchInstanceRequest): EngineRemoteResult?
     fun stopInstance(instanceId: String): EngineRemoteResult?
     fun deleteInstance(instanceId: String): EngineRemoteResult?
+    fun clearInstanceData(instanceId: String): EngineRemoteResult? = null
     fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime?
+    fun queryCapabilities(instanceId: String?): EngineCapabilityReport? = null
     fun exportEvidence(instanceId: String): EngineEvidenceReport?
 }
 
 private object BinderEngineVirtualizationRemote : EngineVirtualizationRemote {
     override fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult? =
         EngineRuntimeIpcClients.engineInstallOrRefreshPackage(originPackageName)
+
+    override fun refreshPackage(request: EnginePackageInstallRequest): EngineRemoteResult? =
+        EngineRuntimeIpcClients.engineRefreshPackage(request)
 
     override fun createInstance(originPackageName: String): EngineRemoteResult? =
         EngineRuntimeIpcClients.engineCreateInstance(originPackageName)
@@ -427,8 +440,14 @@ private object BinderEngineVirtualizationRemote : EngineVirtualizationRemote {
     override fun deleteInstance(instanceId: String): EngineRemoteResult? =
         EngineRuntimeIpcClients.engineDeleteInstance(instanceId)
 
+    override fun clearInstanceData(instanceId: String): EngineRemoteResult? =
+        EngineRuntimeIpcClients.engineClearInstanceData(instanceId)
+
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? =
         EngineRuntimeIpcClients.engineQueryRuntimeState(instanceId)
+
+    override fun queryCapabilities(instanceId: String?): EngineCapabilityReport? =
+        EngineRuntimeIpcClients.engineQueryCapabilities(instanceId)
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport? =
         EngineRuntimeIpcClients.engineExportEvidence(instanceId)
@@ -448,6 +467,9 @@ class IpcVirtualizationEngine @Inject constructor(
     override fun installOrRefreshPackage(originPackageName: String): EngineResult =
         core.installOrRefreshPackage(originPackageName)
 
+    override fun refreshPackage(request: EnginePackageInstallRequest): EngineResult =
+        core.refreshPackage(request)
+
     override fun createInstance(originPackageName: String): EngineResult =
         core.createInstance(originPackageName)
 
@@ -460,8 +482,13 @@ class IpcVirtualizationEngine @Inject constructor(
 
     override fun deleteInstance(instanceId: String): EngineResult = core.deleteInstance(instanceId)
 
+    override fun clearInstanceData(instanceId: String): EngineResult = core.clearInstanceData(instanceId)
+
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? =
         core.queryRuntimeState(instanceId)
+
+    override fun queryCapabilities(instanceId: String?): EngineCapabilityReport =
+        core.queryCapabilities(instanceId)
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport = core.exportEvidence(instanceId)
 }
@@ -475,6 +502,14 @@ internal class IpcVirtualizationEngineCore(
             instanceId = null,
             originPackageName = originPackageName,
             remoteResult = remote.installOrRefreshPackage(originPackageName)
+        )
+
+    override fun refreshPackage(request: EnginePackageInstallRequest): EngineResult =
+        complete(
+            operation = "refreshPackage",
+            instanceId = null,
+            originPackageName = request.originPackageName,
+            remoteResult = remote.refreshPackage(request)
         )
 
     override fun createInstance(originPackageName: String): EngineResult =
@@ -517,10 +552,30 @@ internal class IpcVirtualizationEngineCore(
             remoteResult = remote.deleteInstance(instanceId)
         )
 
+    override fun clearInstanceData(instanceId: String): EngineResult =
+        complete(
+            operation = "clearInstanceData",
+            instanceId = instanceId,
+            originPackageName = null,
+            remoteResult = remote.clearInstanceData(instanceId)
+        )
+
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? {
         return remote.queryRuntimeState(instanceId)?.takeIf { runtime ->
             runtime.instanceId == instanceId
         }
+    }
+
+    override fun queryCapabilities(instanceId: String?): EngineCapabilityReport {
+        if (instanceId != null && instanceId.isBlank()) {
+            return capabilityFailure(null, "invalid_instance_id")
+        }
+        val report = runCatching { remote.queryCapabilities(instanceId) }.getOrNull()
+            ?: return capabilityFailure(instanceId, "engine_capability_authority_unavailable")
+        if (report.instanceId != instanceId) {
+            return capabilityFailure(instanceId, "engine_capability_identity_mismatch")
+        }
+        return report
     }
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport =
@@ -544,6 +599,19 @@ internal class IpcVirtualizationEngineCore(
             originPackageName = originPackageName,
             message = "engine_authority_unavailable_or_unknown_result"
         )
+        val remoteEngineResult = remoteValue.result
+        if (
+            remoteEngineResult.operation != operation ||
+            instanceId != null && remoteEngineResult.instanceId != instanceId ||
+            originPackageName != null && remoteEngineResult.originPackageName != originPackageName
+        ) {
+            return EngineResult.fail(
+                operation = operation,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                message = "engine_authority_result_mismatch"
+            )
+        }
         val identity = remoteValue.runtimeIdentity ?: return remoteValue.result
         val runtime = remoteValue.result.runtime
         if (
@@ -561,6 +629,15 @@ internal class IpcVirtualizationEngineCore(
         return remoteValue.result
     }
 }
+
+private fun capabilityFailure(instanceId: String?, message: String): EngineCapabilityReport =
+    EngineCapabilityReport(
+        instanceId = instanceId,
+        status = EngineResultStatus.FAIL,
+        capabilities = emptyList(),
+        generatedAtMs = 0L,
+        message = message
+    )
 
 private const val KEY_TASK_POLICY = "engineTaskPolicy"
 private const val KEY_PREWARM_POLICY = "enginePrewarmPolicy"

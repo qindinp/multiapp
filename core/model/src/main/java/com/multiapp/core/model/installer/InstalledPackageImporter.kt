@@ -159,7 +159,8 @@ class InstalledPackageImporter(
                 services = services,
                 receivers = receivers,
                 providers = providers,
-                installTimeMs = now
+                installTimeMs = previousRecord?.installTimeMs ?: now,
+                updatedAtMs = if (previousRecord == null) now else now.coerceAtLeast(previousRecord.updatedAtMs + 1L)
             )
 
             val manifest = buildManifest(record)

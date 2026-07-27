@@ -61,6 +61,7 @@ class EngineServerRuntime private constructor(
     val componentProcessClients: EngineComponentProcessClientRegistry = graph.componentProcessClients
     val componentProcessLaunchCapabilities: EngineComponentProcessLaunchCapabilityRegistry =
         graph.componentProcessLaunchCapabilities
+    val systemServiceProxies: EngineSystemServiceProxyRegistry = graph.systemServiceProxies
     val processControlPlane: EngineProcessControlPlane = graph.processControlPlane
     val virtualizationEngine: VirtualizationEngine = graph.virtualizationEngine
 
@@ -484,6 +485,7 @@ private class EngineServerRuntimeGraph(
     val componentProcessIdentityProbe: EngineComponentProcessIdentityProbe,
     val processBootstrapper: EngineProcessBootstrapper,
     val processControlPlane: EngineProcessControlPlane,
+    val systemServiceProxies: EngineSystemServiceProxyRegistry,
     val virtualizationEngine: DefaultVirtualizationEngineCore
 )
 
@@ -514,6 +516,7 @@ private fun createEngineServerRuntimeGraph(
 ): EngineServerRuntimeGraph {
     val runtimeRegistry = systemServerHandle.registry
     val systemServer = systemServerHandle.server
+    val systemServiceProxies = EngineSystemServiceProxyRegistry(systemServer.runtimeService)
     val serviceOperationLeases = EngineServiceOperationLeaseCoordinator(runtimeRegistry)
     val serviceConnections = EngineServiceConnectionRegistry()
     val activityOperationTransactions = EngineActivityOperationTransactionCoordinator()
@@ -581,6 +584,12 @@ private fun createEngineServerRuntimeGraph(
             identity.runtimeEpoch,
             identity.engineSessionId
         )
+        systemServiceProxies.revokeGeneration(
+            identity.instanceId,
+            identity.runtimeEpoch,
+            identity.engineSessionId,
+            identity.processSlot
+        )
     }
     val processControlPlane = processControlPlaneFactory.create(
         runtimeRegistry,
@@ -602,6 +611,7 @@ private fun createEngineServerRuntimeGraph(
         profilePolicy = CompatibilityProfilePolicy(),
         hookRuntime = hookRuntime,
         permissionGrantSeeder = permissionGrantSeeder,
+        systemServiceProxyRegistry = systemServiceProxies,
         ephemeralInstanceCleanup = { instanceId ->
             serviceOperationLeases.revokeInstance(instanceId)
             serviceConnections.revokeInstance(instanceId)
@@ -611,6 +621,7 @@ private fun createEngineServerRuntimeGraph(
             componentProcessClients.revokeInstance(instanceId)
             componentProcessLaunchCapabilities.revokeInstance(instanceId)
             activityOperationTransactions.revokeInstance(instanceId)
+            systemServiceProxies.clearInstance(instanceId)
         },
         evidenceSessionFactory = { UUID.randomUUID().toString() },
         systemServerFactory = { requestedRegistry ->
@@ -636,6 +647,7 @@ private fun createEngineServerRuntimeGraph(
         componentProcessIdentityProbe = componentProcessIdentityProbe,
         processBootstrapper = processBootstrapper,
         processControlPlane = processControlPlane,
+        systemServiceProxies = systemServiceProxies,
         virtualizationEngine = virtualizationEngine
     )
 }

@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.annotation.SuppressLint
 import android.app.Application
 import dalvik.system.PathClassLoader
 import com.multiapp.core.hook.NativeDiagnosticsConfig
@@ -733,6 +734,9 @@ class HostedRuntimeBootstrap(
             }
         }
 
+        // API 37 may block this hidden method. Failure is surfaced by the
+        // bootstrap stage and cannot be promoted to a supported capability.
+        @SuppressLint("SoonBlockedPrivateApi")
         private fun createClassloaderNamespace(
             classLoader: ClassLoader,
             spec: GuestClassLoaderSpec

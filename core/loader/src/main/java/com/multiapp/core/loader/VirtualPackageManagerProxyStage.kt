@@ -486,7 +486,7 @@ class VirtualPackageManagerProxyStage(
             guestPackages = sourcePackages.toSet(),
             processSlot = input.processSlot,
             processName = runCatching { android.app.Application.getProcessName() }.getOrNull(),
-            baseOpPackageName = runCatching { hostContext?.opPackageName }.getOrNull(),
+            baseOpPackageName = hostContext?.opPackageNameCompat(),
             basePackageName = runCatching { hostContext?.packageName }.getOrNull()
         )
         if (hostContext == null || hostPackageName.isBlank()) {

@@ -24,8 +24,10 @@ import android.content.res.XmlResourceParser
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.os.Process
+import android.os.Build
 import android.os.UserHandle
 import androidx.annotation.Keep
+import androidx.annotation.RequiresApi
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 
 /** PackageManager facade for one hosted virtual package snapshot. */
@@ -68,6 +70,7 @@ class VirtualPackageManagerWrapper(
         return base.getPackageInfo(versionedPackage, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun getPackageInfo(packageName: String, flags: PackageInfoFlags): PackageInfo {
         if (service.handlesPackage(packageName)) {
             return service.getPackageInfo(packageName, flags.value) ?: throw NameNotFoundException(packageName)
@@ -75,6 +78,7 @@ class VirtualPackageManagerWrapper(
         return base.getPackageInfo(packageName, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun getPackageInfo(versionedPackage: VersionedPackage, flags: PackageInfoFlags): PackageInfo {
         if (service.handlesPackage(versionedPackage.packageName)) {
             return service.getPackageInfo(versionedPackage.packageName, flags.value)
@@ -91,6 +95,7 @@ class VirtualPackageManagerWrapper(
         return base.getApplicationInfo(packageName, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun getApplicationInfo(packageName: String, flags: ApplicationInfoFlags): ApplicationInfo {
         if (service.handlesPackage(packageName)) {
             return service.getApplicationInfo(packageName, flags.value) ?: throw NameNotFoundException(packageName)
@@ -104,6 +109,7 @@ class VirtualPackageManagerWrapper(
         } ?: base.getActivityInfo(component, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun getActivityInfo(component: ComponentName, flags: ComponentInfoFlags): ActivityInfo {
         return virtualComponentInfo(component) { service.getActivityInfo(component, flags.value) }
             ?: base.getActivityInfo(component, flags)
@@ -115,6 +121,7 @@ class VirtualPackageManagerWrapper(
         } ?: base.getServiceInfo(component, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun getServiceInfo(component: ComponentName, flags: ComponentInfoFlags): ServiceInfo {
         return virtualComponentInfo(component) { service.getServiceInfo(component, flags.value) }
             ?: base.getServiceInfo(component, flags)
@@ -126,6 +133,7 @@ class VirtualPackageManagerWrapper(
         } ?: base.getReceiverInfo(component, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun getReceiverInfo(component: ComponentName, flags: ComponentInfoFlags): ActivityInfo {
         return virtualComponentInfo(component) { service.getReceiverInfo(component, flags.value) }
             ?: base.getReceiverInfo(component, flags)
@@ -137,6 +145,7 @@ class VirtualPackageManagerWrapper(
         } ?: base.getProviderInfo(component, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun getProviderInfo(component: ComponentName, flags: ComponentInfoFlags): ProviderInfo {
         return virtualComponentInfo(component) { service.getProviderInfo(component, flags.value) }
             ?: base.getProviderInfo(component, flags)
@@ -147,6 +156,7 @@ class VirtualPackageManagerWrapper(
             ?: base.resolveContentProvider(authority, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun resolveContentProvider(authority: String, flags: ComponentInfoFlags): ProviderInfo? =
         service.resolveContentProvider(authority, flags.value) ?: base.resolveContentProvider(authority, flags)
 
@@ -157,6 +167,7 @@ class VirtualPackageManagerWrapper(
         return base.queryIntentActivities(intent, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun queryIntentActivities(intent: Intent, flags: ResolveInfoFlags): List<ResolveInfo> {
         service.queryIntentActivities(intent, flags.value).takeIf { it.isNotEmpty() }?.let { return it }
         return base.queryIntentActivities(intent, flags)
@@ -167,6 +178,7 @@ class VirtualPackageManagerWrapper(
             ?: base.resolveActivity(intent, flags)
     }
 
+    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
     override fun resolveActivity(intent: Intent, flags: ResolveInfoFlags): ResolveInfo? =
         service.resolveActivity(intent, flags.value) ?: base.resolveActivity(intent, flags)
 

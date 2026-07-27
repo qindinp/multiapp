@@ -781,7 +781,7 @@ class LoadedApkGuestApplicationCreator(
                 guestPackages = setOf(snapshot.originPackageName, snapshot.virtualPackageName),
                 processSlot = request.virtualContextConfig.processSlot,
                 processName = runCatching { Application.getProcessName() }.getOrNull(),
-                baseOpPackageName = runCatching { request.hostContext.opPackageName }.getOrNull(),
+                baseOpPackageName = request.hostContext.opPackageNameCompat(),
                 basePackageName = runCatching { request.hostContext.packageName }.getOrNull()
             )
         )

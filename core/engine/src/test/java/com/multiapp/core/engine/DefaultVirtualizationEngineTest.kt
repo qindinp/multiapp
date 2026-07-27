@@ -45,6 +45,29 @@ import org.junit.jupiter.api.io.TempDir
 class DefaultVirtualizationEngineTest {
 
     @Test
+    fun `capability query rejects a blank instance id instead of returning the static catalog`() {
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance()),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper()
+        )
+
+        listOf("", " ", "\t").forEach { invalidInstanceId ->
+            val report = engine.queryCapabilities(invalidInstanceId)
+
+            assertEquals(EngineResultStatus.FAIL, report.status)
+            assertNull(report.instanceId)
+            assertEquals("invalid_instance_id", report.message)
+        }
+
+        val staticReport = engine.queryCapabilities(null)
+        assertEquals("static engine capability catalog", staticReport.message)
+        assertNull(staticReport.instanceId)
+    }
+
+    @Test
     fun `launch registers runtime and dispatches container launch spec`() {
         val instance = instance()
         val installs = FakeVirtualInstallService(installRecord())

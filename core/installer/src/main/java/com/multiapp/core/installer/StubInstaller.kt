@@ -7,6 +7,7 @@ import android.content.pm.PackageInstaller
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import timber.log.Timber
 import java.io.File
@@ -177,11 +178,12 @@ class StubInstaller(private val context: Context) {
 
         // 先注册 Receiver，再提交 session，避免广播丢失
         val intentFilter = android.content.IntentFilter(INSTALLER_ACTION)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            context.registerReceiver(receiver, intentFilter)
-        }
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            intentFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         try {
             // 创建结果 PendingIntent

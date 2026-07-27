@@ -151,6 +151,49 @@ class DefaultInstanceManager(
         return false
     }
 
+    @Synchronized
+    override fun clearInstanceData(instanceId: String): Result<InstanceDataRoot> = runCatching {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        val record = store.load(instanceId)
+            ?: throw IllegalStateException("instance_not_found:$instanceId")
+        val rootBase = dataRootBase.canonicalFile
+        val expectedDataRoot = File(rootBase, instanceId).canonicalFile
+        val recordedDataRoot = File(record.dataRoot).canonicalFile
+        require(recordedDataRoot == expectedDataRoot && recordedDataRoot.parentFile == rootBase) {
+            "instance_data_root_outside_base:$instanceId"
+        }
+        if (!rootBase.exists() && !rootBase.mkdirs()) {
+            throw IllegalStateException("instance_data_root_base_create_failed")
+        }
+        if (!recordedDataRoot.exists()) {
+            return@runCatching createDataRoot(instanceId, recordedDataRoot)
+        }
+
+        val tombstone = File(rootBase, ".$instanceId.clear-${UUID.randomUUID()}")
+        if (!recordedDataRoot.renameTo(tombstone)) {
+            throw IllegalStateException("instance_data_root_stage_failed")
+        }
+        val replacement = runCatching { createDataRoot(instanceId, recordedDataRoot) }
+            .getOrElse { error ->
+                recordedDataRoot.deleteRecursively()
+                if (!tombstone.renameTo(recordedDataRoot)) {
+                    throw IllegalStateException("instance_data_root_create_and_restore_failed", error)
+                }
+                throw error
+            }
+
+        val oldRootDeleted = runCatching { dataRootDeleter(tombstone) }.getOrDefault(false) &&
+            !tombstone.exists()
+        if (oldRootDeleted) return@runCatching replacement
+
+        val replacementDeleted = runCatching { dataRootDeleter(recordedDataRoot) }.getOrDefault(false) &&
+            !recordedDataRoot.exists()
+        if (!replacementDeleted || !tombstone.renameTo(recordedDataRoot)) {
+            throw IllegalStateException("instance_data_root_clear_rollback_failed")
+        }
+        throw IllegalStateException("instance_data_root_clear_failed")
+    }
+
     override fun updateLaunchState(instanceId: String): VirtualInstanceRecord? {
         val record = store.load(instanceId) ?: return null
         val now = clock()
@@ -169,5 +212,23 @@ class DefaultInstanceManager(
         val record = store.load(instanceId) ?: return null
         val baseDir = File(record.dataRoot)
         return InstanceDataRoot.fromBaseDir(instanceId, baseDir)
+    }
+
+    private fun createDataRoot(instanceId: String, baseDir: File): InstanceDataRoot {
+        val dataRoot = InstanceDataRoot.fromBaseDir(instanceId, baseDir)
+        listOfNotNull(
+            dataRoot.baseDir,
+            dataRoot.dataDir,
+            dataRoot.cacheDir,
+            dataRoot.filesDir,
+            dataRoot.sharedPrefsDir,
+            dataRoot.databaseDir,
+            dataRoot.externalFilesDir
+        ).forEach { directory ->
+            check(directory.isDirectory || directory.mkdirs()) {
+                "Failed to create instance data directory: ${directory.absolutePath}"
+            }
+        }
+        return dataRoot
     }
 }

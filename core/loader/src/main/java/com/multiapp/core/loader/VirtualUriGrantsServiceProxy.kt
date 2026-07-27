@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.IBinder
 import android.os.IInterface
@@ -15,6 +16,9 @@ object VirtualUriGrantsServiceProxy {
     private const val DESCRIPTOR = "android.app.IUriGrantsManager"
     private val installLock = Any()
 
+    // Hidden Binder access is best-effort and fail-closed; external URI grants
+    // remain UNSUPPORTED until an API 37-safe adapter is implemented.
+    @SuppressLint("BlockedPrivateApi")
     fun install(): Boolean = synchronized(installLock) {
         runCatching {
             val serviceManagerClass = Class.forName("android.os.ServiceManager")
@@ -74,6 +78,7 @@ object VirtualUriGrantsServiceProxy {
         ) as IBinder
     }
 
+    @SuppressLint("BlockedPrivateApi")
     private fun patchCachedService(serviceProxy: IInterface): Boolean = runCatching {
         val managerClass = Class.forName("android.app.UriGrantsManager")
         val singletonField = managerClass.getDeclaredField("IUriGrantsManagerSingleton").apply {

@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.os.IBinder
 import android.os.IInterface
@@ -82,6 +83,8 @@ object VirtualLauncherAppsServiceProxy {
         true
     }.onFailure(::logInstallFailure).getOrDefault(false)
 
+    // This compatibility hook is best-effort and remains non-PASS on API 37.
+    @SuppressLint("SoonBlockedPrivateApi")
     private fun patchServiceManager(
         aliases: Collection<String>,
         hostPackageName: String

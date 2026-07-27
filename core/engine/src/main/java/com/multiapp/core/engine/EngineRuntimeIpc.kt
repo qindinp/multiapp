@@ -404,6 +404,14 @@ class EngineRuntimeBinderEndpoint(
         engine.installOrRefreshPackage(originPackageName).toEngineIpcBundle()
     }
 
+    override fun engineRefreshPackage(request: Bundle): Bundle = managementAuthorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("refreshPackage")
+        val decoded = request.toEnginePackageInstallRequestOrNull()
+            ?: return@managementAuthorizedBundle engineInvalidRequestBundle("refreshPackage")
+        engine.refreshPackage(decoded).toEngineIpcBundle()
+    }
+
     override fun engineCreateInstance(originPackageName: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
             ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("createInstance")
@@ -438,11 +446,33 @@ class EngineRuntimeBinderEndpoint(
         engine.deleteInstance(instanceId).toEngineIpcBundle()
     }
 
+    override fun engineClearInstanceData(instanceId: String): Bundle = managementAuthorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@managementAuthorizedBundle engineOperationUnavailableBundle(
+                operation = "clearInstanceData",
+                instanceId = instanceId
+            )
+        engine.clearInstanceData(instanceId).toEngineIpcBundle()
+    }
+
     override fun engineQueryRuntimeState(instanceId: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
             ?: return@managementAuthorizedBundle engineOperationUnavailableBundle("queryRuntimeState")
         engine.queryRuntimeState(instanceId)?.toEngineRuntimeIdentityBundle()
             ?: engineMissingRuntimeBundle(instanceId)
+    }
+
+    override fun engineQueryCapabilities(instanceId: String): Bundle = managementAuthorizedBundle {
+        val normalizedInstanceId = instanceId.takeIf(String::isNotEmpty)
+        if (normalizedInstanceId != null && normalizedInstanceId.isBlank()) {
+            return@managementAuthorizedBundle engineCapabilityFailureBundle(null, "invalid_instance_id")
+        }
+        val engine = virtualizationEngine
+            ?: return@managementAuthorizedBundle engineCapabilityFailureBundle(
+                normalizedInstanceId,
+                "engine_server_owner_unavailable"
+            )
+        engine.queryCapabilities(normalizedInstanceId).toEngineCapabilityReportBundle()
     }
 
     override fun engineOpenRuntimeState(
@@ -3217,6 +3247,11 @@ object EngineRuntimeIpcClients {
     internal fun engineInstallOrRefreshPackage(originPackageName: String): EngineRemoteResult? =
         invokeEngineResult { service -> service.engineInstallOrRefreshPackage(originPackageName) }
 
+    internal fun engineRefreshPackage(
+        request: com.multiapp.core.model.engine.EnginePackageInstallRequest
+    ): EngineRemoteResult? =
+        invokeEngineResult { service -> service.engineRefreshPackage(request.toEngineIpcBundle(::Bundle)) }
+
     internal fun engineCreateInstance(originPackageName: String): EngineRemoteResult? =
         invokeEngineResult { service -> service.engineCreateInstance(originPackageName) }
 
@@ -3235,6 +3270,9 @@ object EngineRuntimeIpcClients {
 
     internal fun engineDeleteInstance(instanceId: String): EngineRemoteResult? =
         invokeEngineResult { service -> service.engineDeleteInstance(instanceId) }
+
+    internal fun engineClearInstanceData(instanceId: String): EngineRemoteResult? =
+        invokeEngineResult { service -> service.engineClearInstanceData(instanceId) }
 
     fun engineQueryRuntimeState(
         instanceId: String,
@@ -3317,6 +3355,16 @@ object EngineRuntimeIpcClients {
         val active = activeService() ?: return null
         val response = runCatching { active.engineExportEvidence(instanceId) }.getOrNull() ?: return null
         return response.toEngineEvidenceOrNull()
+    }
+
+    internal fun engineQueryCapabilities(
+        instanceId: String?
+    ): com.multiapp.core.model.engine.EngineCapabilityReport? {
+        val active = activeService() ?: return null
+        val response = runCatching {
+            active.engineQueryCapabilities(instanceId.orEmpty())
+        }.getOrNull() ?: return null
+        return response.toEngineCapabilityReportOrNull()
     }
 
     fun attachClient(

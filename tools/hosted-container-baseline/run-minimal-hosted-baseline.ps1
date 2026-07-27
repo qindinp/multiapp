@@ -609,6 +609,9 @@ try {
         if ($script:instrumentationFailures -gt 0 -or $script:instrumentationErrors -gt 0) {
             throw "HostedContainerMinimalBaselineTest failed. tests=$script:instrumentationTests failures=$script:instrumentationFailures errors=$script:instrumentationErrors xml=$script:instrumentationXml"
         }
+        if ($script:instrumentationSkipped -gt 0) {
+            throw "HostedContainerMinimalBaselineTest was skipped. tests=$script:instrumentationTests skipped=$script:instrumentationSkipped xml=$script:instrumentationXml"
+        }
     }
 
     Run-Step "Capture hosted runtime evidence" {

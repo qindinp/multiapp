@@ -5,13 +5,25 @@ import com.multiapp.core.model.instance.CompatibilityMode
 
 interface VirtualizationEngine {
     fun installOrRefreshPackage(originPackageName: String): EngineResult
+    fun refreshPackage(request: EnginePackageInstallRequest): EngineResult = EngineResult.unsupported(
+        operation = "refreshPackage",
+        originPackageName = request.originPackageName,
+        message = "package refresh is unavailable"
+    )
     fun createInstance(originPackageName: String): EngineResult
     fun createInstance(request: CreateInstanceRequest): EngineResult =
         createInstance(request.originPackageName)
     fun launchInstance(request: LaunchInstanceRequest): EngineResult
     fun stopInstance(instanceId: String): EngineResult
     fun deleteInstance(instanceId: String): EngineResult
+    fun clearInstanceData(instanceId: String): EngineResult = EngineResult.unsupported(
+        operation = "clearInstanceData",
+        instanceId = instanceId,
+        message = "instance data clearing is unavailable"
+    )
     fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime?
+    fun queryCapabilities(instanceId: String? = null): EngineCapabilityReport =
+        EngineCapabilityReport.unavailable(instanceId)
     fun exportEvidence(instanceId: String): EngineEvidenceReport
 }
 
@@ -170,6 +182,75 @@ enum class EngineSubsystem {
     STORAGE,
     NATIVE,
     EVIDENCE
+}
+
+/**
+ * Stable capability record exposed by the engine authority.
+ *
+ * A release-critical capability is considered ready only when its status is
+ * [EngineResultStatus.PASS]. PARTIAL and UNSUPPORTED remain visible instead of
+ * being collapsed into a successful bootstrap result.
+ */
+data class EngineCapability(
+    val id: String,
+    val subsystem: EngineSubsystem,
+    val status: EngineResultStatus,
+    val releaseCritical: Boolean,
+    val supportedOperations: Set<String> = emptySet(),
+    val unsupportedOperations: Set<String> = emptySet(),
+    val requiredDeviceEvidence: Set<String> = emptySet(),
+    val message: String = ""
+) {
+    init {
+        require(id.isNotBlank()) { "capability id must not be blank" }
+        require(supportedOperations.none { it.isBlank() }) {
+            "supportedOperations must not contain blank entries"
+        }
+        require(unsupportedOperations.none { it.isBlank() }) {
+            "unsupportedOperations must not contain blank entries"
+        }
+        require(requiredDeviceEvidence.none { it.isBlank() }) {
+            "requiredDeviceEvidence must not contain blank entries"
+        }
+    }
+
+    val releaseReady: Boolean
+        get() = !releaseCritical || status == EngineResultStatus.PASS
+}
+
+data class EngineCapabilityReport(
+    val instanceId: String? = null,
+    val status: EngineResultStatus,
+    val capabilities: List<EngineCapability>,
+    val generatedAtMs: Long,
+    val message: String = ""
+) {
+    init {
+        require(instanceId == null || instanceId.isNotBlank()) {
+            "instanceId must be null or non-blank"
+        }
+        require(generatedAtMs >= 0L) { "generatedAtMs must not be negative" }
+        require(capabilities.map { it.id }.distinct().size == capabilities.size) {
+            "capability ids must be unique"
+        }
+    }
+
+    val releaseReady: Boolean
+        get() = status == EngineResultStatus.PASS &&
+            capabilities.isNotEmpty() &&
+            capabilities.all(EngineCapability::releaseReady)
+
+    fun capability(id: String): EngineCapability? = capabilities.firstOrNull { it.id == id }
+
+    companion object {
+        fun unavailable(instanceId: String?): EngineCapabilityReport = EngineCapabilityReport(
+            instanceId = instanceId,
+            status = EngineResultStatus.UNSUPPORTED,
+            capabilities = emptyList(),
+            generatedAtMs = 0L,
+            message = "engine capability report is unavailable"
+        )
+    }
 }
 
 enum class VirtualRuntimeState {

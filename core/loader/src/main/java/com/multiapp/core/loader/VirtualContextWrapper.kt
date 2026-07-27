@@ -1,6 +1,7 @@
 package com.multiapp.core.loader
 
 import android.app.Application
+import android.os.Build
 import android.content.Context
 import android.content.ContentResolver
 import android.content.ContextWrapper
@@ -33,6 +34,7 @@ import java.io.FileOutputStream
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.Executor
+import androidx.annotation.RequiresApi
 
 /**
  * Wraps the host Context and overrides identity fields so the guest app
@@ -339,7 +341,7 @@ open class VirtualContextWrapper(
         guestPackages = setOf(config.originPackageName, config.virtualPackageName),
         processSlot = config.processSlot,
         processName = runCatching { Application.getProcessName() }.getOrNull(),
-        baseOpPackageName = runCatching { base.opPackageName }.getOrNull(),
+        baseOpPackageName = base.opPackageNameCompat(),
         basePackageName = runCatching { base.packageName }.getOrNull()
     )
 
@@ -643,6 +645,7 @@ open class VirtualContextWrapper(
         )
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     override fun bindService(
         service: Intent,
         flags: Int,
@@ -659,6 +662,7 @@ open class VirtualContextWrapper(
         )
     }
 
+    @RequiresApi(Build.VERSION_CODES.R)
     override fun bindServiceAsUser(
         service: Intent,
         conn: ServiceConnection,
@@ -675,6 +679,7 @@ open class VirtualContextWrapper(
         )
     }
 
+    @RequiresApi(Build.VERSION_CODES.Q)
     override fun bindIsolatedService(
         service: Intent,
         flags: Int,
@@ -1904,3 +1909,10 @@ internal fun resolveSystemHostPackageName(
     basePackageName
 ).firstOrNull { candidate -> !candidate.isNullOrBlank() && candidate !in guestPackages }
     ?: basePackageName.orEmpty()
+
+internal fun Context.opPackageNameCompat(): String? =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        runCatching { opPackageName }.getOrNull()
+    } else {
+        runCatching { packageName }.getOrNull()
+    }

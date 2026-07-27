@@ -2,31 +2,36 @@ name: Android CI
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [master, main]
   pull_request:
-    branches: [ master, main ]
+    branches: [master, main]
+
+env:
+  GRADLE_VERSION: "9.6.1"
+  GRADLE_WRAPPER_JAR_SHA256: "497c8c2a7e5031f6aa847f88104aa80a93532ec32ee17bdb8d1d2f67a194a9c7"
+  ANDROID_PLATFORM: "37.0"
+  ANDROID_BUILD_TOOLS: "37.0.0"
+  ANDROID_NDK: "29.0.14206865"
+  ANDROID_CMAKE: "4.1.2"
 
 jobs:
   build:
+    name: Lint, JVM tests and APKs
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          distribution: temurin
+          java-version: "17"
 
-      - name: Setup Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Install NDK
-        run: sdkmanager "ndk;29.0.13599879"
-
-      - name: Install CMake
-        run: sdkmanager "cmake;3.22.1"
 
       - name: Cache Gradle
         uses: actions/cache@v4
@@ -37,42 +42,354 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: ${{ runner.os }}-gradle-
 
-      - name: Grant execute permission for gradlew
+      - name: Install pinned Android toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK}" \
+            "cmake;${ANDROID_CMAKE}"
+
+      - name: Grant execute permission for Gradle wrapper
         run: chmod +x gradlew
 
+      - name: Verify pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-evidence/build
+          java -version 2>&1 | tee ci-evidence/build/java-version.txt
+          java -XshowSettings:properties -version 2>&1 \
+            | awk -F'= ' '/java.specification.version =/ { print $2 }' \
+            | grep -Fx "17"
+          ./gradlew --version | tee ci-evidence/build/gradle-version.txt
+          grep -Fx "Gradle ${GRADLE_VERSION}" ci-evidence/build/gradle-version.txt
+          echo "${GRADLE_WRAPPER_JAR_SHA256}  gradle/wrapper/gradle-wrapper.jar" \
+            | sha256sum --check -
+          sdkmanager --list_installed | tee ci-evidence/build/android-sdk-packages.txt
+          awk -F'|' 'NF > 1 { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1 }' \
+            ci-evidence/build/android-sdk-packages.txt \
+            | sort -u > ci-evidence/build/android-sdk-package-ids.txt
+          grep -Fx "platforms;android-${ANDROID_PLATFORM}" ci-evidence/build/android-sdk-package-ids.txt
+          grep -Fx "build-tools;${ANDROID_BUILD_TOOLS}" ci-evidence/build/android-sdk-package-ids.txt
+          grep -Fx "ndk;${ANDROID_NDK}" ci-evidence/build/android-sdk-package-ids.txt
+          grep -Fx "cmake;${ANDROID_CMAKE}" ci-evidence/build/android-sdk-package-ids.txt
+          git rev-parse HEAD | tee ci-evidence/build/commit.txt
+
       - name: Lint
-        run: ./gradlew lintDebug --continue
+        run: ./gradlew lintDebug --stacktrace
 
-      - name: Unit Tests
-        run: ./gradlew testDebugUnitTest --continue
+      - name: JVM unit tests
+        run: ./gradlew testDebugUnitTest --stacktrace
 
-      - name: Generate Code Coverage Report
-        run: ./gradlew jacocoTestReport
-        continue-on-error: true
+      - name: Generate code coverage report
+        run: ./gradlew jacocoTestReport --stacktrace
 
-      - name: Upload Test Results
+      - name: Upload verification reports
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results
+          name: host-verification-reports
+          if-no-files-found: warn
+          retention-days: 14
           path: |
+            **/build/reports/lint-results*
             **/build/reports/tests/
+            **/build/test-results/
             **/build/reports/jacoco/
+            ci-evidence/build/
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --stacktrace
 
-      - name: Upload Debug APK
+      - name: Build release APK
+        run: ./gradlew assembleRelease --stacktrace
+
+      - name: Record APK checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum \
+            app/build/outputs/apk/debug/*.apk \
+            app/build/outputs/apk/release/*.apk \
+            | tee ci-evidence/build/apk-sha256.txt
+
+      - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            app/build/outputs/apk/debug/*.apk
+            ci-evidence/build/apk-sha256.txt
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease
-
-      - name: Upload Release APK
+      - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
           name: release-apk
-          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            app/build/outputs/apk/release/*.apk
+            ci-evidence/build/apk-sha256.txt
+
+  android-test:
+    name: Instrumentation API ${{ matrix.label }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: "28"
+            api_level: "28"
+            target: google_apis
+          - label: "30"
+            api_level: "30"
+            target: google_apis
+          - label: "33"
+            api_level: "33"
+            target: google_apis
+          - label: "35"
+            api_level: "35"
+            target: google_apis
+          - label: "37"
+            api_level: "37.0"
+            target: google_apis_ps16k
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-android-test-${{ matrix.api_level }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-android-test-${{ matrix.api_level }}-
+            ${{ runner.os }}-gradle-
+
+      - name: Install pinned Android toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_PLATFORM}" \
+            "build-tools;${ANDROID_BUILD_TOOLS}" \
+            "ndk;${ANDROID_NDK}" \
+            "cmake;${ANDROID_CMAKE}"
+
+      - name: Grant execute permission for Gradle wrapper
+        run: chmod +x gradlew
+
+      - name: Record test toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="ci-evidence/androidTest/api-${{ matrix.label }}"
+          mkdir -p "${evidence_dir}"
+          java -version 2>&1 | tee "${evidence_dir}/java-version.txt"
+          java -XshowSettings:properties -version 2>&1 \
+            | awk -F'= ' '/java.specification.version =/ { print $2 }' \
+            | grep -Fx "17"
+          ./gradlew --version | tee "${evidence_dir}/gradle-version.txt"
+          grep -Fx "Gradle ${GRADLE_VERSION}" "${evidence_dir}/gradle-version.txt"
+          echo "${GRADLE_WRAPPER_JAR_SHA256}  gradle/wrapper/gradle-wrapper.jar" \
+            | sha256sum --check -
+          sdkmanager --list_installed | tee "${evidence_dir}/android-sdk-packages.txt"
+          awk -F'|' 'NF > 1 { gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1); print $1 }' \
+            "${evidence_dir}/android-sdk-packages.txt" \
+            | sort -u > "${evidence_dir}/android-sdk-package-ids.txt"
+          grep -Fx "platforms;android-${ANDROID_PLATFORM}" "${evidence_dir}/android-sdk-package-ids.txt"
+          grep -Fx "build-tools;${ANDROID_BUILD_TOOLS}" "${evidence_dir}/android-sdk-package-ids.txt"
+          grep -Fx "ndk;${ANDROID_NDK}" "${evidence_dir}/android-sdk-package-ids.txt"
+          grep -Fx "cmake;${ANDROID_CMAKE}" "${evidence_dir}/android-sdk-package-ids.txt"
+          git rev-parse HEAD > "${evidence_dir}/commit.txt"
+
+      - name: Enable KVM
+        run: sudo chmod 0666 /dev/kvm
+
+      - name: Run instrumented tests
+        uses: reactivecircus/android-emulator-runner@v2.37.0
+        with:
+          api-level: ${{ matrix.api_level }}
+          target: ${{ matrix.target }}
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: |
+            set -u
+            set -o pipefail
+            evidence_dir="ci-evidence/androidTest/api-${{ matrix.label }}"
+            fixture_status=0
+            test_status=0
+            junit_status=0
+            evidence_status=0
+
+            ./gradlew :test-fixtures:minimal-app:assembleDebug --stacktrace --no-daemon \
+              > "${evidence_dir}/minimal-fixture-build.txt" 2>&1 || fixture_status=$?
+            if [ "${fixture_status}" -eq 0 ]; then
+              adb install -r test-fixtures/minimal-app/build/outputs/apk/debug/minimal-app-debug.apk \
+                > "${evidence_dir}/minimal-fixture-install.txt" 2>&1 || fixture_status=$?
+            fi
+            if [ "${fixture_status}" -eq 0 ]; then
+              ./gradlew :app:connectedDebugAndroidTest --stacktrace --no-daemon || test_status=$?
+            else
+              test_status="${fixture_status}"
+            fi
+
+            EVIDENCE_DIR="${evidence_dir}" python3 - <<'PY' || junit_status=$?
+            import os
+            import pathlib
+            import sys
+            import xml.etree.ElementTree as ET
+
+            evidence_dir = pathlib.Path(os.environ["EVIDENCE_DIR"])
+            xml_files = sorted(pathlib.Path(".").glob(
+                "**/build/outputs/androidTest-results/connected/**/TEST-*.xml"
+            ))
+            required = {
+                ("com.multiapp.app.HostedContainerMinimalBaselineTest", "hostedContainerLaunchesTwoInstalledMinimalApkInstances"),
+                ("com.multiapp.app.HostedContainerPr8AmsApiEvidenceTest", "hostedContainerRecordsPr8AmsApiEvidence"),
+                ("com.multiapp.app.HostedContainerPr9ProviderMethodEvidenceTest", "hostedContainerRecordsPr9ProviderMethodEvidence"),
+                ("com.multiapp.app.HostedContainerPr10StorageEvidenceTest", "hostedContainerRecordsPr10StorageEvidenceForTwoInstances"),
+                ("com.multiapp.app.EngineClearInstanceDataBinderTest", "clearMissingInstanceReturnsTheAuthoritativeEngineFailureAcrossBinder"),
+            }
+            total = failures = errors = skipped = 0
+            executed = set()
+            parse_errors = []
+            for path in xml_files:
+                try:
+                    root = ET.parse(path).getroot()
+                except Exception as exc:
+                    parse_errors.append(f"{path}: {exc}")
+                    continue
+                for case in root.findall(".//testcase"):
+                    total += 1
+                    class_name = case.attrib.get("classname", "")
+                    method_name = case.attrib.get("name", "").split("[")[0]
+                    if case.find("skipped") is not None:
+                        skipped += 1
+                    else:
+                        executed.add((class_name, method_name))
+                    failures += len(case.findall("failure"))
+                    errors += len(case.findall("error"))
+            missing = sorted(required - executed)
+            summary = [
+                f"xmlFiles={len(xml_files)}",
+                f"tests={total}",
+                f"executed={len(executed)}",
+                f"failures={failures}",
+                f"errors={errors}",
+                f"skipped={skipped}",
+                "missingRequired=" + ",".join(f"{c}#{m}" for c, m in missing),
+                "parseErrors=" + " | ".join(parse_errors),
+            ]
+            (evidence_dir / "instrumentation-summary.txt").write_text(
+                "\n".join(summary) + "\n", encoding="utf-8"
+            )
+            valid = (
+                bool(xml_files)
+                and total > 0
+                and len(executed) > 0
+                and failures == 0
+                and errors == 0
+                and skipped == 0
+                and not missing
+                and not parse_errors
+            )
+            if not valid:
+                print("\n".join(summary), file=sys.stderr)
+                sys.exit(1)
+            PY
+
+            record_installed_apks() {
+              package_name="$1"
+              label="$2"
+              paths_file="${evidence_dir}/${label}-pm-path.txt"
+              adb shell pm path "${package_name}" | tr -d '\r' > "${paths_file}" || return 1
+              mapfile -t remote_paths < <(sed -n 's/^package://p' "${paths_file}")
+              [ "${#remote_paths[@]}" -gt 0 ] || return 1
+              checksum_file="${evidence_dir}/${label}-installed-apk-sha256.txt"
+              : > "${checksum_file}"
+              index=0
+              for remote_path in "${remote_paths[@]}"; do
+                local_path="${evidence_dir}/${label}-${index}-$(basename "${remote_path}")"
+                adb pull "${remote_path}" "${local_path}" \
+                  >> "${evidence_dir}/${label}-adb-pull.txt" 2>&1 || return 1
+                sha256sum "${local_path}" >> "${checksum_file}" || return 1
+                index=$((index + 1))
+              done
+            }
+
+            record_installed_apks "com.multiapp.app" "host" || evidence_status=$?
+            record_installed_apks "com.test.minimal" "minimal-fixture" || evidence_status=$?
+            if adb shell pm path com.multiapp.app.test | grep -q '^package:'; then
+              record_installed_apks "com.multiapp.app.test" "instrumentation" || evidence_status=$?
+            fi
+            sha256sum app/build/outputs/apk/debug/*.apk \
+              > "${evidence_dir}/host-built-apk-sha256.txt" || evidence_status=$?
+            sha256sum test-fixtures/minimal-app/build/outputs/apk/debug/*.apk \
+              > "${evidence_dir}/minimal-fixture-built-apk-sha256.txt" || evidence_status=$?
+            awk '{ print $1 }' "${evidence_dir}/host-built-apk-sha256.txt" \
+              > "${evidence_dir}/host-built-apk-hashes.txt"
+            awk '{ print $1 }' "${evidence_dir}/host-installed-apk-sha256.txt" \
+              > "${evidence_dir}/host-installed-apk-hashes.txt"
+            grep -Fxf "${evidence_dir}/host-built-apk-hashes.txt" \
+              "${evidence_dir}/host-installed-apk-hashes.txt" \
+              > "${evidence_dir}/host-installed-build-hash-match.txt" || evidence_status=$?
+            awk '{ print $1 }' "${evidence_dir}/minimal-fixture-built-apk-sha256.txt" \
+              > "${evidence_dir}/minimal-fixture-built-apk-hashes.txt"
+            awk '{ print $1 }' "${evidence_dir}/minimal-fixture-installed-apk-sha256.txt" \
+              > "${evidence_dir}/minimal-fixture-installed-apk-hashes.txt"
+            grep -Fxf "${evidence_dir}/minimal-fixture-built-apk-hashes.txt" \
+              "${evidence_dir}/minimal-fixture-installed-apk-hashes.txt" \
+              > "${evidence_dir}/minimal-fixture-installed-build-hash-match.txt" || evidence_status=$?
+            adb shell getprop > "${evidence_dir}/device-properties.txt" || evidence_status=$?
+            adb shell dumpsys package com.multiapp.app > "${evidence_dir}/package-state.txt" || evidence_status=$?
+            adb shell dumpsys package com.test.minimal > "${evidence_dir}/minimal-package-state.txt" || evidence_status=$?
+            adb shell dumpsys activity exit-info com.multiapp.app \
+              > "${evidence_dir}/application-exit-info.txt" || true
+            adb logcat -d -v threadtime > "${evidence_dir}/logcat.txt" || evidence_status=$?
+            if [ "${fixture_status}" -ne 0 ]; then
+              exit "${fixture_status}"
+            fi
+            if [ "${test_status}" -ne 0 ]; then
+              exit "${test_status}"
+            fi
+            if [ "${junit_status}" -ne 0 ]; then
+              exit "${junit_status}"
+            fi
+            exit "${evidence_status}"
+
+      - name: Upload instrumented test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-test-api-${{ matrix.label }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            **/build/outputs/androidTest-results/connected/
+            **/build/reports/androidTests/connected/
+            ci-evidence/androidTest/api-${{ matrix.label }}/

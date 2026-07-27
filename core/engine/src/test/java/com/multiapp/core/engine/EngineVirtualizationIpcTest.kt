@@ -2,6 +2,8 @@ package com.multiapp.core.engine
 
 import android.os.Bundle
 import com.multiapp.core.model.engine.EngineEvidenceMode
+import com.multiapp.core.model.engine.EngineCapability
+import com.multiapp.core.model.engine.EngineCapabilityReport
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineEvidenceReport
@@ -35,6 +37,60 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class EngineVirtualizationIpcTest {
+    @Test
+    fun `capability report survives strict Bundle round trip and rejects extra fields`() {
+        val bundles = MockBundleFactory()
+        val report = EngineCapabilityReport(
+            instanceId = INSTANCE_ID,
+            status = EngineResultStatus.PARTIAL,
+            capabilities = listOf(
+                EngineCapability(
+                    id = "activity",
+                    subsystem = EngineSubsystem.ACTIVITY,
+                    status = EngineResultStatus.PARTIAL,
+                    releaseCritical = true,
+                    supportedOperations = setOf("launch", "result-record"),
+                    unsupportedOperations = setOf("result-delivery"),
+                    requiredDeviceEvidence = setOf("api-28-37-device-matrix"),
+                    message = "device proof pending"
+                )
+            ),
+            generatedAtMs = 123L,
+            message = "runtime capability catalog"
+        )
+
+        val encoded = report.toEngineCapabilityReportBundle(bundles::create)
+
+        assertEquals(report, encoded.toEngineCapabilityReportOrNull())
+        encoded.putString("unexpected", "value")
+        assertNull(encoded.toEngineCapabilityReportOrNull())
+    }
+
+    @Test
+    fun `remote capability query delegates once and fails closed when authority is unavailable`() {
+        val expected = EngineCapabilityReport(
+            instanceId = INSTANCE_ID,
+            status = EngineResultStatus.PARTIAL,
+            capabilities = emptyList(),
+            generatedAtMs = 123L,
+            message = "runtime capability catalog"
+        )
+        val remote = RecordingRemote().apply { capabilityReport = expected }
+
+        val available = IpcVirtualizationEngineCore(remote).queryCapabilities(INSTANCE_ID)
+        val unavailable = IpcVirtualizationEngineCore(RecordingRemote()).queryCapabilities(INSTANCE_ID)
+        val invalid = IpcVirtualizationEngineCore(remote).queryCapabilities(" ")
+
+        assertEquals(expected, available)
+        assertEquals(1, remote.capabilityQueryCalls)
+        assertEquals(EngineResultStatus.FAIL, unavailable.status)
+        assertTrue(unavailable.capabilities.isEmpty())
+        assertEquals("engine_capability_authority_unavailable", unavailable.message)
+        assertEquals(EngineResultStatus.FAIL, invalid.status)
+        assertEquals("invalid_instance_id", invalid.message)
+        assertEquals(1, remote.capabilityQueryCalls)
+    }
+
     @Test
     fun `launch request and evidence survive strict Bundle round trip`() {
         val bundles = MockBundleFactory()
@@ -259,6 +315,43 @@ class EngineVirtualizationIpcTest {
     }
 
     @Test
+    fun `remote mutation rejects mismatched operation and target without runtime identity`() {
+        val remote = RecordingRemote().apply {
+            stopResult = EngineRemoteResult(
+                result = EngineResult.pass(
+                    operation = "deleteInstance",
+                    instanceId = "instance-other",
+                    message = "wrong target"
+                ),
+                runtimeIdentity = null
+            )
+        }
+
+        val result = IpcVirtualizationEngineCore(remote).stopInstance(INSTANCE_ID)
+
+        assertEquals(EngineResultStatus.FAIL, result.status)
+        assertEquals("engine_authority_result_mismatch", result.message)
+        assertEquals(INSTANCE_ID, result.instanceId)
+    }
+
+    @Test
+    fun `remote clear data delegates exactly once`() {
+        val expected = EngineResult.pass(
+            operation = "clearInstanceData",
+            instanceId = INSTANCE_ID,
+            message = "cleared"
+        )
+        val remote = RecordingRemote().apply {
+            clearResult = EngineRemoteResult(expected, runtimeIdentity = null)
+        }
+
+        val result = IpcVirtualizationEngineCore(remote).clearInstanceData(INSTANCE_ID)
+
+        assertEquals(expected, result)
+        assertEquals(1, remote.clearCalls)
+    }
+
+    @Test
     fun `remote create mutation with metadata is not retried when result is unknown`() {
         val remote = RecordingRemote()
         val engine = IpcVirtualizationEngineCore(remote)
@@ -317,6 +410,11 @@ class EngineVirtualizationIpcTest {
         var legacyCreateCalls: Int = 0
         var launchResult: EngineRemoteResult? = null
         var queryRuntime: VirtualInstanceRuntime? = null
+        var capabilityReport: EngineCapabilityReport? = null
+        var capabilityQueryCalls: Int = 0
+        var stopResult: EngineRemoteResult? = null
+        var clearResult: EngineRemoteResult? = null
+        var clearCalls: Int = 0
 
         override fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult? = null
 
@@ -335,11 +433,21 @@ class EngineVirtualizationIpcTest {
             return launchResult
         }
 
-        override fun stopInstance(instanceId: String): EngineRemoteResult? = null
+        override fun stopInstance(instanceId: String): EngineRemoteResult? = stopResult
 
         override fun deleteInstance(instanceId: String): EngineRemoteResult? = null
 
+        override fun clearInstanceData(instanceId: String): EngineRemoteResult? {
+            clearCalls += 1
+            return clearResult
+        }
+
         override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? = queryRuntime
+
+        override fun queryCapabilities(instanceId: String?): EngineCapabilityReport? {
+            capabilityQueryCalls += 1
+            return capabilityReport
+        }
 
         override fun exportEvidence(instanceId: String): EngineEvidenceReport? = null
     }
@@ -377,6 +485,8 @@ class EngineVirtualizationIpcTest {
                 }
                 every { bundle.containsKey(any()) } answers { values.containsKey(firstArg()) }
                 every { bundle.keySet() } answers { values.keys }
+                @Suppress("DEPRECATION")
+                every { bundle.get(any()) } answers { values[firstArg()] }
             }
         }
     }

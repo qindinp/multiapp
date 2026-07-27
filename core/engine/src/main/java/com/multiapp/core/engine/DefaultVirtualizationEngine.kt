@@ -4,6 +4,7 @@ import com.multiapp.core.loader.ProxyActivitySlots
 import com.multiapp.core.loader.VirtualActivityLaunchAllocationRequest
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EngineCapabilityReport
 import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineEvidenceMode
 import com.multiapp.core.model.engine.EngineEvidenceReport
@@ -56,11 +57,14 @@ internal class DefaultVirtualizationEngineCore(
     private val ephemeralInstanceCleanup: (String) -> Unit = {},
     private val evidenceSessionFactory: () -> String = { UUID.randomUUID().toString() },
     private val runtimeEpochFactory: () -> Long = { System.currentTimeMillis().coerceAtLeast(1L) },
+    systemServiceProxyRegistry: EngineSystemServiceProxyRegistry? = null,
     systemServerFactory: (EngineRuntimeRegistry) -> VirtualSystemServer = { registry ->
         DefaultVirtualSystemServer(registry)
     }
 ) : VirtualizationEngine {
     internal val systemServer: VirtualSystemServer = systemServerFactory(runtimeRegistry)
+    internal val systemServiceProxyRegistry: EngineSystemServiceProxyRegistry =
+        systemServiceProxyRegistry ?: EngineSystemServiceProxyRegistry(systemServer.runtimeService)
     private val activityLaunchAllocator = EngineActivityLaunchAllocator(
         runtimeRegistry = runtimeRegistry,
         activityService = systemServer.activityService,
@@ -90,6 +94,110 @@ internal class DefaultVirtualizationEngineCore(
                 operation = OP_INSTALL,
                 originPackageName = originPackageName,
                 message = "installOrRefreshPackage requires pre-extracted VirtualApp metadata in the current baseline"
+            )
+        }
+    }
+
+    override fun refreshPackage(request: EnginePackageInstallRequest): EngineResult =
+        synchronized(createOperationLock) {
+            refreshPackageLocked(request)
+        }
+
+    private fun refreshPackageLocked(request: EnginePackageInstallRequest): EngineResult {
+        val existing = virtualInstallService.getInstallRecord(request.originPackageName)
+            ?: return EngineResult.fail(
+                operation = OP_REFRESH,
+                originPackageName = request.originPackageName,
+                message = "install_record_not_found:${request.originPackageName}"
+            )
+        if (request.versionCode < existing.versionCode) {
+            return EngineResult.fail(
+                operation = OP_REFRESH,
+                originPackageName = request.originPackageName,
+                message = "package_downgrade_rejected:${existing.versionCode}:${request.versionCode}"
+            )
+        }
+        val generationMismatch = existing.generationMismatch(request)
+        if (generationMismatch == null) {
+            return EngineResult.pass(
+                operation = OP_REFRESH,
+                originPackageName = request.originPackageName,
+                message = "package generation already current"
+            )
+        }
+        if (request.versionCode == existing.versionCode) {
+            if (generationMismatch in SAME_VERSION_CONTENT_MISMATCHES) {
+                return EngineResult.fail(
+                    operation = OP_REFRESH,
+                    originPackageName = request.originPackageName,
+                    message = "same_version_content_changed"
+                )
+            }
+            if (generationMismatch in UNREADABLE_GENERATION_MISMATCHES) {
+                return EngineResult.fail(
+                    operation = OP_REFRESH,
+                    originPackageName = request.originPackageName,
+                    message = "package_refresh_preflight_failed:$generationMismatch"
+                )
+            }
+        }
+
+        val instances = instanceManager.getInstanceByOrigin(request.originPackageName)
+            .sortedBy(VirtualInstanceRecord::instanceId)
+        for (instance in instances) {
+            val stop = stopInstance(instance.instanceId)
+            if (!stop.success) {
+                return EngineResult.fail(
+                    operation = OP_REFRESH,
+                    instanceId = instance.instanceId,
+                    originPackageName = request.originPackageName,
+                    message = "package_refresh_stop_failed:${stop.message.orEmpty()}"
+                )
+            }
+        }
+
+        val refreshed = virtualInstallService.refreshInstallRecord(request.toVirtualApp())
+        if (refreshed.isFailure) {
+            return EngineResult.fail(
+                operation = OP_REFRESH,
+                originPackageName = request.originPackageName,
+                message = refreshed.exceptionOrNull()?.message ?: "package_refresh_failed"
+            )
+        }
+        val current = virtualInstallService.getInstallRecord(request.originPackageName)
+            ?: return EngineResult.fail(
+                operation = OP_REFRESH,
+                originPackageName = request.originPackageName,
+                message = "install_record_missing_after_refresh"
+            )
+        current.generationMismatch(request)?.let { mismatch ->
+            return EngineResult.fail(
+                operation = OP_REFRESH,
+                originPackageName = request.originPackageName,
+                message = "package_refresh_verification_failed:$mismatch"
+            )
+        }
+
+        val cleanupFailures = mutableListOf<String>()
+        instances.forEach { instance ->
+            runCatching { systemServer.instanceLifecycleService.clearInstanceState(instance.instanceId) }
+                .onFailure { cleanupFailures += "${instance.instanceId}:state:${it.javaClass.simpleName}" }
+            runCatching { systemServer.instanceLifecycleService.releaseInstanceSlots(instance.instanceId) }
+                .onFailure { cleanupFailures += "${instance.instanceId}:slots:${it.javaClass.simpleName}" }
+            slotStore.remove(instance.instanceId)
+        }
+        val message = "package generation refreshed:${existing.versionCode}->${current.versionCode}"
+        return if (cleanupFailures.isEmpty()) {
+            EngineResult.pass(
+                operation = OP_REFRESH,
+                originPackageName = request.originPackageName,
+                message = message
+            )
+        } else {
+            EngineResult.partial(
+                operation = OP_REFRESH,
+                originPackageName = request.originPackageName,
+                message = "$message:cleanup_pending=${cleanupFailures.joinToString(",")}"
             )
         }
     }
@@ -343,8 +451,10 @@ internal class DefaultVirtualizationEngineCore(
     }
 
     override fun launchInstance(request: LaunchInstanceRequest): EngineResult =
-        synchronized(instanceOperationLock(request.instanceId)) {
-            launchInstanceLocked(request)
+        synchronized(createOperationLock) {
+            synchronized(instanceOperationLock(request.instanceId)) {
+                launchInstanceLocked(request)
+            }
         }
 
     private fun launchInstanceLocked(request: LaunchInstanceRequest): EngineResult {
@@ -678,6 +788,7 @@ internal class DefaultVirtualizationEngineCore(
             }
         }
         processDeathRegistry.removeInstance(instanceId)
+        systemServiceProxyRegistry.clearInstance(instanceId)
         ephemeralInstanceCleanup(instanceId)
         val stopped = systemServer.runtimeService.stop(instanceId)
         return if (stopped) {
@@ -688,9 +799,76 @@ internal class DefaultVirtualizationEngineCore(
     }
 
     override fun deleteInstance(instanceId: String): EngineResult =
-        synchronized(instanceOperationLock(instanceId)) {
-            deleteInstanceLocked(instanceId)
+        synchronized(createOperationLock) {
+            synchronized(instanceOperationLock(instanceId)) {
+                deleteInstanceLocked(instanceId)
+            }
         }
+
+    override fun clearInstanceData(instanceId: String): EngineResult =
+        synchronized(createOperationLock) {
+            synchronized(instanceOperationLock(instanceId)) {
+                clearInstanceDataLocked(instanceId)
+            }
+        }
+
+    private fun clearInstanceDataLocked(instanceId: String): EngineResult {
+        if (instanceId.isBlank()) {
+            return EngineResult.fail(
+                operation = OP_CLEAR_DATA,
+                message = "instanceId must not be blank"
+            )
+        }
+        val instance = instanceManager.getInstance(instanceId)
+            ?: return EngineResult.fail(
+                operation = OP_CLEAR_DATA,
+                instanceId = instanceId,
+                message = "instance_not_found:$instanceId"
+            )
+        val stopped = stopInstanceLocked(instanceId)
+        if (!stopped.success) {
+            return EngineResult.fail(
+                operation = OP_CLEAR_DATA,
+                instanceId = instanceId,
+                originPackageName = instance.originPackageName,
+                message = "clear_data_stop_failed:${stopped.message.orEmpty()}"
+            )
+        }
+        val cleared = instanceManager.clearInstanceData(instanceId)
+        if (cleared.isFailure) {
+            return EngineResult.fail(
+                operation = OP_CLEAR_DATA,
+                instanceId = instanceId,
+                originPackageName = instance.originPackageName,
+                message = "instance_data_clear_failed:" +
+                    (cleared.exceptionOrNull()?.message ?: "unknown")
+            )
+        }
+
+        val cleanupFailures = mutableListOf<String>()
+        runCatching { systemServer.instanceLifecycleService.clearInstanceState(instanceId) }
+            .onFailure { cleanupFailures += "state:${it.javaClass.simpleName}" }
+        runCatching { systemServer.instanceLifecycleService.releaseInstanceSlots(instanceId) }
+            .onFailure { cleanupFailures += "proxy-slots:${it.javaClass.simpleName}" }
+        runCatching { slotStore.remove(instanceId) }
+            .onFailure { cleanupFailures += "runtime-slot:${it.javaClass.simpleName}" }
+
+        return if (cleanupFailures.isEmpty()) {
+            EngineResult.pass(
+                operation = OP_CLEAR_DATA,
+                instanceId = instanceId,
+                originPackageName = instance.originPackageName,
+                message = "instance data cleared and root recreated"
+            )
+        } else {
+            EngineResult.partial(
+                operation = OP_CLEAR_DATA,
+                instanceId = instanceId,
+                originPackageName = instance.originPackageName,
+                message = "instance data cleared; cleanup_pending=${cleanupFailures.joinToString(",")}"
+            )
+        }
+    }
 
     private fun deleteInstanceLocked(instanceId: String): EngineResult {
         if (instanceId.isBlank()) {
@@ -721,6 +899,7 @@ internal class DefaultVirtualizationEngineCore(
             }
         }
         processDeathRegistry.removeInstance(instanceId)
+        systemServiceProxyRegistry.clearInstance(instanceId)
         ephemeralInstanceCleanup(instanceId)
 
         val cleanup = runCatching {
@@ -753,17 +932,46 @@ internal class DefaultVirtualizationEngineCore(
             )
         }
         slotStore.remove(instanceId)
-        return EngineResult.pass(
-            operation = OP_DELETE,
-            instanceId = instanceId,
-            originPackageName = originPackageName,
-            message = "instance deleted after engine cleanup " +
-                "(${cleanup.totalRemoved} state records, $releasedProxySlots proxy slots removed)"
-        )
+        val packageGc = originPackageName
+            ?.takeIf { instanceManager.getInstanceByOrigin(it).isEmpty() }
+            ?.let { packageName ->
+                !virtualInstallService.hasInstallRecord(packageName) ||
+                    virtualInstallService.deleteInstallRecord(packageName)
+            }
+        val message = "instance deleted after engine cleanup " +
+            "(${cleanup.totalRemoved} state records, $releasedProxySlots proxy slots removed)"
+        return if (packageGc == false) {
+            EngineResult.partial(
+                operation = OP_DELETE,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                message = "$message; package_gc_pending"
+            )
+        } else {
+            EngineResult.pass(
+                operation = OP_DELETE,
+                instanceId = instanceId,
+                originPackageName = originPackageName,
+                message = if (packageGc == true) "$message; package artifacts removed" else message
+            )
+        }
     }
 
     override fun queryRuntimeState(instanceId: String): VirtualInstanceRuntime? =
         systemServer.runtimeService.get(instanceId)
+
+    override fun queryCapabilities(instanceId: String?): EngineCapabilityReport {
+        if (instanceId != null && instanceId.isBlank()) {
+            return EngineCapabilityReport(
+                instanceId = null,
+                status = EngineResultStatus.FAIL,
+                capabilities = emptyList(),
+                generatedAtMs = System.currentTimeMillis().coerceAtLeast(0L),
+                message = "invalid_instance_id"
+            )
+        }
+        return EngineCapabilityCatalog.report(systemServer, instanceId, systemServiceProxyRegistry)
+    }
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport =
         systemServer.evidenceService.exportReport(instanceId)
@@ -1008,10 +1216,22 @@ internal class DefaultVirtualizationEngineCore(
         private const val DEFAULT_HASH_BUFFER_SIZE = 8_192
         private const val CREATE_FINGERPRINT_VERSION = "multiapp-create-v1"
         private const val OP_INSTALL = "installOrRefreshPackage"
+        private const val OP_REFRESH = "refreshPackage"
         private const val OP_CREATE = "createInstance"
         private const val OP_LAUNCH = "launchInstance"
         private const val OP_STOP = "stopInstance"
         private const val OP_DELETE = "deleteInstance"
+        private const val OP_CLEAR_DATA = "clearInstanceData"
+        private val SAME_VERSION_CONTENT_MISMATCHES = setOf(
+            "split_count",
+            "split_names",
+            "base_apk_digest",
+            "split_apk_digest"
+        )
+        private val UNREADABLE_GENERATION_MISMATCHES = setOf(
+            "source_apk_unreadable",
+            "split_apk_unreadable"
+        )
     }
 }
 

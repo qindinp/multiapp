@@ -1,5 +1,6 @@
 package com.multiapp.core.apk
 
+import android.annotation.SuppressLint
 import android.os.Build
 import dalvik.system.PathClassLoader
 import timber.log.Timber
@@ -207,6 +208,9 @@ object VirtualClassLoader {
      * This mirrors what ClassLoaderFactory.createClassloaderNamespace() does
      * when the framework creates ClassLoaders via ApplicationLoaders.
      */
+    // The hosted baseline retains this best-effort legacy path for API comparison.
+    // Suppression is not a support verdict; API 37 device proof remains required.
+    @SuppressLint("SoonBlockedPrivateApi")
     private fun createLinkerNamespace(
         classLoader: ClassLoader,
         dexPath: String,

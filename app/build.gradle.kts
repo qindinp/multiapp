@@ -75,6 +75,9 @@ tasks.configureEach {
     if (name.startsWith("merge") && name.endsWith("Assets")) {
         dependsOn(copyLoaderDex)
     }
+    if (name.contains("LintVital", ignoreCase = true)) {
+        dependsOn(copyLoaderDex)
+    }
 }
 
 val verifyEngineBoundary = tasks.register("verifyEngineBoundary") {

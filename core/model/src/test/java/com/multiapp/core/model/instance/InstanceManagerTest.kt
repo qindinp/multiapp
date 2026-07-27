@@ -300,6 +300,77 @@ class InstanceManagerTest {
     }
 
     @Test
+    fun `clearInstanceData replaces data root while preserving the instance record`() {
+        val created = manager.createInstance("com.example.app", "Example").getOrThrow()
+        val marker = File(created.dataRoot, "files/private.txt").apply {
+            checkNotNull(parentFile).mkdirs()
+            writeText("private")
+        }
+
+        val result = manager.clearInstanceData(created.instanceId)
+
+        assertTrue(result.isSuccess)
+        assertFalse(marker.exists())
+        assertEquals(created, manager.getInstance(created.instanceId))
+        val root = result.getOrThrow()
+        assertTrue(root.baseDir.isDirectory)
+        assertTrue(root.dataDir.isDirectory)
+        assertTrue(root.cacheDir.isDirectory)
+        assertTrue(root.filesDir.isDirectory)
+        assertTrue(root.sharedPrefsDir.isDirectory)
+        assertTrue(root.databaseDir.isDirectory)
+        assertTrue(root.externalFilesDir?.isDirectory == true)
+    }
+
+    @Test
+    fun `clearInstanceData restores old root when tombstone deletion fails`() {
+        val dataRootBase = File(tempDir, "data_clear_failure")
+        val failingManager = DefaultInstanceManager(
+            store = store,
+            dataRootBase = dataRootBase,
+            clock = { currentTimeMs },
+            dataRootDeleter = { directory ->
+                if (directory.name.startsWith(".")) false else directory.deleteRecursively()
+            }
+        )
+        val created = failingManager.createInstance("com.example.app", "Example").getOrThrow()
+        val marker = File(created.dataRoot, "files/keep.txt").apply {
+            checkNotNull(parentFile).mkdirs()
+            writeText("keep")
+        }
+
+        val result = failingManager.clearInstanceData(created.instanceId)
+
+        assertTrue(result.isFailure)
+        assertTrue(marker.isFile)
+        assertNotNull(failingManager.getInstance(created.instanceId))
+        assertTrue(dataRootBase.listFiles().orEmpty().none { it.name.startsWith(".${created.instanceId}.clear-") })
+    }
+
+    @Test
+    fun `clearInstanceData rejects a persisted dataRoot outside the instance root`() {
+        val outsideRoot = File(tempDir, "outside-clear").apply { mkdirs() }
+        val marker = File(outsideRoot, "keep.txt").apply { writeText("keep") }
+        val record = VirtualInstanceRecord(
+            instanceId = "forged-clear-instance",
+            originPackageName = "com.example.app",
+            virtualPackageName = "com.multiapp.instance.forgedclear",
+            displayName = "Forged Clear",
+            dataRoot = outsideRoot.absolutePath,
+            compatibilityMode = CompatibilityMode.DEFAULT,
+            createdAtMs = currentTimeMs,
+            updatedAtMs = currentTimeMs
+        )
+        store.save(record).getOrThrow()
+
+        val result = manager.clearInstanceData(record.instanceId)
+
+        assertTrue(result.isFailure)
+        assertTrue(marker.isFile)
+        assertEquals(record, manager.getInstance(record.instanceId))
+    }
+
+    @Test
     fun `updateLaunchState increments launchCount`() {
         val created = manager.createInstance("com.example.app", "Example").getOrNull()!!
         assertEquals(0, created.launchCount)

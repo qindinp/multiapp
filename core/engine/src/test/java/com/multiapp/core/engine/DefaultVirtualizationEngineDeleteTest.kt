@@ -51,6 +51,7 @@ class DefaultVirtualizationEngineDeleteTest {
             )
         )
         every { instanceManager.getInstance(INSTANCE_ID) } returns instance
+        every { instanceManager.getInstanceByOrigin(ORIGIN_PACKAGE) } returns emptyList()
         every { instanceManager.deleteInstance(INSTANCE_ID) } answers {
             assertNull(registry.get(INSTANCE_ID))
             assertEquals(PROCESS_SLOT, slotStore.get(INSTANCE_ID)?.processSlot)
@@ -78,6 +79,7 @@ class DefaultVirtualizationEngineDeleteTest {
             assign(INSTANCE_ID, ORIGIN_PACKAGE, listOf(PROCESS_SLOT), listOf(PROXY_SLOT))
         }
         every { instanceManager.getInstance(INSTANCE_ID) } returns instance()
+        every { instanceManager.getInstanceByOrigin(ORIGIN_PACKAGE) } returns emptyList()
         every { instanceManager.deleteInstance(INSTANCE_ID) } returns true
         var terminationRequest: Triple<String, String, Int?>? = null
         val engine = engine(
@@ -162,16 +164,80 @@ class DefaultVirtualizationEngineDeleteTest {
         verify(exactly = 0) { instanceManager.deleteInstance(any()) }
     }
 
+    @Test
+    fun `deleting a sibling preserves the shared package generation`() {
+        val instanceManager = mockk<InstanceManager>()
+        val installs = mockk<VirtualInstallService>()
+        val registry = EngineRuntimeRegistry()
+        val server = DefaultVirtualSystemServer(registry)
+        val slotStore = InMemoryEngineRuntimeSlotStore()
+        every { instanceManager.getInstance(INSTANCE_ID) } returns instance()
+        every { instanceManager.deleteInstance(INSTANCE_ID) } returns true
+        every { instanceManager.getInstanceByOrigin(ORIGIN_PACKAGE) } returns listOf(
+            instance().copy(instanceId = "instance-sibling")
+        )
+
+        val result = engine(instanceManager, registry, server, slotStore, installs = installs)
+            .deleteInstance(INSTANCE_ID)
+
+        assertEquals(EngineResultStatus.PASS, result.status)
+        verify(exactly = 0) { installs.deleteInstallRecord(any()) }
+    }
+
+    @Test
+    fun `deleting the final sibling deletes the package generation exactly once`() {
+        val instanceManager = mockk<InstanceManager>()
+        val installs = mockk<VirtualInstallService>()
+        val registry = EngineRuntimeRegistry()
+        val server = DefaultVirtualSystemServer(registry)
+        val slotStore = InMemoryEngineRuntimeSlotStore()
+        every { instanceManager.getInstance(INSTANCE_ID) } returns instance()
+        every { instanceManager.deleteInstance(INSTANCE_ID) } returns true
+        every { instanceManager.getInstanceByOrigin(ORIGIN_PACKAGE) } returns emptyList()
+        every { installs.hasInstallRecord(ORIGIN_PACKAGE) } returns true
+        every { installs.deleteInstallRecord(ORIGIN_PACKAGE) } returns true
+
+        val result = engine(instanceManager, registry, server, slotStore, installs = installs)
+            .deleteInstance(INSTANCE_ID)
+
+        assertEquals(EngineResultStatus.PASS, result.status)
+        assertTrue(result.message.orEmpty().contains("package artifacts removed"))
+        verify(exactly = 1) { installs.deleteInstallRecord(ORIGIN_PACKAGE) }
+    }
+
+    @Test
+    fun `failed final package gc returns partial after instance deletion`() {
+        val instanceManager = mockk<InstanceManager>()
+        val installs = mockk<VirtualInstallService>()
+        val registry = EngineRuntimeRegistry()
+        val server = DefaultVirtualSystemServer(registry)
+        val slotStore = InMemoryEngineRuntimeSlotStore()
+        every { instanceManager.getInstance(INSTANCE_ID) } returns instance()
+        every { instanceManager.deleteInstance(INSTANCE_ID) } returns true
+        every { instanceManager.getInstanceByOrigin(ORIGIN_PACKAGE) } returns emptyList()
+        every { installs.hasInstallRecord(ORIGIN_PACKAGE) } returns true
+        every { installs.deleteInstallRecord(ORIGIN_PACKAGE) } returns false
+
+        val result = engine(instanceManager, registry, server, slotStore, installs = installs)
+            .deleteInstance(INSTANCE_ID)
+
+        assertEquals(EngineResultStatus.PARTIAL, result.status)
+        assertTrue(result.message.orEmpty().contains("package_gc_pending"))
+        verify(exactly = 1) { instanceManager.deleteInstance(INSTANCE_ID) }
+        verify(exactly = 1) { installs.deleteInstallRecord(ORIGIN_PACKAGE) }
+    }
+
     private fun engine(
         instanceManager: InstanceManager,
         registry: EngineRuntimeRegistry,
         server: VirtualSystemServer,
         slotStore: EngineRuntimeSlotStore,
-        processTerminator: EngineProcessTerminator = EngineProcessTerminator.TEST_NO_OP
+        processTerminator: EngineProcessTerminator = EngineProcessTerminator.TEST_NO_OP,
+        installs: VirtualInstallService = mockk(relaxed = true)
     ) = DefaultVirtualizationEngineCore(
         hostPackageName = HOST_PACKAGE,
         instanceManager = instanceManager,
-        virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+        virtualInstallService = installs,
         activityLauncher = EngineActivityLauncher { },
         processTerminator = processTerminator,
         slotStore = slotStore,

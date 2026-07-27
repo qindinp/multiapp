@@ -8,6 +8,30 @@ import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 
 class VirtualizationEngineModelTest {
+    @Test
+    fun `capability report release readiness requires a passing report status`() {
+        val passingCapability = EngineCapability(
+            id = "activity",
+            subsystem = EngineSubsystem.ACTIVITY,
+            status = EngineResultStatus.PASS,
+            releaseCritical = true
+        )
+
+        assertFalse(
+            EngineCapabilityReport(
+                status = EngineResultStatus.FAIL,
+                capabilities = listOf(passingCapability),
+                generatedAtMs = 1L
+            ).releaseReady
+        )
+        assertTrue(
+            EngineCapabilityReport(
+                status = EngineResultStatus.PASS,
+                capabilities = listOf(passingCapability),
+                generatedAtMs = 1L
+            ).releaseReady
+        )
+    }
 
     @Test
     fun `pass and partial results are successful`() {

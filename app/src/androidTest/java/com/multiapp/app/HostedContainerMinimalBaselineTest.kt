@@ -20,7 +20,6 @@ import dagger.hilt.android.testing.HiltAndroidTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
-import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -60,9 +59,9 @@ class HostedContainerMinimalBaselineTest {
 
     @Test
     fun hostedContainerLaunchesTwoInstalledMinimalApkInstances() {
-        val packageInfo = findInstalledMinimalPackage()
-        assumeTrue("com.test.minimal must be installed by baseline script", packageInfo != null)
-        packageInfo!!
+        val packageInfo = checkNotNull(findInstalledMinimalPackage()) {
+            "com.test.minimal must be installed by baseline script"
+        }
 
         val appInfo = packageInfo.applicationInfo
         assertNotNull("minimal app sourceDir must exist", appInfo?.sourceDir)

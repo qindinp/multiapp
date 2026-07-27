@@ -1,5 +1,6 @@
 package com.test.minimal;
 
+import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
@@ -313,6 +314,7 @@ public class MainActivity extends Activity {
         return result;
     }
 
+    @SuppressLint("UnspecifiedRegisterReceiverFlag")
     private String runPr8AmsApiProbe() {
         StringBuilder out = new StringBuilder();
 

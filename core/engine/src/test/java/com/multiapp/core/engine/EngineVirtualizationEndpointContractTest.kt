@@ -3,6 +3,8 @@ package com.multiapp.core.engine
 import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import com.multiapp.core.model.engine.EngineEvidenceMode
+import com.multiapp.core.model.engine.EngineCapability
+import com.multiapp.core.model.engine.EngineCapabilityReport
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineEvidenceReport
@@ -11,6 +13,7 @@ import com.multiapp.core.model.engine.EngineProfile
 import com.multiapp.core.model.engine.EngineResult
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.EngineTaskPolicy
+import com.multiapp.core.model.engine.EngineSubsystem
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
@@ -71,6 +74,88 @@ class EngineVirtualizationEndpointContractTest {
     }
 
     @Test
+    fun `refresh endpoint decodes the typed request`() {
+        val engine = mockk<VirtualizationEngine>()
+        val request = createRequest().install
+        val expected = EngineResult.pass(
+            operation = "refreshPackage",
+            originPackageName = ORIGIN_PACKAGE,
+            message = "generation refreshed"
+        )
+        every { engine.refreshPackage(request) } returns expected
+
+        val result = endpoint(engine).engineRefreshPackage(
+            request.toEngineIpcBundle(bundles::create)
+        ).toEngineRemoteResultOrNull()
+
+        assertEquals(expected, result?.result)
+        verify(exactly = 1) { engine.refreshPackage(request) }
+        verify(exactly = 0) { engine.installOrRefreshPackage(any<String>()) }
+    }
+
+    @Test
+    fun `refresh endpoint rejects malformed request without invoking engine`() {
+        val engine = mockk<VirtualizationEngine>(relaxed = true)
+
+        val result = endpoint(engine).engineRefreshPackage(bundles.create())
+            .toEngineRemoteResultOrNull()
+
+        assertEquals(EngineResultStatus.FAIL, result?.result?.status)
+        assertEquals("invalid_engine_ipc_request", result?.result?.message)
+        verify(exactly = 0) { engine.refreshPackage(any()) }
+    }
+
+    @Test
+    fun `capability endpoint returns strict authoritative report`() {
+        val engine = mockk<VirtualizationEngine>()
+        val expected = EngineCapabilityReport(
+            instanceId = INSTANCE_ID,
+            status = EngineResultStatus.PARTIAL,
+            capabilities = listOf(
+                EngineCapability(
+                    id = "activity",
+                    subsystem = EngineSubsystem.ACTIVITY,
+                    status = EngineResultStatus.PARTIAL,
+                    releaseCritical = true
+                )
+            ),
+            generatedAtMs = 123L,
+            message = "runtime capability catalog"
+        )
+        every { engine.queryCapabilities(INSTANCE_ID) } returns expected
+
+        val result = endpoint(engine).engineQueryCapabilities(INSTANCE_ID)
+            .toEngineCapabilityReportOrNull()
+
+        assertEquals(expected, result)
+        verify(exactly = 1) { engine.queryCapabilities(INSTANCE_ID) }
+    }
+
+    @Test
+    fun `capability endpoint rejects blank instance id without invoking engine`() {
+        val engine = mockk<VirtualizationEngine>(relaxed = true)
+
+        val result = endpoint(engine).engineQueryCapabilities(" ")
+            .toEngineCapabilityReportOrNull()
+
+        assertEquals(EngineResultStatus.FAIL, result?.status)
+        assertEquals("invalid_instance_id", result?.message)
+        verify(exactly = 0) { engine.queryCapabilities(any()) }
+    }
+
+    @Test
+    fun `clear endpoint preserves requested identity when engine owner is unavailable`() {
+        val result = endpoint(null).engineClearInstanceData(INSTANCE_ID)
+            .toEngineRemoteResultOrNull()
+            ?.result
+
+        assertEquals(EngineResultStatus.FAIL, result?.status)
+        assertEquals("clearInstanceData", result?.operation)
+        assertEquals(INSTANCE_ID, result?.instanceId)
+        assertEquals("engine_server_owner_unavailable", result?.message)
+    }
+
+    @Test
     fun `create endpoint returns the authoritative engine result`() {
         val engine = mockk<VirtualizationEngine>()
         val expected = EngineResult.pass(
@@ -98,12 +183,15 @@ class EngineVirtualizationEndpointContractTest {
 
         val responses = listOf(
             endpoint.engineInstallOrRefreshPackage(ORIGIN_PACKAGE),
+            endpoint.engineRefreshPackage(createRequest().install.toEngineIpcBundle(bundles::create)),
             endpoint.engineCreateInstance(ORIGIN_PACKAGE),
             endpoint.engineCreateInstanceWithMetadata(createRequest().toEngineIpcBundle(bundles::create)),
             endpoint.engineLaunchInstance(launchRequest().toEngineIpcBundle(bundles::create)),
             endpoint.engineStopInstance(INSTANCE_ID),
             endpoint.engineDeleteInstance(INSTANCE_ID),
+            endpoint.engineClearInstanceData(INSTANCE_ID),
             endpoint.engineQueryRuntimeState(INSTANCE_ID),
+            endpoint.engineQueryCapabilities(INSTANCE_ID),
             endpoint.engineExportEvidence(INSTANCE_ID),
             endpoint.queryEvidence(INSTANCE_ID)
         )
@@ -118,12 +206,15 @@ class EngineVirtualizationEndpointContractTest {
         assertFalse(endpoint.stopRuntime(INSTANCE_ID, 1L))
         verify(exactly = 0) {
             engine.installOrRefreshPackage(any<String>())
+            engine.refreshPackage(any())
             engine.createInstance(any<String>())
             engine.createInstance(any<CreateInstanceRequest>())
             engine.launchInstance(any())
             engine.stopInstance(any())
             engine.deleteInstance(any())
+            engine.clearInstanceData(any())
             engine.queryRuntimeState(any())
+            engine.queryCapabilities(any())
             engine.exportEvidence(any())
         }
     }
@@ -221,6 +312,23 @@ class EngineVirtualizationEndpointContractTest {
 
         assertEquals(expected, result?.result)
         verify(exactly = 1) { engine.deleteInstance(INSTANCE_ID) }
+    }
+
+    @Test
+    fun `clear data endpoint returns the authoritative engine result`() {
+        val engine = mockk<VirtualizationEngine>()
+        val expected = EngineResult.pass(
+            operation = "clearInstanceData",
+            instanceId = INSTANCE_ID,
+            message = "instance data cleared"
+        )
+        every { engine.clearInstanceData(INSTANCE_ID) } returns expected
+
+        val result = endpoint(engine).engineClearInstanceData(INSTANCE_ID)
+            .toEngineRemoteResultOrNull()
+
+        assertEquals(expected, result?.result)
+        verify(exactly = 1) { engine.clearInstanceData(INSTANCE_ID) }
     }
 
     @Test

@@ -43,11 +43,10 @@ class ProductionVirtualInstallService(
             val appApkSha256 = computeSha256OrNull(app.apkPath)
             val appSplitSha256s = computeSha256sOrNull(importMetadata.splitApkPaths)
             if (existing != null && !existing.needsAppRefresh(app, importMetadata, appApkSha256, appSplitSha256s)) {
-                return Result.success(ImportResult(
-                    packageRecord = buildPackageRecord(existing),
-                    manifest = buildManifest(existing),
-                    recordPath = existing.originApkPath
-                ))
+                return Result.success(existing.toImportResult())
+            }
+            if (existing != null) {
+                return refreshInstallRecord(app)
             }
 
             importer.importFromMetadata(
@@ -81,6 +80,68 @@ class ProductionVirtualInstallService(
         }
     }
 
+    override fun refreshInstallRecord(app: VirtualApp): Result<ImportResult> {
+        return try {
+            requireSafeInstallPackageName(app.packageName)
+            val existing = installRecordStore.load(app.packageName)
+                ?: return Result.failure(IllegalStateException("install_record_not_found:${app.packageName}"))
+            val resolvedMetadata = resolveInstallMetadata(app.packageName, app.apkPath)
+            val appMetadata = app.toInstallMetadata().withResolvedFallback(resolvedMetadata)
+            val replacementMetadata = if (app.versionCode == existing.versionCode) {
+                appMetadata.withExistingSignerFallback(existing)
+            } else {
+                appMetadata
+            }
+            val baseSha256 = computeSha256OrNull(app.apkPath)
+                ?: return Result.failure(IllegalArgumentException("APK file not found: ${app.apkPath}"))
+            val splitSha256s = computeSha256sOrNull(replacementMetadata.splitApkPaths)
+                ?: return Result.failure(IllegalArgumentException("Split APK file not found"))
+            val recordFieldsChanged = existing.versionName != app.versionName ||
+                existing.targetSdk != app.targetSdkVersion ||
+                existing.minSdk != app.minSdkVersion ||
+                existing.applicationClassName != app.applicationClassName ||
+                existing.packageLabel != app.appName
+            if (!requiresGenerationReplacement(
+                    existing = existing,
+                    candidateVersionCode = app.versionCode,
+                    candidateBaseSha256 = baseSha256,
+                    candidateSplitSha256s = splitSha256s,
+                    replacementMetadata = replacementMetadata,
+                    recordFieldsChanged = recordFieldsChanged
+                )) {
+                return Result.success(existing.toImportResult())
+            }
+            importer.importFromMetadata(
+                packageName = app.packageName,
+                originApkPath = app.apkPath,
+                versionCode = app.versionCode,
+                versionName = app.versionName,
+                targetSdk = app.targetSdkVersion,
+                minSdk = app.minSdkVersion,
+                applicationClassName = app.applicationClassName,
+                packageLabel = app.appName,
+                permissions = replacementMetadata.permissions,
+                activities = replacementMetadata.activities,
+                services = replacementMetadata.services,
+                receivers = replacementMetadata.receivers,
+                providers = replacementMetadata.providers,
+                applicationMetaData = replacementMetadata.applicationMetaData,
+                signerSha256Digests = replacementMetadata.signerSha256Digests,
+                hasMultipleSigners = replacementMetadata.hasMultipleSigners,
+                nativeLibraries = replacementMetadata.nativeLibraries,
+                abiList = replacementMetadata.abiList,
+                splitApkPaths = replacementMetadata.splitApkPaths,
+                splitPublicSourceDirs = replacementMetadata.splitPublicSourceDirs,
+                splitNames = replacementMetadata.splitNames,
+                isolatedSplits = replacementMetadata.isolatedSplits
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     override suspend fun importFromInstalledPackage(packageName: String): Result<ImportResult> {
         // Requires Android framework PackageManager - use importFromMetadata() instead
         // with pre-extracted metadata from VirtualApp (populated by LauncherViewModel.loadAllApps).
@@ -105,17 +166,31 @@ class ProductionVirtualInstallService(
             val resolvedMetadata = resolveInstallMetadata(packageName, originApkPath)
                 .withExistingSignerFallback(existing)
 
+            if (existing != null) {
+                val baseSha256 = computeSha256OrNull(originApkPath)
+                    ?: return Result.failure(IllegalArgumentException("APK file not found: $originApkPath"))
+                val splitSha256s = computeSha256sOrNull(resolvedMetadata.splitApkPaths)
+                    ?: return Result.failure(IllegalArgumentException("Split APK file not found"))
+                val recordFieldsChanged = existing.versionName != versionName ||
+                    existing.targetSdk != targetSdk ||
+                    existing.minSdk != minSdk ||
+                    existing.applicationClassName != applicationClassName ||
+                    existing.packageLabel != packageLabel
+                if (!requiresGenerationReplacement(
+                        existing = existing,
+                        candidateVersionCode = versionCode,
+                        candidateBaseSha256 = baseSha256,
+                        candidateSplitSha256s = splitSha256s,
+                        replacementMetadata = resolvedMetadata,
+                        recordFieldsChanged = recordFieldsChanged
+                    )) {
+                    return Result.success(existing.toImportResult())
+                }
+            }
+
             // Idempotent for complete records. Older v2 records may have been created
             // before component import existed; refresh those so hosted launch can find
             // the guest launcher Activity.
-            if (existing != null && !existing.needsMetadataRefresh(resolvedMetadata)) {
-                return Result.success(ImportResult(
-                    packageRecord = buildPackageRecord(existing),
-                    manifest = buildManifest(existing),
-                    recordPath = existing.originApkPath // approximate; actual path is installs/{pkg}.json
-                ))
-            }
-
             importer.importFromMetadata(
                 packageName = packageName,
                 originApkPath = originApkPath,
@@ -195,6 +270,43 @@ class ProductionVirtualInstallService(
             signerSha256Digests = existing.signerSha256Digests,
             hasMultipleSigners = existing.hasMultipleSigners
         )
+    }
+
+    private fun requireSignerContinuity(existing: InstallRecord, replacement: InstallMetadata) {
+        val current = existing.signerSha256Digests.map(String::lowercase)
+        val next = replacement.signerSha256Digests.map(String::lowercase)
+        require(next.isNotEmpty()) { "signing_identity_unavailable" }
+        if (current.isEmpty()) return
+        val continuous = if (existing.hasMultipleSigners || replacement.hasMultipleSigners) {
+            existing.hasMultipleSigners == replacement.hasMultipleSigners && current.toSet() == next.toSet()
+        } else {
+            next.toSet().containsAll(current.toSet())
+        }
+        require(continuous) { "signing_identity_mismatch" }
+    }
+
+    private fun requiresGenerationReplacement(
+        existing: InstallRecord,
+        candidateVersionCode: Long,
+        candidateBaseSha256: String,
+        candidateSplitSha256s: List<String>,
+        replacementMetadata: InstallMetadata,
+        recordFieldsChanged: Boolean
+    ): Boolean {
+        require(candidateVersionCode >= existing.versionCode) {
+            "package_downgrade_rejected:${existing.versionCode}:$candidateVersionCode"
+        }
+        if (candidateVersionCode == existing.versionCode) {
+            val contentMatches = existing.originApkSha256.equals(candidateBaseSha256, ignoreCase = true) &&
+                existing.splitApkSha256s.map(String::lowercase) ==
+                candidateSplitSha256s.map(String::lowercase)
+            require(contentMatches) { "same_version_content_changed" }
+            if (!recordFieldsChanged && !existing.needsMetadataRefresh(replacementMetadata)) {
+                return false
+            }
+        }
+        requireSignerContinuity(existing, replacementMetadata)
+        return true
     }
 
     private fun InstallRecord.needsMetadataRefresh(metadata: InstallMetadata): Boolean {
@@ -310,11 +422,14 @@ class ProductionVirtualInstallService(
             return false
         }
 
+        var deletedAllTombstones = true
         staged.forEach { (_, tombstone) ->
             tombstone.setWritable(true, false)
-            tombstone.delete()
+            if (!tombstone.delete()) {
+                deletedAllTombstones = false
+            }
         }
-        return true
+        return deletedAllTombstones
     }
 
     override fun hasInstallRecord(packageName: String): Boolean {
@@ -370,6 +485,12 @@ class ProductionVirtualInstallService(
             abiList = record.abiList
         )
     }
+
+    private fun InstallRecord.toImportResult() = ImportResult(
+        packageRecord = buildPackageRecord(this),
+        manifest = buildManifest(this),
+        recordPath = originApkPath
+    )
 
     private fun buildPackageRecord(record: InstallRecord): com.multiapp.core.model.VirtualPackageRecord {
         val manifest = buildManifest(record)

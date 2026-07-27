@@ -8,6 +8,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.multiapp.app.container.ContainerActivity
 import com.multiapp.app.container.ContainerAmsApiEvidenceRecorder
 import com.multiapp.app.container.ContainerRuntimePaths
+import com.multiapp.core.engine.EngineRuntimeInstallers
 import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorders
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
 import com.multiapp.core.model.instance.CompatibilityMode
@@ -54,7 +55,9 @@ class HostedContainerPr8AmsApiEvidenceTest {
     @Before
     fun cleanPreviousPr8AmsApiState() {
         hiltRule.inject()
-        VirtualAmsApiEvidenceRecorders.install(ContainerAmsApiEvidenceRecorder(targetContext))
+        EngineRuntimeInstallers.installAmsApiEvidenceRecorder(
+            ContainerAmsApiEvidenceRecorder(targetContext)
+        )
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
         installStore.delete(minimalPackageName)
         val instanceManager = DefaultInstanceManager(

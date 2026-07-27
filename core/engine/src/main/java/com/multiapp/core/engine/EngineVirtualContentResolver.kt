@@ -12,6 +12,7 @@ import android.content.res.AssetFileDescriptor
 import android.content.res.Configuration
 import android.database.Cursor
 import android.net.Uri
+import android.annotation.SuppressLint
 import android.os.Build
 import android.os.Bundle
 import android.os.CancellationSignal
@@ -63,6 +64,8 @@ internal class EngineVirtualContentResolverFactory(
 ) : VirtualContentResolverFactory {
     override fun create(request: VirtualContentResolverFactoryRequest): ContentResolver? {
         if (sdkInt() < Build.VERSION_CODES.Q || request.config.packageSnapshot == null) return null
+        // sdkInt is injectable for the API 28 fallback test; production uses Build.VERSION.SDK_INT.
+        @SuppressLint("NewApi")
         return createWrappedResolver(request)
     }
 
@@ -97,7 +100,7 @@ internal fun createEngineContentResolverHostContexts(
     val hostPackageName = request.config.processSlot
         ?.substringBefore(':')
         ?.takeIf { it.isNotBlank() }
-        ?: runCatching { request.hostContext.opPackageName }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?: request.hostContext.opPackageNameCompat()
         ?: runCatching { request.hostContext.packageName }.getOrNull().orEmpty()
     val systemContext = request.hostContext.createHostPackageContextOrNull(hostPackageName)
         ?: request.hostContext
@@ -114,7 +117,15 @@ private fun Context.createHostPackageContextOrNull(hostPackageName: String): Con
     return runCatching { createPackageContext(hostPackageName, Context.CONTEXT_IGNORE_SECURITY) }.getOrNull()
 }
 
+private fun Context.opPackageNameCompat(): String? {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+    return runCatching { opPackageName }.getOrNull()?.takeIf { it.isNotBlank() }
+}
+
 internal object EngineHybridContentResolver {
+    // The factory only reaches this wrapper after its API 29 gate; the default function
+    // reference itself cannot carry that runtime fact to lint.
+    @SuppressLint("NewApi")
     fun install(
         provider: ContentProvider,
         routingResolver: ContentResolver,
@@ -201,6 +212,7 @@ internal class DefaultEngineProviderAuthorityResolver(
  * Process-local provider bridge used by ContentResolver.wrap on baseline profiles.
  * It keeps data-plane calls out of LSPlant while preserving the engine route gate.
  */
+@RequiresApi(Build.VERSION_CODES.Q)
 class EngineRoutingContentProvider internal constructor(
     private val hostContext: Context,
     private val config: VirtualContextConfig,

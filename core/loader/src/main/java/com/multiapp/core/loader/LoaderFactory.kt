@@ -1,5 +1,6 @@
 package com.multiapp.core.loader
 
+import android.annotation.SuppressLint
 import android.app.AppComponentFactory
 import android.app.Application
 import android.content.ContentProvider
@@ -2930,6 +2931,9 @@ class LoaderFactory : AppComponentFactory() {
      * them to the wrong ClassLoader, so JNI_OnLoad cannot find the protected
      * StubApp class and RegisterNatives never completes.
      */
+    // Legacy compatibility probe only. API 37 may block Runtime.nativeLoad;
+    // the engine capability remains non-PASS until device evidence exists.
+    @SuppressLint("BlockedPrivateApi")
     private fun preloadPackerNativeLibraries(
         originLibDir: File?,
         realGuestClassLoader: ClassLoader
@@ -5360,4 +5364,3 @@ class LoaderFactory : AppComponentFactory() {
         diagnoseNativeLibCache(loader, libKeyword, "FINAL")
     }
 }
-

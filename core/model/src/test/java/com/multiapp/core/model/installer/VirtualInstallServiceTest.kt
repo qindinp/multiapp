@@ -249,7 +249,10 @@ class VirtualInstallServiceTest {
         val installStore = JsonInstallRecordStore(File(tempDir, "installs_stale"))
         val service = ProductionVirtualInstallService(
             installRecordStore = installStore,
-            artifactDir = File(tempDir, "artifacts_stale")
+            artifactDir = File(tempDir, "artifacts_stale"),
+            metadataResolver = InstallMetadataResolver { _, _ ->
+                InstallMetadata(signerSha256Digests = listOf("same-signer"))
+            }
         )
         assertTrue(
             service.ensureInstallRecord(
@@ -286,6 +289,8 @@ class VirtualInstallServiceTest {
         val updatedRecord = installStore.load("com.example.updated")!!
         assertEquals(2L, updatedRecord.versionCode)
         assertEquals("2.0", updatedRecord.versionName)
+        assertEquals(firstRecord.installTimeMs, updatedRecord.installTimeMs)
+        assertTrue(updatedRecord.updatedAtMs > firstRecord.updatedAtMs)
         assertNotEquals(firstRecord.originApkSha256, updatedRecord.originApkSha256)
         assertTrue(File(updatedRecord.originApkPath).exists())
         assertEquals("new apk", File(updatedRecord.originApkPath).readText())
@@ -489,6 +494,191 @@ class VirtualInstallServiceTest {
         assertEquals(
             listOf("old-signer", "current-signer"),
             installStore.load("com.example.app")!!.signerSha256Digests
+        )
+    }
+
+    @Test
+    fun `refreshInstallRecord rejects downgrade without mutating record or artifacts`() {
+        val oldApk = File(tempDir, "downgrade-old.apk").apply { writeText("old generation") }
+        val downgradeApk = File(tempDir, "downgrade-new.apk").apply { writeText("downgrade") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "downgrade-records"))
+        val artifactDir = File(tempDir, "downgrade-artifacts")
+        val service = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = artifactDir,
+            metadataResolver = InstallMetadataResolver { _, _ ->
+                InstallMetadata(signerSha256Digests = listOf("stable-signer"))
+            }
+        )
+        val installed = VirtualApp(
+            packageName = "com.example.downgrade",
+            appName = "Downgrade",
+            versionName = "2.0",
+            versionCode = 2L,
+            apkPath = oldApk.absolutePath,
+            instanceId = "",
+            minSdkVersion = 28,
+            targetSdkVersion = 36
+        )
+        service.ensureInstallRecord(installed).getOrThrow()
+        val before = installStore.load(installed.packageName)!!
+        val artifactNames = artifactDir.listFiles().orEmpty().map(File::getName).sorted()
+
+        val result = service.refreshInstallRecord(
+            installed.copy(
+                versionName = "1.0",
+                versionCode = 1L,
+                apkPath = downgradeApk.absolutePath
+            )
+        )
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("package_downgrade_rejected"))
+        assertEquals(before, installStore.load(installed.packageName))
+        assertEquals(artifactNames, artifactDir.listFiles().orEmpty().map(File::getName).sorted())
+    }
+
+    @Test
+    fun `refreshInstallRecord rejects same version with changed base digest`() {
+        val oldApk = File(tempDir, "same-version-old.apk").apply { writeText("old content") }
+        val changedApk = File(tempDir, "same-version-changed.apk").apply { writeText("changed content") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "same-version-records"))
+        val service = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = File(tempDir, "same-version-artifacts"),
+            metadataResolver = InstallMetadataResolver { _, _ ->
+                InstallMetadata(signerSha256Digests = listOf("stable-signer"))
+            }
+        )
+        val installed = VirtualApp(
+            packageName = "com.example.sameversion",
+            appName = "Same Version",
+            versionName = "1.0",
+            versionCode = 1L,
+            apkPath = oldApk.absolutePath,
+            instanceId = "",
+            minSdkVersion = 28,
+            targetSdkVersion = 36
+        )
+        service.ensureInstallRecord(installed).getOrThrow()
+        val before = installStore.load(installed.packageName)!!
+
+        val result = service.refreshInstallRecord(installed.copy(apkPath = changedApk.absolutePath))
+
+        assertTrue(result.isFailure)
+        assertEquals("same_version_content_changed", result.exceptionOrNull()?.message)
+        assertEquals(before, installStore.load(installed.packageName))
+    }
+
+    @Test
+    fun `refreshInstallRecord rejects same version signer discontinuity`() {
+        val originApk = File(tempDir, "same-version-signer.apk").apply { writeText("same content") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "same-signer-records"))
+        var signer = "original-signer"
+        val service = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = File(tempDir, "same-signer-artifacts"),
+            metadataResolver = InstallMetadataResolver { _, _ ->
+                InstallMetadata(signerSha256Digests = listOf(signer))
+            }
+        )
+        val installed = VirtualApp(
+            packageName = "com.example.samesigner",
+            appName = "Same Signer",
+            versionName = "1.0",
+            versionCode = 1L,
+            apkPath = originApk.absolutePath,
+            instanceId = "",
+            minSdkVersion = 28,
+            targetSdkVersion = 36
+        )
+        service.ensureInstallRecord(installed).getOrThrow()
+        val before = installStore.load(installed.packageName)!!
+        signer = "replacement-signer"
+
+        val result = service.refreshInstallRecord(installed)
+
+        assertTrue(result.isFailure)
+        assertEquals("signing_identity_mismatch", result.exceptionOrNull()?.message)
+        assertEquals(before, installStore.load(installed.packageName))
+    }
+
+    @Test
+    fun `importFromMetadata cannot bypass package generation guards`() {
+        val oldApk = File(tempDir, "legacy-old.apk").apply { writeText("old generation") }
+        val downgradeApk = File(tempDir, "legacy-downgrade.apk").apply { writeText("downgrade") }
+        val installStore = JsonInstallRecordStore(File(tempDir, "legacy-guard-records"))
+        var activityName = "com.example.LegacyMain"
+        val service = ProductionVirtualInstallService(
+            installRecordStore = installStore,
+            artifactDir = File(tempDir, "legacy-guard-artifacts"),
+            metadataResolver = InstallMetadataResolver { _, _ ->
+                InstallMetadata(
+                    activities = listOf(ComponentInfo(activityName)),
+                    signerSha256Digests = listOf("stable-signer")
+                )
+            }
+        )
+        service.importFromMetadata(
+            packageName = "com.example.legacyguard",
+            originApkPath = oldApk.absolutePath,
+            versionCode = 2L,
+            versionName = "2.0",
+            targetSdk = 36,
+            minSdk = 28,
+            applicationClassName = null,
+            packageLabel = "Legacy Guard"
+        ).getOrThrow()
+        val before = installStore.load("com.example.legacyguard")!!
+        activityName = "com.example.ReplacementMain"
+
+        val result = service.importFromMetadata(
+            packageName = "com.example.legacyguard",
+            originApkPath = downgradeApk.absolutePath,
+            versionCode = 1L,
+            versionName = "1.0",
+            targetSdk = 36,
+            minSdk = 28,
+            applicationClassName = null,
+            packageLabel = "Legacy Guard"
+        )
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("package_downgrade_rejected"))
+        assertEquals(before, installStore.load("com.example.legacyguard"))
+    }
+
+    @Test
+    fun `deleteInstallRecord reports tombstone deletion failure`() {
+        val installStore = JsonInstallRecordStore(File(tempDir, "tombstone-records"))
+        val artifactDir = File(tempDir, "tombstone-artifacts").apply { mkdirs() }
+        val corruptArtifact = File(artifactDir, "corrupt-artifact").apply { mkdirs() }
+        File(corruptArtifact, "child").writeText("prevents directory deletion")
+        val packageName = "com.example.tombstone"
+        installStore.save(
+            InstallRecord(
+                packageName = packageName,
+                originApkPath = corruptArtifact.absolutePath,
+                originApkSha256 = "corrupt",
+                originCertSha256 = "corrupt-cert",
+                versionCode = 1L,
+                versionName = "1.0",
+                targetSdk = 36,
+                minSdk = 28,
+                installTimeMs = 1L
+            )
+        ).getOrThrow()
+        val service = ProductionVirtualInstallService(installStore, artifactDir)
+
+        val result = service.deleteInstallRecord(packageName)
+
+        assertFalse(result)
+        assertNull(installStore.load(packageName))
+        assertTrue(
+            artifactDir.listFiles().orEmpty().any { candidate ->
+                candidate.name.startsWith(".corrupt-artifact.delete-") &&
+                    File(candidate, "child").exists()
+            }
         )
     }
 
