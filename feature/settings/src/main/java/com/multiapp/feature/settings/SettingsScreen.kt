@@ -16,7 +16,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
@@ -59,29 +58,69 @@ fun SettingsScreen(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // App info header with gradient
-            AppInfoCard(
-                version = uiState.appVersion,
-                packageName = uiState.packageName,
-                buildType = uiState.buildType
-            )
+            // 产品化头部：关键身份信息前置，低密度但一眼可读
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                tonalElevation = 0.dp,
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "MultiApp",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "v${uiState.appVersion} · ${uiState.buildType}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = uiState.packageName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
 
-            // Device identity section — real system data
+            // 设备身份模板：强调“影响宿主对外暴露身份”的说明
             SettingsSection(
                 title = "设备身份模板",
                 icon = Icons.Default.PhoneAndroid,
                 iconTint = MaterialTheme.colorScheme.primary
             ) {
+                Text(
+                    text = "以下信息用于展示宿主设备身份，修改前请确认对目标应用的影响。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
                 DeviceIdentityContent()
             }
 
-            // About section — storage usage instead of tech stack
+            // 存储与缓存：更贴近系统设置分组
             SettingsSection(
-                title = "存储使用",
+                title = "存储与缓存",
                 icon = Icons.Default.Storage,
                 iconTint = MaterialTheme.colorScheme.tertiary
             ) {
                 StorageContent()
+            }
+
+            // 高级设置：当前仅做占位说明，避免用户误以为缺失
+            SettingsSection(
+                title = "高级设置",
+                icon = Icons.Default.Tune,
+                iconTint = MaterialTheme.colorScheme.secondary
+            ) {
+                Text(
+                    text = "当前版本暂未开放更多高级设置，后续版本会逐步补齐。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             Spacer(modifier = Modifier.height(32.dp))
@@ -89,126 +128,7 @@ fun SettingsScreen(
     }
 }
 
-@Composable
-private fun AppInfoCard(
-    version: String,
-    packageName: String,
-    buildType: String
-) {
-    ElevatedCard(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 2.dp),
-        colors = CardDefaults.elevatedCardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            // App icon with gradient background
-            Box(
-                modifier = Modifier
-                    .size(80.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(
-                                MaterialTheme.colorScheme.primary,
-                                MaterialTheme.colorScheme.tertiary
-                            )
-                        )
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Apps,
-                    contentDescription = null,
-                    modifier = Modifier.size(44.dp),
-                    tint = MaterialTheme.colorScheme.onPrimary
-                )
-            }
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            Text(
-                text = "MultiApp",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-
-            Spacer(modifier = Modifier.height(4.dp))
-
-            Text(
-                text = "Android 应用多开工具",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Version info chips
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                InfoChip(
-                    icon = Icons.Default.NewReleases,
-                    label = "v$version",
-                    bgColor = MaterialTheme.colorScheme.primaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                InfoChip(
-                    icon = Icons.Default.Build,
-                    label = buildType,
-                    bgColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = packageName,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun InfoChip(
-    icon: ImageVector,
-    label: String,
-    bgColor: Color,
-    contentColor: Color
-) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = bgColor
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                modifier = Modifier.size(14.dp),
-                tint = contentColor
-            )
-            Spacer(modifier = Modifier.width(4.dp))
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelMedium,
-                color = contentColor,
-                fontWeight = FontWeight.Medium
-            )
-        }
-    }
-}
 
 @Composable
 private fun DeviceIdentityContent() {

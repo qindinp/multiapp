@@ -21,9 +21,6 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:common"))
     implementation(project(":core:designsystem"))
-    implementation(project(":core:instance"))
-    implementation(project(":core:apk"))
-    implementation(project(":core:identity"))
 
     implementation(libs.core.ktx)
     implementation(libs.timber)

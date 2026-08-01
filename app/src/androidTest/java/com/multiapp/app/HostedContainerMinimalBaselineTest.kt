@@ -2,19 +2,17 @@ package com.multiapp.app
 
 import android.content.pm.PackageInfo
 import android.os.Build
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.multiapp.app.container.ContainerActivity
 import com.multiapp.app.container.ContainerRuntimePaths
+import com.multiapp.core.model.engine.EngineResultStatus
+import com.multiapp.core.model.engine.LaunchInstanceRequest
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
-import com.multiapp.core.model.installer.ComponentInfo
-import com.multiapp.core.model.installer.InstallMetadata
-import com.multiapp.core.model.installer.InstallMetadataResolver
 import com.multiapp.core.model.installer.JsonInstallRecordStore
-import com.multiapp.core.model.installer.ProductionVirtualInstallService
+import com.multiapp.core.model.installer.VirtualInstallService
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.junit.Assert.assertEquals
@@ -25,6 +23,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import javax.inject.Inject
 
 @HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
@@ -32,6 +31,12 @@ class HostedContainerMinimalBaselineTest {
 
     @get:Rule(order = 0)
     val hiltRule = HiltAndroidRule(this)
+
+    @Inject
+    lateinit var virtualizationEngine: VirtualizationEngine
+
+    @Inject
+    lateinit var virtualInstallService: VirtualInstallService
 
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val targetContext = instrumentation.targetContext
@@ -41,15 +46,23 @@ class HostedContainerMinimalBaselineTest {
     fun cleanPreviousBaselineState() {
         hiltRule.inject()
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
-        installStore.delete(minimalPackageName)
         val instanceManager = DefaultInstanceManager(
             store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
             dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
             installRecordStore = installStore
         )
         instanceManager.getInstanceByOrigin(minimalPackageName).forEach { instance ->
-            instanceManager.deleteInstance(instance.instanceId)
+            val result = virtualizationEngine.deleteInstance(instance.instanceId)
+            assertTrue(
+                "engine cleanup failed for ${instance.instanceId}: ${result.status}:${result.message}",
+                result.status == EngineResultStatus.PASS || result.status == EngineResultStatus.PARTIAL
+            )
         }
+        assertTrue(
+            "engine cleanup left baseline instances behind",
+            instanceManager.getInstanceByOrigin(minimalPackageName).isEmpty()
+        )
+        installStore.delete(minimalPackageName)
         ContainerRuntimePaths.hostedLaunchEvidenceDir(targetContext)
             .listFiles()
             ?.forEach { file ->
@@ -68,21 +81,7 @@ class HostedContainerMinimalBaselineTest {
         assertTrue(File(appInfo!!.sourceDir).isFile)
 
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
-        val installService = ProductionVirtualInstallService(
-            installRecordStore = installStore,
-            artifactDir = ContainerRuntimePaths.artifactDir(targetContext),
-            metadataResolver = InstallMetadataResolver { packageName, _ ->
-                val info = findInstalledPackage(packageName) ?: return@InstallMetadataResolver InstallMetadata()
-                InstallMetadata(
-                    permissions = info.requestedPermissions?.toList().orEmpty(),
-                    activities = info.activities.toComponentInfos(),
-                    services = info.services.toComponentInfos(),
-                    receivers = info.receivers.toComponentInfos(),
-                    providers = info.providers.toComponentInfos()
-                )
-            }
-        )
-        val importResult = installService.importFromMetadata(
+        val importResult = virtualInstallService.importFromMetadata(
             packageName = minimalPackageName,
             originApkPath = appInfo.sourceDir,
             versionCode = packageInfo.longVersionCodeCompat(),
@@ -93,7 +92,11 @@ class HostedContainerMinimalBaselineTest {
             packageLabel = appInfo.loadLabel(packageManager).toString()
         )
         assertTrue(importResult.exceptionOrNull()?.stackTraceToString(), importResult.isSuccess)
-        assertNotNull(installStore.load(minimalPackageName))
+        val installRecord = checkNotNull(installStore.load(minimalPackageName))
+        assertEquals(
+            "singleTop",
+            installRecord.activities.firstOrNull { it.name == "com.test.minimal.MainActivity" }?.launchMode
+        )
 
         val instanceManager = DefaultInstanceManager(
             store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
@@ -114,84 +117,176 @@ class HostedContainerMinimalBaselineTest {
         assertEquals(2, instances.map { it.dataRoot }.distinct().size)
 
         instances.forEachIndexed { index, instance ->
-            ActivityScenario.launch<ContainerActivity>(
-                ContainerActivity.createIntent(
-                    targetContext,
-                    instance.instanceId,
-                    "androidTest:minimal-baseline-${index + 1}"
+                val initialLaunch = virtualizationEngine.launchInstance(
+                    LaunchInstanceRequest(
+                        instanceId = instance.instanceId,
+                        reason = "androidTest:minimal-baseline-${index + 1}"
+                    )
                 )
-            ).close()
-            instrumentation.waitForIdleSync()
-            waitForRuntimeEvidence(instance.instanceId, includeNewIntent = false)
-            assertRuntimeEvidenceHasLine(instance.instanceId, "package-manager-proxy", "stage=PACKAGE_MANAGER_PROXY")
-            assertRuntimeEvidenceHasAnyLine(
-                instance.instanceId,
-                "package-manager-proxy",
-                setOf("status=SUCCESS", "status=DEGRADED")
-            )
-            assertRuntimeEvidenceHasLineStartingWith(
-                instance.instanceId,
-                "package-manager-proxy",
-                "globalPmsProxyEnabled="
-            )
-            assertRuntimeEvidenceHasLineStartingWith(
-                instance.instanceId,
-                "package-manager-proxy",
-                "sPackageManagerPatched="
-            )
-            assertRuntimeEvidenceHasLine(
-                instance.instanceId,
-                "package-manager-proxy",
-                "uidAggregateVirtualizationMode=merge-packages-preserve-name"
-            )
-            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-lifecycle", "status=GUEST_ACTIVITY_LIFECYCLE")
-            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-lifecycle", "activityRecordFound=true")
-            assertRuntimeEvidenceDoesNotHaveLine(
-                instance.instanceId,
-                "activity-lifecycle",
-                "status=GUEST_ACTIVITY_LIFECYCLE_UNLINKED"
-            )
-            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "activityRecordFound=false")
-            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "reason=TOKEN_MISSING")
-            assertRuntimeEvidenceDoesNotHaveLine(
-                instance.instanceId,
-                "activity-lifecycle",
-                "guestActivityClassName=com.multiapp.app.container.ContainerActivity"
-            )
-            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "reason=ACTIVITY_RECORD_MISSING")
-            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "status=ACTIVITY_RESULT_UNSUPPORTED")
-            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "resultSupported=false")
-            assertRuntimeEvidenceHasLine(
-                instance.instanceId,
-                "activity-result",
-                "unsupportedReason=HOST_PROXY_RESULT_ROUTING_NOT_IMPLEMENTED"
-            )
+                assertEquals(
+                    "engine launch failed for ${instance.instanceId}: ${initialLaunch.message}",
+                    EngineResultStatus.PASS,
+                    initialLaunch.status
+                )
+                instrumentation.waitForIdleSync()
+                waitForRuntimeEvidence(instance.instanceId, includeNewIntent = false)
+                waitForProviderProbe(instance.dataRoot, instance.instanceId)
+                assertRuntimeEvidenceHasLine(instance.instanceId, "package-manager-proxy", "stage=PACKAGE_MANAGER_PROXY")
+                assertRuntimeEvidenceHasAnyLine(
+                    instance.instanceId,
+                    "package-manager-proxy",
+                    setOf("status=SUCCESS", "status=DEGRADED")
+                )
+                assertRuntimeEvidenceHasLineStartingWith(
+                    instance.instanceId,
+                    "package-manager-proxy",
+                    "globalPmsProxyEnabled="
+                )
+                assertRuntimeEvidenceHasLineStartingWith(
+                    instance.instanceId,
+                    "package-manager-proxy",
+                    "sPackageManagerPatched="
+                )
+                assertRuntimeEvidenceHasLine(
+                    instance.instanceId,
+                    "package-manager-proxy",
+                    "uidAggregateVirtualizationMode=merge-packages-preserve-name"
+                )
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-lifecycle", "status=GUEST_ACTIVITY_LIFECYCLE")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-lifecycle", "activityRecordFound=true")
+                assertRuntimeEvidenceDoesNotHaveLine(
+                    instance.instanceId,
+                    "activity-lifecycle",
+                    "status=GUEST_ACTIVITY_LIFECYCLE_UNLINKED"
+                )
+                assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "activityRecordFound=false")
+                assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "reason=TOKEN_MISSING")
+                assertRuntimeEvidenceDoesNotHaveLine(
+                    instance.instanceId,
+                    "activity-lifecycle",
+                    "guestActivityClassName=com.multiapp.app.container.ContainerActivity"
+                )
+                assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-lifecycle", "reason=ACTIVITY_RECORD_MISSING")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "status=ACTIVITY_RESULT_NOT_REQUESTED")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "resultPipelineInstalled=true")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "resultRequested=false")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "resultDelivered=false")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "unsupportedReason=")
 
-            ActivityScenario.launch<ContainerActivity>(
-                ContainerActivity.createIntent(
-                    targetContext,
-                    instance.instanceId,
-                    "androidTest:minimal-new-intent-${index + 1}"
+                val newIntentAction = "com.test.minimal.NEW_INTENT_PROBE.${instance.instanceId}"
+                val newIntentLaunch = virtualizationEngine.launchInstance(
+                    LaunchInstanceRequest(
+                        instanceId = instance.instanceId,
+                        reason = "androidTest:minimal-new-intent-${index + 1}",
+                        launchAction = newIntentAction
+                    )
                 )
-            ).close()
-            instrumentation.waitForIdleSync()
-            waitForRuntimeEvidence(instance.instanceId, includeNewIntent = true)
-            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "status=GUEST_ACTIVITY_ON_NEW_INTENT")
-            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "pendingNewIntentConsumed=true")
-            assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "reason=")
-            assertRuntimeEvidenceDoesNotHaveLine(
-                instance.instanceId,
-                "activity-new-intent",
-                "status=GUEST_ACTIVITY_ON_NEW_INTENT_UNLINKED"
-            )
-            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-new-intent", "pendingNewIntentConsumed=false")
-            assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-new-intent", "reason=TOKEN_MISSING")
-            assertRuntimeEvidenceDoesNotHaveLine(
-                instance.instanceId,
-                "activity-new-intent",
-                "reason=NO_PENDING_NEW_INTENT_RECORD"
-            )
+                assertEquals(
+                    "engine re-launch failed for ${instance.instanceId}: ${newIntentLaunch.message}",
+                    EngineResultStatus.PASS,
+                    newIntentLaunch.status
+                )
+                instrumentation.waitForIdleSync()
+                waitForRuntimeEvidence(instance.instanceId, includeNewIntent = true)
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "status=GUEST_ACTIVITY_ON_NEW_INTENT")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "pendingNewIntentConsumed=true")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "pendingAction=$newIntentAction")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "intentAction=$newIntentAction")
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-new-intent", "reason=")
+                assertRuntimeEvidenceDoesNotHaveLine(
+                    instance.instanceId,
+                    "activity-new-intent",
+                    "status=GUEST_ACTIVITY_ON_NEW_INTENT_UNLINKED"
+                )
+                assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-new-intent", "pendingNewIntentConsumed=false")
+                assertRuntimeEvidenceDoesNotHaveLine(instance.instanceId, "activity-new-intent", "reason=TOKEN_MISSING")
+                assertRuntimeEvidenceDoesNotHaveLine(
+                    instance.instanceId,
+                    "activity-new-intent",
+                    "reason=NO_PENDING_NEW_INTENT_RECORD"
+                )
+
+                val resultProbeAction = "com.test.minimal.ACTION_ACTIVITY_RESULT_PROBE"
+                val resultResponseAction = "com.test.minimal.ACTION_ACTIVITY_RESULT_RESPONSE"
+                val resultLaunch = virtualizationEngine.launchInstance(
+                    LaunchInstanceRequest(
+                        instanceId = instance.instanceId,
+                        reason = "androidTest:minimal-activity-result-${index + 1}",
+                        launchAction = resultProbeAction
+                    )
+                )
+                assertEquals(
+                    "engine result probe failed for ${instance.instanceId}: ${resultLaunch.message}",
+                    EngineResultStatus.PASS,
+                    resultLaunch.status
+                )
+                waitForActivityResultProbe(instance.dataRoot, instance.instanceId, resultResponseAction)
+                assertRuntimeEvidenceHasLine(
+                    instance.instanceId,
+                    "activity-result",
+                    "status=ACTIVITY_RESULT_DELIVERED"
+                )
+                assertRuntimeEvidenceHasLine(instance.instanceId, "activity-result", "requestCode=4242")
+                assertRuntimeEvidenceHasLine(
+                    instance.instanceId,
+                    "activity-result",
+                    "dataAction=$resultResponseAction"
+                )
         }
+    }
+
+    private fun waitForActivityResultProbe(
+        dataRoot: String,
+        instanceId: String,
+        expectedAction: String
+    ) {
+        val probe = File(dataRoot, "files/activity-result-probe.txt")
+        val evidence = ContainerRuntimePaths.hostedRuntimeEvidenceFile(
+            targetContext,
+            instanceId,
+            "activity-result"
+        )
+        val deadline = System.currentTimeMillis() + 8_000L
+        while (System.currentTimeMillis() < deadline) {
+            val probeLines = probe.takeIf(File::isFile)?.readLines()?.map(String::trim).orEmpty()
+            val evidenceLines = evidence.takeIf(File::isFile)?.readLines()?.map(String::trim).orEmpty()
+            if (
+                "status=DELIVERED" in probeLines &&
+                "requestCode=4242" in probeLines &&
+                "resultCode=-1" in probeLines &&
+                "action=$expectedAction" in probeLines &&
+                "status=ACTIVITY_RESULT_DELIVERED" in evidenceLines
+            ) {
+                return
+            }
+            Thread.sleep(100L)
+        }
+        assertTrue("missing guest Activity result probe for $instanceId: ${probe.takeIf(File::isFile)?.readText()}", false)
+    }
+
+    private fun waitForProviderProbe(dataRoot: String, instanceId: String) {
+        val probe = File(dataRoot, "files/provider-probe.txt")
+        val deadline = System.currentTimeMillis() + 8_000L
+        while (System.currentTimeMillis() < deadline) {
+            val lines = probe.takeIf(File::isFile)?.readLines()?.map(String::trim).orEmpty()
+            if (
+                "provider.queryStatus: QUERY_OK" in lines &&
+                "provider.callStatus: CALL_OK" in lines &&
+                "provider.updateRows: 1" in lines &&
+                "provider.deleteRows: 1" in lines &&
+                "provider.bulkRows: 2" in lines &&
+                "provider.openFilePayload: provider-open-ok" in lines &&
+                "provider.openAssetFilePayload: provider-open-ok" in lines &&
+                "provider.openTypedAssetFilePayload: provider-open-ok" in lines
+            ) {
+                return
+            }
+            Thread.sleep(100L)
+        }
+        assertTrue(
+            "missing real guest Provider results for $instanceId: ${probe.takeIf(File::isFile)?.readText()}",
+            false
+        )
     }
 
     private fun waitForRuntimeEvidence(instanceId: String, includeNewIntent: Boolean = false) {
@@ -300,14 +395,6 @@ class HostedContainerMinimalBaselineTest {
                 packageManager.getPackageInfo(packageName, flags)
             }
         }.getOrNull()
-    }
-
-    private fun Array<out android.content.pm.ComponentInfo>?.toComponentInfos(): List<ComponentInfo> {
-        return this?.mapNotNull { component ->
-            component.name?.takeIf { it.isNotBlank() }?.let { name ->
-                ComponentInfo(name = name, exported = component.exported)
-            }
-        }.orEmpty()
     }
 
     private fun PackageInfo.longVersionCodeCompat(): Long {

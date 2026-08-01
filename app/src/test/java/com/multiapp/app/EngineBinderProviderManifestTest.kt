@@ -97,11 +97,37 @@ class EngineBinderProviderManifestTest {
             }
             .sortedBy { it.first }
 
-        assertEquals((0..7).toList(), bootstrapProviders.mapNotNull { it.first })
+        assertEquals((0..23).toList(), bootstrapProviders.mapNotNull { it.first })
         bootstrapProviders.forEach { (index, authority, process) ->
             assertEquals("${'$'}{applicationId}.multiapp.bootstrap.v$index", authority)
             assertEquals(":v$index", process)
         }
+    }
+
+    @Test
+    fun `foreground launch relay stays private in the host main process`() {
+        val manifest = File(repoRoot(), "app/src/main/AndroidManifest.xml")
+        val document = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+        }.newDocumentBuilder().parse(manifest)
+        val receivers = document.getElementsByTagName("receiver")
+        val receiver = (0 until receivers.length)
+            .map { receivers.item(it) }
+            .firstOrNull { node ->
+                node.attributes
+                    ?.getNamedItemNS(ANDROID_NAMESPACE, "name")
+                    ?.nodeValue == ".container.EngineForegroundLaunchReceiver"
+            }
+
+        val requiredReceiver = requireNotNull(receiver)
+        assertEquals(
+            "false",
+            requiredReceiver.attributes.getNamedItemNS(ANDROID_NAMESPACE, "exported")?.nodeValue
+        )
+        assertEquals(
+            null,
+            requiredReceiver.attributes.getNamedItemNS(ANDROID_NAMESPACE, "process")?.nodeValue
+        )
     }
 
     private fun repoRoot(): File {

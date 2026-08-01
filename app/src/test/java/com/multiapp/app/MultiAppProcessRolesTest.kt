@@ -15,13 +15,15 @@ class MultiAppProcessRolesTest {
         )
         assertEquals(MultiAppProcessRole.GUEST, MultiAppProcessRoles.resolve(HOST, "$HOST:v0"))
         assertEquals(MultiAppProcessRole.GUEST, MultiAppProcessRoles.resolve(HOST, "$HOST:v7"))
+        assertEquals(MultiAppProcessRole.GUEST, MultiAppProcessRoles.resolve(HOST, "$HOST:v8"))
+        assertEquals(MultiAppProcessRole.GUEST, MultiAppProcessRoles.resolve(HOST, "$HOST:v23"))
 
         listOf(
             "",
             "$HOST:engine2",
             "$HOST:v",
             "$HOST:v00",
-            "$HOST:v8",
+            "$HOST:v24",
             "$HOST:v-1",
             "other.package:engine"
         ).forEach { processName ->

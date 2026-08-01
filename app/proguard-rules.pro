@@ -7,7 +7,23 @@
 -keep class * extends dagger.hilt.android.internal.managers.ViewComponentManager$FragmentContextWrapper { *; }
 
 # --- Model classes (Gson serialization) ---
--keep class com.multiapp.core.model.** { *; }
+# -keep class com.multiapp.core.model.** { *; }
+
+# 只保留需要序列化的数据类
+-keep class com.multiapp.core.model.VirtualConstants { *; }
+-keep class com.multiapp.core.model.VirtualAppInfo { *; }
+-keep class com.multiapp.core.model.InstanceConfig { *; }
+
+# 保留所有使用 @SerializedName 注解的字段
+-keepclassmembers class com.multiapp.core.model.** {
+    @com.google.gson.annotations.SerializedName <fields>;
+}
+
+# 保留 Parcelable 相关
+-keep class com.multiapp.core.model.** implements android.os.Parcelable {
+    public static final ** CREATOR;
+}
+
 -keep class com.multiapp.core.manifest.StubConfig { *; }
 -keep class com.multiapp.core.manifest.DeviceIdentityConfig { *; }
 -keepclassmembers class * { @com.google.gson.annotations.SerializedName <fields>; }

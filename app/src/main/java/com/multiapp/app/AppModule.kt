@@ -1,4 +1,4 @@
-package com.multiapp.app
+﻿package com.multiapp.app
 
 import android.content.Context
 import android.content.pm.ActivityInfo
@@ -12,6 +12,7 @@ import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.app.container.ContentProviderEngineProcessBootstrapper
 import com.multiapp.app.container.EngineReadyActivityLauncher
 import com.multiapp.core.engine.DefaultHostedRuntimeEngine
+import com.multiapp.core.engine.EngineRuntimeIpcContract
 import com.multiapp.core.engine.EngineActivityLauncher
 import com.multiapp.core.engine.EngineProcessBootstrapper
 import com.multiapp.core.engine.EngineRuntimeSlotStore
@@ -70,18 +71,21 @@ object AppModule {
     @Provides
     @Singleton
     fun provideEngineRuntimeSlotStore(@ApplicationContext context: Context): EngineRuntimeSlotStore {
+        requireEngineProcess(context)
         return FileBackedEngineRuntimeSlotStore(ContainerRuntimePaths.engineRuntimeSlotsFile(context))
     }
 
     @Provides
     @Singleton
     fun provideInstanceRecordStore(@ApplicationContext context: Context): InstanceRecordStore {
+        requireEngineProcess(context)
         return JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(context))
     }
 
     @Provides
     @Singleton
     fun provideInstallRecordStore(@ApplicationContext context: Context): InstallRecordStore {
+        requireEngineProcess(context)
         return JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(context))
     }
 
@@ -91,6 +95,7 @@ object AppModule {
         installRecordStore: InstallRecordStore,
         @ApplicationContext context: Context
     ): VirtualInstallService {
+        requireEngineProcess(context)
         return ProductionVirtualInstallService(
             installRecordStore,
             ContainerRuntimePaths.artifactDir(context),
@@ -105,11 +110,34 @@ object AppModule {
         installRecordStore: InstallRecordStore,
         @ApplicationContext context: Context
     ): InstanceManager {
+        requireEngineProcess(context)
         return DefaultInstanceManager(
             store = instanceRecordStore,
             dataRootBase = ContainerRuntimePaths.instanceDataRootBase(context),
             installRecordStore = installRecordStore
         )
+    }
+
+    // Process guard for owner stores
+
+    /**
+     * Ensures that owner stores are only constructed in the :engine process.
+     *
+     * This is a defense-in-depth measure. The primary guard is that host/guest
+     * code does not depend on these types (verified by boundary tests). This
+     * runtime check catches any future accidental dependency.
+     */
+    private fun requireEngineProcess(context: Context) {
+        val processName = runCatching {
+            Class.forName("android.app.Application")
+                .getMethod("getProcessName")
+                .invoke(null) as? String
+        }.getOrNull()
+        val expected = EngineRuntimeIpcContract.engineProcessName(context.packageName)
+        check(processName == expected) {
+            val actual = processName?.takeIf { it.isNotBlank() } ?: "<unavailable>"
+            "Engine owner store must only be constructed in ${expected}, actual=${actual}"
+        }
     }
 
     private fun packageManagerInstallMetadataResolver(context: Context): InstallMetadataResolver {

@@ -37,6 +37,7 @@ fun AppManagerScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var showDetailDialog by remember { mutableStateOf<VirtualInstanceRecord?>(null) }
+    var showDeleteConfirm by remember { mutableStateOf<VirtualInstanceRecord?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(Unit) {
@@ -53,6 +54,12 @@ fun AppManagerScreen(
                         }
                     }
                 }
+                is AppManagerEvent.StopFailed -> {
+                    snackbarHostState.showSnackbar(
+                        message = "停止失败: ${event.message}",
+                        duration = SnackbarDuration.Short
+                    )
+                }
                 else -> {}
             }
         }
@@ -62,39 +69,66 @@ fun AppManagerScreen(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "实例管理",
-                            style = MaterialTheme.typography.titleLarge,
-                        )
-                        if (uiState.instances.isNotEmpty()) {
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = MaterialTheme.colorScheme.primaryContainer,
-                            ) {
-                                Text(
-                                    text = "${uiState.instances.size}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                )
+            Column {
+                TopAppBar(
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "实例管理",
+                                style = MaterialTheme.typography.titleLarge,
+                            )
+                            if (uiState.instances.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                ) {
+                                    Text(
+                                        text = "${uiState.instances.size}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                         }
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.onEvent(AppManagerEvent.Refresh) }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    },
+                    actions = {
+                        IconButton(onClick = { viewModel.onEvent(AppManagerEvent.Refresh) }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "刷新")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    )
                 )
-            )
+                if (uiState.instances.isNotEmpty()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                        tonalElevation = 0.dp,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "实例",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = uiState.instances.size.toString(),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
         }
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -124,11 +158,10 @@ fun AppManagerScreen(
                                 onLaunch = {
                                     viewModel.launchInstance(instance.instanceId)
                                 },
-                                onDelete = {
-                                    viewModel.onEvent(
-                                        AppManagerEvent.DeleteInstance(instance.instanceId)
-                                    )
-                                }
+                                onStop = {
+                                    viewModel.onEvent(AppManagerEvent.StopInstance(instance.instanceId))
+                                },
+                                onDelete = { showDeleteConfirm = instance }
                             )
                         }
                     }
@@ -143,6 +176,23 @@ fun AppManagerScreen(
             onDismiss = { showDetailDialog = null }
         )
     }
+
+    showDeleteConfirm?.let { instance ->
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirm = null },
+            title = { Text("确认删除") },
+            text = { Text("确定要删除 ${instance.displayName.ifBlank { instance.originPackageName.substringAfterLast(".") }} 吗？此操作不可撤销。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.onEvent(AppManagerEvent.DeleteInstance(instance.instanceId))
+                    showDeleteConfirm = null
+                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirm = null }) { Text("取消") }
+            }
+        )
+    }
 }
 
 @Composable
@@ -152,10 +202,10 @@ private fun AppManagerCard(
     onToggleExpand: () -> Unit,
     onShowDetail: () -> Unit,
     onLaunch: () -> Unit,
+    onStop: () -> Unit,
     onDelete: () -> Unit
 ) {
     val appIcon = rememberInstalledAppIconBitmap(instance.originPackageName, 96)
-
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(20.dp),
@@ -246,6 +296,13 @@ private fun AppManagerCard(
                             Icons.Default.PlayArrow,
                             contentDescription = "启动",
                             tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(onClick = onStop) {
+                        Icon(
+                            Icons.Default.Stop,
+                            contentDescription = "停止",
+                            tint = MaterialTheme.colorScheme.error
                         )
                     }
                     IconButton(onClick = onShowDetail) {

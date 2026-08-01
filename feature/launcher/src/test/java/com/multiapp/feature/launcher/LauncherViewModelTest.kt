@@ -1,17 +1,16 @@
 package com.multiapp.feature.launcher
 
 import androidx.lifecycle.SavedStateHandle
-import com.multiapp.core.instance.CloneCreateAttempt
-import com.multiapp.core.instance.CloneCreateFailureException
-import com.multiapp.core.instance.CloneCreateResult
-import com.multiapp.core.instance.CloneCreateUseCase
-import com.multiapp.core.instance.InstalledAppRepository
+import com.multiapp.core.model.CloneCreateAttempt
+import com.multiapp.core.model.CloneCreateFailureException
+import com.multiapp.core.model.CloneCreateResult
+import com.multiapp.core.model.CloneCreationCoordinator
+import com.multiapp.core.model.InstalledAppCatalog
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.engine.EngineResult
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
-import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import io.mockk.*
@@ -36,21 +35,19 @@ import kotlin.coroutines.CoroutineContext
 class LauncherViewModelTest {
 
     private val testDispatcher = UnconfinedTestDispatcher()
-    private lateinit var instanceManager: InstanceManager
-    private lateinit var cloneCreateUseCase: CloneCreateUseCase
-    private lateinit var installedAppRepository: InstalledAppRepository
+    private lateinit var cloneCreationCoordinator: CloneCreationCoordinator
+    private lateinit var installedAppCatalog: InstalledAppCatalog
     private lateinit var virtualizationEngine: VirtualizationEngine
 
     @BeforeEach
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
         launcherIoDispatcher = testDispatcher
-        instanceManager = mockk(relaxed = true)
-        cloneCreateUseCase = mockk(relaxed = true)
-        installedAppRepository = mockk(relaxed = true)
+        cloneCreationCoordinator = mockk(relaxed = true)
+        installedAppCatalog = mockk(relaxed = true)
         virtualizationEngine = mockk(relaxed = true)
-        every { instanceManager.listInstances() } returns emptyList()
-        every { installedAppRepository.listInstalledApps(any()) } returns emptyList()
+        every { virtualizationEngine.listInstances() } returns emptyList()
+        every { installedAppCatalog.listInstalledApps(any()) } returns emptyList()
         every { virtualizationEngine.launchInstance(any()) } returns EngineResult.pass(operation = "launchInstance")
         every { virtualizationEngine.deleteInstance(any()) } returns EngineResult.pass(operation = "deleteInstance")
     }
@@ -69,18 +66,18 @@ class LauncherViewModelTest {
         val app = testApp()
         val record = testRecord(originPackageName = app.packageName, displayName = app.appName)
         val attempt = testAttempt()
-        every { cloneCreateUseCase.prepareAttempt(app, null, null) } returns attempt
-        every { cloneCreateUseCase.create(app, attempt) } returns Result.success(
+        every { cloneCreationCoordinator.prepareAttempt(app, null, null) } returns attempt
+        every { cloneCreationCoordinator.create(app, attempt) } returns Result.success(
             CloneCreateResult(record.instanceId, createLatencyMs = 42L, cleanupStatus = "engine_owned")
         )
-        every { instanceManager.listInstances() } returnsMany listOf(emptyList(), listOf(record))
+        every { virtualizationEngine.listInstances() } returnsMany listOf(emptyList(), listOf(record))
 
         val viewModel = createViewModel()
 
         viewModel.createInstance(app)
 
-        verify { cloneCreateUseCase.prepareAttempt(app, null, null) }
-        verify { cloneCreateUseCase.create(app, attempt) }
+        verify { cloneCreationCoordinator.prepareAttempt(app, null, null) }
+        verify { cloneCreationCoordinator.create(app, attempt) }
         assertEquals(listOf(record), viewModel.uiState.value.instances)
         assertEquals(record.instanceId, viewModel.uiState.value.lastCreatedInstanceId)
         assertEquals(42L, viewModel.uiState.value.lastCreateLatencyMs)
@@ -92,8 +89,8 @@ class LauncherViewModelTest {
     fun `createInstance shows friendly failure and cleanup detail`() = runTest {
         val app = testApp()
         val attempt = testAttempt(displayName = "Work")
-        every { cloneCreateUseCase.prepareAttempt(app, "Work", null) } returns attempt
-        every { cloneCreateUseCase.create(app, attempt) } returns Result.failure(
+        every { cloneCreationCoordinator.prepareAttempt(app, "Work", null) } returns attempt
+        every { cloneCreationCoordinator.create(app, attempt) } returns Result.failure(
             CloneCreateFailureException(
                 failureCode = "origin_apk_missing",
                 userMessage = "找不到应用",
@@ -118,12 +115,12 @@ class LauncherViewModelTest {
         val savedStateHandle = SavedStateHandle()
         val attempt = testAttempt()
         val pendingArguments = mutableListOf<CloneCreateAttempt?>()
-        every { cloneCreateUseCase.prepareAttempt(app, null, any()) } answers {
+        every { cloneCreationCoordinator.prepareAttempt(app, null, any()) } answers {
             val pending = arg<CloneCreateAttempt?>(2)
             pendingArguments += pending
             pending ?: attempt
         }
-        every { cloneCreateUseCase.create(app, attempt) } returnsMany listOf(
+        every { cloneCreationCoordinator.create(app, attempt) } returnsMany listOf(
             Result.failure(
                 CloneCreateFailureException(
                     failureCode = "create_failed",
@@ -144,7 +141,7 @@ class LauncherViewModelTest {
         restoredViewModel.createInstance(app)
 
         assertEquals(listOf(null, attempt), pendingArguments)
-        verify(exactly = 2) { cloneCreateUseCase.create(app, attempt) }
+        verify(exactly = 2) { cloneCreationCoordinator.create(app, attempt) }
         assertEquals("instance-1", restoredViewModel.uiState.value.lastCreatedInstanceId)
     }
 
@@ -154,12 +151,12 @@ class LauncherViewModelTest {
         val savedStateHandle = SavedStateHandle()
         val attempt = testAttempt()
         val pendingArguments = mutableListOf<CloneCreateAttempt?>()
-        every { cloneCreateUseCase.prepareAttempt(app, null, any()) } answers {
+        every { cloneCreationCoordinator.prepareAttempt(app, null, any()) } answers {
             val pending = arg<CloneCreateAttempt?>(2)
             pendingArguments += pending
             pending ?: attempt
         }
-        every { cloneCreateUseCase.create(app, attempt) } returns Result.success(
+        every { cloneCreationCoordinator.create(app, attempt) } returns Result.success(
             CloneCreateResult("instance-1", createLatencyMs = 42L, cleanupStatus = "engine_owned")
         )
 
@@ -175,12 +172,12 @@ class LauncherViewModelTest {
         val savedStateHandle = SavedStateHandle()
         val attempt = testAttempt()
         val pendingArguments = mutableListOf<CloneCreateAttempt?>()
-        every { cloneCreateUseCase.prepareAttempt(app, null, any()) } answers {
+        every { cloneCreationCoordinator.prepareAttempt(app, null, any()) } answers {
             val pending = arg<CloneCreateAttempt?>(2)
             pendingArguments += pending
             pending ?: attempt
         }
-        every { cloneCreateUseCase.create(app, attempt) } returnsMany listOf(
+        every { cloneCreationCoordinator.create(app, attempt) } returnsMany listOf(
             Result.failure(
                 CloneCreateFailureException(
                     failureCode = "creation_request_id_conflict",
@@ -204,12 +201,12 @@ class LauncherViewModelTest {
     @Test
     fun `loadAllApps delegates package query to repository`() = runTest {
         val apps = listOf(testApp())
-        every { installedAppRepository.listInstalledApps(false) } returns apps
+        every { installedAppCatalog.listInstalledApps(false) } returns apps
         val viewModel = createViewModel()
 
         viewModel.loadAllApps()
 
-        verify { installedAppRepository.listInstalledApps(false) }
+        verify { installedAppCatalog.listInstalledApps(false) }
         assertEquals(apps, viewModel.allApps.value)
         assertEquals(false, viewModel.uiState.value.allAppsLoading)
         assertEquals(true, viewModel.uiState.value.allAppsLoaded)
@@ -218,12 +215,12 @@ class LauncherViewModelTest {
 
     @Test
     fun `loadAllApps marks empty result as loaded`() = runTest {
-        every { installedAppRepository.listInstalledApps(false) } returns emptyList()
+        every { installedAppCatalog.listInstalledApps(false) } returns emptyList()
         val viewModel = createViewModel()
 
         viewModel.loadAllApps()
 
-        verify { installedAppRepository.listInstalledApps(false) }
+        verify { installedAppCatalog.listInstalledApps(false) }
         assertEquals(emptyList<VirtualApp>(), viewModel.allApps.value)
         assertEquals(false, viewModel.uiState.value.allAppsLoading)
         assertEquals(true, viewModel.uiState.value.allAppsLoaded)
@@ -232,12 +229,12 @@ class LauncherViewModelTest {
 
     @Test
     fun `loadAllApps exposes repository failure`() = runTest {
-        every { installedAppRepository.listInstalledApps(false) } throws IllegalStateException("package query failed")
+        every { installedAppCatalog.listInstalledApps(false) } throws IllegalStateException("package query failed")
         val viewModel = createViewModel()
 
         viewModel.loadAllApps()
 
-        verify { installedAppRepository.listInstalledApps(false) }
+        verify { installedAppCatalog.listInstalledApps(false) }
         assertEquals(emptyList<VirtualApp>(), viewModel.allApps.value)
         assertEquals(false, viewModel.uiState.value.allAppsLoading)
         assertEquals(false, viewModel.uiState.value.allAppsLoaded)
@@ -259,7 +256,7 @@ class LauncherViewModelTest {
         assertEquals(false, viewModel.uiState.value.allAppsLoading)
         assertEquals(false, viewModel.uiState.value.allAppsLoaded)
         assertEquals("读取应用列表超时，请重试", viewModel.uiState.value.allAppsError)
-        verify(exactly = 0) { installedAppRepository.listInstalledApps(any()) }
+        verify(exactly = 0) { installedAppCatalog.listInstalledApps(any()) }
     }
 
     @Test
@@ -268,7 +265,7 @@ class LauncherViewModelTest {
         launcherIoDispatcher = NeverDispatcher
         allAppsLoadTimeoutMs = 100L
         val apps = listOf(testApp())
-        every { installedAppRepository.listInstalledApps(false) } returns apps
+        every { installedAppCatalog.listInstalledApps(false) } returns apps
         val viewModel = createViewModel()
 
         viewModel.loadAllApps()
@@ -280,7 +277,7 @@ class LauncherViewModelTest {
         viewModel.loadAllApps()
         runCurrent()
 
-        verify(exactly = 1) { installedAppRepository.listInstalledApps(false) }
+        verify(exactly = 1) { installedAppCatalog.listInstalledApps(false) }
         assertEquals(apps, viewModel.allApps.value)
         assertEquals(false, viewModel.uiState.value.allAppsLoading)
         assertEquals(true, viewModel.uiState.value.allAppsLoaded)
@@ -300,7 +297,7 @@ class LauncherViewModelTest {
 
         assertEquals(false, viewModel.uiState.value.isLoading)
         assertEquals("读取分身列表超时，请重试", viewModel.uiState.value.error)
-        verify(exactly = 0) { instanceManager.listInstances() }
+        verify(exactly = 0) { virtualizationEngine.listInstances() }
     }
 
     @Test
@@ -319,8 +316,7 @@ class LauncherViewModelTest {
         viewModel.deleteInstance("instance-1")
 
         verify { virtualizationEngine.deleteInstance("instance-1") }
-        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
-        verify(atLeast = 2) { instanceManager.listInstances() }
+        verify(atLeast = 2) { virtualizationEngine.listInstances() }
         assertNull(viewModel.uiState.value.error)
     }
 
@@ -335,7 +331,6 @@ class LauncherViewModelTest {
 
         viewModel.deleteInstance("instance-1")
 
-        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
         assertEquals("删除分身失败", viewModel.uiState.value.error)
         assertEquals(
             "active_runtime_requires_confirmed_process_termination",
@@ -382,9 +377,8 @@ class LauncherViewModelTest {
     ): LauncherViewModel {
         return LauncherViewModel(
             savedStateHandle = savedStateHandle,
-            instanceManager = instanceManager,
-            cloneCreateUseCase = cloneCreateUseCase,
-            installedAppRepository = installedAppRepository,
+            cloneCreationCoordinator = cloneCreationCoordinator,
+            installedAppCatalog = installedAppCatalog,
             virtualizationEngine = virtualizationEngine
         )
     }

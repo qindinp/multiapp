@@ -27,6 +27,26 @@ import org.junit.jupiter.api.Test
 
 class EngineProcessBootstrapTransportTest {
     @Test
+    fun `package manager evidence preserves bootstrap stage fields`() {
+        val fields = readyResult(
+            envelope = EngineProcessBootstrapIpc.requestEnvelope(request()),
+            token = mockk<IBinder> { every { isBinderAlive } returns true }
+        ).copy(
+            evidence = mapOf(
+                "packageManagerProxy.stage" to "PACKAGE_MANAGER_PROXY",
+                "packageManagerProxy.status" to "SUCCESS",
+                "packageManagerProxy.globalPmsProxyEnabled" to "true",
+                "packageManagerProxy.sPackageManagerPatched" to "true"
+            )
+        ).packageManagerProxyEvidenceFields()
+
+        assertEquals("PACKAGE_MANAGER_PROXY", fields?.get("stage"))
+        assertEquals("SUCCESS", fields?.get("status"))
+        assertEquals("true", fields?.get("globalPmsProxyEnabled"))
+        assertEquals("true", fields?.get("sPackageManagerPatched"))
+    }
+
+    @Test
     fun `process slot maps only to declared bootstrap authorities`() {
         assertEquals(
             "com.multiapp.app.multiapp.bootstrap.v0",
@@ -36,7 +56,11 @@ class EngineProcessBootstrapTransportTest {
             "com.multiapp.app.multiapp.bootstrap.v7",
             EngineProcessBootstrapIpc.authority("com.multiapp.app", "com.multiapp.app:v7")
         )
-        assertNull(EngineProcessBootstrapIpc.authority("com.multiapp.app", "com.multiapp.app:v8"))
+        assertEquals(
+            "com.multiapp.app.multiapp.bootstrap.v23",
+            EngineProcessBootstrapIpc.authority("com.multiapp.app", "com.multiapp.app:v23")
+        )
+        assertNull(EngineProcessBootstrapIpc.authority("com.multiapp.app", "com.multiapp.app:v24"))
         assertNull(EngineProcessBootstrapIpc.authority("com.multiapp.app", "not-a-slot"))
     }
 
@@ -128,7 +152,7 @@ class EngineProcessBootstrapTransportTest {
     }
 
     @Test
-    fun `timed out binder call keeps slot tombstone until transport actually exits`() {
+    fun `timed out binder call force-removes slot tombstone so next launch proceeds`() {
         val entered = CountDownLatch(1)
         val executor = object : ThreadPoolExecutor(
             1,
@@ -188,8 +212,8 @@ class EngineProcessBootstrapTransportTest {
             assertEquals(EngineProcessBootstrapState.TIMED_OUT, first.state)
 
             val blockedRetry = bootstrapper.bootstrap(request(runtimeEpoch = 43L))
-            assertEquals(EngineProcessBootstrapState.STALE, blockedRetry.state)
-            assertEquals("true", blockedRetry.evidence["bootstrapInFlightTombstone"])
+            assertEquals(EngineProcessBootstrapState.TIMED_OUT, blockedRetry.state)
+            assertNull(blockedRetry.evidence["bootstrapInFlightTombstone"])
             assertEquals(1, calls.get())
 
             release.countDown()

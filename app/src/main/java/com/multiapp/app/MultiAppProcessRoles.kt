@@ -3,6 +3,7 @@ package com.multiapp.app
 import android.app.Application
 import android.os.Build
 import com.multiapp.core.engine.EngineRuntimeIpcContract
+import com.multiapp.core.model.engine.EngineProcessSlotContract
 import java.io.File
 
 internal enum class MultiAppProcessRole {
@@ -18,7 +19,7 @@ internal data class MultiAppProcessStartupPolicy(
 )
 
 internal object MultiAppProcessRoles {
-    private const val GUEST_PROCESS_SLOT_COUNT = 8
+    private const val GUEST_PROCESS_SLOT_COUNT = EngineProcessSlotContract.PROCESS_SLOT_COUNT
 
     fun currentProcessName(): String = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> Application.getProcessName().orEmpty()

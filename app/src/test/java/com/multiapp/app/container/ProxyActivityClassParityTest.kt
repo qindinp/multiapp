@@ -30,8 +30,8 @@ class ProxyActivityClassParityTest {
         val launchModeByClassName = ProxyActivitySlots.launchModeByClassName(hostPackageName)
         val processNameByClassName = ProxyActivitySlots.processNameByClassName(hostPackageName)
 
-        assertEquals(expectedClassNames, manifest.map { entry -> entry.className })
-        assertEquals(24, manifest.map { entry -> entry.taskAffinity }.distinct().size)
+        assertEquals(expectedClassNames.sorted(), manifest.map { entry -> entry.className }.sorted())
+        assertEquals(72, manifest.map { entry -> entry.taskAffinity }.distinct().size)
         assertFalse(manifest.any { entry -> entry.excludeFromRecents })
 
         manifest.forEach { entry ->

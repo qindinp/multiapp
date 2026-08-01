@@ -70,9 +70,52 @@ class EngineDependencyInjectionBoundaryTest {
         }
     }
 
+    @Test
+    fun `host clone coordinator does not reference owner file dependencies`() {
+        val source = coreSource(
+            "com/multiapp/core/instance/CloneCreateUseCase.kt"
+        ).readText()
+
+        hostCloneForbiddenOwnerTypes.forEach { type ->
+            assertFalse(
+                Regex("""\b${Regex.escape(type)}\b""").containsMatchIn(source),
+                "CloneCreateUseCase (host-facing coordinator) must not reference $type; " +
+                    "instance operations must go through VirtualizationEngine only"
+            )
+        }
+        assertTrue(
+            Regex("""\bVirtualizationEngine\b""").containsMatchIn(source),
+            "CloneCreateUseCase must depend on VirtualizationEngine"
+        )
+    }
+
+    @Test
+    fun `InstanceBoundaryModule binds coordinator to use case without owner store exposure`() {
+        val source = coreSource(
+            "com/multiapp/core/instance/InstanceBoundaryModule.kt"
+        ).readText()
+
+        assertTrue(
+            bindCoordinatorRegex.containsMatchIn(source),
+            "InstanceBoundaryModule must bind CloneCreateUseCase as CloneCreationCoordinator"
+        )
+        hostCloneForbiddenOwnerTypes.forEach { type ->
+            assertFalse(
+                Regex("""\b${Regex.escape(type)}\b""").containsMatchIn(source),
+                "InstanceBoundaryModule must not reference $type in its bindings"
+            )
+        }
+    }
+
     private fun productionSource(relativePath: String): File {
         val source = File(repoRoot(), "app/src/main/java/$relativePath")
         check(source.isFile) { "Unable to locate production source: $source" }
+        return source
+    }
+
+    private fun coreSource(relativePath: String): File {
+        val source = File(repoRoot(), "core/instance/src/main/java/$relativePath")
+        check(source.isFile) { "Unable to locate core source: $source" }
         return source
     }
 
@@ -119,5 +162,66 @@ class EngineDependencyInjectionBoundaryTest {
             "DefaultVirtualSystemServer",
             "DefaultVirtualizationEngine"
         )
+
+        /** Owner types that the host clone coordinator must NOT reference. */
+        val hostCloneForbiddenOwnerTypes = listOf(
+            "InstanceManager",
+            "PackageGenerationJournal",
+            "PackageGenerationTransaction",
+            "PackageGenerationTransactionJournal"
+        )
+
+        val bindCoordinatorRegex = Regex(
+            """fun\s+\w+\s*\(\s*\w+\s*:\s*CloneCreateUseCase\s*\)\s*:\s*CloneCreationCoordinator"""
+        )
     }
+
+
+    @Test
+    fun `AppModule owner store providers are process-guarded`() {
+        val source = productionSource("com/multiapp/app/AppModule.kt").readText()
+
+        // Verify the process guard function exists
+        assertTrue(
+            source.contains("private fun requireEngineProcess(context: Context)"),
+            "AppModule must define requireEngineProcess() for owner store defense-in-depth"
+        )
+        assertTrue(
+            source.contains("EngineRuntimeIpcContract.engineProcessName(context.packageName)"),
+            "requireEngineProcess must use EngineRuntimeIpcContract to resolve expected process name"
+        )
+
+        // Verify all 5 owner store providers call requireEngineProcess
+        val guardedProviders = listOf(
+            "provideEngineRuntimeSlotStore",
+            "provideInstanceRecordStore",
+            "provideInstallRecordStore",
+            "provideVirtualInstallService",
+            "provideInstanceManager"
+        )
+        for (provider in guardedProviders) {
+            val bodyStart = source.indexOf("{", source.indexOf(provider))
+            val bodyEnd = findMatchingBrace(source, bodyStart)
+            val body = source.substring(bodyStart, bodyEnd + 1)
+            assertTrue(
+                body.contains("requireEngineProcess(context)"),
+                "$provider must call requireEngineProcess(context) before constructing owner stores"
+            )
+        }
+    }
+
+    private fun findMatchingBrace(source: String, openIndex: Int): Int {
+        var depth = 0
+        for (i in openIndex until source.length) {
+            when (source[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return i
+                }
+            }
+        }
+        error("Unmatched brace at index $openIndex")
+    }
+
 }

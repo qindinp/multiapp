@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualizationEngine
-import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -32,15 +31,16 @@ data class AppManagerUiState(
 
 sealed interface AppManagerEvent {
     data class DeleteInstance(val instanceId: String) : AppManagerEvent
+    data class StopInstance(val instanceId: String) : AppManagerEvent
     data class ToggleExpand(val instanceId: String) : AppManagerEvent
     data object Refresh : AppManagerEvent
     data class LaunchInstance(val instanceId: String) : AppManagerEvent
     data class LaunchFailed(val instanceId: String, val message: String) : AppManagerEvent
+    data class StopFailed(val instanceId: String, val message: String) : AppManagerEvent
 }
 
 @HiltViewModel
 class AppManagerViewModel @Inject constructor(
-    private val instanceManager: InstanceManager,
     private val virtualizationEngine: VirtualizationEngine
 ) : ViewModel() {
 
@@ -59,10 +59,12 @@ class AppManagerViewModel @Inject constructor(
     fun onEvent(event: AppManagerEvent) {
         when (event) {
             is AppManagerEvent.DeleteInstance -> deleteInstance(event.instanceId)
+            is AppManagerEvent.StopInstance -> stopInstance(event.instanceId)
             is AppManagerEvent.ToggleExpand -> toggleExpand(event.instanceId)
             is AppManagerEvent.Refresh -> loadInstances()
             is AppManagerEvent.LaunchInstance -> launchInstance(event.instanceId)
             is AppManagerEvent.LaunchFailed -> {} // Handled by Screen
+            is AppManagerEvent.StopFailed -> {} // Handled by Screen
         }
     }
 
@@ -71,7 +73,7 @@ class AppManagerViewModel @Inject constructor(
         loadJob = viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true, error = null) }
             try {
-                val instances = instanceManager.listInstances()
+                val instances = virtualizationEngine.listInstances()
                 _uiState.update { it.copy(instances = instances, isLoading = false) }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
@@ -94,6 +96,23 @@ class AppManagerViewModel @Inject constructor(
                 if (e is CancellationException) throw e
                 Timber.e(e, "Failed to delete instance")
                 _uiState.update { it.copy(error = e.message) }
+            }
+        }
+    }
+
+    private fun stopInstance(instanceId: String) {
+        viewModelScope.launch(appManagerIoDispatcher) {
+            try {
+                val result = virtualizationEngine.stopInstance(instanceId)
+                if (result.success) {
+                    loadInstances()
+                } else {
+                    _events.send(AppManagerEvent.StopFailed(instanceId, result.message ?: "停止分身失败"))
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Timber.e(e, "Failed to stop instance")
+                _events.send(AppManagerEvent.StopFailed(instanceId, e.message ?: "停止分身失败"))
             }
         }
     }

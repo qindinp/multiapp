@@ -22,6 +22,7 @@ import com.multiapp.core.engine.EngineProcessClientIdentity
 import com.multiapp.core.engine.EngineRuntimeAuthorityValidator
 import com.multiapp.core.engine.EngineRuntimeIpcClients
 import com.multiapp.core.model.engine.EngineEvidenceMode
+import com.multiapp.core.model.engine.EngineProcessSlotContract
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import java.io.File
@@ -38,7 +39,7 @@ import java.util.concurrent.atomic.AtomicReference
 internal object EngineProcessBootstrapIpc {
     const val METHOD_PREPARE = "prepareGuestProcess"
     const val AUTHORITY_SUFFIX = ".multiapp.bootstrap.v"
-    const val PROCESS_SLOT_COUNT = 8
+    const val PROCESS_SLOT_COUNT = EngineProcessSlotContract.PROCESS_SLOT_COUNT
     const val DEFAULT_TIMEOUT_MS = 45_000L
 
     private const val KEY_INSTANCE_ID = "instanceId"
@@ -428,6 +429,12 @@ internal class ContentProviderEngineProcessBootstrapper internal constructor(
             } else {
                 if (active.completed.get()) {
                     cleanupTimedOutCall(slotKey, active)
+                } else {
+                    // Force remove the stale entry to unblock future launches.
+                    // The timed-out FutureTask may never complete if the underlying
+                    // ContentProvider call ignores interrupts; leaving the entry
+                    // blocks this process slot indefinitely.
+                    inFlight.remove(slotKey, active)
                 }
                 active.cleanupResult.get() ?: EngineProcessSlotRecycleResult(
                     status = if (cancelled) "DEFERRED_IN_FLIGHT" else "DEFERRED_NOT_CANCELLED",
@@ -982,6 +989,14 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
                 component = "process-bootstrap",
                 fields = fields
             )
+            response.packageManagerProxyEvidenceFields()?.let { packageManagerFields ->
+                ContainerRuntimeEvidenceWriter.write(
+                    context = hostContext,
+                    instanceId = response.instanceId,
+                    component = "package-manager-proxy",
+                    fields = packageManagerFields
+                )
+            }
         }
         return EngineProcessBootstrapIpc.resultBundle(response)
     }
@@ -1044,6 +1059,39 @@ class EngineProcessBootstrapProviderV4 : EngineProcessBootstrapProvider()
 class EngineProcessBootstrapProviderV5 : EngineProcessBootstrapProvider()
 class EngineProcessBootstrapProviderV6 : EngineProcessBootstrapProvider()
 class EngineProcessBootstrapProviderV7 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV8 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV9 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV10 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV11 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV12 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV13 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV14 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV15 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV16 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV17 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV18 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV19 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV20 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV21 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV22 : EngineProcessBootstrapProvider()
+class EngineProcessBootstrapProviderV23 : EngineProcessBootstrapProvider()
+
+internal fun EngineProcessBootstrapResult.packageManagerProxyEvidenceFields(): Map<String, Any?>? {
+    val prefix = "packageManagerProxy."
+    val stageFields = evidence
+        .asSequence()
+        .filter { (key, _) -> key.startsWith(prefix) }
+        .associate { (key, value) -> key.removePrefix(prefix) to value }
+    if (stageFields.isEmpty()) return null
+    return linkedMapOf<String, Any?>(
+        "stage" to (stageFields["stage"] ?: "PACKAGE_MANAGER_PROXY"),
+        "status" to (stageFields["status"] ?: systemServiceProxyStatus.orEmpty())
+    ).apply {
+        stageFields.forEach { (key, value) ->
+            if (key !in keys) put(key, value)
+        }
+    }
+}
 
 private fun readAndroidProcessStartTicks(processId: Int): Long? {
     if (processId <= 0) return null

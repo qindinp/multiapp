@@ -8,6 +8,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed as lazyItemsIndexed
@@ -23,6 +25,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -40,7 +43,7 @@ import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
 import com.multiapp.core.designsystem.components.rememberAppIconBitmap
-import com.multiapp.core.instance.isCloneCandidate
+import com.multiapp.core.model.isCloneCandidate
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.VirtualApp
@@ -66,44 +69,74 @@ fun LauncherScreen(
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "快捷启动",
-                            style = MaterialTheme.typography.titleLarge,
-                        )
-                        if (uiState.instances.isNotEmpty()) {
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = MaterialTheme.colorScheme.primaryContainer,
-                            ) {
-                                Text(
-                                    text = "${uiState.instances.size}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                                )
+            Column {
+                TopAppBar(
+                    title = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "快捷启动",
+                                style = MaterialTheme.typography.titleLarge,
+                            )
+                            if (uiState.instances.isNotEmpty()) {
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                ) {
+                                    Text(
+                                        text = "${uiState.instances.size}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                                    )
+                                }
                             }
                         }
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.loadInstances() }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "刷新")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    titleContentColor = MaterialTheme.colorScheme.onSurface,
-                    actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    actions = {
+                        IconButton(onClick = { viewModel.loadInstances() }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "刷新")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.background,
+                        titleContentColor = MaterialTheme.colorScheme.onSurface,
+                        actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 )
-            )
+                if (uiState.instances.isNotEmpty()) {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
+                        tonalElevation = 0.dp,
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "实例",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = uiState.instances.size.toString(),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
         },
+
         floatingActionButton = {
+            val fabScale by animateFloatAsState(targetValue = 1f, animationSpec = spring(dampingRatio = 0.9f))
             ExtendedFloatingActionButton(
                 onClick = { showAppPicker = true },
+                modifier = Modifier.graphicsLayer { scaleX = fabScale; scaleY = fabScale },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 icon = { Icon(Icons.Default.Add, contentDescription = null) },
@@ -123,6 +156,9 @@ fun LauncherScreen(
                     instances = uiState.instances,
                     onLaunch = { instance ->
                         viewModel.launchInstance(instance.instanceId)
+                    },
+                    onStop = { instance ->
+                        viewModel.stopInstance(instance.instanceId)
                     },
                     onDelete = { showDeleteConfirm = it }
                 )
@@ -272,6 +308,7 @@ private fun CreationProgressDialog(step: String) {
 private fun AppGrid(
     instances: List<VirtualInstanceRecord>,
     onLaunch: (VirtualInstanceRecord) -> Unit,
+    onStop: (VirtualInstanceRecord) -> Unit,
     onDelete: (VirtualInstanceRecord) -> Unit
 ) {
     LazyVerticalGrid(
@@ -288,6 +325,7 @@ private fun AppGrid(
             AppGridItem(
                 instance = instance,
                 onLaunch = { onLaunch(instance) },
+                onStop = { onStop(instance) },
                 onDelete = { onDelete(instance) }
             )
         }
@@ -299,15 +337,22 @@ private fun AppGrid(
 private fun AppGridItem(
     instance: VirtualInstanceRecord,
     onLaunch: () -> Unit,
+    onStop: () -> Unit,
     onDelete: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val appIcon = rememberInstalledAppIconBitmap(instance.originPackageName, 128)
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val itemScale by animateFloatAsState(targetValue = if (pressed) 0.98f else 1f, animationSpec = spring(dampingRatio = 0.9f))
 
     ElevatedCard(
         modifier = Modifier
             .fillMaxWidth()
+            .graphicsLayer { scaleX = itemScale; scaleY = itemScale }
             .combinedClickable(
+                interactionSource = interactionSource,
+                indication = null,
                 onClick = onLaunch,
                 onLongClick = { showMenu = true }
             ),
@@ -396,6 +441,20 @@ private fun AppGridItem(
                     onClick = {
                         showMenu = false
                         onLaunch()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("停止") },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Stop,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    },
+                    onClick = {
+                        showMenu = false
+                        onStop()
                     }
                 )
                 DropdownMenuItem(
@@ -568,9 +627,10 @@ private fun AppPickerSheet(
             ) {
                 CloneSourceButton(
                     modifier = Modifier.weight(1f),
-                    icon = Icons.Default.Apps,
+                    icon = Icons.Default.CheckCircle,
                     title = "已安装应用",
-                    subtitle = "从设备应用创建"
+                    subtitle = "当前模式：从下方列表选择",
+                    onClick = {} // already active - list shown below
                 )
                 CloneSourceButton(
                     modifier = Modifier.weight(1f),

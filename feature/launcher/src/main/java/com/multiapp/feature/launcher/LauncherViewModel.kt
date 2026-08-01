@@ -8,15 +8,14 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
-import com.multiapp.core.instance.CloneCreateAttempt
-import com.multiapp.core.instance.CloneCreateFailureException
-import com.multiapp.core.instance.CloneCreateUseCase
-import com.multiapp.core.instance.InstalledAppRepository
+import com.multiapp.core.model.CloneCreateAttempt
+import com.multiapp.core.model.CloneCreateFailureException
+import com.multiapp.core.model.CloneCreationCoordinator
+import com.multiapp.core.model.InstalledAppCatalog
 import com.multiapp.core.manifest.ComponentExtractor
 import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualizationEngine
-import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.VirtualApp
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -71,9 +70,8 @@ data class LauncherUiState(
 @HiltViewModel
 class LauncherViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
-    private val instanceManager: InstanceManager,
-    private val cloneCreateUseCase: CloneCreateUseCase,
-    private val installedAppRepository: InstalledAppRepository,
+    private val cloneCreationCoordinator: CloneCreationCoordinator,
+    private val installedAppCatalog: InstalledAppCatalog,
     private val virtualizationEngine: VirtualizationEngine
 ) : ViewModel() {
 
@@ -100,7 +98,7 @@ class LauncherViewModel @Inject constructor(
 
         val job = viewModelScope.launch(launcherIoDispatcher) {
             try {
-                val records = instanceManager.listInstances()
+                val records = virtualizationEngine.listInstances()
                 ensureActive()
                 _uiState.update { it.copy(instances = records, isLoading = false) }
             } catch (e: Exception) {
@@ -154,17 +152,17 @@ class LauncherViewModel @Inject constructor(
             var createAttempt: CloneCreateAttempt? = null
             try {
                 _uiState.update { it.copy(creationStep = "复制 APK 并导入元数据…") }
-                createAttempt = cloneCreateUseCase.prepareAttempt(
+                createAttempt = cloneCreationCoordinator.prepareAttempt(
                     app = app,
                     displayName = displayName,
                     pendingAttempt = pendingCreateAttempt()
                 )
                 savePendingCreateAttempt(createAttempt)
-                val createResult = cloneCreateUseCase.create(app, createAttempt).getOrThrow()
+                val createResult = cloneCreationCoordinator.create(app, createAttempt).getOrThrow()
                 clearPendingCreateAttempt(createAttempt)
 
                 _uiState.update { it.copy(creationStep = "刷新分身列表…") }
-                val records = instanceManager.listInstances()
+                val records = virtualizationEngine.listInstances()
                 _uiState.update {
                     it.copy(
                         instances = records,
@@ -218,7 +216,7 @@ class LauncherViewModel @Inject constructor(
         }
     }
 
-    fun suggestedDisplayName(app: VirtualApp): String = cloneCreateUseCase.suggestedDisplayName(app)
+    fun suggestedDisplayName(app: VirtualApp): String = cloneCreationCoordinator.suggestedDisplayName(app)
 
     fun clearError() {
         _uiState.update { it.copy(error = null, errorDetail = null) }
@@ -284,6 +282,25 @@ class LauncherViewModel @Inject constructor(
         _uiState.update { it.copy(creationStep = null) }
     }
 
+    fun stopInstance(instanceId: String) {
+        viewModelScope.launch(launcherIoDispatcher) {
+            try {
+                val result = virtualizationEngine.stopInstance(instanceId)
+                if (result.success) {
+                    loadInstances()
+                } else {
+                    _uiState.update {
+                        it.copy(error = "停止分身失败", errorDetail = result.message ?: "无法停止分身")
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Timber.e(e, "Failed to stop instance")
+                _uiState.update { it.copy(error = "停止分身失败", errorDetail = e.message) }
+            }
+        }
+    }
+
     fun deleteInstance(instanceId: String) {
         viewModelScope.launch(launcherIoDispatcher) {
             try {
@@ -321,7 +338,7 @@ class LauncherViewModel @Inject constructor(
 
         val job = viewModelScope.launch(launcherIoDispatcher) {
             try {
-                val apps = installedAppRepository.listInstalledApps(forceRefresh)
+                val apps = installedAppCatalog.listInstalledApps(forceRefresh)
                 ensureActive()
                 _allApps.value = apps
                 _uiState.update {

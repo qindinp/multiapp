@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
@@ -24,6 +24,9 @@
             android:exported="false"
             android:initOrder="1000"
             android:process=":engine" />
+        <receiver
+            android:name=".container.EngineForegroundLaunchReceiver"
+            android:exported="false" />
         <provider
             android:name="com.multiapp.core.installer.PackageGenerationRecoveryProvider"
             android:authorities="${applicationId}.multiapp.package-generation-recovery"
@@ -70,6 +73,86 @@
             android:authorities="${applicationId}.multiapp.bootstrap.v7"
             android:exported="false"
             android:process=":v7" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV8"
+            android:authorities="${applicationId}.multiapp.bootstrap.v8"
+            android:exported="false"
+            android:process=":v8" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV9"
+            android:authorities="${applicationId}.multiapp.bootstrap.v9"
+            android:exported="false"
+            android:process=":v9" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV10"
+            android:authorities="${applicationId}.multiapp.bootstrap.v10"
+            android:exported="false"
+            android:process=":v10" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV11"
+            android:authorities="${applicationId}.multiapp.bootstrap.v11"
+            android:exported="false"
+            android:process=":v11" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV12"
+            android:authorities="${applicationId}.multiapp.bootstrap.v12"
+            android:exported="false"
+            android:process=":v12" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV13"
+            android:authorities="${applicationId}.multiapp.bootstrap.v13"
+            android:exported="false"
+            android:process=":v13" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV14"
+            android:authorities="${applicationId}.multiapp.bootstrap.v14"
+            android:exported="false"
+            android:process=":v14" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV15"
+            android:authorities="${applicationId}.multiapp.bootstrap.v15"
+            android:exported="false"
+            android:process=":v15" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV16"
+            android:authorities="${applicationId}.multiapp.bootstrap.v16"
+            android:exported="false"
+            android:process=":v16" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV17"
+            android:authorities="${applicationId}.multiapp.bootstrap.v17"
+            android:exported="false"
+            android:process=":v17" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV18"
+            android:authorities="${applicationId}.multiapp.bootstrap.v18"
+            android:exported="false"
+            android:process=":v18" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV19"
+            android:authorities="${applicationId}.multiapp.bootstrap.v19"
+            android:exported="false"
+            android:process=":v19" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV20"
+            android:authorities="${applicationId}.multiapp.bootstrap.v20"
+            android:exported="false"
+            android:process=":v20" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV21"
+            android:authorities="${applicationId}.multiapp.bootstrap.v21"
+            android:exported="false"
+            android:process=":v21" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV22"
+            android:authorities="${applicationId}.multiapp.bootstrap.v22"
+            android:exported="false"
+            android:process=":v22" />
+        <provider
+            android:name=".container.EngineProcessBootstrapProviderV23"
+            android:authorities="${applicationId}.multiapp.bootstrap.v23"
+            android:exported="false"
+            android:process=":v23" />
 
         <activity
             android:name=".MainActivity"
@@ -92,9 +175,7 @@
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 
-        <!-- Process-bound container entry points. The engine must launch the one
-             matching the selected proxy process slot so guest bootstrap happens
-             in the same Android process as the hosted Activity. -->
+        <!-- Process-bound container entry points. -->
         <activity
             android:name=".container.ContainerActivityV0"
             android:exported="false"
@@ -336,7 +417,7 @@
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 
-        <!-- v2 proxy Activity slots. Guest Activity launches are mapped here first. -->
+        <!-- v2 proxy Activity slots. -->
         <activity
             android:name=".container.ProxyActivity0"
             android:exported="false"
@@ -415,6 +496,166 @@
             android:process=":v7"
             android:screenOrientation="unspecified"
             android:taskAffinity="${applicationId}.multiapp.task.standard7"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity8"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v8"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard8"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity9"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v9"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard9"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity10"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v10"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard10"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity11"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v11"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard11"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity12"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v12"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard12"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity13"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v13"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard13"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity14"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v14"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard14"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity15"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v15"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard15"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity16"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v16"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard16"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity17"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v17"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard17"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity18"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v18"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard18"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity19"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v19"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard19"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity20"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v20"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard20"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity21"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v21"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard21"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity22"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v22"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard22"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivity23"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="standard"
+            android:process=":v23"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.standard23"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
@@ -498,6 +739,166 @@
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
         <activity
+            android:name=".container.ProxyActivitySingleTop8"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v8"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop8"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop9"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v9"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop9"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop10"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v10"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop10"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop11"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v11"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop11"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop12"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v12"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop12"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop13"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v13"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop13"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop14"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v14"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop14"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop15"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v15"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop15"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop16"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v16"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop16"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop17"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v17"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop17"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop18"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v18"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop18"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop19"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v19"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop19"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop20"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v20"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop20"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop21"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v21"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop21"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop22"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v22"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop22"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTop23"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTop"
+            android:process=":v23"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTop23"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
             android:name=".container.ProxyActivitySingleTask0"
             android:exported="false"
             android:excludeFromRecents="false"
@@ -577,8 +978,168 @@
             android:taskAffinity="${applicationId}.multiapp.task.singleTask7"
             android:theme="@style/Theme.MultiApp.Proxy"
             android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask8"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v8"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask8"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask9"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v9"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask9"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask10"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v10"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask10"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask11"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v11"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask11"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask12"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v12"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask12"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask13"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v13"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask13"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask14"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v14"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask14"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask15"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v15"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask15"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask16"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v16"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask16"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask17"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v17"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask17"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask18"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v18"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask18"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask19"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v19"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask19"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask20"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v20"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask20"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask21"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v21"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask21"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask22"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v22"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask22"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
+        <activity
+            android:name=".container.ProxyActivitySingleTask23"
+            android:exported="false"
+            android:excludeFromRecents="false"
+            android:launchMode="singleTask"
+            android:process=":v23"
+            android:screenOrientation="unspecified"
+            android:taskAffinity="${applicationId}.multiapp.task.singleTask23"
+            android:theme="@style/Theme.MultiApp.Proxy"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|uiMode" />
 
-        <!-- v2 hosted Service proxy slot. Guest Service dispatch is partial/evidence-gated. -->
+        <!-- v2 hosted Service proxy slot. -->
         <service
             android:name=".container.StubService"
             android:exported="false"
@@ -623,8 +1184,88 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:process=":v7" />
+        <service
+            android:name=".container.StubServiceV8"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v8" />
+        <service
+            android:name=".container.StubServiceV9"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v9" />
+        <service
+            android:name=".container.StubServiceV10"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v10" />
+        <service
+            android:name=".container.StubServiceV11"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v11" />
+        <service
+            android:name=".container.StubServiceV12"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v12" />
+        <service
+            android:name=".container.StubServiceV13"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v13" />
+        <service
+            android:name=".container.StubServiceV14"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v14" />
+        <service
+            android:name=".container.StubServiceV15"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v15" />
+        <service
+            android:name=".container.StubServiceV16"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v16" />
+        <service
+            android:name=".container.StubServiceV17"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v17" />
+        <service
+            android:name=".container.StubServiceV18"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v18" />
+        <service
+            android:name=".container.StubServiceV19"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v19" />
+        <service
+            android:name=".container.StubServiceV20"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v20" />
+        <service
+            android:name=".container.StubServiceV21"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v21" />
+        <service
+            android:name=".container.StubServiceV22"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v22" />
+        <service
+            android:name=".container.StubServiceV23"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:process=":v23" />
 
-        <!-- v2 hosted Provider proxy slot. Guest Provider dispatch is partial/evidence-gated. -->
+        <!-- v2 hosted Provider proxy slot. -->
         <provider
             android:name=".container.StubContentProvider"
             android:authorities="${applicationId}.multiapp.provider.stub"
@@ -669,6 +1310,86 @@
             android:authorities="${applicationId}.multiapp.provider.stub.v7"
             android:exported="false"
             android:process=":v7" />
+        <provider
+            android:name=".container.StubContentProviderV8"
+            android:authorities="${applicationId}.multiapp.provider.stub.v8"
+            android:exported="false"
+            android:process=":v8" />
+        <provider
+            android:name=".container.StubContentProviderV9"
+            android:authorities="${applicationId}.multiapp.provider.stub.v9"
+            android:exported="false"
+            android:process=":v9" />
+        <provider
+            android:name=".container.StubContentProviderV10"
+            android:authorities="${applicationId}.multiapp.provider.stub.v10"
+            android:exported="false"
+            android:process=":v10" />
+        <provider
+            android:name=".container.StubContentProviderV11"
+            android:authorities="${applicationId}.multiapp.provider.stub.v11"
+            android:exported="false"
+            android:process=":v11" />
+        <provider
+            android:name=".container.StubContentProviderV12"
+            android:authorities="${applicationId}.multiapp.provider.stub.v12"
+            android:exported="false"
+            android:process=":v12" />
+        <provider
+            android:name=".container.StubContentProviderV13"
+            android:authorities="${applicationId}.multiapp.provider.stub.v13"
+            android:exported="false"
+            android:process=":v13" />
+        <provider
+            android:name=".container.StubContentProviderV14"
+            android:authorities="${applicationId}.multiapp.provider.stub.v14"
+            android:exported="false"
+            android:process=":v14" />
+        <provider
+            android:name=".container.StubContentProviderV15"
+            android:authorities="${applicationId}.multiapp.provider.stub.v15"
+            android:exported="false"
+            android:process=":v15" />
+        <provider
+            android:name=".container.StubContentProviderV16"
+            android:authorities="${applicationId}.multiapp.provider.stub.v16"
+            android:exported="false"
+            android:process=":v16" />
+        <provider
+            android:name=".container.StubContentProviderV17"
+            android:authorities="${applicationId}.multiapp.provider.stub.v17"
+            android:exported="false"
+            android:process=":v17" />
+        <provider
+            android:name=".container.StubContentProviderV18"
+            android:authorities="${applicationId}.multiapp.provider.stub.v18"
+            android:exported="false"
+            android:process=":v18" />
+        <provider
+            android:name=".container.StubContentProviderV19"
+            android:authorities="${applicationId}.multiapp.provider.stub.v19"
+            android:exported="false"
+            android:process=":v19" />
+        <provider
+            android:name=".container.StubContentProviderV20"
+            android:authorities="${applicationId}.multiapp.provider.stub.v20"
+            android:exported="false"
+            android:process=":v20" />
+        <provider
+            android:name=".container.StubContentProviderV21"
+            android:authorities="${applicationId}.multiapp.provider.stub.v21"
+            android:exported="false"
+            android:process=":v21" />
+        <provider
+            android:name=".container.StubContentProviderV22"
+            android:authorities="${applicationId}.multiapp.provider.stub.v22"
+            android:exported="false"
+            android:process=":v22" />
+        <provider
+            android:name=".container.StubContentProviderV23"
+            android:authorities="${applicationId}.multiapp.provider.stub.v23"
+            android:exported="false"
+            android:process=":v23" />
 
         <!-- FileProvider for sharing Stub APK with system installer -->
         <provider
