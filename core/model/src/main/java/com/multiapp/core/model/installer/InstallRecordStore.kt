@@ -2,6 +2,7 @@ package com.multiapp.core.model.installer
 
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
+import com.multiapp.core.model.persistence.JsonDirectoryLock
 import java.io.File
 import java.util.concurrent.CancellationException
 
@@ -25,7 +26,8 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
     override fun save(record: InstallRecord): Result<String> {
         requireSafeInstallPackageName(record.packageName)
         return try {
-            val updatedRecord = record.copy(updatedAtMs = System.currentTimeMillis())
+            JsonDirectoryLock.withExclusiveLock(baseDir) {
+                val updatedRecord = record.copy(updatedAtMs = System.currentTimeMillis())
             val fileName = "${record.packageName}.json"
             val targetFile = File(baseDir, fileName)
             val tempFile = File(baseDir, "$fileName.tmp")
@@ -40,7 +42,7 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
             if (targetFile.exists()) {
                 if (!targetFile.renameTo(backupFile)) {
                     tempFile.delete()
-                    return Result.failure(RuntimeException("Failed to backup existing file"))
+                    return@withExclusiveLock Result.failure(RuntimeException("Failed to backup existing file"))
                 }
             }
 
@@ -56,6 +58,7 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
                 tempFile.delete()
                 Result.failure(RuntimeException("Failed to rename temp file to target"))
             }
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -66,17 +69,13 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
     override fun load(packageName: String): InstallRecord? {
         requireSafeInstallPackageName(packageName)
         return try {
-            val file = File(baseDir, "$packageName.json")
-            if (!file.exists()) return null
+            JsonDirectoryLock.withExclusiveLock(baseDir) {
+                val file = File(baseDir, "$packageName.json")
+                if (!file.exists()) return@withExclusiveLock null
 
-            val json = file.readText()
-            val record = gson.fromJson(json, InstallRecord::class.java)
-
-            if (record.schemaVersion != 1) {
-                return null
+                val record = gson.fromJson(file.readText(), InstallRecord::class.java)
+                if (record.schemaVersion != 1) null else record.normalized()
             }
-
-            record.normalized()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -85,26 +84,29 @@ class JsonInstallRecordStore(private val baseDir: File) : InstallRecordStore {
     }
 
     override fun listAll(): List<InstallRecord> {
-        return baseDir.listFiles()
-            ?.filter { it.name.endsWith(".json") && !it.name.endsWith(".tmp") && !it.name.endsWith(".bak") }
-            ?.mapNotNull { file ->
-                try {
-                    val json = file.readText()
-                    val record = gson.fromJson(json, InstallRecord::class.java)
-                    if (record.schemaVersion == 1) record.normalized() else null
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    null
+        return JsonDirectoryLock.withExclusiveLock(baseDir) {
+            baseDir.listFiles()
+                ?.filter { it.name.endsWith(".json") && !it.name.endsWith(".tmp") && !it.name.endsWith(".bak") }
+                ?.mapNotNull { file ->
+                    try {
+                        val record = gson.fromJson(file.readText(), InstallRecord::class.java)
+                        if (record.schemaVersion == 1) record.normalized() else null
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        null
+                    }
                 }
-            }
-            ?: emptyList()
+                ?: emptyList()
+        }
     }
 
     override fun delete(packageName: String): Boolean {
         requireSafeInstallPackageName(packageName)
-        val file = File(baseDir, "$packageName.json")
-        return file.exists() && file.delete()
+        return JsonDirectoryLock.withExclusiveLock(baseDir) {
+            val file = File(baseDir, "$packageName.json")
+            file.exists() && file.delete()
+        }
     }
 
     private fun InstallRecord.normalized(): InstallRecord =

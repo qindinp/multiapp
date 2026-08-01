@@ -7,7 +7,7 @@ class ProviderStubAuthorityContractTest {
 
     @Test
     fun `valid process slots map to indexed stub authorities`() {
-        repeat(8) { index ->
+        repeat(EngineProcessSlotContract.PROCESS_SLOT_COUNT) { index ->
             assertEquals(
                 "com.multiapp.app.multiapp.provider.stub.v$index",
                 ProviderStubAuthorityContract.stubAuthority(
@@ -27,7 +27,7 @@ class ProviderStubAuthorityContractTest {
             "com.other:v3",
             "com.multiapp.app:vx",
             "com.multiapp.app:v-1",
-            "com.multiapp.app:v8"
+            "com.multiapp.app:v${EngineProcessSlotContract.PROCESS_SLOT_COUNT}"
         ).forEach { processSlot ->
             assertEquals(
                 "com.multiapp.app.multiapp.provider.stub",
@@ -69,7 +69,7 @@ class ProviderStubAuthorityContractTest {
             ".multiapp.provider.stub",
             "com.multiapp.app.multiapp.provider.stub.extra",
             "com.multiapp.app.multiapp.provider.stub.v03",
-            "com.multiapp.app.multiapp.provider.stub.v8",
+            "com.multiapp.app.multiapp.provider.stub.v${EngineProcessSlotContract.PROCESS_SLOT_COUNT}",
             "com.multiapp.app.multiapp.provider.stub.vx"
         ).forEach { authority ->
             assertEquals(null, ProviderStubAuthorityContract.hostPackageNameOrNull(authority))

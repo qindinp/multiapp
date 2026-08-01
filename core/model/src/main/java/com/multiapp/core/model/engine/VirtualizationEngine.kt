@@ -2,6 +2,7 @@ package com.multiapp.core.model.engine
 
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import com.multiapp.core.model.instance.CompatibilityMode
+import com.multiapp.core.model.instance.VirtualInstanceRecord
 
 interface VirtualizationEngine {
     fun installOrRefreshPackage(originPackageName: String): EngineResult
@@ -25,6 +26,15 @@ interface VirtualizationEngine {
     fun queryCapabilities(instanceId: String? = null): EngineCapabilityReport =
         EngineCapabilityReport.unavailable(instanceId)
     fun exportEvidence(instanceId: String): EngineEvidenceReport
+
+    /**
+     * List all known virtual instances managed by the engine.
+     *
+     * The engine is the single authority for instance state. Feature modules
+     * MUST query through this method instead of accessing [InstanceManager] directly.
+     */
+    fun listInstances(): List<VirtualInstanceRecord> = emptyList()
+
 }
 
 data class EnginePackageInstallRequest(
@@ -45,7 +55,10 @@ data class EnginePackageInstallRequest(
     val splitApkPaths: List<String> = emptyList(),
     val splitPublicSourceDirs: List<String> = emptyList(),
     val splitNames: List<String> = emptyList(),
-    val isolatedSplits: Boolean = false
+    val isolatedSplits: Boolean = false,
+    val debuggable: Boolean = false,
+    val sharedUserId: String? = null,
+    val sharedUserLabel: Int = 0
 ) {
     init {
         require(originPackageName.isNotBlank() && originPackageName.length <= MAX_IDENTITY_LENGTH) {
@@ -286,6 +299,7 @@ data class LaunchInstanceRequest(
     val reason: String = "user",
     val targetComponentClassName: String? = null,
     val launchFlags: Int = 0,
+    val launchAction: String? = null,
     val taskPolicy: EngineTaskPolicy = EngineTaskPolicy.DEFAULT,
     val prewarmPolicy: EnginePrewarmPolicy = EnginePrewarmPolicy.DEFAULT,
     val evidenceMode: EngineEvidenceMode = EngineEvidenceMode.DEFAULT
@@ -299,6 +313,7 @@ data class LaunchInstanceRequest(
         require(targetComponentClassName?.isNotBlank() ?: true) {
             "targetComponentClassName must not be blank"
         }
+        require(launchAction?.isNotBlank() ?: true) { "launchAction must not be blank" }
     }
 }
 

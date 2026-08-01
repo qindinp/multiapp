@@ -4,6 +4,9 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -127,6 +130,37 @@ class InstanceRecordStoreTest {
         val loaded = store.load("inst-1")
         assertNotNull(loaded)
         assertEquals("Updated", loaded.displayName)
+    }
+
+    @Test
+    fun `separate stores serialize concurrent writes to the same record`() {
+        val firstStore = JsonInstanceRecordStore(tempDir)
+        val secondStore = JsonInstanceRecordStore(tempDir)
+        val workersReady = CountDownLatch(2)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+
+        val writes = listOf("first", "second").map { displayName ->
+            executor.submit {
+                workersReady.countDown()
+                check(start.await(5, TimeUnit.SECONDS))
+                check(
+                    (if (displayName == "first") firstStore else secondStore)
+                        .save(makeRecord(instanceId = "shared", displayName = displayName))
+                        .isSuccess
+                )
+            }
+        }
+        assertTrue(workersReady.await(5, TimeUnit.SECONDS))
+        start.countDown()
+        writes.forEach { it.get(5, TimeUnit.SECONDS) }
+        executor.shutdownNow()
+
+        val loaded = store.load("shared")
+        assertNotNull(loaded)
+        assertTrue(loaded.displayName in setOf("first", "second"))
+        assertTrue(File(tempDir, "shared.json").readText().contains(loaded.displayName))
+        assertTrue(tempDir.listFiles().orEmpty().none { it.name.endsWith(".tmp") || it.name.endsWith(".bak") })
     }
 
     private fun makeRecord(

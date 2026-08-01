@@ -1,6 +1,7 @@
 package com.multiapp.core.model.instance
 
 import com.google.gson.GsonBuilder
+import com.multiapp.core.model.persistence.JsonDirectoryLock
 import java.io.File
 
 /**
@@ -71,7 +72,8 @@ class JsonInstanceRecordStore(private val baseDir: File) : InstanceRecordStore {
 
     override fun save(record: VirtualInstanceRecord): Result<String> {
         return runCatching {
-            val file = fileFor(record.instanceId)
+            JsonDirectoryLock.withExclusiveLock(baseDir) {
+                val file = fileFor(record.instanceId)
             val tempFile = File(baseDir, "${record.instanceId}.json.tmp")
             val backupFile = File(baseDir, "${record.instanceId}.json.bak")
 
@@ -101,17 +103,18 @@ class JsonInstanceRecordStore(private val baseDir: File) : InstanceRecordStore {
                 error("Failed to rename temp file to ${file.name}")
             }
 
-            record.instanceId
+                record.instanceId
+            }
         }
     }
 
     override fun load(instanceId: String): VirtualInstanceRecord? {
-        val file = fileFor(instanceId)
-        if (!file.exists()) return null
-
         return runCatching {
-            val json = file.readText(Charsets.UTF_8)
-            gson.fromJson(json, VirtualInstanceRecord::class.java)
+            JsonDirectoryLock.withExclusiveLock(baseDir) {
+                val file = fileFor(instanceId)
+                if (!file.exists()) return@withExclusiveLock null
+                gson.fromJson(file.readText(Charsets.UTF_8), VirtualInstanceRecord::class.java)
+            }
         }.getOrNull()
     }
 
@@ -120,20 +123,23 @@ class JsonInstanceRecordStore(private val baseDir: File) : InstanceRecordStore {
     }
 
     override fun listAll(): List<VirtualInstanceRecord> {
-        val files = baseDir.listFiles() ?: return emptyList()
-        return files
-            .filter { it.extension == "json" && !it.name.endsWith(".tmp") }
-            .mapNotNull { file ->
-                runCatching {
-                    val json = file.readText(Charsets.UTF_8)
-                    gson.fromJson(json, VirtualInstanceRecord::class.java)
-                }.getOrNull()
-            }
+        return JsonDirectoryLock.withExclusiveLock(baseDir) {
+            val files = baseDir.listFiles() ?: return@withExclusiveLock emptyList()
+            files
+                .filter { it.extension == "json" && !it.name.endsWith(".tmp") }
+                .mapNotNull { file ->
+                    runCatching {
+                        gson.fromJson(file.readText(Charsets.UTF_8), VirtualInstanceRecord::class.java)
+                    }.getOrNull()
+                }
+        }
     }
 
     override fun delete(instanceId: String): Boolean {
-        val file = fileFor(instanceId)
-        return file.exists() && file.delete()
+        return JsonDirectoryLock.withExclusiveLock(baseDir) {
+            val file = fileFor(instanceId)
+            file.exists() && file.delete()
+        }
     }
 
     private fun fileFor(instanceId: String): File {

@@ -74,6 +74,9 @@ data class VirtualApp(
     val useEmbeddedDex: Boolean = false,
     /** Whether the app is debuggable */
     val isDebuggable: Boolean = false,
+    /** Shared user ID from the original manifest (null = no shared UID) */
+    val sharedUserId: String? = null,
+    val sharedUserLabel: Int = 0,
     /** Install location preference: auto=0, internalOnly=1, preferExternal=2 */
     val installLocation: Int = 0,
     /** Page size compatibility mode (Android 15+) */

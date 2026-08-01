@@ -40,6 +40,9 @@ data class VirtualPackageSnapshot(
     val receivers: List<ResolvedComponent> = emptyList(),
     val providers: List<ResolvedComponent> = emptyList(),
     val permissions: List<String> = emptyList(),
+    val debuggable: Boolean = false,
+    val sharedUserId: String? = null,
+    val sharedUserLabel: Int = 0,
     val originCertSha256: String? = null,
     val signerSha256Digests: List<String> = emptyList(),
     val hasMultipleSigners: Boolean = false

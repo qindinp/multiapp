@@ -3,6 +3,9 @@ package com.multiapp.core.model.installer
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import com.multiapp.core.model.virtual.VirtualMetaDataValue
 import com.multiapp.core.model.virtual.VirtualProviderPathPattern
 import com.multiapp.core.model.virtual.VirtualProviderPathPatternType
@@ -269,6 +272,36 @@ class InstallRecordStoreTest {
             store.delete("../evil")
         }
         assertTrue(outsideRecord.exists())
+    }
+
+    @Test
+    fun `separate stores serialize concurrent writes to the same package`() {
+        val firstStore = JsonInstallRecordStore(tempDir)
+        val secondStore = JsonInstallRecordStore(tempDir)
+        val workersReady = CountDownLatch(2)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+
+        val writes = listOf(1L, 2L).map { versionCode ->
+            executor.submit {
+                workersReady.countDown()
+                check(start.await(5, TimeUnit.SECONDS))
+                check(
+                    (if (versionCode == 1L) firstStore else secondStore)
+                        .save(createRecord(packageName = "com.example.shared").copy(versionCode = versionCode))
+                        .isSuccess
+                )
+            }
+        }
+        assertTrue(workersReady.await(5, TimeUnit.SECONDS))
+        start.countDown()
+        writes.forEach { it.get(5, TimeUnit.SECONDS) }
+        executor.shutdownNow()
+
+        val loaded = firstStore.load("com.example.shared")
+        assertNotNull(loaded)
+        assertTrue(loaded.versionCode in setOf(1L, 2L))
+        assertTrue(tempDir.listFiles().orEmpty().none { it.name.endsWith(".tmp") || it.name.endsWith(".bak") })
     }
 
     private fun createRecord(

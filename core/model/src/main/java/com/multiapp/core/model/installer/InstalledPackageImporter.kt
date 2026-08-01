@@ -53,7 +53,10 @@ class InstalledPackageImporter(
         splitApkPaths: List<String> = emptyList(),
         splitPublicSourceDirs: List<String> = emptyList(),
         splitNames: List<String> = emptyList(),
-        isolatedSplits: Boolean = false
+        isolatedSplits: Boolean = false,
+        debuggable: Boolean = false,
+        sharedUserId: String? = null,
+        sharedUserLabel: Int = 0
     ): Result<ImportResult> {
         var transaction: ArtifactTransaction? = null
         return try {
@@ -160,7 +163,10 @@ class InstalledPackageImporter(
                 receivers = receivers,
                 providers = providers,
                 installTimeMs = previousRecord?.installTimeMs ?: now,
-                updatedAtMs = if (previousRecord == null) now else now.coerceAtLeast(previousRecord.updatedAtMs + 1L)
+                updatedAtMs = if (previousRecord == null) now else now.coerceAtLeast(previousRecord.updatedAtMs + 1L),
+                debuggable = debuggable,
+                sharedUserId = sharedUserId,
+                sharedUserLabel = sharedUserLabel
             )
 
             val manifest = buildManifest(record)

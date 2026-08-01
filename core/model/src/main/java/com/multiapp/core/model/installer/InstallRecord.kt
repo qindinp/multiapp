@@ -110,7 +110,10 @@ data class InstallRecord(
     val receivers: List<ComponentInfo> = emptyList(),
     val providers: List<ComponentInfo> = emptyList(),
     val installTimeMs: Long,
-    val updatedAtMs: Long = installTimeMs
+    val updatedAtMs: Long = installTimeMs,
+    val debuggable: Boolean = false,
+    val sharedUserId: String? = null,
+    val sharedUserLabel: Int = 0
 ) {
     /** Code paths for runtime class loading: base APK first, then split APKs. */
     val codeSourceDirs: List<String>

@@ -1,7 +1,7 @@
 package com.multiapp.core.model.engine
 
 object ProviderStubAuthorityContract {
-    private const val PROCESS_SLOT_COUNT = 8
+    private const val PROCESS_SLOT_COUNT = EngineProcessSlotContract.PROCESS_SLOT_COUNT
     private const val STUB_AUTHORITY_SUFFIX = ".multiapp.provider.stub"
     private const val SLOT_AUTHORITY_PREFIX = ".v"
 
@@ -27,15 +27,8 @@ object ProviderStubAuthorityContract {
             stubAuthority(hostPackageName, processSlot)
         }
 
-    private fun processSlotIndex(hostPackageName: String, processSlot: String?): Int? {
-        if (processSlot.isNullOrBlank()) return null
-        val expectedPrefix = "$hostPackageName:v"
-        if (!processSlot.startsWith(expectedPrefix)) return null
-        return processSlot
-            .removePrefix(expectedPrefix)
-            .toIntOrNull()
-            ?.takeIf { it in 0 until PROCESS_SLOT_COUNT }
-    }
+    private fun processSlotIndex(hostPackageName: String, processSlot: String?): Int? =
+        EngineProcessSlotContract.processSlotIndex(hostPackageName, processSlot)
 
     private fun String.baseAuthorityFromCanonicalSlotOrNull(): String? {
         val slotPrefixIndex = lastIndexOf(SLOT_AUTHORITY_PREFIX)

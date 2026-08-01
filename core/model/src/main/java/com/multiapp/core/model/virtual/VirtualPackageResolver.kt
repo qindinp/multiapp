@@ -1,4 +1,4 @@
-package com.multiapp.core.model.virtual
+﻿package com.multiapp.core.model.virtual
 
 /**
  * Resolved metadata for an installed APK.
@@ -121,7 +121,8 @@ data class ResolvedComponent(
     val uriPermissionPatterns: List<VirtualProviderPathPattern> = emptyList(),
     val metaData: Map<String, String> = emptyMap(),
     val typedMetaData: Map<String, VirtualMetaDataValue> = emptyMap(),
-    val targetActivityName: String? = null
+    val targetActivityName: String? = null,
+    val enabled: Boolean = true
 )
 
 /** Resolves Activity-alias runtime attributes from its authoritative target Activity. */

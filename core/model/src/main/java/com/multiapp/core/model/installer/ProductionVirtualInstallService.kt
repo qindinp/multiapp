@@ -71,7 +71,10 @@ class ProductionVirtualInstallService(
                 splitApkPaths = importMetadata.splitApkPaths,
                 splitPublicSourceDirs = importMetadata.splitPublicSourceDirs,
                 splitNames = importMetadata.splitNames,
-                isolatedSplits = importMetadata.isolatedSplits
+                isolatedSplits = importMetadata.isolatedSplits,
+                debuggable = app.isDebuggable,
+                sharedUserId = app.sharedUserId,
+                sharedUserLabel = app.sharedUserLabel
             )
         } catch (e: CancellationException) {
             throw e
@@ -133,7 +136,10 @@ class ProductionVirtualInstallService(
                 splitApkPaths = replacementMetadata.splitApkPaths,
                 splitPublicSourceDirs = replacementMetadata.splitPublicSourceDirs,
                 splitNames = replacementMetadata.splitNames,
-                isolatedSplits = replacementMetadata.isolatedSplits
+                isolatedSplits = replacementMetadata.isolatedSplits,
+                debuggable = app.isDebuggable,
+                sharedUserId = app.sharedUserId,
+                sharedUserLabel = app.sharedUserLabel
             )
         } catch (e: CancellationException) {
             throw e
