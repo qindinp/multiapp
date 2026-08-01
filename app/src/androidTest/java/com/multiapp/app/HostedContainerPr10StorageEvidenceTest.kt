@@ -161,7 +161,9 @@ class HostedContainerPr10StorageEvidenceTest {
         val launchResult = virtualizationEngine.launchInstance(
             com.multiapp.core.model.engine.LaunchInstanceRequest(
                 instanceId = instance.instanceId,
-                reason = "androidTest:pr10-storage-evidence"
+                reason = "androidTest:pr10-storage-evidence",
+                // storage evidence 仅在 FULL 模式写入（2026-08-01 真机定位）
+                evidenceMode = com.multiapp.core.model.engine.EngineEvidenceMode.FULL
             )
         )
         assertTrue(
