@@ -26,6 +26,8 @@ import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
+import com.multiapp.core.designsystem.components.MiUiConfirmDialog
+import com.multiapp.core.designsystem.theme.RadiusXl
 import com.multiapp.core.designsystem.components.rememberAppIconBitmap
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
@@ -178,19 +180,17 @@ fun AppManagerScreen(
     }
 
     showDeleteConfirm?.let { instance ->
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = null },
-            title = { Text("确认删除") },
-            text = { Text("确定要删除 ${instance.displayName.ifBlank { instance.originPackageName.substringAfterLast(".") }} 吗？此操作不可撤销。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.onEvent(AppManagerEvent.DeleteInstance(instance.instanceId))
-                    showDeleteConfirm = null
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+        MiUiConfirmDialog(
+            title = "确认删除",
+            text = "确定要删除 ${instance.displayName.ifBlank { instance.originPackageName.substringAfterLast(".") }} 吗？此操作不可撤销。",
+            confirmText = "删除",
+            dismissText = "取消",
+            danger = true,
+            onConfirm = {
+                viewModel.onEvent(AppManagerEvent.DeleteInstance(instance.instanceId))
+                showDeleteConfirm = null
             },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = null }) { Text("取消") }
-            }
+            onDismiss = { showDeleteConfirm = null }
         )
     }
 }
@@ -208,8 +208,8 @@ private fun AppManagerCard(
     val appIcon = rememberInstalledAppIconBitmap(instance.originPackageName, 96)
     ElevatedCard(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
+        shape = RadiusXl,   // DESIGN.md §4.2 28dp 大圆角主卡片
+        elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp), // shadow-2 等效
         colors = CardDefaults.elevatedCardColors(
             containerColor = MaterialTheme.colorScheme.surface
         )

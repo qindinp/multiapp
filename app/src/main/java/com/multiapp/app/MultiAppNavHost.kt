@@ -1,5 +1,6 @@
 package com.multiapp.app
 
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
@@ -13,12 +14,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.multiapp.core.designsystem.theme.MultiAppSpacing
 import com.multiapp.feature.appmanager.AppManagerScreen
 import com.multiapp.feature.launcher.LauncherScreen
 import com.multiapp.feature.settings.SettingsScreen
@@ -46,8 +49,10 @@ fun MultiAppNavHost() {
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             NavigationBar(
-                containerColor = MaterialTheme.colorScheme.surface,
-                tonalElevation = NavigationBarDefaults.Elevation
+                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f), // §4.3 毛玻璃近似（半透明 surface）
+                tonalElevation = 0.dp,
+                modifier = Modifier.height(MultiAppSpacing.bottomBarHeight), // §4.3 56dp
+                windowInsets = NavigationBarDefaults.windowInsets
             ) {
                 navItems.forEach { item ->
                     val selected = currentDestination?.hierarchy?.any {

@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.multiapp.core.designsystem.components.SettingsSection
 import com.multiapp.core.designsystem.components.SettingsDivider
+import com.multiapp.core.designsystem.theme.RadiusXl
 import com.multiapp.core.common.formatBytes
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -61,7 +62,7 @@ fun SettingsScreen(
             // 产品化头部：关键身份信息前置，低密度但一眼可读
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
+                shape = RadiusXl,   // DESIGN.md §4.2 28dp 大圆角主卡片
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
                 tonalElevation = 0.dp,
             ) {

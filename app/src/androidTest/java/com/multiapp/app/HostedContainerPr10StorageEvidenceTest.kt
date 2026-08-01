@@ -9,15 +9,14 @@ import com.multiapp.app.container.ContainerActivity
 import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
 import com.multiapp.core.loader.VirtualStoragePathDiagnostics
+import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EnginePackageInstallRequest
+import com.multiapp.core.model.engine.EngineResultStatus
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
-import com.multiapp.core.model.instance.DefaultInstanceManager
-import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.installer.ComponentInfo
-import com.multiapp.core.model.installer.InstallMetadata
-import com.multiapp.core.model.installer.InstallMetadataResolver
 import com.multiapp.core.model.installer.JsonInstallRecordStore
-import com.multiapp.core.model.installer.ProductionVirtualInstallService
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.junit.After
@@ -31,6 +30,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import javax.inject.Inject
 
 @HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
@@ -38,6 +38,11 @@ class HostedContainerPr10StorageEvidenceTest {
 
     @get:Rule(order = 0)
     val hiltRule = HiltAndroidRule(this)
+
+    @Inject
+    lateinit var virtualizationEngine: VirtualizationEngine
+
+    private lateinit var activityScenario: ActivityScenario<MainActivity>
 
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val targetContext = instrumentation.targetContext
@@ -57,23 +62,29 @@ class HostedContainerPr10StorageEvidenceTest {
     @Before
     fun cleanPreviousPr10StorageState() {
         hiltRule.inject()
+        // host Activity 前台化：MIUI BAL 视窗检查（2026-08-01）
+        activityScenario = ActivityScenario.launch(MainActivity::class.java)
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
         installStore.delete(minimalPackageName)
-        val instanceManager = DefaultInstanceManager(
-            store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
-            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
-            installRecordStore = installStore
-        )
-        val previousInstances = instanceManager.getInstanceByOrigin(minimalPackageName)
-        previousInstances.forEach { instance ->
-            deletePr10Evidence(instance.instanceId)
-            instanceManager.deleteInstance(instance.instanceId)
-        }
+        // engine facade 清理：owner store 只在 :engine 进程构造（2026-08-01 修复）
+        virtualizationEngine.listInstances()
+            .filter { it.originPackageName == minimalPackageName }
+            .forEach { instance ->
+                deletePr10Evidence(instance.instanceId)
+                val result = virtualizationEngine.deleteInstance(instance.instanceId)
+                assertTrue(
+                    "engine cleanup failed for ${instance.instanceId}: ${result.status}:${result.message}",
+                    result.status == EngineResultStatus.PASS || result.status == EngineResultStatus.PARTIAL
+                )
+            }
         deletePr10EvidenceFilesByComponentName()
     }
 
     @After
     fun restoreGlobalRuntimeHooks() {
+        if (::activityScenario.isInitialized) {
+            activityScenario.close()
+        }
         VirtualInstrumentationInstaller.restore()
     }
 
@@ -88,23 +99,10 @@ class HostedContainerPr10StorageEvidenceTest {
         assertNotNull("minimal app sourceDir must exist", applicationInfo.sourceDir)
         assertTrue(File(applicationInfo.sourceDir).isFile)
 
-        val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
-        val installService = ProductionVirtualInstallService(
-            installRecordStore = installStore,
-            artifactDir = ContainerRuntimePaths.artifactDir(targetContext),
-            metadataResolver = InstallMetadataResolver { packageName, _ ->
-                val info = findInstalledPackage(packageName) ?: return@InstallMetadataResolver InstallMetadata()
-                InstallMetadata(
-                    permissions = info.requestedPermissions?.toList().orEmpty(),
-                    activities = info.activities.toComponentInfos(),
-                    services = info.services.toComponentInfos(),
-                    receivers = info.receivers.toComponentInfos(),
-                    providers = info.providers.toComponentInfos()
-                )
-            }
-        )
-        val importResult = installService.importFromMetadata(
-            packageName = minimalPackageName,
+        // engine.createInstance 在 install record 缺失时会 ensureInstallRecord 自动导入
+        // （2026-08-01 真机修正：refreshPackage 是"仅刷新已有记录"语义）
+        val installRequest = EnginePackageInstallRequest(
+            originPackageName = minimalPackageName,
             originApkPath = applicationInfo.sourceDir,
             versionCode = packageInfo.longVersionCodeCompat(),
             versionName = packageInfo.versionName ?: "1.0",
@@ -113,23 +111,24 @@ class HostedContainerPr10StorageEvidenceTest {
             applicationClassName = applicationInfo.className,
             packageLabel = applicationInfo.loadLabel(packageManager).toString()
         )
-        assertTrue(importResult.exceptionOrNull()?.stackTraceToString(), importResult.isSuccess)
-
-        val instanceManager = DefaultInstanceManager(
-            store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
-            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
-            installRecordStore = installStore
-        )
-        val first = instanceManager.createInstance(
-            originPackageName = minimalPackageName,
-            displayName = "MinimalTest PR10 Storage A",
-            compatibilityMode = CompatibilityMode.DEFAULT
-        ).getOrThrow()
-        val second = instanceManager.createInstance(
-            originPackageName = minimalPackageName,
-            displayName = "MinimalTest PR10 Storage B",
-            compatibilityMode = CompatibilityMode.DEFAULT
-        ).getOrThrow()
+        fun createStorageInstance(label: String, displayName: String): VirtualInstanceRecord {
+            val result = virtualizationEngine.createInstance(
+                CreateInstanceRequest(
+                    creationRequestId = "androidTest-pr10-storage-$label-${System.currentTimeMillis()}",
+                    install = installRequest,
+                    displayName = displayName,
+                    compatibilityMode = CompatibilityMode.DEFAULT
+                )
+            )
+            assertTrue(
+                "engine createInstance failed for $label: ${result.status}:${result.message}",
+                result.status == EngineResultStatus.PASS
+            )
+            val instanceId = checkNotNull(result.instanceId) { "createInstance returned no instanceId for $label" }
+            return virtualizationEngine.listInstances().first { it.instanceId == instanceId }
+        }
+        val first = createStorageInstance("A", "MinimalTest PR10 Storage A")
+        val second = createStorageInstance("B", "MinimalTest PR10 Storage B")
 
         val instrumentationInstall = VirtualInstrumentationInstaller.install()
         assertTrue(instrumentationInstall.exceptionOrNull()?.stackTraceToString(), instrumentationInstall.isSuccess)
@@ -156,6 +155,19 @@ class HostedContainerPr10StorageEvidenceTest {
     }
 
     private fun launchAndWaitForPr10Evidence(instance: VirtualInstanceRecord) {
+        // engine.launchInstance 建立 runtime 状态（package snapshot/进程绑定），
+        // 否则 ContainerActivity 的 bindApplication 无法构建 binding fingerprint
+        // （2026-08-01 真机定位：Unable to build hosted runtime binding fingerprint）
+        val launchResult = virtualizationEngine.launchInstance(
+            com.multiapp.core.model.engine.LaunchInstanceRequest(
+                instanceId = instance.instanceId,
+                reason = "androidTest:pr10-storage-evidence"
+            )
+        )
+        assertTrue(
+            "engine launchInstance failed for ${instance.instanceId}: ${launchResult.status}:${launchResult.message}",
+            launchResult.status == EngineResultStatus.PASS
+        )
         val scenario = ActivityScenario.launch<ContainerActivity>(
             ContainerActivity.createIntent(
                 targetContext,
@@ -267,7 +279,7 @@ class HostedContainerPr10StorageEvidenceTest {
     }
 
     private fun waitForPr10Evidence(instanceId: String) {
-        val deadline = System.currentTimeMillis() + 8_000L
+        val deadline = System.currentTimeMillis() + 20_000L // guest 冷启动阈值（2026-08-01 真机修正：8s→20s）
         while (System.currentTimeMillis() < deadline) {
             val missing = pr10EvidenceComponents.filterNot { component ->
                 ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component).isFile

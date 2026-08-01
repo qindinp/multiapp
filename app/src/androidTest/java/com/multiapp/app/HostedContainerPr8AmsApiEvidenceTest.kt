@@ -11,14 +11,13 @@ import com.multiapp.app.container.ContainerRuntimePaths
 import com.multiapp.core.engine.EngineRuntimeInstallers
 import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorders
 import com.multiapp.core.loader.VirtualInstrumentationInstaller
+import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EnginePackageInstallRequest
+import com.multiapp.core.model.engine.EngineResultStatus
+import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
-import com.multiapp.core.model.instance.DefaultInstanceManager
-import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.ComponentInfo
-import com.multiapp.core.model.installer.InstallMetadata
-import com.multiapp.core.model.installer.InstallMetadataResolver
 import com.multiapp.core.model.installer.JsonInstallRecordStore
-import com.multiapp.core.model.installer.ProductionVirtualInstallService
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.junit.After
@@ -29,6 +28,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import javax.inject.Inject
 
 @HiltAndroidTest
 @RunWith(AndroidJUnit4::class)
@@ -36,6 +36,11 @@ class HostedContainerPr8AmsApiEvidenceTest {
 
     @get:Rule(order = 0)
     val hiltRule = HiltAndroidRule(this)
+
+    @Inject
+    lateinit var virtualizationEngine: VirtualizationEngine
+
+    private lateinit var activityScenario: ActivityScenario<MainActivity>
 
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val targetContext = instrumentation.targetContext
@@ -55,26 +60,32 @@ class HostedContainerPr8AmsApiEvidenceTest {
     @Before
     fun cleanPreviousPr8AmsApiState() {
         hiltRule.inject()
+        // host Activity 前台化：MIUI BAL 视窗检查（2026-08-01）
+        activityScenario = ActivityScenario.launch(MainActivity::class.java)
         EngineRuntimeInstallers.installAmsApiEvidenceRecorder(
             ContainerAmsApiEvidenceRecorder(targetContext)
         )
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
         installStore.delete(minimalPackageName)
-        val instanceManager = DefaultInstanceManager(
-            store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
-            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
-            installRecordStore = installStore
-        )
-        val previousInstances = instanceManager.getInstanceByOrigin(minimalPackageName)
-        previousInstances.forEach { instance ->
-            deletePr8AmsApiEvidence(instance.instanceId)
-            instanceManager.deleteInstance(instance.instanceId)
-        }
+        // engine facade 清理：owner store 只在 :engine 进程构造（2026-08-01 修复）
+        virtualizationEngine.listInstances()
+            .filter { it.originPackageName == minimalPackageName }
+            .forEach { instance ->
+                deletePr8AmsApiEvidence(instance.instanceId)
+                val result = virtualizationEngine.deleteInstance(instance.instanceId)
+                assertTrue(
+                    "engine cleanup failed for ${instance.instanceId}: ${result.status}:${result.message}",
+                    result.status == EngineResultStatus.PASS || result.status == EngineResultStatus.PARTIAL
+                )
+            }
         deletePr8AmsApiEvidenceFilesByComponentName()
     }
 
     @After
     fun restoreGlobalRuntimeHooks() {
+        if (::activityScenario.isInitialized) {
+            activityScenario.close()
+        }
         VirtualAmsApiEvidenceRecorders.reset()
         VirtualInstrumentationInstaller.restore()
     }
@@ -91,23 +102,10 @@ class HostedContainerPr8AmsApiEvidenceTest {
         assertNotNull("minimal app sourceDir must exist", applicationInfo.sourceDir)
         assertTrue(File(applicationInfo.sourceDir).isFile)
 
-        val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
-        val installService = ProductionVirtualInstallService(
-            installRecordStore = installStore,
-            artifactDir = ContainerRuntimePaths.artifactDir(targetContext),
-            metadataResolver = InstallMetadataResolver { packageName, _ ->
-                val info = findInstalledPackage(packageName) ?: return@InstallMetadataResolver InstallMetadata()
-                InstallMetadata(
-                    permissions = info.requestedPermissions?.toList().orEmpty(),
-                    activities = info.activities.toComponentInfos(),
-                    services = info.services.toComponentInfos(),
-                    receivers = info.receivers.toComponentInfos(),
-                    providers = info.providers.toComponentInfos()
-                )
-            }
-        )
-        val importResult = installService.importFromMetadata(
-            packageName = minimalPackageName,
+        // engine.createInstance 在 install record 缺失时会 ensureInstallRecord 自动导入
+        // （2026-08-01 真机修正：refreshPackage 是"仅刷新已有记录"语义）
+        val installRequest = EnginePackageInstallRequest(
+            originPackageName = minimalPackageName,
             originApkPath = applicationInfo.sourceDir,
             versionCode = packageInfo.longVersionCodeCompat(),
             versionName = packageInfo.versionName ?: "1.0",
@@ -116,19 +114,34 @@ class HostedContainerPr8AmsApiEvidenceTest {
             applicationClassName = applicationInfo.className,
             packageLabel = applicationInfo.loadLabel(packageManager).toString()
         )
-        assertTrue(importResult.exceptionOrNull()?.stackTraceToString(), importResult.isSuccess)
-
-        val instanceManager = DefaultInstanceManager(
-            store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
-            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
-            installRecordStore = installStore
+        val createResult = virtualizationEngine.createInstance(
+            CreateInstanceRequest(
+                creationRequestId = "androidTest-pr8-ams-api-${System.currentTimeMillis()}",
+                install = installRequest,
+                displayName = "MinimalTest PR8 AMS API",
+                compatibilityMode = CompatibilityMode.DEFAULT
+            )
         )
-        val instance = instanceManager.createInstance(
-            originPackageName = minimalPackageName,
-            displayName = "MinimalTest PR8 AMS API",
-            compatibilityMode = CompatibilityMode.DEFAULT
-        ).getOrThrow()
+        assertTrue(
+            "engine createInstance failed: ${createResult.status}:${createResult.message}",
+            createResult.status == EngineResultStatus.PASS
+        )
+        val instanceId = checkNotNull(createResult.instanceId) { "createInstance returned no instanceId" }
+        val instance = virtualizationEngine.listInstances().first { it.instanceId == instanceId }
 
+        // engine.launchInstance 建立 runtime 状态（package snapshot/进程绑定），
+        // 否则 ContainerActivity 的 bindApplication 无法构建 binding fingerprint
+        // （2026-08-01 真机定位：Unable to build hosted runtime binding fingerprint）
+        val launchResult = virtualizationEngine.launchInstance(
+            com.multiapp.core.model.engine.LaunchInstanceRequest(
+                instanceId = instance.instanceId,
+                reason = "androidTest:pr8-ams-api-evidence"
+            )
+        )
+        assertTrue(
+            "engine launchInstance failed: ${launchResult.status}:${launchResult.message}",
+            launchResult.status == EngineResultStatus.PASS
+        )
         ActivityScenario.launch<ContainerActivity>(
             ContainerActivity.createIntent(
                 targetContext,
@@ -163,13 +176,23 @@ class HostedContainerPr8AmsApiEvidenceTest {
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "status=ACTIVITY_START_BLOCKED")
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "hostFallback=false")
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "remapped=false")
-        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activity-overload", "reason=unsupportedActivityIntent")
+        // reason 为演进后精确版本（engine 侧 explicit activity plan 失败），2026-08-01 真机对齐
+        assertRuntimeEvidenceHasLineStartingWith(
+            instance.instanceId,
+            "ams-start-activity-overload",
+            "reason=engine_activity_plan_fail:"
+        )
 
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "stage=AMS_API_OVERLOAD")
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "api=startActivities")
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "status=ACTIVITY_BATCH_BLOCKED")
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "hostFallback=false")
-        assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-activities-overload", "reason=unsupportedActivityIntent")
+        // reason 为演进后精确版本（batch 分配缺失），2026-08-01 真机对齐
+        assertRuntimeEvidenceHasLineStartingWith(
+            instance.instanceId,
+            "ams-start-activities-overload",
+            "reason=engine_activity_batch_"
+        )
 
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "stage=AMS_API_OVERLOAD")
         assertRuntimeEvidenceHasLine(instance.instanceId, "ams-start-service", "api=startService")
@@ -213,7 +236,9 @@ class HostedContainerPr8AmsApiEvidenceTest {
     }
 
     private fun waitForPr8AmsApiEvidence(instanceId: String) {
-        val deadline = System.currentTimeMillis() + 8_000L
+        // guest 冷启动 + AMS probe 执行可能超过 8s（Android 16 + MIUI 实测 ~10-15s），
+        // 2026-08-01 真机修正：8s → 20s
+        val deadline = System.currentTimeMillis() + 20_000L
         while (System.currentTimeMillis() < deadline) {
             val missing = pr8AmsApiEvidenceComponents.filterNot { component ->
                 ContainerRuntimePaths.hostedRuntimeEvidenceFile(targetContext, instanceId, component).isFile

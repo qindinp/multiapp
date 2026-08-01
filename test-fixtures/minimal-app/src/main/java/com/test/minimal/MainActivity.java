@@ -443,9 +443,17 @@ public class MainActivity extends Activity {
         }
 
         try {
-            Context runtimeContext = getApplicationContext();
+            // 必须用 getBaseContext()（容器替换为 VirtualContextWrapper 的 base context）
+            // 而非 getApplicationContext()/this：
+            // - getApplicationContext() 返回原生 guest Application context，未被 wrapper 包装，
+            //   调用在到达拦截器前被系统拒绝（FLAG_ACTIVITY_NEW_TASK）
+            // - this（Activity）的 startActivity 走 Instrumentation 路径（VirtualInstrumentation 重映射），
+            //   不触发 VirtualContextWrapper 的 startActivity 拦截（Blocked evidence 在 wrapper 层）
+            // 2026-08-01 真机两轮定位。
+            Context runtimeContext = getBaseContext();
             Intent missingActivity = new Intent()
-                .setComponent(new ComponentName(getPackageName(), "com.test.minimal.MissingActivity"));
+                .setComponent(new ComponentName(getPackageName(), "com.test.minimal.MissingActivity"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             runtimeContext.startActivity(missingActivity, new Bundle());
             out.append("startActivity.optionsReturned: true\n");
         } catch (Exception e) {
@@ -457,9 +465,11 @@ public class MainActivity extends Activity {
         }
 
         try {
-            Context runtimeContext = getApplicationContext();
-            Intent first = new Intent().setComponent(new ComponentName(getPackageName(), SecondActivity.class.getName()));
-            Intent second = new Intent().setComponent(new ComponentName(getPackageName(), "com.test.minimal.MissingActivity"));
+            Context runtimeContext = getBaseContext();
+            Intent first = new Intent().setComponent(new ComponentName(getPackageName(), SecondActivity.class.getName()))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            Intent second = new Intent().setComponent(new ComponentName(getPackageName(), "com.test.minimal.MissingActivity"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             runtimeContext.startActivities(new Intent[] { first, second });
             out.append("startActivities.batchReturned: true\n");
         } catch (Exception e) {
@@ -471,7 +481,7 @@ public class MainActivity extends Activity {
         }
 
         try {
-            Context runtimeContext = getApplicationContext();
+            Context runtimeContext = this;
             Intent foregroundService = new Intent().setComponent(new ComponentName(getPackageName(), ProbeService.class.getName()));
             ComponentName foregroundResult = runtimeContext.startForegroundService(foregroundService);
             out.append("startForegroundService.result: ")

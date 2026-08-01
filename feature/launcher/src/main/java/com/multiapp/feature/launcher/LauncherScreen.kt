@@ -42,6 +42,9 @@ import com.multiapp.core.designsystem.components.LoadingState
 import com.multiapp.core.designsystem.components.ErrorState
 import com.multiapp.core.designsystem.components.EmptyState
 import com.multiapp.core.designsystem.components.InstanceStatusChip
+import com.multiapp.core.designsystem.components.MiUiConfirmDialog
+import com.multiapp.core.designsystem.components.MiUiPrimaryButton
+import com.multiapp.core.designsystem.theme.RadiusLg
 import com.multiapp.core.designsystem.components.rememberAppIconBitmap
 import com.multiapp.core.model.isCloneCandidate
 import com.multiapp.core.model.instance.InstanceState
@@ -240,19 +243,17 @@ fun LauncherScreen(
 
     // Delete confirmation dialog
     showDeleteConfirm?.let { instance ->
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = null },
-            title = { Text("确认删除") },
-            text = { Text("确定要删除 ${instance.displayName} 吗？此操作不可撤销。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.deleteInstance(instance.instanceId)
-                    showDeleteConfirm = null
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+        MiUiConfirmDialog(
+            title = "确认删除",
+            text = "确定要删除 ${instance.displayName} 吗？此操作不可撤销。",
+            confirmText = "删除",
+            dismissText = "取消",
+            danger = true,
+            onConfirm = {
+                viewModel.deleteInstance(instance.instanceId)
+                showDeleteConfirm = null
             },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = null }) { Text("取消") }
-            }
+            onDismiss = { showDeleteConfirm = null }
         )
     }
 }
@@ -265,8 +266,8 @@ private fun CreationProgressDialog(step: String) {
     ) {
         Box(contentAlignment = Alignment.Center) {
             ElevatedCard(
-                shape = RoundedCornerShape(24.dp),
-                elevation = CardDefaults.elevatedCardElevation(defaultElevation = 6.dp),
+                shape = RadiusLg,
+                elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp),
                 colors = CardDefaults.elevatedCardColors(
                     containerColor = MaterialTheme.colorScheme.surface
                 ),
@@ -487,16 +488,10 @@ private fun EmptyState(onAdd: () -> Unit) {
         title = "暂无分身应用",
         subtitle = "点击下方按钮添加应用分身，\n在独立沙箱中运行多个实例。",
         action = {
-            Button(
-                onClick = onAdd,
-                shape = RoundedCornerShape(50),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                contentPadding = PaddingValues(horizontal = 28.dp, vertical = 14.dp)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(10.dp))
-                Text("添加应用", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            }
+            MiUiPrimaryButton(
+                text = "添加应用",
+                onClick = onAdd
+            )
         }
     )
 }
@@ -886,12 +881,12 @@ private fun CreateInstanceDialog(
             }
         },
         confirmButton = {
-            Button(
+            MiUiPrimaryButton(
+                text = "创建",
                 onClick = { onConfirm(displayName) },
-                enabled = displayName.isNotBlank()
-            ) {
-                Text("创建")
-            }
+                enabled = displayName.isNotBlank(),
+                height = 40.dp
+            )
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
@@ -928,7 +923,7 @@ private fun CreateResultDialog(
         confirmButton = {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 TextButton(onClick = onDismiss) { Text("完成") }
-                Button(onClick = onLaunch) { Text("启动") }
+                MiUiPrimaryButton(text = "启动", onClick = onLaunch, height = 40.dp)
             }
         }
     )

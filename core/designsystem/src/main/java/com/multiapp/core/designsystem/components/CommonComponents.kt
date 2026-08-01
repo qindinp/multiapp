@@ -178,8 +178,8 @@ fun SettingsSection(
         }
         ElevatedCard(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 1.dp),
+            shape = RoundedCornerShape(28.dp),   // DESIGN.md §4.2 大圆角卡片
+            elevation = CardDefaults.elevatedCardElevation(defaultElevation = 4.dp), // shadow-2 等效
             colors = CardDefaults.elevatedCardColors(
                 containerColor = MaterialTheme.colorScheme.surface
             )
