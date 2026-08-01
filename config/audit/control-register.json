@@ -196,10 +196,12 @@
       "id": "P0-COMPAT-01",
       "title": "All six whitelist applications pass N and N-1",
       "tier": "P0",
-      "status": "BLOCKED",
-      "evidence": "compatibility-dossiers",
+      "status": "PARTIAL",
+      "evidence": "compatibility-dossiers/2026-08-01-realapp-smoke.md",
       "auditFindings": [
-        "qa-auditor: 6/6 BLOCKED - no APK, no version hash, no signing, no test account, no device"
+        "2026-08-01 设备基线首测（popsicle API36）：导入层 7/7 PASS（含微信 266MB 加固 APK）；启动层 3/7 PASS（酷狗/高德/minimal）",
+        "失败 4 项 = 2 类已定位产品缺口：(A) authoritative runtime state missing ×3（微信/起点/WPS，guest PREPARE 查询 engine runtime miss，与 Pr10 跨进程同步同源）(B) self-provider UID 隔离冲突 ×1（微博 AppMonitorProvider，Provider data plane 缺口）",
+        "dossier: docs/compatibility-dossiers/2026-08-01-realapp-smoke.md"
       ]
     },
     {
