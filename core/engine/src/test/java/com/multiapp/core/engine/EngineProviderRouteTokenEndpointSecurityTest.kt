@@ -9,12 +9,14 @@ import io.mockk.mockkConstructor
 import io.mockk.unmockkConstructor
 import io.mockk.verify
 import java.util.IdentityHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -87,6 +89,52 @@ class EngineProviderRouteTokenEndpointSecurityTest {
         assertEquals("VALID", consumed.status)
         assertEquals(route, consumed.route)
         assertEquals("REPLAYED", fixture.consume(route).status)
+    }
+
+    @Test
+    fun `missing and unknown tokens fail closed at the endpoint`() {
+        // W1-7 端点级负测（2026-08-01）：端点层 fail-closed，不泄露内部路由状态。
+        // 未知 token（长度合法）→ TARGET_UNAUTHORIZED（binding 不可解析）；
+        // 非法长度 token → 请求构造阶段即抛 IllegalArgumentException（fail-closed 前置）。
+        val fixture = endpointFixture()
+        val route = assertNotNull(fixture.issue().route)
+
+        val forged = "a".repeat(43)
+        assertEquals("TARGET_UNAUTHORIZED", fixture.consume(route, tokenOverride = forged).status)
+        assertNull(fixture.consume(route, tokenOverride = forged).route)
+
+        val short = assertFailsWith<IllegalArgumentException> {
+            fixture.consume(route, tokenOverride = "x")
+        }
+        assertTrue(short.message.orEmpty().contains("invalid length"))
+    }
+
+    @Test
+    fun `endpoint rejects expired route tokens fail closed`() {
+        // W1-7 端点级负测（2026-08-01）：TTL 过期后 targetBinding 经 prune 不可解析
+        // → 端点层 TARGET_UNAUTHORIZED（fail-closed，先于 registry 细分 EXPIRED 状态）
+        var nowNanos = 1_000_000_000L
+        val fixture = endpointFixture(routeTokenClockNanos = { nowNanos })
+        val route = assertNotNull(fixture.issue().route)
+        assertTrue(route.expiresAtMillis > 0L)
+
+        nowNanos += TimeUnit.MINUTES.toNanos(3)
+        assertEquals("TARGET_UNAUTHORIZED", fixture.consume(route).status)
+        assertNull(fixture.consume(route).route)
+    }
+
+    @Test
+    fun `endpoint rejects foreign target instance fail closed`() {
+        // W1-7 端点级负测（2026-08-01）：target 实例不一致在端点层先行拒绝
+        // （TARGET_UNAUTHORIZED），不落到 registry 细分状态
+        val fixture = endpointFixture()
+        val route = assertNotNull(fixture.issue().route)
+
+        assertEquals(
+            "TARGET_UNAUTHORIZED",
+            fixture.consume(route, targetInstanceId = "$INSTANCE_ID-other").status
+        )
+        assertNull(fixture.consume(route, targetInstanceId = "$INSTANCE_ID-other").route)
     }
 
     @Test
@@ -164,7 +212,10 @@ class EngineProviderRouteTokenEndpointSecurityTest {
         }
     }
 
-    private fun endpointFixture(coldTarget: Boolean = false): EndpointFixture {
+    private fun endpointFixture(
+        coldTarget: Boolean = false,
+        routeTokenClockNanos: (() -> Long)? = null
+    ): EndpointFixture {
         val runtime = runtime()
         val registry = EngineRuntimeRegistry().apply { register(runtime) }
         val callerIdentity = EngineProcessClientIdentity(
@@ -286,7 +337,11 @@ class EngineProviderRouteTokenEndpointSecurityTest {
         } answers { targetIdentity.takeIf { targetAttached.get() } }
 
         val callingPid = AtomicInteger(CALLER_PROCESS_ID)
-        val routeTokens = EngineProviderRouteTokenRegistry()
+        val routeTokens = if (routeTokenClockNanos != null) {
+            EngineProviderRouteTokenRegistry(clockNanos = routeTokenClockNanos)
+        } else {
+            EngineProviderRouteTokenRegistry()
+        }
         val systemServer = DefaultVirtualSystemServer(registry)
         val endpoint = allocateEndpoint().apply {
             setEndpointField("registry", registry)
@@ -428,11 +483,13 @@ class EngineProviderRouteTokenEndpointSecurityTest {
             expectedProcessSlot: String = TARGET_PROCESS_SLOT,
             guestAuthority: String = AUTHORITY,
             operation: String = OPERATION,
-            providerCallingPid: Int = CALLER_PROCESS_ID
+            providerCallingPid: Int = CALLER_PROCESS_ID,
+            tokenOverride: String? = null,
+            targetInstanceId: String = INSTANCE_ID
         ): EngineProviderRouteTokenAuthorityResult {
             val request = EngineProviderRouteTokenConsumeRequest(
-                token = route.token,
-                targetInstanceId = INSTANCE_ID,
+                token = tokenOverride ?: route.token,
+                targetInstanceId = targetInstanceId,
                 guestAuthority = guestAuthority,
                 operation = operation,
                 expectedProcessSlot = expectedProcessSlot,
