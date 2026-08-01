@@ -65,6 +65,26 @@ class EngineProcessBootstrapTransportTest {
     }
 
     @Test
+    fun `process slot parsing rejects injection aliases and foreign packages`() {
+        // P1-SEC-01 严格化（2026-08-01）：多分隔符注入、前导零别名、非十进制均拒绝
+        assertEquals(3, EngineProcessBootstrapIpc.processSlotIndex("com.multiapp.app:v3"))
+        assertEquals(23, EngineProcessBootstrapIpc.processSlotIndex("com.multiapp.app:v23"))
+        assertNull(EngineProcessBootstrapIpc.processSlotIndex("com.multiapp.app:v24"))
+        assertNull(EngineProcessBootstrapIpc.processSlotIndex("com.multiapp.app:v"))
+        assertNull(EngineProcessBootstrapIpc.processSlotIndex("not-a-slot"))
+        // v03 是前导零别名：严格十进制下拒绝（canonical 为 v3）
+        assertNull(EngineProcessBootstrapIpc.processSlotIndex("com.multiapp.app:v03"))
+        // 多分隔符注入：host:v3:evil:v1 必须整体拒绝，不得解析出 1
+        assertNull(EngineProcessBootstrapIpc.processSlotIndex("com.multiapp.app:v3:evil:v1"))
+        // foreign 包名前缀（无 host 校验时格式合法，返回 index；host 校验在 authority() 拒绝）
+        assertEquals(1, EngineProcessBootstrapIpc.processSlotIndex("foreign.pkg:v1"))
+        // authority() 带 host 校验：foreign 包名被拒绝
+        assertNull(EngineProcessBootstrapIpc.authority("com.multiapp.app", "foreign.pkg:v1"))
+        assertNull(EngineProcessBootstrapIpc.authority("com.multiapp.app", "com.multiapp.app:v03"))
+        assertNull(EngineProcessBootstrapIpc.authority("com.multiapp.app", "com.multiapp.app:v3:evil:v1"))
+    }
+
+    @Test
     fun `component bootstrap envelope carries kind and complete launch ticket`() {
         val request = componentRequest()
 

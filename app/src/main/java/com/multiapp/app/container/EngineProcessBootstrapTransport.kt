@@ -69,14 +69,27 @@ internal object EngineProcessBootstrapIpc {
     private const val KEY_EVIDENCE = "evidence"
 
     fun authority(hostPackageName: String, processSlot: String): String? {
+        // 严格校验：processSlot 必须是 host 的 canonical 槽位（2026-08-01，P1-SEC-01）
+        if (!EngineProcessSlotContract.isCanonicalProcessSlot(hostPackageName, processSlot)) return null
         val index = processSlotIndex(processSlot) ?: return null
         return hostPackageName + AUTHORITY_SUFFIX + index
     }
 
-    fun processSlotIndex(processSlot: String): Int? = processSlot
-        .substringAfterLast(":v", missingDelimiterValue = "")
-        .toIntOrNull()
-        ?.takeIf { it in 0 until PROCESS_SLOT_COUNT }
+    fun processSlotIndex(processSlot: String): Int? {
+        // 严格化（2026-08-01，P1-SEC-01）：拒绝多分隔符注入、非严格十进制、前导零别名。
+        // 无 hostPackageName 参数时无法验证包名前缀（foreign 包名格式上合法），
+        // 由 authority() 的 isCanonicalProcessSlot 在有权校验 host 的路径补足。
+        val lastColonV = processSlot.lastIndexOf(":v")
+        if (lastColonV < 0) return null
+        val prefix = processSlot.substring(0, lastColonV)
+        if (prefix.isBlank() || ':' in prefix || '/' in prefix) return null
+        val suffix = processSlot.substring(lastColonV + 2)
+        if (suffix.isEmpty() || !suffix.all(Char::isDigit)) return null
+        val index = suffix.toIntOrNull() ?: return null
+        // 严格十进制：v03 是 v3 的前导零别名，必须拒绝（canonical 形式才接受）
+        if (index.toString() != suffix) return null
+        return index.takeIf { it in 0 until EngineProcessSlotContract.PROCESS_SLOT_COUNT }
+    }
 
     fun requestEnvelope(request: EngineProcessBootstrapRequest): EngineProcessBootstrapRequestEnvelope =
         EngineProcessBootstrapRequestEnvelope(
