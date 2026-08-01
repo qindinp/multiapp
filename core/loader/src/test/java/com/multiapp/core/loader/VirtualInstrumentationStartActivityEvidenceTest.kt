@@ -510,6 +510,37 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     }
 
     @Test
+    fun `result baseline reports not requested instead of unsupported routing`(@TempDir filesDir: File) {
+        val instrumentation = VirtualInstrumentation(base = mockk<Instrumentation>(relaxed = true))
+        val hostApplication = mockk<Application>(relaxed = true) {
+            every { this@mockk.filesDir } returns filesDir
+        }
+        val activity = mockk<Activity>(relaxed = true) {
+            every { intent } returns hostedIdentityIntent()
+        }
+        mockkObject(ActivityThreadCompat)
+        every { ActivityThreadCompat.currentApplication() } returns hostApplication
+
+        invokePrivate(
+            instrumentation,
+            "ensureActivityResultBaselineEvidence",
+            arrayOf(Activity::class.java),
+            activity
+        )
+
+        val lines = File(
+            filesDir,
+            "hosted_launch_evidence/${HostedActivityEvidenceFiles.result("inst-001")}"
+        ).readLines().map { it.trim() }
+        assertTrue("status=ACTIVITY_RESULT_NOT_REQUESTED" in lines)
+        assertTrue("resultPipelineInstalled=true" in lines)
+        assertTrue("resultRequested=false" in lines)
+        assertTrue("resultDelivered=false" in lines)
+        assertTrue("resultSupported=true" in lines)
+        assertTrue("unsupportedReason=" in lines)
+    }
+
+    @Test
     fun `delivered activity result consumes virtual result through injected operations`(@TempDir filesDir: File) {
         val operations = RecordingVirtualActivityOperations(
             consumedResult = VirtualActivityResult(
@@ -559,7 +590,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
     }
 
     @Test
-    fun `destroy finish records result through injected activity operations`(@TempDir filesDir: File) {
+    fun `destroy finish only releases record because result was captured at framework boundary`() {
         val operations = RecordingVirtualActivityOperations(
             finishResult = VirtualActivityFinishResultRecord(
                 instanceId = "inst-001",
@@ -574,15 +605,10 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             base = mockk<Instrumentation>(relaxed = true),
             activityOperations = operations
         )
-        val hostApplication = mockk<Application>(relaxed = true) {
-            every { this@mockk.filesDir } returns filesDir
-        }
         val activity = mockk<Activity>(relaxed = true) {
             every { isFinishing } returns true
             every { intent } returns hostedIdentityIntent()
         }
-        mockkObject(ActivityThreadCompat)
-        every { ActivityThreadCompat.currentApplication() } returns hostApplication
 
         invokePrivate(
             instrumentation,
@@ -591,23 +617,14 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             activity
         )
 
-        val lines = File(
-            filesDir,
-            "hosted_launch_evidence/${HostedActivityEvidenceFiles.result("inst-001")}"
-        ).readLines().map { it.trim() }
-        assertEquals(listOf(Triple("inst-001", "token-001", Activity.RESULT_CANCELED)), operations.finishResultCalls)
+        assertTrue(operations.finishResultCalls.isEmpty())
         assertEquals(listOf("inst-001" to "token-001"), operations.finishCalls)
-        assertTrue("status=ACTIVITY_FINISH_RESULT_RECORDED" in lines)
-        assertTrue("stage=ACTIVITY_FINISH_RESULT" in lines)
-        assertTrue("sourceToken=<redacted>" in lines)
-        assertTrue("requestCode=42" in lines)
-        assertTrue("virtualResultRecorded=true" in lines)
-        assertTrue("activityThreadSendActivityResultVerdict=SKIPPED" in lines)
-        assertTrue("activityThreadSendActivityResultReason=SOURCE_ACTIVITY_THREAD_TOKEN_MISSING" in lines)
     }
 
     @Test
     fun `remap start activity uses instrumentation activity record manager`(@TempDir filesDir: File) {
+        val remapFailures = mutableListOf<Throwable>()
+        mockProxyIntentConstruction()
         val recordManager = VirtualActivityRecordManager()
         val processRuntime = VirtualProcessRuntime()
         val instrumentation = VirtualInstrumentation(
@@ -634,7 +651,10 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         mockkStatic(Log::class)
         every { Log.i(any(), any()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
-        every { Log.w(any(), any<String>(), any()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } answers {
+            remapFailures += thirdArg<Throwable>()
+            0
+        }
         rememberHostedRuntime(
             instrumentation = instrumentation,
             instanceId = "inst-001",
@@ -659,7 +679,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             every { extras } returns null
         }
 
-        instrumentation.remapStartActivityIntent(
+        val remapped = instrumentation.remapStartActivityIntent(
             target = null,
             who = who,
             intent = intent,
@@ -667,6 +687,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             requestCode = -1
         )
 
+        assertNotNull(remapped, remapFailures.joinToString("\n") { it.stackTraceToString() })
         val record = assertNotNull(recordManager.list().singleOrNull())
         assertEquals("com.test.minimal.DetailActivity", record.guestActivityClassName)
         assertSame(record, recordManager.resolveByProxy(record.proxyActivityClassName))
@@ -675,6 +696,10 @@ class VirtualInstrumentationStartActivityEvidenceTest {
 
     @Test
     fun `remap start activity records result route for hosted source activity`(@TempDir filesDir: File) {
+        val remapFailures = mutableListOf<Throwable>()
+        mockProxyIntentConstruction()
+        val allocationProvider = TestActivityLaunchAllocationProvider()
+        VirtualActivityLaunchAllocationProviders.install(allocationProvider)
         val recordManager = VirtualActivityRecordManager()
         val processRuntime = VirtualProcessRuntime()
         val instrumentation = VirtualInstrumentation(
@@ -701,7 +726,10 @@ class VirtualInstrumentationStartActivityEvidenceTest {
         mockkStatic(Log::class)
         every { Log.i(any(), any()) } returns 0
         every { Log.w(any(), any<String>()) } returns 0
-        every { Log.w(any(), any<String>(), any()) } returns 0
+        every { Log.w(any(), any<String>(), any()) } answers {
+            remapFailures += thirdArg<Throwable>()
+            0
+        }
         rememberHostedRuntime(
             instrumentation = instrumentation,
             instanceId = "inst-001",
@@ -728,11 +756,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             every { categories } returns emptySet()
             every { extras } returns null
         }
-        every { Log.w(any(), any<String>(), any()) } answers {
-            0
-        }
-
-        instrumentation.remapStartActivityIntent(
+        val remapped = instrumentation.remapStartActivityIntent(
             target = sourceActivity,
             who = who,
             intent = intent,
@@ -740,9 +764,13 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             requestCode = 42
         )
 
+        assertNotNull(remapped, remapFailures.joinToString("\n") { it.stackTraceToString() })
         val record = assertNotNull(recordManager.list().singleOrNull())
         assertEquals("source-token-001", record.resultToToken)
         assertEquals(42, record.resultRequestCode)
+        assertEquals(1, allocationProvider.commitRequests.size)
+        assertEquals("source-token-001", allocationProvider.commitRequests.single().record.resultToToken)
+        assertEquals(42, allocationProvider.commitRequests.single().record.resultRequestCode)
     }
 
     @Test
@@ -1453,6 +1481,7 @@ class VirtualInstrumentationStartActivityEvidenceTest {
 
     private class TestActivityLaunchAllocationProvider : VirtualActivityLaunchAllocationProvider {
         private var tokenIndex = 0
+        val commitRequests = mutableListOf<VirtualActivityLaunchCommitRequest>()
 
         override fun allocate(
             request: VirtualActivityLaunchAllocationRequest
@@ -1481,7 +1510,28 @@ class VirtualInstrumentationStartActivityEvidenceTest {
             )
         }
 
+        override fun commit(request: VirtualActivityLaunchCommitRequest): VirtualActivityLaunchCommitResult {
+            commitRequests += request
+            return VirtualActivityLaunchCommitResult(
+                accepted = true,
+                activity = request.record,
+                reason = "test_activity_launch_committed"
+            )
+        }
+
         override fun release(allocation: VirtualActivityLaunchAllocation): Boolean = true
+    }
+
+    private fun mockProxyIntentConstruction() {
+        mockkConstructor(Intent::class)
+        every { anyConstructed<Intent>().setClassName(any<String>(), any<String>()) } answers { self as Intent }
+        every { anyConstructed<Intent>().putExtra(any<String>(), any<String>()) } answers { self as Intent }
+        every { anyConstructed<Intent>().putExtra(any<String>(), any<Long>()) } answers { self as Intent }
+        every { anyConstructed<Intent>().putExtra(any<String>(), any<Int>()) } answers { self as Intent }
+        every { anyConstructed<Intent>().flags } returns 0
+        every { anyConstructed<Intent>().setFlags(any()) } answers { self as Intent }
+        every { anyConstructed<Intent>().addFlags(any()) } answers { self as Intent }
+        every { anyConstructed<Intent>().component } returns null
     }
 
     private class SameSlotRecordingAllocationProvider : VirtualActivityLaunchAllocationProvider {
@@ -1508,6 +1558,13 @@ class VirtualInstrumentationStartActivityEvidenceTest {
                 reason = "activity_allocation_authorized"
             ).also(allocations::add)
         }
+
+        override fun commit(request: VirtualActivityLaunchCommitRequest): VirtualActivityLaunchCommitResult =
+            VirtualActivityLaunchCommitResult(
+                accepted = true,
+                activity = request.record,
+                reason = "test_activity_launch_committed"
+            )
 
         override fun release(allocation: VirtualActivityLaunchAllocation): Boolean {
             releasedCapabilityTokens += allocation.launchIdentity?.capabilityToken.orEmpty()

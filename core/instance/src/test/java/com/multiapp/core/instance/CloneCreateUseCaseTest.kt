@@ -1,20 +1,16 @@
 package com.multiapp.core.instance
 
-import com.multiapp.core.installer.PackageGenerationTransaction
-import com.multiapp.core.installer.PackageGenerationTransactionJournal
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EngineResult
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
-import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.InstanceState
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.unmockkAll
 import io.mockk.verify
-import io.mockk.verifyOrder
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
@@ -25,15 +21,13 @@ import org.junit.jupiter.api.Test
 
 class CloneCreateUseCaseTest {
 
-    private lateinit var instanceManager: InstanceManager
     private lateinit var virtualizationEngine: VirtualizationEngine
     private var now = 1_000L
 
     @BeforeEach
     fun setUp() {
-        instanceManager = mockk(relaxed = true)
         virtualizationEngine = mockk()
-        every { instanceManager.listInstances() } returns emptyList()
+        every { virtualizationEngine.listInstances() } returns emptyList()
         every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } returns EngineResult.pass(
             operation = "createInstance",
             instanceId = CREATED_INSTANCE_ID,
@@ -49,7 +43,7 @@ class CloneCreateUseCaseTest {
     @Test
     fun `create assigns numbered display name through engine request`() {
         val app = testApp()
-        every { instanceManager.listInstances() } returns listOf(testRecord("old", app.packageName, app.appName))
+        every { virtualizationEngine.listInstances() } returns listOf(testRecord("old", app.packageName, app.appName))
 
         val useCase = useCase()
         val result = useCase.create(app, useCase.prepareAttempt(app)).getOrThrow()
@@ -62,7 +56,6 @@ class CloneCreateUseCaseTest {
                 }
             )
         }
-        verify(exactly = 0) { instanceManager.createInstance(any<InstanceManager.CreationRequest>()) }
     }
 
     @Test
@@ -120,75 +113,6 @@ class CloneCreateUseCaseTest {
     }
 
     @Test
-    fun `create publishes journal before engine and completes it after authoritative response`() {
-        val transaction = mockk<PackageGenerationTransaction>(relaxed = true)
-        val journal = mockk<PackageGenerationTransactionJournal>()
-        every { journal.begin(any(), any(), any()) } returns transaction
-        val useCase = useCase(packageGenerationJournal = journal)
-        val app = testApp()
-        val attempt = useCase.prepareAttempt(app)
-
-        useCase.create(app, attempt).getOrThrow()
-
-        verifyOrder {
-            journal.begin(app.packageName, attempt.creationRequestId, attempt.payloadFingerprint)
-            virtualizationEngine.createInstance(any<CreateInstanceRequest>())
-            transaction.complete()
-        }
-        verify(exactly = 0) { transaction.abandon() }
-    }
-
-    @Test
-    fun `unknown engine result abandons journal for startup reconcile`() {
-        val transaction = mockk<PackageGenerationTransaction>(relaxed = true)
-        val journal = mockk<PackageGenerationTransactionJournal>()
-        every { journal.begin(any(), any(), any()) } returns transaction
-        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } returns EngineResult.fail(
-            operation = "createInstance",
-            message = "engine_authority_unavailable_or_unknown_result"
-        )
-        val useCase = useCase(packageGenerationJournal = journal)
-        val app = testApp()
-
-        val result = useCase.create(app, useCase.prepareAttempt(app))
-
-        assertTrue(result.isFailure)
-        verify(exactly = 1) { transaction.abandon() }
-        verify(exactly = 0) { transaction.complete() }
-    }
-
-    @Test
-    fun `transport exception abandons journal`() {
-        val transaction = mockk<PackageGenerationTransaction>(relaxed = true)
-        val journal = mockk<PackageGenerationTransactionJournal>()
-        every { journal.begin(any(), any(), any()) } returns transaction
-        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } throws
-            IllegalStateException("binder died")
-        val useCase = useCase(packageGenerationJournal = journal)
-        val app = testApp()
-
-        val result = useCase.create(app, useCase.prepareAttempt(app))
-
-        assertTrue(result.isFailure)
-        verify(exactly = 1) { transaction.abandon() }
-        verify(exactly = 0) { transaction.complete() }
-    }
-
-    @Test
-    fun `journal persistence failure prevents unjournaled engine mutation`() {
-        val journal = mockk<PackageGenerationTransactionJournal>()
-        every { journal.begin(any(), any(), any()) } throws
-            IllegalStateException("Unable to persist package generation journal")
-        val useCase = useCase(packageGenerationJournal = journal)
-        val app = testApp()
-
-        val result = useCase.create(app, useCase.prepareAttempt(app))
-
-        assertTrue(result.isFailure)
-        verify(exactly = 0) { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) }
-    }
-
-    @Test
     fun `create reports engine authority failure without local mutation fallback`() {
         every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } returns EngineResult.fail(
             operation = "createInstance",
@@ -204,8 +128,6 @@ class CloneCreateUseCaseTest {
         val error = result.exceptionOrNull() as CloneCreateFailureException
         assertEquals("create_failed", error.failureCode)
         assertEquals("engine_owned", error.cleanupStatus)
-        verify(exactly = 0) { instanceManager.createInstance(any<InstanceManager.CreationRequest>()) }
-        verify(exactly = 0) { instanceManager.deleteInstance(any()) }
     }
 
     @Test
@@ -226,7 +148,6 @@ class CloneCreateUseCaseTest {
     fun `post-commit clock failure does not delete engine-created instance`() {
         var clockCalls = 0
         val useCase = CloneCreateUseCase(
-            instanceManager = instanceManager,
             virtualizationEngine = virtualizationEngine,
             clock = {
                 clockCalls += 1
@@ -331,16 +252,30 @@ class CloneCreateUseCaseTest {
         assertEquals(5, requestNumber)
     }
 
+    @Test
+    fun `transport exception does not fall back to local mutation and retains request id for retry`() {
+        every { virtualizationEngine.createInstance(any<CreateInstanceRequest>()) } throws
+            IllegalStateException("binder died")
+        val useCase = useCase()
+        val app = testApp()
+        val attempt = useCase.prepareAttempt(app, "Work")
+
+        val result = useCase.create(app, attempt)
+
+        assertTrue(result.isFailure)
+        val error = result.exceptionOrNull() as CloneCreateFailureException
+        assertTrue(error.shouldRetainCreationRequestId)
+        assertEquals("create_failed", error.failureCode)
+        assertEquals("engine_owned", error.cleanupStatus)
+        assertEquals("binder died", error.cause?.message)
+    }
+
     private fun useCase(
-        packageGenerationJournal: PackageGenerationTransactionJournal =
-            PackageGenerationTransactionJournal.NO_OP,
         creationRequestIdFactory: () -> String = { CREATION_REQUEST_ID }
     ): CloneCreateUseCase = CloneCreateUseCase(
-        instanceManager = instanceManager,
         virtualizationEngine = virtualizationEngine,
         clock = { now },
-        creationRequestIdFactory = creationRequestIdFactory,
-        packageGenerationJournal = packageGenerationJournal
+        creationRequestIdFactory = creationRequestIdFactory
     )
 
     private fun testApp(): VirtualApp = VirtualApp(

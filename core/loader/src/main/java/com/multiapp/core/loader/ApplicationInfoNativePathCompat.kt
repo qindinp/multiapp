@@ -22,7 +22,7 @@ internal object ApplicationInfoNativePathCompat {
             ?.let { parentPath(it) ?: it }
             .orEmpty()
         writeStringField(appInfo, "nativeLibraryRootDir", nativeRoot)
-        writeStringField(appInfo, "secondaryNativeLibraryDir", safeNativeLibraryDir)
+        writeNullableStringField(appInfo, "secondaryNativeLibraryDir", null)
     }
 
     private fun appendPathSegment(root: String, child: String): String {
@@ -42,6 +42,10 @@ internal object ApplicationInfoNativePathCompat {
     }
 
     private fun writeStringField(target: Any, fieldName: String, value: String) {
+        writeNullableStringField(target, fieldName, value)
+    }
+
+    private fun writeNullableStringField(target: Any, fieldName: String, value: String?) {
         runCatching {
             target.javaClass.getField(fieldName).set(target, value)
         }

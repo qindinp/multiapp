@@ -1201,6 +1201,11 @@ class LoaderFactory : AppComponentFactory() {
                 if (args != null && method.name.startsWith("startActiv")) {
                     remapStartActivityArgs(method.name, args, config)
                 }
+                if (method.name == "finishActivity") {
+                    runCatching {
+                        VirtualActivityResultFrameworkBridge.captureFinishActivity(method.name, args)
+                    }
+                }
                 try {
                     method.invoke(base, *(args ?: emptyArray()))
                 } catch (e: java.lang.reflect.InvocationTargetException) {

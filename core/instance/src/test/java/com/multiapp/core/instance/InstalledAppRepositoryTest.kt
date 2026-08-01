@@ -13,6 +13,7 @@ import io.mockk.verify
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -153,6 +154,65 @@ class InstalledAppRepositoryTest {
     }
 
     @Test
+    fun `listInstalledApps maps package identity fields from package info`() {
+        every { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) } returns listOf(
+            packageInfo(
+                packageName = "com.shared.app",
+                label = "Shared",
+                launcher = true,
+                debuggable = true,
+                uid = 10_123,
+                sharedUserId = "android.uid.shared",
+                sharedUserLabel = 0x7f01_0203
+            )
+        )
+        every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
+            launcherResolveInfo("com.shared.app")
+        )
+
+        val repository = InstalledAppRepository(
+            packageManagerProvider = { packageManager },
+            hostPackageName = "com.multiapp.app",
+            launcherIntentFactory = { launcherQueryIntent() }
+        )
+
+        val app = repository.listInstalledApps().single()
+
+        assertTrue(app.isDebuggable)
+        assertEquals("android.uid.shared", app.sharedUserId)
+        assertEquals(0x7f01_0203, app.sharedUserLabel)
+    }
+
+    @Test
+    fun `listInstalledApps drops blank shared user identity`() {
+        every { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) } returns listOf(
+            packageInfo(
+                packageName = "com.plain.app",
+                label = "Plain",
+                launcher = true,
+                uid = 10_456,
+                sharedUserId = " ",
+                sharedUserLabel = 0
+            )
+        )
+        every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
+            launcherResolveInfo("com.plain.app")
+        )
+
+        val repository = InstalledAppRepository(
+            packageManagerProvider = { packageManager },
+            hostPackageName = "com.multiapp.app",
+            launcherIntentFactory = { launcherQueryIntent() }
+        )
+
+        val app = repository.listInstalledApps().single()
+
+        assertFalse(app.isDebuggable)
+        assertNull(app.sharedUserId)
+        assertEquals(0, app.sharedUserLabel)
+    }
+
+    @Test
     fun `isCloneCandidate rejects system or no launcher apps`() {
         assertTrue(virtualApp(mainActivity = "Main", system = false).isCloneCandidate())
         assertFalse(virtualApp(mainActivity = null, system = false).isCloneCandidate())
@@ -164,6 +224,10 @@ class InstalledAppRepositoryTest {
         label: String,
         launcher: Boolean,
         system: Boolean = false,
+        debuggable: Boolean = false,
+        uid: Int = 0,
+        sharedUserId: String? = null,
+        sharedUserLabel: Int = 0,
         splitSourceDirs: Array<String>? = null,
         splitPublicSourceDirs: Array<String>? = null,
         splitNames: Array<String>? = null
@@ -174,7 +238,9 @@ class InstalledAppRepositoryTest {
             sourceDir = "/data/app/$packageName/base.apk"
             targetSdkVersion = 36
             minSdkVersion = 28
-            flags = if (system) ApplicationInfo.FLAG_SYSTEM else 0
+            this.uid = uid
+            flags = (if (system) ApplicationInfo.FLAG_SYSTEM else 0) or
+                (if (debuggable) ApplicationInfo.FLAG_DEBUGGABLE else 0)
             this.splitSourceDirs = splitSourceDirs
             this.splitPublicSourceDirs = splitPublicSourceDirs
             this.splitNames = splitNames
@@ -184,6 +250,8 @@ class InstalledAppRepositoryTest {
             applicationInfo = appInfo
             versionName = "1.0"
             versionCode = 1
+            this.sharedUserId = sharedUserId
+            this.sharedUserLabel = sharedUserLabel
             if (!launcher) {
                 activities = emptyArray()
             }

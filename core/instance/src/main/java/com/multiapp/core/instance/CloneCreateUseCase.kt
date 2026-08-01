@@ -1,13 +1,10 @@
 package com.multiapp.core.instance
 
-import com.multiapp.core.installer.PackageGenerationJournal
-import com.multiapp.core.installer.PackageGenerationTransaction
-import com.multiapp.core.installer.PackageGenerationTransactionJournal
+import com.multiapp.core.model.CloneCreationCoordinator
 import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.engine.CreateInstanceRequest
 import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.VirtualizationEngine
-import com.multiapp.core.model.instance.InstanceManager
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
@@ -16,65 +13,40 @@ import java.util.concurrent.CancellationException
 import java.util.UUID
 import javax.inject.Inject
 
-data class CloneCreateResult(
-    val instanceId: String,
-    val createLatencyMs: Long,
-    val cleanupStatus: String
-)
+typealias CloneCreateAttempt = com.multiapp.core.model.CloneCreateAttempt
+typealias CloneCreateResult = com.multiapp.core.model.CloneCreateResult
+typealias CloneCreateFailureException = com.multiapp.core.model.CloneCreateFailureException
 
-data class CloneCreateAttempt(
-    val creationRequestId: String,
-    val payloadFingerprint: String,
-    val displayName: String
-) {
-    init {
-        require(creationRequestId.isNotBlank()) { "creationRequestId must not be blank" }
-        require(payloadFingerprint.isNotBlank()) { "payloadFingerprint must not be blank" }
-        require(displayName.isNotBlank() && displayName == displayName.trim()) {
-            "displayName must be non-blank and trimmed"
-        }
-    }
-}
-
-class CloneCreateFailureException(
-    val failureCode: String,
-    val userMessage: String,
-    val technicalReason: String?,
-    val cleanupStatus: String,
-    cause: Throwable,
-    val shouldRetainCreationRequestId: Boolean = false
-) : RuntimeException(technicalReason ?: userMessage, cause)
-
+/**
+ * Host-side clone creation coordinator that depends solely on [VirtualizationEngine].
+ *
+ * The engine is the single authority for instance lifecycle. Host-side code
+ * only submits requests and interprets authoritative results; it neither
+ * duplicates lifecycle state nor performs local compensation.
+ */
 class CloneCreateUseCase internal constructor(
-    private val instanceManager: InstanceManager,
     private val virtualizationEngine: VirtualizationEngine,
     private val clock: () -> Long,
-    private val creationRequestIdFactory: () -> String,
-    private val packageGenerationJournal: PackageGenerationTransactionJournal =
-        PackageGenerationTransactionJournal.NO_OP
-) {
+    private val creationRequestIdFactory: () -> String
+) : CloneCreationCoordinator {
 
     @Inject
     constructor(
-        instanceManager: InstanceManager,
-        virtualizationEngine: VirtualizationEngine,
-        packageGenerationJournal: PackageGenerationJournal
+        virtualizationEngine: VirtualizationEngine
     ) : this(
-        instanceManager = instanceManager,
         virtualizationEngine = virtualizationEngine,
         clock = System::currentTimeMillis,
-        creationRequestIdFactory = { UUID.randomUUID().toString() },
-        packageGenerationJournal = packageGenerationJournal
+        creationRequestIdFactory = { UUID.randomUUID().toString() }
     )
 
-    fun suggestedDisplayName(app: VirtualApp): String {
-        return nextDisplayName(app, instanceManager.listInstances())
+    override fun suggestedDisplayName(app: VirtualApp): String {
+        return nextDisplayName(app, virtualizationEngine.listInstances())
     }
 
-    fun prepareAttempt(
+    override fun prepareAttempt(
         app: VirtualApp,
-        displayName: String? = null,
-        pendingAttempt: CloneCreateAttempt? = null
+        displayName: String?,
+        pendingAttempt: CloneCreateAttempt?
     ): CloneCreateAttempt {
         val normalizedDisplayName = displayName.normalizedDisplayName()
         val payloadFingerprint = app.createPayloadFingerprint(normalizedDisplayName)
@@ -87,39 +59,19 @@ class CloneCreateUseCase internal constructor(
             )
     }
 
-    fun create(app: VirtualApp, attempt: CloneCreateAttempt): Result<CloneCreateResult> {
+    override fun create(app: VirtualApp, attempt: CloneCreateAttempt): Result<CloneCreateResult> {
         val startedAt = clock()
         var shouldRetainCreationRequestId = false
-        var generationTransaction: PackageGenerationTransaction? = null
-        var journalResolved = false
 
         return try {
-            val transaction = packageGenerationJournal.begin(
-                packageName = app.packageName,
-                creationRequestId = attempt.creationRequestId,
-                payloadFingerprint = attempt.payloadFingerprint
-            )
-            generationTransaction = transaction
             val request = CreateInstanceRequest(
                 creationRequestId = attempt.creationRequestId,
                 install = app.toEngineInstallRequest(),
                 displayName = attempt.displayName
             )
             shouldRetainCreationRequestId = true
-            val engineResult = virtualizationEngine.createInstance(
-                request
-            )
+            val engineResult = virtualizationEngine.createInstance(request)
             val resultIsUnknown = engineResult.message == ENGINE_AUTHORITY_UNKNOWN_RESULT
-            journalResolved = true
-            if (resultIsUnknown) {
-                transaction.abandon()
-            } else {
-                try {
-                    transaction.complete()
-                } catch (_: Exception) {
-                    // A stale journal is safe and will be removed by startup reconciliation.
-                }
-            }
             if (!engineResult.success) {
                 shouldRetainCreationRequestId = resultIsUnknown
                 throw IllegalStateException(engineResult.message ?: "engine createInstance failed")
@@ -137,10 +89,8 @@ class CloneCreateUseCase internal constructor(
                 )
             )
         } catch (e: CancellationException) {
-            if (!journalResolved) generationTransaction?.abandon()
             throw e
         } catch (e: Exception) {
-            if (!journalResolved) generationTransaction?.abandon()
             val (failureCode, userMessage, technicalReason) = e.toCreateFailure()
             Result.failure(
                 CloneCreateFailureException(
@@ -252,7 +202,10 @@ private fun VirtualApp.toEngineInstallRequest(): EnginePackageInstallRequest =
         splitApkPaths = splitApkPaths,
         splitPublicSourceDirs = splitPublicSourceDirs,
         splitNames = splitNames,
-        isolatedSplits = isolatedSplits
+        isolatedSplits = isolatedSplits,
+        debuggable = isDebuggable,
+        sharedUserId = sharedUserId,
+        sharedUserLabel = sharedUserLabel
     )
 
 private const val ENGINE_AUTHORITY_UNKNOWN_RESULT =

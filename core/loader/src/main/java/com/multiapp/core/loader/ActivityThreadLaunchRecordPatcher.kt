@@ -6,9 +6,13 @@ import android.content.pm.ActivityInfo
 import android.os.Message
 import android.util.Log
 import com.multiapp.core.common.EvidenceSanitizer
+import com.multiapp.core.model.virtual.VirtualActivityRecord
+import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualContextConfig
+import com.multiapp.core.model.virtual.VirtualIntentSnapshot
 import com.multiapp.core.model.virtual.VirtualPackageSnapshot
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Patches framework launch records before ActivityThread creates and attaches an Activity.
@@ -27,6 +31,7 @@ object ActivityThreadLaunchRecordPatcher {
     private val ACTIVITY_INFO_FIELDS = listOf("activityInfo", "mActivityInfo", "info", "mInfo")
     private val INTENT_FIELDS = listOf("intent", "mIntent")
     private val LOADED_APK_FIELDS = listOf("packageInfo", "mPackageInfo", "loadedApk", "mLoadedApk")
+    private val prepatchedLaunchIdentities = ConcurrentHashMap<String, VirtualActivityLaunchIdentity>()
 
     fun patchMessage(
         message: Message,
@@ -308,6 +313,28 @@ object ActivityThreadLaunchRecordPatcher {
         } else if (recoveryStatus == "PENDING") {
             recoveryStatus = "PASS"
         }
+        val activityRecordRegistration = registerPatchedActivityRecord(
+            spec = spec,
+            proxyIntent = proxyIntent,
+            guestIntent = state.guestIntent,
+            proxyActivityClassName = proxyActivityClassName
+        )
+        if (!activityRecordRegistration.accepted) {
+            val rolledBackFields = rollbackLaunchRecord(patchAttempt)
+            return skippedPrelaunchPatch(
+                record = record,
+                spec = spec,
+                reason = "ACTIVITY_RECORD_REGISTRATION_FAILED:${activityRecordRegistration.reason}",
+                launchAuthorityStatus = "FAIL",
+                launchAuthorityReason = "activity_record_registration_failed",
+                launchRecoveryStatus = recoveryStatus,
+                launchRecoveryReason = recoveryReason,
+                rolledBackFields = rolledBackFields,
+                loadedApkSource = state.loadedApkSource,
+                launchCapabilityOwner = RECORD_PATCH_CAPABILITY_OWNER
+            )
+        }
+        prepatchedLaunchIdentities[activityRecordRegistration.token] = launchIdentity
         val patch = patchAttempt.patch
         val result = ActivityThreadLaunchRecordPatchResult(
             targetClassName = record.javaClass.name,
@@ -332,6 +359,81 @@ object ActivityThreadLaunchRecordPatcher {
                 "loadedApk=${result.loadedApkSource ?: result.skippedReason.orEmpty()}"
         )
         return result.also { writeEvidence(it) }
+    }
+
+    internal fun consumePrepatchedLaunchIdentity(
+        token: String,
+        identity: VirtualActivityLaunchIdentity
+    ): Boolean = prepatchedLaunchIdentities.remove(token, identity)
+
+    internal fun clearPrepatchedLaunchIdentitiesForTests() {
+        prepatchedLaunchIdentities.clear()
+    }
+
+    private fun registerPatchedActivityRecord(
+        spec: LaunchSpec,
+        proxyIntent: Intent,
+        guestIntent: Intent,
+        proxyActivityClassName: String
+    ): ActivityRecordRegistration {
+        val token = spec.token?.takeIf { it.isNotBlank() }
+            ?: return ActivityRecordRegistration(reason = "TOKEN_MISSING")
+        val manager = VirtualActivityRecordManager.global
+        val existing = manager.resolve(token)
+        if (existing != null) {
+            val matches = existing.instanceId == spec.instanceId &&
+                existing.originPackageName == spec.originPackageName &&
+                existing.guestActivityClassName == spec.guestActivityClassName &&
+                existing.proxyActivityClassName == proxyActivityClassName
+            return if (matches) {
+                ActivityRecordRegistration(accepted = true, token = token)
+            } else {
+                ActivityRecordRegistration(reason = "TOKEN_OWNER_MISMATCH")
+            }
+        }
+        val resultToToken = proxyIntent.getStringExtra(VirtualActivityManager.EXTRA_RESULT_TO_TOKEN)
+            ?.takeIf { it.isNotBlank() }
+        val record = VirtualActivityRecord(
+            token = token,
+            instanceId = spec.instanceId,
+            originPackageName = spec.originPackageName,
+            guestActivityClassName = spec.guestActivityClassName,
+            proxyActivityClassName = proxyActivityClassName,
+            launchMode = spec.launchMode,
+            taskAffinity = spec.taskAffinity,
+            resultToToken = resultToToken,
+            resultRequestCode = if (resultToToken == null) {
+                -1
+            } else {
+                proxyIntent.getIntExtra(VirtualActivityManager.EXTRA_RESULT_REQUEST_CODE, -1)
+            },
+            state = VirtualActivityState.RESUMED
+        )
+        if (manager.conflictingProxyOwner(record) != null) {
+            return ActivityRecordRegistration(reason = "PROXY_SLOT_ALREADY_OWNED")
+        }
+        val sourceIntent = VirtualActivityIntentStore.find(token) ?: guestIntent
+        val launched = manager.registerLaunch(
+            record = record,
+            intentFlags = runCatching { sourceIntent.flags }.getOrDefault(0),
+            dataIntent = sourceIntent.toVirtualIntentSnapshot()
+        ).activity
+        return if (launched.token == token) {
+            ActivityRecordRegistration(accepted = true, token = token)
+        } else {
+            ActivityRecordRegistration(reason = "PROXY_SLOT_ALREADY_OWNED")
+        }
+    }
+
+    private fun Intent.toVirtualIntentSnapshot(): VirtualIntentSnapshot {
+        val sourceExtras = runCatching { extras }.getOrNull()
+        return VirtualIntentSnapshot(
+            flags = runCatching { flags }.getOrDefault(0),
+            action = runCatching { action }.getOrNull(),
+            dataUri = runCatching { dataString?.let(EvidenceSanitizer::redactUriForEvidence) }.getOrNull(),
+            categories = runCatching { categories.orEmpty().toSet() }.getOrDefault(emptySet()),
+            extras = sourceExtras?.keySet()?.associateWith { "<present>" }.orEmpty()
+        )
     }
 
     private fun patchLaunchRecordTransaction(
@@ -657,6 +759,22 @@ object ActivityThreadLaunchRecordPatcher {
             spec.hostPackageName?.takeIf { it.isNotBlank() }?.let {
                 runCatching { putExtra(VirtualActivityManager.EXTRA_HOST_PACKAGE_NAME, it) }
             }
+            runCatching {
+                putExtra(
+                    VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH,
+                    proxyIntent.getLongExtra(VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH, 0L)
+                )
+            }
+            listOf(
+                VirtualActivityManager.EXTRA_ENGINE_SESSION_ID,
+                VirtualActivityManager.EXTRA_ENGINE_PROCESS_SLOT,
+                VirtualActivityManager.EXTRA_ENGINE_PROXY_ACTIVITY_CLASS_NAME,
+                VirtualActivityManager.EXTRA_ENGINE_LAUNCH_CAPABILITY
+            ).forEach { key ->
+                proxyIntent.getStringExtra(key)?.let { value ->
+                    runCatching { putExtra(key, value) }
+                }
+            }
         }
     }
 
@@ -791,7 +909,7 @@ object ActivityThreadLaunchRecordPatcher {
     private fun writeEvidence(result: ActivityThreadLaunchRecordPatchResult) {
         val instanceId = result.instanceId?.takeIf { it.isNotBlank() } ?: return
         runCatching {
-            val filesDir = ActivityThreadCompat.currentApplication().filesDir
+            val filesDir = hostFilesDirFor(instanceId) ?: ActivityThreadCompat.currentApplication().filesDir
             val evidenceDir = File(filesDir, EVIDENCE_DIR).apply { mkdirs() }.canonicalFile
             val file = File(evidenceDir, HostedActivityEvidenceFiles.launchRecord(instanceId)).canonicalFile
             require(file.parentFile == evidenceDir) { "Launch record evidence path escapes evidence dir" }
@@ -820,6 +938,17 @@ object ActivityThreadLaunchRecordPatcher {
                 ).joinToString("\n")
             )
         }
+    }
+
+    private fun hostFilesDirFor(instanceId: String): File? {
+        val dataRoot = VirtualPackageRegistry.global.getByInstanceId(instanceId)
+            ?.dataDir
+            ?.takeIf { it.isNotBlank() }
+            ?: return null
+        val instanceRoot = runCatching { File(dataRoot).canonicalFile }.getOrNull() ?: return null
+        val instanceDataDir = instanceRoot.parentFile ?: return null
+        if (instanceDataDir.name != "instance_data") return null
+        return instanceDataDir.parentFile?.canonicalFile
     }
 
     internal fun launchRecordVerdict(result: ActivityThreadLaunchRecordPatchResult): String {
@@ -899,6 +1028,12 @@ object ActivityThreadLaunchRecordPatcher {
         val failureReason: String? = null,
         val rolledBackFields: List<String> = emptyList(),
         val loadedApkBindingMode: String? = null
+    )
+
+    private data class ActivityRecordRegistration(
+        val accepted: Boolean = false,
+        val token: String = "",
+        val reason: String = ""
     )
 }
 

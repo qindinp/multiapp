@@ -818,6 +818,19 @@ class LoadedApkGuestApplicationCreator(
             "LoadedApk.makeApplication returned",
             mapOf("actualClass" to application.javaClass.name)
         )
+        val redirectApplied = ExternalStorageRedirectContextWrapper.redirectApplicationContext(
+            application,
+            request.virtualContextConfig.dataDir
+        )
+        request.progress(
+            if (redirectApplied) "EXTERNAL_STORAGE_REDIRECTED" else "EXTERNAL_STORAGE_REDIRECT_SKIPPED",
+            if (redirectApplied) {
+                "Application external storage paths redirected to instance sandbox"
+            } else {
+                "Application external storage redirect skipped (base context unavailable)"
+            },
+            mapOf("dataRoot" to request.virtualContextConfig.dataDir)
+        )
         val bindResult = runCatching {
             applicationBinder(activityThread, installResult, state, application)
         }.getOrElse { error ->

@@ -1,5 +1,8 @@
 package com.multiapp.core.loader
 
+import com.multiapp.core.model.virtual.VirtualActivityRecord
+import com.multiapp.core.model.virtual.VirtualIntentSnapshot
+
 data class VirtualActivityLaunchAllocationRequest(
     val instanceId: String,
     val originPackageName: String,
@@ -38,8 +41,33 @@ data class VirtualActivityLaunchAllocation(
     }
 }
 
+data class VirtualActivityLaunchCommitRequest(
+    val allocation: VirtualActivityLaunchAllocation,
+    val record: VirtualActivityRecord,
+    val intentFlags: Int = record.intentFlags,
+    val dataIntent: VirtualIntentSnapshot? = null
+)
+
+data class VirtualActivityLaunchCommitResult(
+    val accepted: Boolean,
+    val idempotent: Boolean = false,
+    val activity: VirtualActivityRecord? = null,
+    val launchReused: Boolean = false,
+    val reason: String
+) {
+    init {
+        require(reason.isNotBlank()) { "reason must not be blank" }
+        require(!accepted || activity != null) { "accepted commit must contain an Activity record" }
+    }
+}
+
 interface VirtualActivityLaunchAllocationProvider {
     fun allocate(request: VirtualActivityLaunchAllocationRequest): VirtualActivityLaunchAllocation
+    fun commit(request: VirtualActivityLaunchCommitRequest): VirtualActivityLaunchCommitResult =
+        VirtualActivityLaunchCommitResult(
+            accepted = false,
+            reason = "activity_launch_commit_provider_not_implemented"
+        )
     fun release(allocation: VirtualActivityLaunchAllocation): Boolean
 }
 

@@ -1,4 +1,4 @@
-package com.multiapp.core.loader
+﻿package com.multiapp.core.loader
 
 import android.content.ComponentName
 import android.content.Intent
@@ -52,6 +52,11 @@ internal object VirtualPackageInfoFactory {
             metaData = snapshot.metaData.toBundle(snapshot.typedMetaData)
         }
         enabled = true
+        this.flags = ApplicationInfo.FLAG_INSTALLED
+        if (snapshot.debuggable) {
+            this.flags = this.flags or ApplicationInfo.FLAG_DEBUGGABLE
+        }
+        writeIntField(this, "privateFlags", 0)
     }
 
     @Suppress("DEPRECATION")
@@ -65,6 +70,7 @@ internal object VirtualPackageInfoFactory {
         versionCode = snapshot.versionCode.toInt()
         versionName = snapshot.versionName
         applicationInfo = applicationInfo(snapshot, runtimeUid, flags)
+        sharedUserId = snapshot.sharedUserId
         if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_PERMISSIONS)) {
             requestedPermissions = snapshot.permissions.toTypedArray()
         }
@@ -101,7 +107,7 @@ internal object VirtualPackageInfoFactory {
             name = component.name
             exported = component.exported
             applicationInfo = applicationInfo(snapshot, runtimeUid, flags)
-            enabled = true
+            enabled = component.enabled
             launchMode = toActivityInfoLaunchMode(component.launchMode)
             processName = component.processName
             taskAffinity = component.taskAffinity
@@ -133,7 +139,7 @@ internal object VirtualPackageInfoFactory {
             name = component.name
             exported = component.exported
             applicationInfo = applicationInfo(snapshot, runtimeUid, flags)
-            enabled = true
+            enabled = component.enabled
             processName = component.processName
             permission = component.permission
             if (VirtualPackageQueryFlags.includes(flags, PackageManager.GET_META_DATA)) {
@@ -155,7 +161,7 @@ internal object VirtualPackageInfoFactory {
             name = component.name
             exported = component.exported
             applicationInfo = applicationInfo(snapshot, runtimeUid, flags)
-            enabled = true
+            enabled = component.enabled
             this.authority = authority
             processName = component.processName
             readPermission = component.readPermission ?: component.permission
@@ -264,6 +270,12 @@ internal object VirtualPackageInfoFactory {
     private fun requireRuntimeUid(runtimeUid: Int): Int {
         require(runtimeUid > 0) { "runtimeUid must be a positive Android application UID" }
         return runtimeUid
+    }
+
+    private fun writeIntField(target: Any, fieldName: String, value: Int) {
+        runCatching {
+            target.javaClass.getField(fieldName).setInt(target, value)
+        }
     }
 
     private fun toActivityInfoLaunchMode(launchMode: String?): Int = when (launchMode) {

@@ -6,7 +6,9 @@ import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.content.Intent
 import android.os.Build
+import com.multiapp.core.model.InstalledAppCatalog
 import com.multiapp.core.model.VirtualApp
+import com.multiapp.core.model.isCloneCandidate as isModelCloneCandidate
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 
@@ -16,7 +18,7 @@ class InstalledAppRepository internal constructor(
     private val launcherIntentFactory: () -> Intent = {
         Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
     }
-) {
+) : InstalledAppCatalog {
     private var cachedApps: List<VirtualApp>? = null
 
     @Inject
@@ -25,7 +27,7 @@ class InstalledAppRepository internal constructor(
         hostPackageName = context.packageName
     )
 
-    fun listInstalledApps(forceRefresh: Boolean = false): List<VirtualApp> {
+    override fun listInstalledApps(forceRefresh: Boolean): List<VirtualApp> {
         if (!forceRefresh) {
             cachedApps?.let { return it }
         }
@@ -42,7 +44,7 @@ class InstalledAppRepository internal constructor(
     }
 
     fun recommendedCloneTargets(forceRefresh: Boolean = false): List<VirtualApp> {
-        return listInstalledApps(forceRefresh).filter { it.isCloneCandidate() }
+        return listInstalledApps(forceRefresh).filter { it.isModelCloneCandidate() }
     }
 
     fun clearCache() {
@@ -110,7 +112,10 @@ internal fun PackageInfo.toVirtualApp(
         splitPublicSourceDirs = appInfo.splitPublicSourceDirs?.filterNotBlank().orEmpty(),
         splitNames = appInfo.splitNames?.filterNotBlank().orEmpty(),
         hasSplitApks = !appInfo.splitSourceDirs.isNullOrEmpty(),
-        isolatedSplits = appInfo.safeRequestsIsolatedSplitLoading()
+        isolatedSplits = appInfo.safeRequestsIsolatedSplitLoading(),
+        isDebuggable = (appInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0,
+        sharedUserId = sharedUserId?.takeIf { it.isNotBlank() },
+        sharedUserLabel = if (sharedUserId.isNullOrBlank()) 0 else sharedUserLabel
     )
 }
 
@@ -138,6 +143,5 @@ private fun ApplicationInfo.safeRequestsIsolatedSplitLoading(): Boolean =
         javaClass.getMethod("requestsIsolatedSplitLoading").invoke(this) as? Boolean ?: false
     }.getOrDefault(false)
 
-fun VirtualApp.isCloneCandidate(): Boolean {
-    return mainActivity != null && !isSystemApp
-}
+@Deprecated("Import com.multiapp.core.model.isCloneCandidate")
+fun VirtualApp.isCloneCandidate(): Boolean = isModelCloneCandidate()

@@ -9,6 +9,7 @@ import io.mockk.every
 import io.mockk.mockk
 import io.mockk.mockkObject
 import io.mockk.unmockkObject
+import io.mockk.verify
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.lang.ref.WeakReference
@@ -25,6 +26,8 @@ class ActivityThreadLaunchRecordPatcherTest {
     fun setUp() {
         VirtualPackageRegistry.global.clear()
         VirtualProcessRuntime.global.clearAll()
+        VirtualActivityRecordManager.global.clearAll()
+        ActivityThreadLaunchRecordPatcher.clearPrepatchedLaunchIdentitiesForTests()
         VirtualActivityLaunchAuthority.install(
             validator = VirtualActivityLaunchValidator {
                 VirtualActivityLaunchAuthorityResult(true, "test_authorized")
@@ -39,6 +42,8 @@ class ActivityThreadLaunchRecordPatcherTest {
         VirtualActivityIntentStore.resetIntentCopierForTest()
         VirtualPackageRegistry.global.clear()
         VirtualProcessRuntime.global.clearAll()
+        VirtualActivityRecordManager.global.clearAll()
+        ActivityThreadLaunchRecordPatcher.clearPrepatchedLaunchIdentitiesForTests()
         VirtualActivityLaunchAuthority.clearForTests()
         VirtualActivityLaunchRecovery.clearForTests()
         unmockkObject(ActivityThreadCompat)
@@ -312,6 +317,20 @@ class ActivityThreadLaunchRecordPatcherTest {
         assertTrue("packageInfo" in result.patchedFields)
         assertSame(guestIntent, record.intent)
         assertSame(loadedApk, record.packageInfo)
+        verify {
+            guestIntent.putExtra(
+                VirtualActivityManager.EXTRA_ENGINE_PROXY_ACTIVITY_CLASS_NAME,
+                "com.multiapp.app.container.ProxyActivity0"
+            )
+            guestIntent.putExtra(
+                VirtualActivityManager.EXTRA_ENGINE_LAUNCH_CAPABILITY,
+                "capability-token-ready"
+            )
+        }
+        assertEquals(
+            "com.test.minimal.MainActivity",
+            VirtualActivityRecordManager.global.resolve("token-ready")?.guestActivityClassName
+        )
         assertEquals(2, authorizationCalls)
         assertEquals(false, replay.accepted)
         assertEquals("launch_capability_replayed", replay.reason)
@@ -564,6 +583,8 @@ class ActivityThreadLaunchRecordPatcherTest {
             every { getLongExtra(VirtualActivityManager.EXTRA_ENGINE_RUNTIME_EPOCH, 0L) } returns 7L
             every { getStringExtra(VirtualActivityManager.EXTRA_ENGINE_SESSION_ID) } returns "session-001"
             every { getStringExtra(VirtualActivityManager.EXTRA_ENGINE_PROCESS_SLOT) } returns "com.multiapp.app:v0"
+            every { getStringExtra(VirtualActivityManager.EXTRA_ENGINE_PROXY_ACTIVITY_CLASS_NAME) } returns
+                "com.multiapp.app.container.ProxyActivity0"
         }
 
     private fun mutableProxyIntent(extras: MutableMap<String, Any?>): Intent {

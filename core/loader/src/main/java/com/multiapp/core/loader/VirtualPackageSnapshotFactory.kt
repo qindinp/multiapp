@@ -58,7 +58,10 @@ internal object VirtualPackageSnapshotFactory {
             permissions = resolvedPackage?.permissions ?: installRecord.permissions,
             originCertSha256 = installRecord.originCertSha256,
             signerSha256Digests = installRecord.signerSha256Digests,
-            hasMultipleSigners = installRecord.hasMultipleSigners
+            hasMultipleSigners = installRecord.hasMultipleSigners,
+            debuggable = installRecord.debuggable,
+            sharedUserId = installRecord.sharedUserId,
+            sharedUserLabel = installRecord.sharedUserLabel
         )
     }
 

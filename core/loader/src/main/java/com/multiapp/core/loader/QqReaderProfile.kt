@@ -193,23 +193,23 @@ object QqReaderProfile {
     ): DiagResult {
         var result = DiagResult()
         try {
-            val fileDiagOk = com.multiapp.core.hook.QqReaderFileJavaDiag.install(hookEngine)
+            val fileDiagOk = com.multiapp.core.hook.compat.qqreader.QqReaderFileJavaDiag.install(hookEngine)
             Log.d(TAG, "QQReader java file diag installed: $fileDiagOk")
             result = result.copy(fileDiag = fileDiagOk)
 
-            val providerDiagOk = com.multiapp.core.hook.QqReaderProviderDiag.install(hookEngine, guestCl)
+            val providerDiagOk = com.multiapp.core.hook.compat.qqreader.QqReaderProviderDiag.install(hookEngine, guestCl)
             Log.d(TAG, "QQReader provider diag installed: $providerDiagOk")
             result = result.copy(providerDiag = providerDiagOk)
 
-            val protocolDiagOk = com.multiapp.core.hook.QqReaderProtocolDiag.install(hookEngine, guestCl)
+            val protocolDiagOk = com.multiapp.core.hook.compat.qqreader.QqReaderProtocolDiag.install(hookEngine, guestCl)
             Log.d(TAG, "QQReader protocol diag installed: $protocolDiagOk")
             result = result.copy(protocolDiag = protocolDiagOk)
 
-            val eqctCompatOk = com.multiapp.core.hook.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
+            val eqctCompatOk = com.multiapp.core.hook.compat.qqreader.QqReaderEqctPlaintextCompat.install(hookEngine, guestCl)
             Log.d(TAG, "QQReader eqct plaintext compat installed: $eqctCompatOk")
             result = result.copy(eqctCompat = eqctCompatOk)
 
-            val loginDiagOk = com.multiapp.core.hook.QqReaderYwLoginJavaDiag.install(hookEngine, guestCl)
+            val loginDiagOk = com.multiapp.core.hook.compat.qqreader.QqReaderYwLoginJavaDiag.install(hookEngine, guestCl)
             Log.d(TAG, "QQReader YWLogin java diag installed: $loginDiagOk")
             result = result.copy(loginDiag = loginDiagOk)
         } catch (e: Throwable) {

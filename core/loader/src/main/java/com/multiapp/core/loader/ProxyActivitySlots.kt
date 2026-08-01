@@ -3,7 +3,7 @@ package com.multiapp.core.loader
 import com.multiapp.core.model.virtual.ProxySlotContract
 
 object ProxyActivitySlots {
-    const val SLOT_COUNT: Int = 8
+    const val SLOT_COUNT: Int = 24
     const val SLOT_ASSIGNMENT_FILE: String = ProxySlotContract.SLOT_ASSIGNMENT_FILE
 
     fun classNames(hostPackageName: String): List<String> = buildList {

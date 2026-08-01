@@ -12,6 +12,7 @@ internal object VirtualContextStorage {
     const val SHARED_PREFS_DIR = "shared_prefs"
     const val EXTERNAL_FILES_DIR = "external_files"
     const val EXTERNAL_CACHE_DIR = "external_cache"
+    const val EXTERNAL_OBB_DIR = "external_obb"
 
     fun filesDir(dataRoot: String): File = ensureDir(File(dataRoot), FILES_DIR)
 
