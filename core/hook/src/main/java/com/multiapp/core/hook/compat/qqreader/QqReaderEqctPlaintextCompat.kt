@@ -1,6 +1,7 @@
-package com.multiapp.core.hook
+package com.multiapp.core.hook.compat.qqreader
 
 import android.util.Log
+import com.multiapp.core.hook.HookEngine
 import java.io.File
 
 object QqReaderEqctPlaintextCompat {

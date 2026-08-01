@@ -1,6 +1,7 @@
 package com.multiapp.core.hook
 
 import android.util.Log
+import com.multiapp.core.hook.compat.qqreader.QqReaderCompatProfile
 
 class AppCompatProfileManager {
 

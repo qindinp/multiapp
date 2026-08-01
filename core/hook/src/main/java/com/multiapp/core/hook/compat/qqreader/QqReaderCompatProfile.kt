@@ -1,4 +1,7 @@
-package com.multiapp.core.hook
+package com.multiapp.core.hook.compat.qqreader
+
+import com.multiapp.core.hook.AppCompatProfile
+import com.multiapp.core.hook.PackerType
 
 class QqReaderCompatProfile : AppCompatProfile {
 

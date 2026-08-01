@@ -15,7 +15,23 @@ style:
   MaxLineLength:
     maxLineLength: 120
   MagicNumber:
-    active: false
+    active: true
+    ignoreNumbers:
+      - '-1'
+      - '0'
+      - '1'
+      - '2'
+      - '10'
+      - '100'
+      - '1000'
+      - '1024'
+    ignoreAnnotated:
+      - 'Preview'
+      - 'Test'
+    ignorePropertyDeclaration: true
+    ignoreEnums: true
+    ignoreHashCodeFunction: true
+    ignoreRanges: true
   ReturnCount:
     max: 3
   NestedBlockDepth:

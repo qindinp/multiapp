@@ -1,4 +1,4 @@
-package com.multiapp.core.hook
+package com.multiapp.core.hook.compat.qqreader
 
 import android.app.Activity
 import android.app.Application
@@ -7,6 +7,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import com.multiapp.core.hook.HookEngine
 import org.json.JSONObject
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Method

@@ -1,4 +1,4 @@
-package com.multiapp.core.hook;
+package com.multiapp.core.hook.compat.qqreader;
 
 import android.util.Log;
 
@@ -588,4 +588,3 @@ public final class QqReaderOnlineProtocolFallback {
         return seen ? value : 0;
     }
 }
-

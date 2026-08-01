@@ -218,6 +218,8 @@ class NativeHookBridge {
     private var appContext: android.content.Context? = null
     @Volatile private var activeProcessSlot: String = ""
     @Volatile private var activeInstanceId: String = ""
+    /** 按 processSlot 分组的 scoped 规则索引，长前缀优先排序 */
+    private val scopedRulesBySlot = ConcurrentHashMap<String, List<PathRedirectionRule>>()
 
     fun initialize() {
         Timber.tag(TAG).i("NativeHookBridge.initialize() called")
@@ -736,6 +738,8 @@ class NativeHookBridge {
     }
 
     private fun hasParentTraversal(path: String): Boolean {
+        // 检查空字节注入
+        if (path.contains('\u0000')) return true
         if (path.isEmpty()) return false
         var segmentStart = 0
         for (index in 0..path.length) {
@@ -764,6 +768,11 @@ class NativeHookBridge {
         return try {
             val rootPath = root.canonicalFile.path.trimEnd(File.separatorChar)
             val candidatePath = candidate.canonicalFile.path
+            // 额外检查：确保不是符号链接逃逸
+            if (candidate.absolutePath != candidate.canonicalPath &&
+                !candidate.absolutePath.startsWith(root.path)) {
+                return false
+            }
             candidatePath == rootPath || candidatePath.startsWith(rootPath + File.separator)
         } catch (_: Exception) {
             false
@@ -775,16 +784,16 @@ class NativeHookBridge {
         val instanceId = activeInstanceId
         if (processSlot.isBlank() || instanceId.isBlank()) return null
 
-        var bestRule: PathRedirectionRule? = null
-        for (rule in pathRedirections.values) {
-            if (!rule.scoped || !rule.matchesScope(processSlot, instanceId)) continue
-            if (pathMatchesPrefix(originalPath, rule.fromPrefix) &&
-                rule.fromPrefix.length > (bestRule?.fromPrefix?.length ?: -1)
+        // 使用分组索引，只遍历当前 processSlot 的规则（已按前缀长度降序排列，首个匹配即最优）
+        val rules = scopedRulesBySlot[processSlot] ?: return null
+        for (rule in rules) {
+            if (rule.matchesScope(processSlot, instanceId) &&
+                pathMatchesPrefix(originalPath, rule.fromPrefix)
             ) {
-                bestRule = rule
+                return secureScopedTranslation(rule, originalPath)
             }
         }
-        return bestRule?.let { secureScopedTranslation(it, originalPath) }
+        return null
     }
 
     private fun pathMatchesPrefix(path: String, prefix: String): Boolean {
@@ -802,6 +811,23 @@ class NativeHookBridge {
             if (!rule.scoped) pathTrie.insert(rule.fromPrefix, rule.toPrefix)
         }
         synchronized(pathCacheLock) { pathCache.clear() }
+        buildScopedRuleIndex()
+    }
+
+    /**
+     * 构建按 processSlot 分组的 scoped 规则索引。
+     * 在规则加载完成后调用，避免每次查询都线性扫描全部规则。
+     */
+    private fun buildScopedRuleIndex() {
+        val grouped = pathRedirections.values
+            .filter { it.scoped }
+            .groupBy { it.processSlot }
+            .mapValues { (_, rules) ->
+                rules.sortedByDescending { it.fromPrefix.length } // 长前缀优先匹配
+            }
+        scopedRulesBySlot.clear()
+        scopedRulesBySlot.putAll(grouped)
+        Timber.tag(TAG).d("Built scoped rule index: ${grouped.size} slots, ${grouped.values.sumOf { it.size }} rules")
     }
 
     fun addPathRedirection(fromPrefix: String, toPrefix: String) {
@@ -1244,7 +1270,7 @@ class NativeHookBridge {
     fun isNativeAvailable(): Boolean = nativeHooksAvailable
 
     fun cleanup() {
-        pathRedirections.clear(); pathTrie.clear(); hiddenPaths.clear()
+        pathRedirections.clear(); pathTrie.clear(); hiddenPaths.clear(); scopedRulesBySlot.clear()
         synchronized(pathCacheLock) { pathCache.clear() }
         fakeFileContent.clear(); propertyOverrides.clear()
         spoofedPackageName = null; spoofedPid = -1; appContext = null

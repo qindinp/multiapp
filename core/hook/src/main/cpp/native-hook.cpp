@@ -76,8 +76,8 @@
 
 static std::atomic_bool g_initialized{false};
 static std::atomic_bool g_register_natives_business_wrappers_enabled{false};
-static bool g_hooks_installed = false;
-static uint32_t g_installed_hook_profiles = 0;
+static std::atomic_bool g_hooks_installed{false};
+static std::atomic<uint32_t> g_installed_hook_profiles{0};
 static std::shared_mutex g_mutex;
 static std::atomic_bool g_suppress_self_sigkill{false};
 static std::atomic_bool g_proc_cmdline_spoof_enabled{false};
@@ -996,7 +996,7 @@ static bool install_shadowhook_hooks(uint32_t requested_profiles, const char* ca
 
     bool ok = requested_count > 0 && success_count > 0;
     if (ok) {
-        g_installed_hook_profiles |= requested_profiles;
+        g_installed_hook_profiles.fetch_or(requested_profiles);
     }
     LOGI("ShadowHook: %d/%d requested hooks available for profiles=0x%x",
          success_count,
@@ -1052,7 +1052,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInit(
     (void)env; (void)thiz;
     std::unique_lock<std::shared_mutex> lock(g_mutex);
 
-    if (g_initialized.load() && (g_installed_hook_profiles & HOOK_PROFILE_FULL) != 0) {
+    if (g_initialized.load() && (g_installed_hook_profiles.load() & HOOK_PROFILE_FULL) != 0) {
         LOGI("Native hook engine already initialized for full profile");
         return JNI_TRUE;
     }
@@ -1063,9 +1063,9 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInit(
     g_status_tracerpid_spoof_enabled.store(true, std::memory_order_relaxed);
 
     bool shadowhookReady = g_initialized.load() || init_shadowhook_for_runtime("nativeInit");
-    g_hooks_installed = shadowhookReady &&
-        install_shadowhook_hooks(HOOK_PROFILE_FULL, "nativeInit");
-    if (!g_hooks_installed) {
+    g_hooks_installed.store(shadowhookReady &&
+        install_shadowhook_hooks(HOOK_PROFILE_FULL, "nativeInit"));
+    if (!g_hooks_installed.load()) {
         LOGW("ShadowHook installation failed — falling back to Java-level hooks only");
     }
 
@@ -1086,7 +1086,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInitPathRedirectHooks(
     (void)env; (void)thiz;
     std::unique_lock<std::shared_mutex> lock(g_mutex);
 
-    if (g_initialized.load() && (g_installed_hook_profiles & HOOK_PROFILE_PATH_REDIRECT) != 0) {
+    if (g_initialized.load() && (g_installed_hook_profiles.load() & HOOK_PROFILE_PATH_REDIRECT) != 0) {
         LOGI("Native hook engine already initialized for path redirect profile");
         return JNI_TRUE;
     }
@@ -1094,15 +1094,15 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeInitPathRedirectHooks(
     LOGI("Initializing MultiApp native path redirect hooks...");
 
     bool shadowhookReady = g_initialized.load() || init_shadowhook_for_runtime("nativeInitPathRedirectHooks");
-    g_hooks_installed = shadowhookReady &&
-        install_shadowhook_hooks(HOOK_PROFILE_PATH_REDIRECT, "nativeInitPathRedirectHooks");
-    if (!g_hooks_installed) {
+    g_hooks_installed.store(shadowhookReady &&
+        install_shadowhook_hooks(HOOK_PROFILE_PATH_REDIRECT, "nativeInitPathRedirectHooks"));
+    if (!g_hooks_installed.load()) {
         LOGW("ShadowHook path redirect hook installation failed");
     }
 
     g_initialized.store(true);
     LOGI("Native path redirect hooks initialized");
-    return g_hooks_installed ? JNI_TRUE : JNI_FALSE;
+    return g_hooks_installed.load() ? JNI_TRUE : JNI_FALSE;
 }
 
 /**
@@ -6080,10 +6080,10 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
             bool shadowhookReady = init_shadowhook_for_runtime("nativeSetupForLoader");
             g_proc_cmdline_spoof_enabled.store(true, std::memory_order_relaxed);
             g_status_tracerpid_spoof_enabled.store(true, std::memory_order_relaxed);
-            g_hooks_installed = shadowhookReady &&
-                install_shadowhook_hooks(HOOK_PROFILE_FULL, "nativeSetupForLoader");
+            g_hooks_installed.store(shadowhookReady &&
+                install_shadowhook_hooks(HOOK_PROFILE_FULL, "nativeSetupForLoader"));
             g_initialized.store(true);
-            if (g_hooks_installed) {
+            if (g_hooks_installed.load()) {
                 LOGI("nativeSetupForLoader: PLT/GOT hooks installed");
             } else {
                 LOGW("nativeSetupForLoader: hook installation failed");
@@ -6131,7 +6131,7 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeSetupForLoader(
         }
     }
 
-    return g_hooks_installed ? JNI_TRUE : JNI_FALSE;
+    return g_hooks_installed.load() ? JNI_TRUE : JNI_FALSE;
 }
 
 /**
@@ -10427,7 +10427,7 @@ static jobject read_online_search_via_reader_protocol(
         return nullptr;
     }
 
-    jstring helperName = env->NewStringUTF("com.multiapp.core.hook.QqReaderOnlineProtocolFallback");
+    jstring helperName = env->NewStringUTF("com.multiapp.core.hook.compat.qqreader.QqReaderOnlineProtocolFallback");
     jclass helperClass = helperName == nullptr ? nullptr :
             (jclass)env->CallObjectMethod(g_hook_classloader, g_classloader_loadclass, helperName);
     if (helperName != nullptr) env->DeleteLocalRef(helperName);
@@ -10492,7 +10492,7 @@ static bool materialize_mini_content_eqct(
         return false;
     }
 
-    jstring helperName = env->NewStringUTF("com.multiapp.core.hook.QqReaderOnlineProtocolFallback");
+    jstring helperName = env->NewStringUTF("com.multiapp.core.hook.compat.qqreader.QqReaderOnlineProtocolFallback");
     jclass helperClass = helperName == nullptr ? nullptr :
             (jclass)env->CallObjectMethod(g_hook_classloader, g_classloader_loadclass, helperName);
     if (helperName != nullptr) env->DeleteLocalRef(helperName);

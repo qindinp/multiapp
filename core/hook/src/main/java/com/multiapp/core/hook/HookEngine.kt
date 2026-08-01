@@ -56,8 +56,8 @@ class HookEngine private constructor() {
     fun initLsplant(classLoader: ClassLoader): Boolean {
         if (lsplantInitialized) return true
 
-        android.util.Log.i(TAG, "=== LSPlant.init() 开始 ===")
-        android.util.Log.i(TAG, "ClassLoader: ${classLoader.javaClass.name}")
+        Timber.tag(TAG).i("LSPlant.init() started")
+        Timber.tag(TAG).i("ClassLoader: ${classLoader.javaClass.name}")
 
         val bridge = NativeHookBridge.getInstance()
         val result = bridge.initLsplant()
@@ -65,10 +65,8 @@ class HookEngine private constructor() {
 
         if (result) {
             Timber.tag(TAG).i("LSPlant initialized successfully via native JNI")
-            android.util.Log.i(TAG, "=== LSPlant.init() 成功 ===")
         } else {
             Timber.tag(TAG).e("LSPlant initialization failed")
-            android.util.Log.e(TAG, "=== LSPlant.init() 失败 ===")
         }
 
         return result
