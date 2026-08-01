@@ -648,6 +648,9 @@ class EngineProviderRouteTokenRegistry(
                 "openFileDescriptor" -> "openFile"
                 "openAssetFileDescriptor" -> "openAssetFile"
                 "openTypedAssetFileDescriptor" -> "openTypedAssetFile"
+                // 归一化所有文件操作到统一 category，避免 openFile/openAssetFile/openTypedAssetFile
+                // 各自绑定独立 token 导致 OPERATION_MISMATCH（2026-08-01 真机 bug 发现）
+                "openFile", "openAssetFile", "openTypedAssetFile" -> "openFile"
                 else -> base
             }
 

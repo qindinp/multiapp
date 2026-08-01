@@ -267,6 +267,8 @@ object ProviderRouteTokenRegistry {
             "openFileDescriptor" -> "openFile"
             "openAssetFileDescriptor" -> "openAssetFile"
             "openTypedAssetFileDescriptor" -> "openTypedAssetFile"
+            // 归一化所有文件操作到统一 category（与 EngineProviderRouteTokenRegistry 一致）
+            "openFile", "openAssetFile", "openTypedAssetFile" -> "openFile"
             else -> base
         }
     }
