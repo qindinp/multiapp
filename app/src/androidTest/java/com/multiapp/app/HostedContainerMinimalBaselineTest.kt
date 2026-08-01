@@ -5,14 +5,13 @@ import android.os.Build
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.multiapp.app.container.ContainerRuntimePaths
+import com.multiapp.core.model.engine.CreateInstanceRequest
+import com.multiapp.core.model.engine.EnginePackageInstallRequest
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
-import com.multiapp.core.model.instance.DefaultInstanceManager
-import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import com.multiapp.core.model.installer.JsonInstallRecordStore
-import com.multiapp.core.model.installer.VirtualInstallService
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
 import org.junit.Assert.assertEquals
@@ -35,9 +34,6 @@ class HostedContainerMinimalBaselineTest {
     @Inject
     lateinit var virtualizationEngine: VirtualizationEngine
 
-    @Inject
-    lateinit var virtualInstallService: VirtualInstallService
-
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val targetContext = instrumentation.targetContext
     private val packageManager = instrumentation.context.packageManager
@@ -45,22 +41,22 @@ class HostedContainerMinimalBaselineTest {
     @Before
     fun cleanPreviousBaselineState() {
         hiltRule.inject()
+        // 只注入 VirtualizationEngine facade：owner store（VirtualInstallService/InstanceManager）
+        // 受 requireEngineProcess 防线保护，只能在 :engine 进程构造（2026-08-01 修复）。
+        // 安装记录文件仅用于测试清理，不经过 Hilt。
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
-        val instanceManager = DefaultInstanceManager(
-            store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
-            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
-            installRecordStore = installStore
-        )
-        instanceManager.getInstanceByOrigin(minimalPackageName).forEach { instance ->
-            val result = virtualizationEngine.deleteInstance(instance.instanceId)
-            assertTrue(
-                "engine cleanup failed for ${instance.instanceId}: ${result.status}:${result.message}",
-                result.status == EngineResultStatus.PASS || result.status == EngineResultStatus.PARTIAL
-            )
-        }
+        virtualizationEngine.listInstances()
+            .filter { it.originPackageName == minimalPackageName }
+            .forEach { instance ->
+                val result = virtualizationEngine.deleteInstance(instance.instanceId)
+                assertTrue(
+                    "engine cleanup failed for ${instance.instanceId}: ${result.status}:${result.message}",
+                    result.status == EngineResultStatus.PASS || result.status == EngineResultStatus.PARTIAL
+                )
+            }
         assertTrue(
             "engine cleanup left baseline instances behind",
-            instanceManager.getInstanceByOrigin(minimalPackageName).isEmpty()
+            virtualizationEngine.listInstances().none { it.originPackageName == minimalPackageName }
         )
         installStore.delete(minimalPackageName)
         ContainerRuntimePaths.hostedLaunchEvidenceDir(targetContext)
@@ -81,8 +77,8 @@ class HostedContainerMinimalBaselineTest {
         assertTrue(File(appInfo!!.sourceDir).isFile)
 
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
-        val importResult = virtualInstallService.importFromMetadata(
-            packageName = minimalPackageName,
+        val installRequest = EnginePackageInstallRequest(
+            originPackageName = minimalPackageName,
             originApkPath = appInfo.sourceDir,
             versionCode = packageInfo.longVersionCodeCompat(),
             versionName = packageInfo.versionName ?: "1.0",
@@ -91,26 +87,37 @@ class HostedContainerMinimalBaselineTest {
             applicationClassName = appInfo.className,
             packageLabel = appInfo.loadLabel(packageManager).toString()
         )
-        assertTrue(importResult.exceptionOrNull()?.stackTraceToString(), importResult.isSuccess)
+        val installResult = virtualizationEngine.refreshPackage(installRequest)
+        assertTrue(
+            "engine refreshPackage failed: ${installResult.status}:${installResult.message}",
+            installResult.status == EngineResultStatus.PASS || installResult.status == EngineResultStatus.PARTIAL
+        )
         val installRecord = checkNotNull(installStore.load(minimalPackageName))
         assertEquals(
             "singleTop",
             installRecord.activities.firstOrNull { it.name == "com.test.minimal.MainActivity" }?.launchMode
         )
 
-        val instanceManager = DefaultInstanceManager(
-            store = JsonInstanceRecordStore(ContainerRuntimePaths.instanceStoreDir(targetContext)),
-            dataRootBase = ContainerRuntimePaths.instanceDataRootBase(targetContext),
-            installRecordStore = installStore
-        )
         val instances = listOf("A", "B").map { label ->
-            instanceManager.createInstance(
-                originPackageName = minimalPackageName,
-                displayName = "MinimalTest baseline $label",
-                compatibilityMode = CompatibilityMode.DEFAULT
-            ).getOrThrow().also { instance ->
-                assertTrue(File(instance.dataRoot).isDirectory)
-            }
+            val createResult = virtualizationEngine.createInstance(
+                CreateInstanceRequest(
+                    creationRequestId = "androidTest-minimal-baseline-$label-${System.currentTimeMillis()}",
+                    install = installRequest,
+                    displayName = "MinimalTest baseline $label",
+                    compatibilityMode = CompatibilityMode.DEFAULT
+                )
+            )
+            assertEquals(
+                "engine createInstance failed for $label: ${createResult.message}",
+                EngineResultStatus.PASS,
+                createResult.status
+            )
+            val instanceId = checkNotNull(createResult.instanceId) { "createInstance returned no instanceId for $label" }
+            virtualizationEngine.listInstances()
+                .first { it.instanceId == instanceId }
+                .also { instance ->
+                    assertTrue("instance dataRoot missing: ${instance.dataRoot}", File(instance.dataRoot).isDirectory)
+                }
         }
         assertEquals(2, instances.map { it.instanceId }.distinct().size)
         assertEquals(2, instances.map { it.virtualPackageName }.distinct().size)
