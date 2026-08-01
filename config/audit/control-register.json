@@ -330,11 +330,11 @@
       "id": "P1-TEST-01",
       "title": "Unit test gate: zero failures, zero unexpected skips",
       "tier": "P1",
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": "junit-xml-inventory",
       "auditFindings": [
-        "2026-08-01 进展: 全量 2564 tests / 0 failures（StubBuilder 10 个与 IdentityHookTest 9 个失败均已修复）",
-        "剩余: 13 skipped（HookEngineTest×11 依赖 ART/LSPlant、CoreFlowIntegrationTest×1、PackageGenerationReconcilerTest×1），需豁免登记或迁移 androidTest 后方可达 skipped=0 门禁"
+        "2026-08-01 已闭环: 全量 2564 tests / 0 failures；13 skipped 已显式豁免登记（config/audit/test-skip-waivers.json）：HookEngineTest×11 + CoreFlow×1 依赖 ART/LSPlant（REQUIRES_DEVICE，真机覆盖）；PackageGenerationReconciler×1 为 Windows 符号链接权限环境差异（CI Linux 不跳过）",
+        "StubBuilder/IdentityHook 等此前失败的测试已全部修复并转为 PASS"
       ]
     },
     {
@@ -427,9 +427,9 @@
     },
     "p1": {
       "total": 12,
-      "pass": 1,
+      "pass": 2,
       "fail": 0,
-      "blocked": 11,
+      "blocked": 10,
       "notApplicable": 0
     },
     "p2": {

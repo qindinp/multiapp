@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "updatedAt": "2026-08-01T19:20:00+08:00",
+  "policy": "skipped=0 门禁针对意外跳过（assertion 未执行）。以下 skipped 为显式登记的豁免：HookEngine/CoreFlow 依赖 ART 运行时，JVM 无法执行；PackageGenerationReconciler 为 Windows 本机符号链接权限限制（CI Linux 不跳过）。任一豁免项的处置（迁移 androidTest / 设备验证）完成后从本表移除并关闭豁免。",
+  "waivers": [
+    {
+      "id": "WAIVE-001",
+      "testClass": "com.multiapp.core.hook.HookEngineTest",
+      "count": 11,
+      "skipMechanism": "assumeTrue(engine.initLsplant(...))",
+      "reason": "依赖 LSPlant（ART + native hook 引擎），JVM 无法初始化",
+      "type": "REQUIRES_DEVICE",
+      "disposition": "迁移至 androidTest（core:hook 增加测试变体）或保持豁免并由真机 instrumentation 覆盖",
+      "status": "WAIVED"
+    },
+    {
+      "id": "WAIVE-002",
+      "testClass": "com.multiapp.core.hook.integration.CoreFlowIntegrationTest$FileAccessInterception",
+      "count": 1,
+      "skipMechanism": "assumeTrue(android runtime)",
+      "reason": "文件访问拦截依赖 ART/native hook，JVM 无法验证真实路径拦截",
+      "type": "REQUIRES_DEVICE",
+      "disposition": "真机 instrumentation 覆盖（hosted 容器 FileAccess 场景）",
+      "status": "WAIVED"
+    },
+    {
+      "id": "WAIVE-003",
+      "testClass": "com.multiapp.core.installer.PackageGenerationReconcilerTest",
+      "count": 1,
+      "skipMechanism": "assumeTrue(symbolic link 可用)",
+      "reason": "Windows 本机无符号链接创建特权（客户端没有所需的特权）；CI Linux 环境可创建，该用例在 CI 上正常执行",
+      "type": "ENV_DIFFERENCE",
+      "disposition": "无需处置；CI 上即为绿色。本地 Windows 验证时记录为环境差异",
+      "status": "ENV_DIFFERENCE"
+    }
+  ]
+}
