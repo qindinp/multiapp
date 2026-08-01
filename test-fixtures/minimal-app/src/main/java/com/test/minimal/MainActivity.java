@@ -29,6 +29,7 @@ import android.widget.TextView;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 
 /**
@@ -47,8 +48,14 @@ public class MainActivity extends Activity {
     private static final String ACTION_PR8_DYNAMIC_RECEIVER = "com.test.minimal.ACTION_PR8_DYNAMIC_RECEIVER";
     private static final String ACTION_PR8_STICKY_ORDERED = "com.test.minimal.ACTION_PR8_STICKY_ORDERED";
     private static final String ACTION_NEW_INTENT_PROBE = "com.test.minimal.ACTION_NEW_INTENT_PROBE";
+    private static final String ACTION_ACTIVITY_RESULT_PROBE = "com.test.minimal.ACTION_ACTIVITY_RESULT_PROBE";
+    private static final String ACTION_ACTIVITY_RESULT_RESPONSE = "com.test.minimal.ACTION_ACTIVITY_RESULT_RESPONSE";
+    private static final String ACTIVITY_RESULT_PROBE_FILE = "activity-result-probe.txt";
+    private static final String PROVIDER_PROBE_FILE = "provider-probe.txt";
+    private static final int REQUEST_ACTIVITY_RESULT_PROBE = 4242;
 
     private TextView newIntentStatus;
+    private TextView activityResultStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -130,12 +137,26 @@ public class MainActivity extends Activity {
         });
         layout.addView(relaunchSingleTop);
 
+        activityResultStatus = new TextView(this);
+        activityResultStatus.setText("activity result: pending");
+        activityResultStatus.setTextSize(16);
+        activityResultStatus.setTextColor(0xFF00695C);
+        layout.addView(activityResultStatus);
+
+        Button requestActivityResult = new Button(this);
+        requestActivityResult.setText("Trigger Activity result");
+        requestActivityResult.setOnClickListener(v -> launchActivityResultProbe());
+        layout.addView(requestActivityResult);
+
         addText(layout, "\nIf this page is visible, the hosted container reached guest Activity.onCreate().", 14, 0xFF999999);
 
         scroll.addView(layout);
         setContentView(scroll);
 
         Log.d(TAG, "=== MainActivity.onCreate() complete ===");
+        if (ACTION_ACTIVITY_RESULT_PROBE.equals(getIntent().getAction())) {
+            launchActivityResultProbe();
+        }
     }
 
     @Override
@@ -147,6 +168,38 @@ public class MainActivity extends Activity {
         Log.d(TAG, "=== MainActivity.onNewIntent(): " + action + " ===");
         if (newIntentStatus != null) {
             newIntentStatus.setText(marker);
+        }
+        if (ACTION_ACTIVITY_RESULT_PROBE.equals(action)) {
+            launchActivityResultProbe();
+        }
+    }
+
+    private void launchActivityResultProbe() {
+        Log.d(TAG, "startActivityForResult(SecondActivity) requested");
+        Intent resultIntent = new Intent(this, SecondActivity.class)
+            .setAction(ACTION_ACTIVITY_RESULT_PROBE);
+        startActivityForResult(resultIntent, REQUEST_ACTIVITY_RESULT_PROBE);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_ACTIVITY_RESULT_PROBE) {
+            return;
+        }
+        String action = data != null ? data.getAction() : "";
+        String payload = "status=DELIVERED\n"
+            + "requestCode=" + requestCode + "\n"
+            + "resultCode=" + resultCode + "\n"
+            + "action=" + action + "\n";
+        Log.d(TAG, "=== MainActivity.onActivityResult(): " + payload.replace('\n', ' ') + " ===");
+        if (activityResultStatus != null) {
+            activityResultStatus.setText("activity result: " + action);
+        }
+        try (FileOutputStream output = openFileOutput(ACTIVITY_RESULT_PROBE_FILE, MODE_PRIVATE)) {
+            output.write(payload.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception error) {
+            Log.e(TAG, "Unable to persist Activity result probe", error);
         }
     }
 
@@ -223,6 +276,7 @@ public class MainActivity extends Activity {
             out.append("broadcast failed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
         }
 
+        int providerProbeStart = out.length();
         try {
             String instanceId = getIntent().getStringExtra(EXTRA_INSTANCE_ID);
             String hostPackageName = getIntent().getStringExtra(EXTRA_HOST_PACKAGE_NAME);
@@ -231,10 +285,8 @@ public class MainActivity extends Activity {
             } else {
                 Uri uri = new Uri.Builder()
                     .scheme("content")
-                    .authority(hostPackageName + ".multiapp.provider.stub")
+                    .authority(GUEST_PROVIDER_AUTHORITY)
                     .appendPath("probe")
-                    .appendQueryParameter(PROXY_INSTANCE_ID, instanceId)
-                    .appendQueryParameter(PROXY_GUEST_AUTHORITY, GUEST_PROVIDER_AUTHORITY)
                     .build();
                 try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
                     String status = "null";
@@ -284,23 +336,37 @@ public class MainActivity extends Activity {
                 } catch (Exception e) {
                     out.append("provider.callFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
                 }
-                try (ContentProviderClient client = getContentResolver().acquireContentProviderClient(uri)) {
-                    ParcelFileDescriptor descriptor = client != null ? client.openFile(uri, "r") : null;
-                    try {
-                        out.append("provider.openFile: ").append(descriptor != null).append("\n");
-                    } finally {
-                        if (descriptor != null) descriptor.close();
+                try {
+                    ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(uri, "r");
+                    out.append("provider.openFile: ").append(descriptor != null).append("\n");
+                    if (descriptor != null) {
+                        try (ParcelFileDescriptor.AutoCloseInputStream input =
+                                 new ParcelFileDescriptor.AutoCloseInputStream(descriptor)) {
+                            out.append("provider.openFilePayload: ")
+                                .append(readProviderPayload(input))
+                                .append("\n");
+                        }
                     }
                 } catch (Exception e) {
                     out.append("provider.openFileFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
                 }
                 try (AssetFileDescriptor descriptor = getContentResolver().openAssetFileDescriptor(uri, "r")) {
                     out.append("provider.openAssetFile: ").append(descriptor != null).append("\n");
+                    if (descriptor != null) {
+                        out.append("provider.openAssetFilePayload: ")
+                            .append(readProviderPayload(descriptor.createInputStream()))
+                            .append("\n");
+                    }
                 } catch (Exception e) {
                     out.append("provider.openAssetFileFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
                 }
                 try (AssetFileDescriptor descriptor = getContentResolver().openTypedAssetFileDescriptor(uri, "*/*", null)) {
                     out.append("provider.openTypedAssetFile: ").append(descriptor != null).append("\n");
+                    if (descriptor != null) {
+                        out.append("provider.openTypedAssetFilePayload: ")
+                            .append(readProviderPayload(descriptor.createInputStream()))
+                            .append("\n");
+                    }
                 } catch (Exception e) {
                     out.append("provider.openTypedAssetFileFailed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
                 }
@@ -308,10 +374,27 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             out.append("provider failed: ").append(e.getClass().getSimpleName()).append(": ").append(e.getMessage()).append("\n");
         }
+        persistProviderProbe(out.substring(providerProbeStart));
 
         String result = out.toString();
         Log.d(TAG, "=== component probe ===\n" + result);
         return result;
+    }
+
+    private String readProviderPayload(InputStream input) throws Exception {
+        try (InputStream ownedInput = input) {
+            byte[] bytes = new byte[4096];
+            int read = ownedInput.read(bytes);
+            return read > 0 ? new String(bytes, 0, read, StandardCharsets.UTF_8) : "";
+        }
+    }
+
+    private void persistProviderProbe(String payload) {
+        try (FileOutputStream output = openFileOutput(PROVIDER_PROBE_FILE, MODE_PRIVATE)) {
+            output.write(payload.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception error) {
+            Log.e(TAG, "Unable to persist Provider probe", error);
+        }
     }
 
     @SuppressLint("UnspecifiedRegisterReceiverFlag")

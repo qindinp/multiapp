@@ -1,6 +1,7 @@
 package com.test.minimal;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.os.Bundle;
 import android.util.Log;
 import android.widget.Button;
@@ -9,6 +10,8 @@ import android.widget.TextView;
 
 public class SecondActivity extends Activity {
     private static final String TAG = "MinimalApp";
+    private static final String ACTION_ACTIVITY_RESULT_PROBE = "com.test.minimal.ACTION_ACTIVITY_RESULT_PROBE";
+    private static final String ACTION_ACTIVITY_RESULT_RESPONSE = "com.test.minimal.ACTION_ACTIVITY_RESULT_RESPONSE";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -40,5 +43,12 @@ public class SecondActivity extends Activity {
 
         setContentView(layout);
         Log.d(TAG, "=== SecondActivity.onCreate() complete ===");
+
+        if (ACTION_ACTIVITY_RESULT_PROBE.equals(getIntent().getAction())) {
+            Intent result = new Intent().setAction(ACTION_ACTIVITY_RESULT_RESPONSE);
+            setResult(RESULT_OK, result);
+            Log.d(TAG, "SecondActivity returning Activity result");
+            finish();
+        }
     }
 }
