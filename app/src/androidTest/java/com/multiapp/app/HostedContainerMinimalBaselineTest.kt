@@ -2,6 +2,7 @@ package com.multiapp.app
 
 import android.content.pm.PackageInfo
 import android.os.Build
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.multiapp.app.container.ContainerRuntimePaths
@@ -14,6 +15,7 @@ import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.installer.JsonInstallRecordStore
 import dagger.hilt.android.testing.HiltAndroidRule
 import dagger.hilt.android.testing.HiltAndroidTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -34,16 +36,25 @@ class HostedContainerMinimalBaselineTest {
     @Inject
     lateinit var virtualizationEngine: VirtualizationEngine
 
+    private lateinit var activityScenario: ActivityScenario<MainActivity>
+
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val targetContext = instrumentation.targetContext
     private val packageManager = instrumentation.context.packageManager
     private val minimalPackageName = "com.test.minimal"
+    @After
+    fun tearDown() {
+        if (::activityScenario.isInitialized) {
+            activityScenario.close()
+        }
+    }
+
     @Before
     fun cleanPreviousBaselineState() {
         hiltRule.inject()
-        // 只注入 VirtualizationEngine facade：owner store（VirtualInstallService/InstanceManager）
-        // 受 requireEngineProcess 防线保护，只能在 :engine 进程构造（2026-08-01 修复）。
-        // 安装记录文件仅用于测试清理，不经过 Hilt。
+        // 启动 host Activity 到前台，确保 MIUI BAL 不阻止 guest ProxyActivity 启动。
+        // 测试进程自身不是前台，需要 host Activity 持续 visible 才能通过 BAL 视窗检查。
+        activityScenario = ActivityScenario.launch(MainActivity::class.java)
         val installStore = JsonInstallRecordStore(ContainerRuntimePaths.installStoreDir(targetContext))
         virtualizationEngine.listInstances()
             .filter { it.originPackageName == minimalPackageName }
@@ -87,17 +98,9 @@ class HostedContainerMinimalBaselineTest {
             applicationClassName = appInfo.className,
             packageLabel = appInfo.loadLabel(packageManager).toString()
         )
-        val installResult = virtualizationEngine.refreshPackage(installRequest)
-        assertTrue(
-            "engine refreshPackage failed: ${installResult.status}:${installResult.message}",
-            installResult.status == EngineResultStatus.PASS || installResult.status == EngineResultStatus.PARTIAL
-        )
-        val installRecord = checkNotNull(installStore.load(minimalPackageName))
-        assertEquals(
-            "singleTop",
-            installRecord.activities.firstOrNull { it.name == "com.test.minimal.MainActivity" }?.launchMode
-        )
 
+        // engine.createInstance 在 install record 缺失时会 ensureInstallRecord 自动导入；
+        // refreshPackage 是"仅刷新已有记录"语义，首次导入不能走它（2026-08-01 真机修正）。
         val instances = listOf("A", "B").map { label ->
             val createResult = virtualizationEngine.createInstance(
                 CreateInstanceRequest(
@@ -122,6 +125,14 @@ class HostedContainerMinimalBaselineTest {
         assertEquals(2, instances.map { it.instanceId }.distinct().size)
         assertEquals(2, instances.map { it.virtualPackageName }.distinct().size)
         assertEquals(2, instances.map { it.dataRoot }.distinct().size)
+
+        val installRecord = checkNotNull(installStore.load(minimalPackageName)) {
+            "install record must exist after engine createInstance auto-import"
+        }
+        assertEquals(
+            "singleTop",
+            installRecord.activities.firstOrNull { it.name == "com.test.minimal.MainActivity" }?.launchMode
+        )
 
         instances.forEachIndexed { index, instance ->
                 val initialLaunch = virtualizationEngine.launchInstance(
