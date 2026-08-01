@@ -3,6 +3,8 @@ package com.multiapp.core.engine
 import com.multiapp.core.loader.VirtualActivityLaunchAllocation
 import com.multiapp.core.loader.VirtualActivityLaunchAllocationProvider
 import com.multiapp.core.loader.VirtualActivityLaunchAllocationRequest
+import com.multiapp.core.loader.VirtualActivityLaunchCommitRequest
+import com.multiapp.core.loader.VirtualActivityLaunchCommitResult
 import com.multiapp.core.loader.VirtualActivityLaunchIdentity
 import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualRuntimeState
@@ -158,6 +160,32 @@ class IpcVirtualActivityLaunchAllocationProvider : VirtualActivityLaunchAllocati
                 request = request,
                 reason = "engine_activity_allocation_authority_unavailable"
             )
+
+    override fun commit(request: VirtualActivityLaunchCommitRequest): VirtualActivityLaunchCommitResult {
+        val identity = request.allocation.launchIdentity?.toEngineIdentity()
+            ?: return VirtualActivityLaunchCommitResult(
+                accepted = false,
+                reason = "activity_launch_commit_identity_missing"
+            )
+        val response = EngineRuntimeIpcClients.commitActivityLaunch(
+            EngineActivityLaunchCommitRequest(
+                identity = identity,
+                record = request.record,
+                intentFlags = request.intentFlags,
+                dataIntent = request.dataIntent
+            )
+        ) ?: return VirtualActivityLaunchCommitResult(
+            accepted = false,
+            reason = "engine_activity_commit_authority_unavailable"
+        )
+        return VirtualActivityLaunchCommitResult(
+            accepted = response.accepted,
+            idempotent = response.idempotent,
+            activity = response.activity,
+            launchReused = response.launchReused,
+            reason = response.reason
+        )
+    }
 
     override fun release(allocation: VirtualActivityLaunchAllocation): Boolean =
         EngineRuntimeIpcClients.releaseActivityLaunch(allocation) == true

@@ -75,4 +75,7 @@ interface IEngineRuntimeService {
     Bundle engineQueryCapabilities(String instanceId);
     Bundle engineClearInstanceData(String instanceId);
     Bundle engineRefreshPackage(in Bundle request);
+    Bundle prepareActivityLaunch(String instanceId, in Bundle request);
+    Bundle commitActivityLaunch(String instanceId, in Bundle request);
+    Bundle engineListInstances();
 }

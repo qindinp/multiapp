@@ -32,7 +32,9 @@ class EngineCapabilityCatalogTest {
             EngineResultStatus.UNSUPPORTED,
             report.capability("system-service:job_scheduler")?.status
         )
-        assertTrue(report.capability("activity")?.unsupportedOperations?.contains("result-delivery") == true)
+        assertFalse(report.capability("activity")?.unsupportedOperations?.contains("result-delivery") == true)
+        assertTrue(report.capability("activity")?.supportedOperations?.contains("result-delivery") == true)
+        assertTrue(report.capability("activity")?.supportedOperations?.contains("finish-result-delivery") == true)
     }
 
     @Test

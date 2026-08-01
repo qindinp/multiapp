@@ -18,12 +18,38 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertSame
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class EngineServerRuntimeTest {
+
+    @Test
+    fun `owner construction allows only exact engine process of host package`() {
+        EngineServerRuntime.requireEngineProcess(
+            hostPackageName = "com.multiapp.app",
+            processName = "com.multiapp.app:engine"
+        )
+
+        listOf(
+            null,
+            "",
+            "com.multiapp.app",
+            "com.multiapp.app:v0",
+            "com.multiapp.app:v7",
+            "other.package:engine",
+            "com.multiapp.app:engine.extra"
+        ).forEach { processName ->
+            val error = assertFailsWith<IllegalStateException>(
+                "expected rejection for process=$processName"
+            ) {
+                EngineServerRuntime.requireEngineProcess("com.multiapp.app", processName)
+            }
+            assertTrue(error.message.orEmpty().contains("com.multiapp.app:engine"))
+        }
+    }
 
     @Test
     fun `wrapper and owner share one engine runtime graph`() {

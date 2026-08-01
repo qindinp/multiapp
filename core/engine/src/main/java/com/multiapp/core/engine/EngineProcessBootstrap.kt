@@ -252,6 +252,8 @@ object EngineProcessBootstrapReadiness {
                         key == "activityThreadApplicationBindingStatus"
                 }
                 ?.forEach { (key, value) -> put(key, value) }
+            systemServiceStage?.toEvidenceFields()
+                ?.forEach { (key, value) -> put("packageManagerProxy.$key", value) }
         }
 
         if (!identityMatches) {

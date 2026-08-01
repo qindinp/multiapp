@@ -94,8 +94,12 @@ class EngineContainerDispatchersTest {
             EngineProviderRouteSlots.stubAuthority("com.multiapp.app", "com.multiapp.app:v7")
         )
         assertEquals(
+            "com.multiapp.app.multiapp.provider.stub.v16",
+            EngineProviderRouteSlots.stubAuthority("com.multiapp.app", "com.multiapp.app:v16")
+        )
+        assertEquals(
             "com.multiapp.app.multiapp.provider.stub",
-            EngineProviderRouteSlots.stubAuthority("com.multiapp.app", "com.multiapp.app:v8")
+            EngineProviderRouteSlots.stubAuthority("com.multiapp.app", "com.multiapp.app:v24")
         )
     }
 
@@ -213,8 +217,8 @@ class EngineContainerDispatchersTest {
             ?.operationEntries("broadcast", "plan")
             ?.single()
 
-        assertTrue(result is VirtualBroadcastResult.UnsupportedImplicit)
-        assertEquals(EngineResultStatus.UNSUPPORTED, planEvidence?.verdict)
+        verify(exactly = 1) { fallback.dispatchBroadcast(any(), any(), any()) }
+        assertEquals(EngineResultStatus.PARTIAL, planEvidence?.verdict)
         assertEquals("true", planEvidence?.entries?.get("ordered"))
         assertEquals("true", planEvidence?.entries?.get("sticky"))
         assertEquals(
@@ -224,19 +228,13 @@ class EngineContainerDispatchersTest {
         assertEquals("android:read_device_identifiers", planEvidence?.entries?.get("receiverAppOp"))
         assertEquals("true", planEvidence?.entries?.get("asUserRequested"))
         assertEquals("true", planEvidence?.entries?.get("platformOptionsPresent"))
-        assertTrue(
-            planEvidence?.entries?.get("unsupportedOperations")
-                .orEmpty()
-                .contains("receiver-permission")
-        )
-        assertTrue(planEvidence?.entries?.get("unsupportedOperations").orEmpty().contains("as-user"))
-        assertTrue(
+        assertFalse(planEvidence?.entries?.get("unsupportedOperations").orEmpty().contains("as-user"))
+        assertFalse(
             planEvidence?.entries?.get("unsupportedOperations")
                 .orEmpty()
                 .contains("broadcast-options")
         )
-        verify(exactly = 0) { fallback.dispatchBroadcast(any(), any(), any()) }
-        verify(exactly = 0) { fallback.dispatchBroadcast(any(), any(), any(), any()) }
+        verify(exactly = 1) { fallback.dispatchBroadcast(any(), any(), any()) }
     }
 
     @Test

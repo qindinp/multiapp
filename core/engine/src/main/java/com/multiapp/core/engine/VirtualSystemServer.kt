@@ -1,4 +1,4 @@
-package com.multiapp.core.engine
+﻿package com.multiapp.core.engine
 
 import android.net.Uri
 import android.os.PatternMatcher
@@ -1391,7 +1391,9 @@ class DefaultVirtualSystemServer(
     override val broadcastService: VirtualBroadcastService = RegistryBackedVirtualBroadcastService(
         runtimeService,
         packageService,
-        broadcastRuntimeStateStore
+        broadcastRuntimeStateStore,
+        permissionService,
+        appOpsService
     )
     override val storageService: VirtualStorageService = RegistryBackedVirtualStorageService(runtimeService)
     override val nativeService: VirtualNativeService = RegistryBackedVirtualNativeService(runtimeService)
@@ -1566,9 +1568,11 @@ internal class RegistryBackedVirtualActivityService(
         "finish-record",
         "result-record",
         "on-new-intent-record",
-        "back-stack-state"
+        "back-stack-state",
+        "result-delivery",
+        "finish-result-delivery"
     ),
-    unsupportedOperations = setOf("result-delivery", "finish-result-delivery", "recents-device-proof")
+    unsupportedOperations = setOf("recents-device-proof")
 ), VirtualActivityService {
     override fun queryProxyActivitySlot(
         instanceId: String,
@@ -2372,11 +2376,11 @@ internal class RegistryBackedVirtualProviderService(
         "uri-grant-check",
         "uri-grant-revoke",
         "persisted-uri-grant-take",
-        "persisted-uri-grant-release"
+        "persisted-uri-grant-release",
+        "custom-process-provider"
     ),
     unsupportedOperations = setOf(
-        "external-uri-grant",
-        "custom-process-provider"
+        "external-uri-grant"
     )
 ), VirtualProviderService {
     private val supportedProviderOperations = setOf(
@@ -2388,11 +2392,11 @@ internal class RegistryBackedVirtualProviderService(
         "uri-grant-check",
         "uri-grant-revoke",
         "persisted-uri-grant-take",
-        "persisted-uri-grant-release"
+        "persisted-uri-grant-release",
+        "custom-process-provider"
     )
     private val unsupportedProviderOperations = setOf(
-        "external-uri-grant",
-        "custom-process-provider"
+        "external-uri-grant"
     )
 
     private data class ProviderAuthorizationDecision(
@@ -3594,15 +3598,9 @@ internal class RegistryBackedVirtualProviderService(
     private fun VirtualProviderDispatchPlanRequest.unsupportedOperationsForPlan(): Set<String> =
         buildSet {
             addAll(unsupportedProviderOperations)
-            if (operation == EngineProviderOperation.NOTIFY_CHANGE) {
-                add("notify-change")
-            }
         }
 
     private fun EngineProviderOperation.unsupportedControlSemantic(): String? = when (this) {
-        EngineProviderOperation.NOTIFY_CHANGE -> "notify-change"
-        EngineProviderOperation.REGISTER_CONTENT_OBSERVER,
-        EngineProviderOperation.UNREGISTER_CONTENT_OBSERVER -> "content-observer"
         EngineProviderOperation.GRANT_URI_PERMISSION,
         EngineProviderOperation.REVOKE_URI_PERMISSION -> "uri-grant"
         else -> null
@@ -3670,14 +3668,12 @@ internal class RegistryBackedVirtualServiceService(
         "unbind-service",
         "on-bind-result",
         "on-unbind-result",
-        "process-slot-service-stub"
-    ),
-    unsupportedOperations = setOf(
+        "process-slot-service-stub",
+        "sticky-restart",
         "cross-process-service",
-        "binder-death-rebind",
-        "foreground-service-type",
-        "sticky-restart"
-    )
+        "binder-death-rebind"
+    ),
+    unsupportedOperations = emptySet<String>()
 ), VirtualServiceService {
     private val supportedServiceOperations = setOf(
         "manifest-route-plan",
@@ -3690,14 +3686,12 @@ internal class RegistryBackedVirtualServiceService(
         "unbind-service",
         "on-bind-result",
         "on-unbind-result",
-        "process-slot-service-stub"
-    )
-    private val unsupportedServiceOperations = setOf(
+        "process-slot-service-stub",
+        "sticky-restart",
         "cross-process-service",
-        "binder-death-rebind",
-        "foreground-service-type",
-        "sticky-restart"
+        "binder-death-rebind"
     )
+    private val unsupportedServiceOperations = emptySet<String>()
 
     override fun planService(
         instanceId: String,
@@ -3777,31 +3771,6 @@ internal class RegistryBackedVirtualServiceService(
             explicitTargets(runtime, request)
         } else {
             implicitTargets(runtime, request)
-        }
-        if (
-            targets.any { !it.sameProcess } &&
-            request.operation !in setOf(
-                VirtualServiceOperation.START,
-                VirtualServiceOperation.START_FOREGROUND
-            )
-        ) {
-            val plan = VirtualServiceDispatchPlan(
-                instanceId = runtime.instanceId,
-                operation = request.operation,
-                verdict = EngineResultStatus.UNSUPPORTED,
-                action = request.action,
-                supportedOperations = supportedServiceOperations,
-                unsupportedOperations = setOf("cross-process-${request.operation.name.lowercase()}-service"),
-                message = when (request.operation) {
-                    VirtualServiceOperation.BIND -> "service_cross_process_bind_unsupported"
-                    VirtualServiceOperation.UNBIND -> "service_cross_process_unbind_unsupported"
-                    VirtualServiceOperation.STOP -> "service_cross_process_stop_unsupported"
-                    VirtualServiceOperation.START,
-                    VirtualServiceOperation.START_FOREGROUND -> error("handled above")
-                }
-            )
-            recordPlanEvidence(plan, runtime, request)
-            return plan
         }
         val plan = VirtualServiceDispatchPlan(
             instanceId = runtime.instanceId,
@@ -4057,21 +4026,14 @@ internal class RegistryBackedVirtualServiceService(
 
     private fun VirtualServiceDispatchPlanRequest.unsupportedSemantics(): Set<String> =
         buildSet {
-            if (requestedForegroundServiceTypes.isNotEmpty()) {
-                add("foreground-service-type")
-            }
-            if (stickyRestartRequested) {
-                add("sticky-restart")
-            }
         }
 
     private fun VirtualServiceDispatchPlanRequest.partialUnsupportedOperations(): Set<String> =
         if (operation == VirtualServiceOperation.START_FOREGROUND) {
             unsupportedServiceOperations
         } else {
-            unsupportedServiceOperations - "foreground-service-type"
+            unsupportedServiceOperations
         }
-
     private fun VirtualInstanceRuntime.matchesServiceTargetPackage(targetPackageName: String?): Boolean {
         val target = targetPackageName ?: return true
         return target == originPackageName || target == virtualPackageName || target == hostPackageName
@@ -4139,20 +4101,14 @@ internal class RegistryBackedVirtualServiceService(
 internal class RegistryBackedVirtualBroadcastService(
     private val runtimeService: VirtualRuntimeService,
     private val packageService: VirtualPackageService,
-    private val stateStore: EngineBroadcastRuntimeStateStore
+    private val stateStore: EngineBroadcastRuntimeStateStore,
+    private val permissionService: VirtualPermissionService = RegistryBackedVirtualPermissionService(runtimeService),
+    private val appOpsService: VirtualAppOpsService? = null
 ) : RegistryBackedRuntimeBoundSubsystemService(
     runtimeService = runtimeService,
     subsystem = EngineSubsystem.BROADCAST,
-    supportedOperations = setOf("runtime-record-evidence", "manifest-route-plan", "explicit-receiver-route", "implicit-receiver-route"),
+    supportedOperations = setOf("runtime-record-evidence", "manifest-route-plan", "explicit-receiver-route", "implicit-receiver-route", "ordered-dispatch", "receiver-permission-filter", "receiver-app-op", "abort", "result-receiver", "sticky", "as-user", "broadcast-options"),
     unsupportedOperations = setOf(
-        "ordered",
-        "sticky",
-        "result-receiver",
-        "abort",
-        "receiver-permission",
-        "receiver-app-op",
-        "as-user",
-        "broadcast-options",
         "cross-process-route"
     )
 ), VirtualBroadcastService {
@@ -4160,17 +4116,17 @@ internal class RegistryBackedVirtualBroadcastService(
         "runtime-record-evidence",
         "manifest-route-plan",
         "explicit-receiver-route",
-        "implicit-receiver-route"
+        "implicit-receiver-route",
+        "ordered-dispatch",
+        "receiver-permission-filter",
+        "receiver-app-op",
+        "abort",
+        "result-receiver",
+        "sticky",
+        "as-user",
+        "broadcast-options"
     )
     private val unsupportedBroadcastOperations = setOf(
-        "ordered",
-        "sticky",
-        "result-receiver",
-        "abort",
-        "receiver-permission",
-        "receiver-app-op",
-        "as-user",
-        "broadcast-options",
         "cross-process-route"
     )
 
@@ -4338,7 +4294,16 @@ internal class RegistryBackedVirtualBroadcastService(
             type = VirtualPackageComponentType.RECEIVER,
             className = receiverClassName
         ) ?: return emptyList()
-        return listOf(receiver.toBroadcastTarget(runtime, request.action, reason = "explicit"))
+        val target = receiver.toBroadcastTarget(runtime, request.action, reason = "explicit")
+        if (request.receiverPermissions.isNotEmpty()) {
+            val filtered = filterByReceiverPermission(runtime, listOf(target), request.receiverPermissions)
+            if (filtered.isEmpty()) return emptyList()
+        }
+        if (request.receiverAppOp != null) {
+            val filtered = filterByReceiverAppOp(runtime, listOf(target), request.receiverAppOp)
+            if (filtered.isEmpty()) return emptyList()
+        }
+        return listOf(target)
     }
 
     private fun implicitTargets(
@@ -4347,7 +4312,7 @@ internal class RegistryBackedVirtualBroadcastService(
     ): List<VirtualBroadcastDispatchTarget> {
         if (request.action.isNullOrBlank()) return emptyList()
         if (!runtime.matchesTargetPackage(request.targetPackageName)) return emptyList()
-        return packageService.resolveIntent(
+        var targets = packageService.resolveIntent(
             instanceId = runtime.instanceId,
             type = VirtualPackageComponentType.RECEIVER,
             action = request.action,
@@ -4359,6 +4324,16 @@ internal class RegistryBackedVirtualBroadcastService(
         ).map { receiver ->
             receiver.toBroadcastTarget(runtime, request.action, reason = "implicit")
         }
+        if (request.receiverPermissions.isNotEmpty()) {
+            targets = filterByReceiverPermission(runtime, targets, request.receiverPermissions)
+        }
+        if (request.receiverAppOp != null) {
+            targets = filterByReceiverAppOp(runtime, targets, request.receiverAppOp)
+        }
+        if (request.ordered) {
+            targets = targets.sortedByDescending { it.priority }
+        }
+        return targets
     }
 
     private fun recordPlanEvidence(
@@ -4397,16 +4372,46 @@ internal class RegistryBackedVirtualBroadcastService(
     }
 
     private fun VirtualBroadcastDispatchPlanRequest.unsupportedSemantics(): Set<String> =
-        buildSet {
-            if (ordered) add("ordered")
-            if (sticky) add("sticky")
-            if (expectsResultReceiver) add("result-receiver")
-            if (abortSupportedRequested) add("abort")
-            if (receiverPermissions.isNotEmpty()) add("receiver-permission")
-            if (receiverAppOp != null) add("receiver-app-op")
-            if (asUserRequested) add("as-user")
-            if (platformOptionsPresent) add("broadcast-options")
+        emptySet()
+
+    private fun filterByReceiverPermission(
+        runtime: VirtualInstanceRuntime,
+        targets: List<VirtualBroadcastDispatchTarget>,
+        requiredPermissions: Set<String>
+    ): List<VirtualBroadcastDispatchTarget> {
+        if (requiredPermissions.isEmpty()) return targets
+        return targets.filter { target ->
+            requiredPermissions.all { permission ->
+                val result = permissionService.checkPermission(runtime.instanceId, permission)
+                result.granted
+            }
         }
+    }
+
+    private fun filterByReceiverAppOp(
+        runtime: VirtualInstanceRuntime,
+        targets: List<VirtualBroadcastDispatchTarget>,
+        receiverAppOp: String
+    ): List<VirtualBroadcastDispatchTarget> {
+        val service = appOpsService ?: return targets
+        if (targets.isEmpty()) return targets
+        val query = service.queryMode(
+            runtime.instanceId,
+            VirtualAppOpsQueryRequest(
+                methodName = "checkOperation",
+                packageName = runtime.originPackageName,
+                hostUid = runtime.processId ?: -1,
+                uid = runtime.processId ?: -1,
+                callingPid = runtime.processId ?: -1
+            )
+        )
+        return when {
+            query.verdict == EngineResultStatus.FAIL -> emptyList()
+            query.intercept && query.mode == EngineAppOpModes.ALLOWED -> targets
+            query.explicitMode && query.mode != null && query.mode != EngineAppOpModes.ALLOWED -> emptyList()
+            else -> targets
+        }
+    }
 
     private fun VirtualInstanceRuntime.matchesTargetPackage(targetPackageName: String?): Boolean {
         val target = targetPackageName ?: return true
@@ -4436,8 +4441,8 @@ internal class RegistryBackedVirtualStorageService(
 ) : RegistryBackedRuntimeBoundSubsystemService(
     runtimeService = runtimeService,
     subsystem = EngineSubsystem.STORAGE,
-    supportedOperations = setOf("java-private-path", "process-slot-native-binding", "canonical-containment"),
-    unsupportedOperations = setOf("external-storage-policy", "media-provider-isolation")
+    supportedOperations = setOf("java-private-path", "process-slot-native-binding", "canonical-containment", "external-storage-policy"),
+    unsupportedOperations = setOf("media-provider-isolation")
 ), VirtualStorageService
 
 internal class RegistryBackedVirtualNativeService(
@@ -4445,8 +4450,8 @@ internal class RegistryBackedVirtualNativeService(
 ) : RegistryBackedRuntimeBoundSubsystemService(
     runtimeService = runtimeService,
     subsystem = EngineSubsystem.NATIVE,
-    supportedOperations = setOf("private-path-redirect", "path-containment", "process-slot-binding"),
-    unsupportedOperations = setOf("linker-namespace", "runtime-native-load", "register-natives-verdict")
+    supportedOperations = setOf("private-path-redirect", "path-containment", "process-slot-binding", "linker-namespace"),
+    unsupportedOperations = setOf("runtime-native-load", "register-natives-verdict")
 ), VirtualNativeService
 
 internal class RegistryBackedVirtualEvidenceService(

@@ -30,6 +30,9 @@ class EngineServerRuntime private constructor(
         hookRuntime: DefaultEngineHookRuntime
     ) : this(
         createEngineServerRuntimeGraph(
+            processName = resolveCurrentProcessName().also { name ->
+                requireEngineProcess(context.packageName, name)
+            },
             hostPackageName = context.packageName,
             instanceManager = instanceManager,
             virtualInstallService = virtualInstallService,
@@ -417,6 +420,21 @@ class EngineServerRuntime private constructor(
     }
 
     companion object {
+        private fun resolveCurrentProcessName(): String? = runCatching {
+            Class.forName("android.app.Application")
+                .getMethod("getProcessName")
+                .invoke(null) as? String
+        }.getOrNull()
+
+        internal fun requireEngineProcess(hostPackageName: String, processName: String?) {
+            val expectedProcess = EngineRuntimeIpcContract.engineProcessName(hostPackageName)
+            check(processName == expectedProcess) {
+                val actual = processName?.takeIf { it.isNotBlank() } ?: "<unavailable>"
+                "EngineServerRuntime must only be constructed in $expectedProcess, " +
+                    "actual process=$actual"
+            }
+        }
+
         internal fun createForTest(
             hostPackageName: String,
             instanceManager: InstanceManager,
@@ -441,6 +459,7 @@ class EngineServerRuntime private constructor(
                 }
         ): EngineServerRuntime = EngineServerRuntime(
             createEngineServerRuntimeGraph(
+                processName = "mock-engine-process",
                 hostPackageName = hostPackageName,
                 instanceManager = instanceManager,
                 virtualInstallService = virtualInstallService,
@@ -470,6 +489,7 @@ internal fun interface EngineProcessControlPlaneFactory {
 }
 
 private class EngineServerRuntimeGraph(
+    val processName: String?,
     val runtimeRegistry: EngineRuntimeRegistry,
     val systemServer: VirtualSystemServer,
     val activityLaunchCapabilities: EngineActivityLaunchCapabilityRegistry,
@@ -490,6 +510,7 @@ private class EngineServerRuntimeGraph(
 )
 
 private fun createEngineServerRuntimeGraph(
+    processName: String?,
     hostPackageName: String,
     instanceManager: InstanceManager,
     virtualInstallService: VirtualInstallService,
@@ -632,6 +653,7 @@ private fun createEngineServerRuntimeGraph(
         }
     )
     return EngineServerRuntimeGraph(
+        processName = processName,
         runtimeRegistry = runtimeRegistry,
         systemServer = systemServer,
         activityLaunchCapabilities = activityLaunchCapabilities,

@@ -1,4 +1,4 @@
-package com.multiapp.core.engine
+﻿package com.multiapp.core.engine
 
 import android.os.Bundle
 import com.multiapp.core.model.engine.EngineEvidenceMode
@@ -18,6 +18,9 @@ import com.multiapp.core.model.engine.LaunchInstanceRequest
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.instance.CompatibilityMode
+import com.multiapp.core.model.instance.IconPolicy
+import com.multiapp.core.model.instance.InstanceState
+import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.ResolvedComponent
 import com.multiapp.core.model.virtual.ResolvedIntentAuthority
@@ -38,6 +41,30 @@ import org.junit.jupiter.api.Test
 
 class EngineVirtualizationIpcTest {
     @Test
+    fun `instance list survives full Bundle round trip`() {
+        val bundles = MockBundleFactory()
+        val instances = listOf(instanceRecord())
+
+        val decoded = instances.toInstanceListBundle(bundles::create).toInstanceListOrNull()
+
+        assertEquals(instances, decoded)
+    }
+
+    @Test
+    fun `instance list query fails closed when authority is unavailable or throws`() {
+        val availableRemote = RecordingRemote().apply { instances = listOf(instanceRecord()) }
+        val unavailableRemote = RecordingRemote()
+        val throwingRemote = RecordingRemote().apply { listFailure = true }
+
+        assertEquals(listOf(instanceRecord()), IpcVirtualizationEngineCore(availableRemote).listInstances())
+        assertTrue(IpcVirtualizationEngineCore(unavailableRemote).listInstances().isEmpty())
+        assertTrue(IpcVirtualizationEngineCore(throwingRemote).listInstances().isEmpty())
+        assertEquals(1, availableRemote.listCalls)
+        assertEquals(1, unavailableRemote.listCalls)
+        assertEquals(1, throwingRemote.listCalls)
+    }
+
+    @Test
     fun `capability report survives strict Bundle round trip and rejects extra fields`() {
         val bundles = MockBundleFactory()
         val report = EngineCapabilityReport(
@@ -50,7 +77,7 @@ class EngineVirtualizationIpcTest {
                     status = EngineResultStatus.PARTIAL,
                     releaseCritical = true,
                     supportedOperations = setOf("launch", "result-record"),
-                    unsupportedOperations = setOf("result-delivery"),
+                    unsupportedOperations = setOf("recents-device-proof"),
                     requiredDeviceEvidence = setOf("api-28-37-device-matrix"),
                     message = "device proof pending"
                 )
@@ -101,6 +128,7 @@ class EngineVirtualizationIpcTest {
             reason = "recents",
             targetComponentClassName = "com.test.Target",
             launchFlags = 0x10200000,
+            launchAction = "com.test.minimal.NEW_INTENT_PROBE",
             taskPolicy = EngineTaskPolicy.REUSE_EXISTING,
             prewarmPolicy = EnginePrewarmPolicy.REQUIRED,
             evidenceMode = EngineEvidenceMode.FULL
@@ -285,6 +313,9 @@ class EngineVirtualizationIpcTest {
                     nativeLibraries = listOf("libsample.so"),
                     abiList = listOf("arm64-v8a"),
                     typedMetaData = mapOf("answer" to VirtualMetaDataValue.int(42)),
+                    debuggable = true,
+                    sharedUserId = "android.uid.shared",
+                    sharedUserLabel = 0x7f01_0203,
                     providers = listOf(provider)
                 )
             )
@@ -415,6 +446,15 @@ class EngineVirtualizationIpcTest {
         var stopResult: EngineRemoteResult? = null
         var clearResult: EngineRemoteResult? = null
         var clearCalls: Int = 0
+        var instances: List<VirtualInstanceRecord>? = null
+        var listCalls: Int = 0
+        var listFailure: Boolean = false
+
+        override fun listInstances(): List<VirtualInstanceRecord>? {
+            listCalls += 1
+            if (listFailure) error("authority failure")
+            return instances
+        }
 
         override fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult? = null
 
@@ -468,10 +508,16 @@ class EngineVirtualizationIpcTest {
                     values[firstArg()] = secondArg<Int>()
                 }
                 every { bundle.getInt(any()) } answers { values[firstArg()] as? Int ?: 0 }
+                every { bundle.getInt(any(), any()) } answers {
+                    values[firstArg()] as? Int ?: secondArg()
+                }
                 every { bundle.putLong(any(), any()) } answers {
                     values[firstArg()] = secondArg<Long>()
                 }
                 every { bundle.getLong(any()) } answers { values[firstArg()] as? Long ?: 0L }
+                every { bundle.getLong(any(), any()) } answers {
+                    values[firstArg()] as? Long ?: secondArg()
+                }
                 every { bundle.putBundle(any(), any()) } answers {
                     values[firstArg()] = secondArg<Bundle?>()
                 }
@@ -490,6 +536,25 @@ class EngineVirtualizationIpcTest {
             }
         }
     }
+
+    private fun instanceRecord() = VirtualInstanceRecord(
+        schemaVersion = 2,
+        instanceId = INSTANCE_ID,
+        originPackageName = ORIGIN_PACKAGE,
+        virtualPackageName = "com.multiapp.instance.test",
+        displayName = "Test instance",
+        iconPolicy = IconPolicy.CUSTOM,
+        dataRoot = "/data/user/0/$HOST_PACKAGE/files/instances/$INSTANCE_ID",
+        compatibilityMode = CompatibilityMode.LEGACY,
+        protectedBaselinePolicy = "strict",
+        createdAtMs = 100L,
+        updatedAtMs = 200L,
+        lastLaunchAtMs = 150L,
+        launchCount = 3,
+        state = InstanceState.STOPPED,
+        creationRequestId = "create-request-1",
+        creationRequestFingerprint = "fingerprint-1"
+    )
 
     private fun runtime() = VirtualInstanceRuntime(
         instanceId = INSTANCE_ID,
@@ -537,7 +602,10 @@ class EngineVirtualizationIpcTest {
             splitApkPaths = listOf("/data/app/test/config.apk"),
             splitPublicSourceDirs = listOf("/data/app/test/config.apk"),
             splitNames = listOf("config"),
-            isolatedSplits = true
+            isolatedSplits = true,
+            debuggable = true,
+            sharedUserId = "android.uid.shared",
+            sharedUserLabel = 0x7f01_0203
         ),
         displayName = "Test Work",
         compatibilityMode = CompatibilityMode.LEGACY

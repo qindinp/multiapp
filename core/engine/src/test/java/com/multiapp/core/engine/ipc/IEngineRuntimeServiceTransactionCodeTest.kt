@@ -13,12 +13,15 @@ class IEngineRuntimeServiceTransactionCodeTest {
         val queryCapabilities = transactionCode("engineQueryCapabilities")
         val clearInstanceData = transactionCode("engineClearInstanceData")
         val refreshPackage = transactionCode("engineRefreshPackage")
+        val commitActivityLaunch = transactionCode("commitActivityLaunch")
+        val listInstances = transactionCode("engineListInstances")
 
         assertEquals(IBinder.FIRST_CALL_TRANSACTION + 2, createInstance)
         assertEquals(IBinder.FIRST_CALL_TRANSACTION + 66, stopRuntime)
         assertEquals(IBinder.FIRST_CALL_TRANSACTION + 67, queryCapabilities)
         assertEquals(IBinder.FIRST_CALL_TRANSACTION + 68, clearInstanceData)
         assertEquals(IBinder.FIRST_CALL_TRANSACTION + 69, refreshPackage)
+        assertEquals(commitActivityLaunch + 1, listInstances)
         assertTrue(refreshPackage > stopRuntime)
     }
 

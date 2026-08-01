@@ -137,6 +137,47 @@ class EngineActivityLaunchCapabilityRegistry(
         )
     }
 
+    /**
+     * Verifies that an issued launch capability may create its engine-owned Activity record
+     * without consuming the capability. The guest still has to pass [authorize] before the
+     * framework is allowed to instantiate the Activity.
+     */
+    @Synchronized
+    fun validateCommit(identity: EngineActivityLaunchIdentity, callingPid: Int): EngineActivityLaunchAuthorization {
+        pruneExpiredLocked()
+        val record = records[identity.capabilityToken]
+            ?: return rejected("launch_capability_not_found")
+        if (record.identity != identity) return rejected("launch_capability_identity_mismatch")
+        if (callingPid <= 0 || callingPid != record.processId) {
+            return rejected("launch_capability_process_id_mismatch")
+        }
+        if (record.authorized || record.completed) return rejected("launch_capability_already_consumed")
+        return EngineActivityLaunchAuthorization(
+            accepted = true,
+            idempotent = false,
+            reason = "launch_capability_commit_ready"
+        )
+    }
+
+    /**
+     * Lets the trusted host persist a launch record before it asks Android to dispatch the
+     * Proxy Activity. The capability remains bound to its target guest process and is still
+     * consumed only by [authorize].
+     */
+    @Synchronized
+    fun validatePrepare(identity: EngineActivityLaunchIdentity): EngineActivityLaunchAuthorization {
+        pruneExpiredLocked()
+        val record = records[identity.capabilityToken]
+            ?: return rejected("launch_capability_not_found")
+        if (record.identity != identity) return rejected("launch_capability_identity_mismatch")
+        if (record.authorized || record.completed) return rejected("launch_capability_already_consumed")
+        return EngineActivityLaunchAuthorization(
+            accepted = true,
+            idempotent = false,
+            reason = "launch_capability_prepare_ready"
+        )
+    }
+
     @Synchronized
     fun releaseUnconsumedAllocation(
         identity: EngineActivityLaunchIdentity,

@@ -271,18 +271,24 @@ data class EngineActivityLaunchRequest(
     val guestActivityClassName: String,
     val launchMode: String?,
     val taskAffinity: String?,
-    val launchIdentity: EngineActivityLaunchIdentity
+    val launchIdentity: EngineActivityLaunchIdentity,
+    val launchAction: String? = null
 )
 
 class EngineActivityProxyLauncher private constructor(
-    private val manager: VirtualActivityRecordManager
+    private val manager: VirtualActivityRecordManager,
+    private val prepare: (EngineActivityLaunchCommitRequest) -> EngineActivityLaunchCommitResult?
 ) {
-    constructor() : this(EngineHostedProcessRuntimeDefaults.activityRecordManager)
+    constructor() : this(
+        manager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+        prepare = EngineRuntimeIpcClients::prepareActivityLaunch
+    )
 
     internal constructor(
         manager: VirtualActivityRecordManager,
+        prepare: (EngineActivityLaunchCommitRequest) -> EngineActivityLaunchCommitResult?,
         @Suppress("UNUSED_PARAMETER") marker: EngineActivityRuntimeInternal = EngineActivityRuntimeInternal
-    ) : this(manager)
+    ) : this(manager, prepare)
 
     fun launchGuestLauncher(request: EngineActivityLaunchRequest): Result<VirtualActivityRecord> {
         val identity = request.launchIdentity
@@ -307,20 +313,55 @@ class EngineActivityProxyLauncher private constructor(
             ),
             activityRecordManager = manager
         )
-        return activityManager.launchGuestLauncher(
-            instanceId = request.instanceId,
-            originPackageName = request.originPackageName,
-            guestActivityClassName = request.guestActivityClassName,
-            launchMode = request.launchMode,
-            taskAffinity = request.taskAffinity,
-            engineLaunchIdentity = identity.toLoaderIdentity()
-        )
+        val sourceIntent = Intent().apply {
+            action = request.launchAction
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val snapshot = manager.snapshotState()
+        return runCatching {
+            val record = activityManager.allocateGuestActivity(
+                VirtualActivityLaunchRequest(
+                    instanceId = request.instanceId,
+                    originPackageName = request.originPackageName,
+                    guestActivityClassName = request.guestActivityClassName,
+                    sourceIntent = sourceIntent,
+                    reason = "engine_foreground_launcher",
+                    launchMode = request.launchMode,
+                    taskAffinity = request.taskAffinity
+                )
+            )
+            val prepared = prepare(
+                EngineActivityLaunchCommitRequest(
+                    identity = identity,
+                    record = record,
+                    intentFlags = sourceIntent.flags,
+                    dataIntent = VirtualIntentSnapshot(
+                        flags = sourceIntent.flags,
+                        action = sourceIntent.action
+                    )
+                )
+            )
+            check(prepared?.accepted == true) {
+                "engine_activity_launch_prepare_failed:${prepared?.reason.orEmpty()}"
+            }
+            val proxyIntent = activityManager.createProxyIntent(
+                record = record,
+                sourceIntent = sourceIntent,
+                forceNewTask = true,
+                engineLaunchIdentity = identity.toLoaderIdentity()
+            ).putExtra(VirtualActivityManager.EXTRA_ORIGINAL_GUEST_INTENT, Intent(sourceIntent))
+            request.hostContext.startActivity(proxyIntent)
+            prepared.activity ?: record
+        }.onFailure {
+            manager.restoreState(snapshot)
+        }
     }
 }
 
 data class EngineProxyActivityObservation(
     val recordFound: Boolean,
     val recordRecovered: Boolean,
+    val record: VirtualActivityRecord? = null,
     val pendingNewIntent: VirtualActivityPendingNewIntent?,
     val result: VirtualActivityResult?,
     val taskId: Int = 0,
@@ -354,6 +395,7 @@ class EngineProxyActivityRecords private constructor(
             return EngineProxyActivityObservation(
                 recordFound = false,
                 recordRecovered = false,
+                record = null,
                 pendingNewIntent = null,
                 result = null
             )
@@ -364,6 +406,7 @@ class EngineProxyActivityRecords private constructor(
         return EngineProxyActivityObservation(
             recordFound = existingRecord != null,
             recordRecovered = existingRecord == null && recoveredRecord != null,
+            record = observedRecord,
             pendingNewIntent = observedRecord?.pendingNewIntents?.firstOrNull(),
             result = observedRecord?.result,
             taskId = observedRecord?.taskId ?: 0,

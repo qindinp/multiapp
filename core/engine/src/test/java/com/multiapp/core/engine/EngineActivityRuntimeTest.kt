@@ -221,7 +221,7 @@ class EngineActivityRuntimeTest {
         val classNames = EngineProxyActivitySlots.classNames(hostPackageName)
         val launchModes = EngineProxyActivitySlots.launchModeByClassName(hostPackageName)
 
-        assertEquals(24, classNames.size)
+        assertEquals(72, classNames.size)
         assertEquals("com.multiapp.app.container.ProxyActivity0", classNames.first())
         assertEquals(null, launchModes["com.multiapp.app.container.ProxyActivity0"])
         assertEquals("singleTop", launchModes["com.multiapp.app.container.ProxyActivitySingleTop0"])

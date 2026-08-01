@@ -22,6 +22,8 @@ import com.multiapp.core.model.installer.ComponentInfo
 import com.multiapp.core.model.installer.ImportResult
 import com.multiapp.core.model.installer.InstallRecord
 import com.multiapp.core.model.installer.VirtualInstallService
+import com.multiapp.core.model.virtual.FileBackedProxyActivitySlotAssignmentStore
+import com.multiapp.core.model.virtual.ProxyActivitySlotKey
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityState
 import com.multiapp.core.model.virtual.VirtualTaskRecord
@@ -98,6 +100,9 @@ class DefaultVirtualizationEngineTest {
         assertEquals(EngineProfile.BASELINE, launches.single().profile)
         assertEquals(EngineEvidenceMode.DEFAULT, launches.single().evidenceMode)
         assertEquals("com.test.app.MainActivity", launches.single().guestActivityClassName)
+        assertEquals(true, result.runtime?.packageSnapshot?.debuggable)
+        assertEquals("android.uid.shared", result.runtime?.packageSnapshot?.sharedUserId)
+        assertEquals(0x7f01_0203, result.runtime?.packageSnapshot?.sharedUserLabel)
         assertEquals(result.runtime?.runtimeEpoch, launches.single().runtimeEpoch)
         assertEquals(result.runtime?.engineSessionId, launches.single().engineSessionId)
         assertEquals(EngineProcessBootstrapState.READY, launches.single().bootstrapState)
@@ -108,6 +113,13 @@ class DefaultVirtualizationEngineTest {
         assertEquals("engine-evidence-1", registry.evidence(instance.instanceId).entries["engineSessionId"])
         assertEquals("PREWARMED", registry.evidence(instance.instanceId).entries["runtimeState"])
         assertEquals("PASS", registry.evidence(instance.instanceId).entries["virtualSystemServerStatus"])
+        assertEquals(
+            "PROXY_LAUNCH_RETURNED",
+            registry.evidence(instance.instanceId)
+                .operationEntries("activity", "foreground-launch")
+                .last()
+                .entries["stage"]
+        )
         assertEquals(
             "BASELINE",
             registry.evidence(instance.instanceId)
@@ -593,6 +605,11 @@ class DefaultVirtualizationEngineTest {
         assertEquals(EngineResultStatus.PARTIAL, report.status)
         assertEquals(
             listOf(
+                "activity:foreground-launch:PASS",
+                "activity:foreground-launch:PASS",
+                "activity:foreground-launch:PASS",
+                "activity:foreground-launch:PASS",
+                "activity:foreground-launch:PASS",
                 "activity:task-state:PASS",
                 "app-ops:runtime-state:PARTIAL",
                 "broadcast:runtime-state:PARTIAL",
@@ -780,6 +797,45 @@ class DefaultVirtualizationEngineTest {
         assertEquals(second.dataRoot, secondRebuiltRuntime.dataRoot)
     }
 
+    @Test
+    fun `launch reconciles stale proxy activity slots for deleted instances`(@TempDir tempDir: File) {
+        val active = instance(instanceId = "instance-active")
+        val staleKey = ProxyActivitySlotKey(
+            instanceId = "instance-deleted",
+            launchMode = "singleTop",
+            taskKey = "com.test.app:instance-deleted"
+        )
+        val proxySlotStore = FileBackedProxyActivitySlotAssignmentStore(
+            File(tempDir, "proxy_activity_slots.properties")
+        )
+        proxySlotStore.save(
+            staleKey,
+            EngineProxyActivitySlots.classNamesForProcessSlot(
+                hostPackageName = "com.multiapp.app",
+                processSlot = "com.multiapp.app:v2",
+                launchMode = "singleTop"
+            ).first()
+        )
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(active),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { },
+            processBootstrapper = readyBootstrapper(),
+            systemServerFactory = { registry ->
+                DefaultVirtualSystemServer(
+                    registry = registry,
+                    proxyActivitySlotAssignmentStore = proxySlotStore
+                )
+            }
+        )
+
+        val result = engine.launchInstance(LaunchInstanceRequest(instanceId = active.instanceId))
+
+        assertEquals(EngineResultStatus.PASS, result.status)
+        assertNull(proxySlotStore.find(staleKey))
+    }
+
     private fun instance(instanceId: String = "instance-1") = VirtualInstanceRecord(
         instanceId = instanceId,
         originPackageName = "com.test.app",
@@ -830,6 +886,9 @@ class DefaultVirtualizationEngineTest {
         activities = activities,
         providers = providers,
         permissions = permissions,
+        debuggable = true,
+        sharedUserId = "android.uid.shared",
+        sharedUserLabel = 0x7f01_0203,
         installTimeMs = 1L
     )
 

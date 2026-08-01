@@ -58,6 +58,9 @@ class EngineRuntimeStateStoreTest {
         assertEquals(runtime.packageSnapshot.services, restored?.packageSnapshot?.services)
         assertEquals(runtime.packageSnapshot.receivers, restored?.packageSnapshot?.receivers)
         assertEquals(runtime.packageSnapshot.providers, restored?.packageSnapshot?.providers)
+        assertEquals(runtime.packageSnapshot.debuggable, restored?.packageSnapshot?.debuggable)
+        assertEquals(runtime.packageSnapshot.sharedUserId, restored?.packageSnapshot?.sharedUserId)
+        assertEquals(runtime.packageSnapshot.sharedUserLabel, restored?.packageSnapshot?.sharedUserLabel)
     }
 
     @Test
@@ -375,6 +378,9 @@ class EngineRuntimeStateStoreTest {
                 )
             ),
             permissions = listOf("android.permission.INTERNET"),
+            debuggable = true,
+            sharedUserId = "android.uid.shared",
+            sharedUserLabel = 0x7f01_0203,
             originCertSha256 = "cert-sha",
             signerSha256Digests = listOf("old-cert-sha", "cert-sha"),
             hasMultipleSigners = false

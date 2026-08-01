@@ -20,6 +20,8 @@ data class EnginePermissionGrantRecord(
     val permissionName: String,
     val granted: Boolean,
     val source: EnginePermissionGrantSource,
+    val flags: Int = 0,
+    val oneTime: Boolean = false,
     val updatedAtMs: Long = System.currentTimeMillis()
 ) {
     init {
@@ -115,6 +117,8 @@ class FileBackedEnginePermissionGrantStore(
                     source = EnginePermissionGrantSource.valueOf(
                         properties.required(prefix + SOURCE)
                     ),
+                    flags = properties.getProperty(prefix + FLAGS)?.toIntOrNull() ?: 0,
+                    oneTime = properties.getProperty(prefix + ONE_TIME)?.toBooleanStrictOrNull() ?: false,
                     updatedAtMs = properties.required(prefix + UPDATED_AT_MS).toLong()
                 )
             }.getOrNull()
@@ -136,6 +140,8 @@ class FileBackedEnginePermissionGrantStore(
                 setProperty(prefix + PERMISSION_NAME, record.permissionName)
                 setProperty(prefix + GRANTED, record.granted.toString())
                 setProperty(prefix + SOURCE, record.source.name)
+                setProperty(prefix + FLAGS, record.flags.toString())
+                setProperty(prefix + ONE_TIME, record.oneTime.toString())
                 setProperty(prefix + UPDATED_AT_MS, record.updatedAtMs.toString())
             }
         }
@@ -176,6 +182,8 @@ class FileBackedEnginePermissionGrantStore(
         const val PERMISSION_NAME = "permissionName"
         const val GRANTED = "granted"
         const val SOURCE = "source"
+        const val FLAGS = "flags"
+        const val ONE_TIME = "oneTime"
         const val UPDATED_AT_MS = "updatedAtMs"
         val FILE_MONITORS = ConcurrentHashMap<String, Any>()
     }

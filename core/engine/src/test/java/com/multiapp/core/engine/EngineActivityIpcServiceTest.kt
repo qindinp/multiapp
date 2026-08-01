@@ -135,6 +135,30 @@ class EngineActivityIpcServiceTest {
     }
 
     @Test
+    fun `finish result mutation accepts the authoritative source Activity token`() {
+        val remote = operationResult(
+            operation = EngineActivityIpcOperation.RECORD_FINISH_RESULT,
+            token = "source-token",
+            message = "activity_finish_result_persisted"
+        ).copy(requestCode = 4242, resultCode = -1)
+        val service = IpcBackedVirtualActivityService(
+            remoteMutation = { _, _ -> remote },
+            authorityConnected = { true }
+        )
+
+        val actual = service.recordActivityResultForFinish(
+            instanceId = "instance-1",
+            token = "child-token",
+            resultCode = -1,
+            dataIntent = VirtualIntentSnapshot(action = "test.RESULT")
+        )
+
+        assertSame(remote, actual)
+        assertEquals("source-token", actual.token)
+        assertEquals(4242, actual.requestCode)
+    }
+
+    @Test
     fun `connected authority fails closed for invalid Activity mutation response`() {
         val fallback = mockk<VirtualActivityService>(relaxed = true)
         val service = IpcBackedVirtualActivityService(
@@ -476,13 +500,14 @@ class EngineActivityIpcServiceTest {
 
     private fun operationResult(
         operation: EngineActivityIpcOperation,
+        token: String = "token-1",
         state: VirtualActivityState? = null,
         message: String
     ) = VirtualActivityOperationResult(
         instanceId = "instance-1",
         operation = operation.wireName,
         verdict = EngineResultStatus.PASS,
-        token = "token-1",
+        token = token,
         state = state,
         message = message
     )

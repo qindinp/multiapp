@@ -22,6 +22,14 @@ data class VirtualPermissionRuntimeState(
     val message: String
 )
 
+object EnginePermissionFlags {
+    const val FLAG_USER_SET = 1
+    const val FLAG_USER_FIXED = 2
+    const val FLAG_GRANTED_BY_DEFAULT = 4
+    const val FLAG_ONE_TIME = 8
+    const val FLAG_AUTO_RESET = 16
+}
+
 interface VirtualPermissionService : VirtualRuntimeBoundSubsystemService {
     fun checkPermission(instanceId: String, permissionName: String): VirtualPermissionCheckResult
     fun setPermissionGrant(
@@ -33,6 +41,18 @@ interface VirtualPermissionService : VirtualRuntimeBoundSubsystemService {
 
     fun clearPermissionGrant(instanceId: String, permissionName: String? = null): Int
     fun queryRuntimeState(instanceId: String): VirtualPermissionRuntimeState
+    fun setPermissionGrantWithFlags(
+        instanceId: String,
+        permissionName: String,
+        granted: Boolean,
+        source: EnginePermissionGrantSource,
+        flags: Int,
+        oneTime: Boolean = false
+    ): VirtualPermissionCheckResult = setPermissionGrant(instanceId, permissionName, granted, source)
+    fun consumeOneTimePermission(
+        instanceId: String,
+        permissionName: String
+    ): VirtualPermissionCheckResult = checkPermission(instanceId, permissionName)
 }
 
 internal class RegistryBackedVirtualPermissionService(
@@ -45,12 +65,12 @@ internal class RegistryBackedVirtualPermissionService(
         "check-permission",
         "persistent-instance-grant",
         "explicit-grant",
-        "explicit-revoke"
+        "explicit-revoke",
+        "permission-flags",
+        "one-time-permission"
     ),
     unsupportedOperations = setOf(
         "runtime-permission-dialog",
-        "permission-flags",
-        "one-time-permission",
         "auto-reset",
         "shared-uid-permission"
     )
@@ -163,6 +183,117 @@ internal class RegistryBackedVirtualPermissionService(
                 recordEvidence(it, if (granted) "grant" else "revoke")
             }
         }
+    }
+
+    override fun setPermissionGrantWithFlags(
+        instanceId: String,
+        permissionName: String,
+        granted: Boolean,
+        source: EnginePermissionGrantSource,
+        flags: Int,
+        oneTime: Boolean
+    ): VirtualPermissionCheckResult {
+        val runtime = runtimeService.get(instanceId)
+            ?: return result(
+                instanceId,
+                permissionName.ifBlank { "invalid" },
+                EngineResultStatus.FAIL,
+                requested = false,
+                granted = false,
+                explicit = false,
+                message = "runtime_not_found:$instanceId"
+            )
+        if (permissionName.isBlank() || permissionName !in runtime.packageSnapshot.permissions) {
+            return checkPermission(runtime.instanceId, permissionName)
+        }
+        val record = stateStore.set(
+            EnginePermissionGrantRecord(
+                instanceId = runtime.instanceId,
+                permissionName = permissionName,
+                granted = granted,
+                source = source,
+                flags = flags,
+                oneTime = oneTime
+            )
+        )
+        return result(
+            runtime.instanceId,
+            permissionName,
+            verdict = if (record.granted) EngineResultStatus.PASS else EngineResultStatus.FAIL,
+            requested = true,
+            granted = record.granted,
+            explicit = true,
+            source = record.source,
+            message = if (record.granted) {
+                "permission_grant_with_flags_persisted:$permissionName:flags=$flags:oneTime=$oneTime"
+            } else {
+                "permission_revoke_with_flags_persisted:$permissionName:flags=$flags"
+            }
+        ).also {
+            if (source != EnginePermissionGrantSource.SOURCE_APP_MIRROR) {
+                recordEvidence(it, if (granted) "grant-with-flags" else "revoke-with-flags")
+            }
+        }
+    }
+
+    override fun consumeOneTimePermission(
+        instanceId: String,
+        permissionName: String
+    ): VirtualPermissionCheckResult {
+        val runtime = runtimeService.get(instanceId)
+            ?: return result(
+                instanceId,
+                permissionName,
+                EngineResultStatus.FAIL,
+                requested = false,
+                granted = false,
+                explicit = false,
+                message = "runtime_not_found:$instanceId"
+            )
+        val record = stateStore.get(runtime.instanceId, permissionName)
+            ?: return result(
+                runtime.instanceId,
+                permissionName,
+                EngineResultStatus.UNSUPPORTED,
+                requested = true,
+                granted = false,
+                explicit = false,
+                message = "permission_grant_state_unknown:$permissionName"
+            )
+        if (!record.oneTime || !record.granted) {
+            return result(
+                runtime.instanceId,
+                permissionName,
+                verdict = if (record.granted) EngineResultStatus.PASS else EngineResultStatus.FAIL,
+                requested = true,
+                granted = record.granted,
+                explicit = true,
+                source = record.source,
+                message = "permission_not_one_time_or_not_granted:$permissionName"
+            )
+        }
+        // Revoke the one-time permission after consumption
+        stateStore.set(
+            EnginePermissionGrantRecord(
+                instanceId = runtime.instanceId,
+                permissionName = permissionName,
+                granted = false,
+                source = record.source,
+                flags = record.flags,
+                oneTime = false,
+                updatedAtMs = System.currentTimeMillis()
+            )
+        )
+        return result(
+            runtime.instanceId,
+            permissionName,
+            verdict = EngineResultStatus.PASS,
+            requested = true,
+            granted = true,
+            explicit = true,
+            source = record.source,
+            message = "one_time_permission_consumed:$permissionName"
+        ).also { recordEvidence(it, "consume-one-time") }
     }
 
     override fun clearPermissionGrant(instanceId: String, permissionName: String?): Int {

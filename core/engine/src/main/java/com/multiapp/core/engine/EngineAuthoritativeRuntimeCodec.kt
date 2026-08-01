@@ -391,6 +391,9 @@ private fun VirtualPackageSnapshot.toBundle(bundleFactory: () -> Bundle): Bundle
     putString(RuntimeCodecKeys.ORIGIN_CERT_SHA256, originCertSha256)
     putStringArrayList(RuntimeCodecKeys.SIGNER_SHA256_DIGESTS, ArrayList(signerSha256Digests))
     putBoolean(RuntimeCodecKeys.HAS_MULTIPLE_SIGNERS, hasMultipleSigners)
+    putBoolean(RuntimeCodecKeys.DEBUGGABLE, debuggable)
+    putString(RuntimeCodecKeys.SHARED_USER_ID, sharedUserId)
+    putInt(RuntimeCodecKeys.SHARED_USER_LABEL, sharedUserLabel)
 }
 
 private fun Bundle.toPackageSnapshotOrNull(): VirtualPackageSnapshot? = runCatching {
@@ -437,7 +440,10 @@ private fun Bundle.toPackageSnapshotOrNull(): VirtualPackageSnapshot? = runCatch
         permissions = boundedStringList(RuntimeCodecKeys.PERMISSIONS, MAX_PERMISSION_COUNT),
         originCertSha256 = optionalBoundedString(RuntimeCodecKeys.ORIGIN_CERT_SHA256),
         signerSha256Digests = boundedStringList(RuntimeCodecKeys.SIGNER_SHA256_DIGESTS, MAX_SIGNER_COUNT),
-        hasMultipleSigners = getBoolean(RuntimeCodecKeys.HAS_MULTIPLE_SIGNERS)
+        hasMultipleSigners = getBoolean(RuntimeCodecKeys.HAS_MULTIPLE_SIGNERS),
+        debuggable = getBoolean(RuntimeCodecKeys.DEBUGGABLE),
+        sharedUserId = optionalBoundedString(RuntimeCodecKeys.SHARED_USER_ID),
+        sharedUserLabel = getInt(RuntimeCodecKeys.SHARED_USER_LABEL)
     )
     check(snapshot.activities.hasUniqueComponentNames())
     check(snapshot.services.hasUniqueComponentNames())
@@ -892,6 +898,9 @@ private object RuntimeCodecKeys {
     const val ORIGIN_CERT_SHA256 = "originCertSha256"
     const val SIGNER_SHA256_DIGESTS = "signerSha256Digests"
     const val HAS_MULTIPLE_SIGNERS = "hasMultipleSigners"
+    const val DEBUGGABLE = "debuggable"
+    const val SHARED_USER_ID = "sharedUserId"
+    const val SHARED_USER_LABEL = "sharedUserLabel"
     const val COUNT = "count"
     const val NAME = "name"
     const val EXPORTED = "exported"
@@ -987,7 +996,10 @@ private val PACKAGE_FIELDS = setOf(
     RuntimeCodecKeys.PERMISSIONS,
     RuntimeCodecKeys.ORIGIN_CERT_SHA256,
     RuntimeCodecKeys.SIGNER_SHA256_DIGESTS,
-    RuntimeCodecKeys.HAS_MULTIPLE_SIGNERS
+    RuntimeCodecKeys.HAS_MULTIPLE_SIGNERS,
+    RuntimeCodecKeys.DEBUGGABLE,
+    RuntimeCodecKeys.SHARED_USER_ID,
+    RuntimeCodecKeys.SHARED_USER_LABEL
 )
 
 private val COMPONENT_FIELDS = setOf(

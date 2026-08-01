@@ -19,6 +19,9 @@ import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
 import com.multiapp.core.model.instance.CompatibilityMode
+import com.multiapp.core.model.instance.IconPolicy
+import com.multiapp.core.model.instance.InstanceState
+import com.multiapp.core.model.instance.VirtualInstanceRecord
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -70,6 +73,7 @@ internal fun LaunchInstanceRequest.toEngineIpcBundle(
     putString(EngineRuntimeIpcContract.KEY_REASON, reason)
     putString(EngineRuntimeIpcContract.KEY_TARGET_PACKAGE_NAME, targetComponentClassName)
     putInt(EngineRuntimeIpcContract.KEY_LAUNCH_FLAGS, launchFlags)
+    putString(EngineRuntimeIpcContract.KEY_ACTION, launchAction)
     putString(KEY_TASK_POLICY, taskPolicy.name)
     putString(KEY_PREWARM_POLICY, prewarmPolicy.name)
     putString(KEY_EVIDENCE_MODE, evidenceMode.name)
@@ -87,6 +91,7 @@ internal fun Bundle.toLaunchInstanceRequestOrNull(): LaunchInstanceRequest? = ru
             EngineRuntimeIpcContract.KEY_TARGET_PACKAGE_NAME
         ),
         launchFlags = getInt(EngineRuntimeIpcContract.KEY_LAUNCH_FLAGS),
+        launchAction = optionalNonBlankString(EngineRuntimeIpcContract.KEY_ACTION),
         taskPolicy = requiredEnum(KEY_TASK_POLICY),
         prewarmPolicy = requiredEnum(KEY_PREWARM_POLICY),
         evidenceMode = requiredEnum(KEY_EVIDENCE_MODE)
@@ -134,6 +139,9 @@ internal fun EnginePackageInstallRequest.toEngineIpcBundle(
     putStringArrayList(KEY_SPLIT_PUBLIC_SOURCE_DIRS, ArrayList(splitPublicSourceDirs))
     putStringArrayList(KEY_SPLIT_NAMES, ArrayList(splitNames))
     putBoolean(KEY_ISOLATED_SPLITS, isolatedSplits)
+    putBoolean(KEY_DEBUGGABLE, debuggable)
+    putString(KEY_SHARED_USER_ID, sharedUserId)
+    putInt(KEY_SHARED_USER_LABEL, sharedUserLabel)
 }
 
 internal fun Bundle.toEnginePackageInstallRequestOrNull(): EnginePackageInstallRequest? = runCatching {
@@ -155,7 +163,10 @@ internal fun Bundle.toEnginePackageInstallRequestOrNull(): EnginePackageInstallR
         splitApkPaths = stringList(KEY_SPLIT_APK_PATHS),
         splitPublicSourceDirs = stringList(KEY_SPLIT_PUBLIC_SOURCE_DIRS),
         splitNames = stringList(KEY_SPLIT_NAMES),
-        isolatedSplits = getBoolean(KEY_ISOLATED_SPLITS)
+        isolatedSplits = getBoolean(KEY_ISOLATED_SPLITS),
+        debuggable = getBoolean(KEY_DEBUGGABLE),
+        sharedUserId = optionalNonBlankString(KEY_SHARED_USER_ID),
+        sharedUserLabel = getInt(KEY_SHARED_USER_LABEL)
     )
 }.getOrNull()
 
@@ -358,6 +369,83 @@ internal fun engineMissingRuntimeBundle(instanceId: String): Bundle = Bundle().a
     putString(EngineRuntimeIpcContract.KEY_REASON, "runtime_not_found")
 }
 
+internal fun emptyInstanceListBundle(): Bundle = emptyList<VirtualInstanceRecord>().toInstanceListBundle()
+
+internal fun List<VirtualInstanceRecord>.toInstanceListBundle(
+    bundleFactory: () -> Bundle = ::Bundle
+): Bundle = bundleFactory().apply {
+    putInt(KEY_INSTANCE_LIST_SCHEMA_VERSION, INSTANCE_LIST_SCHEMA_VERSION)
+    putInt(KEY_INSTANCE_COUNT, size)
+    this@toInstanceListBundle.forEachIndexed { index, record ->
+        putBundle(instanceKey(index), record.toInstanceRecordBundle(bundleFactory))
+    }
+}
+
+internal fun Bundle.toInstanceListOrNull(): List<VirtualInstanceRecord>? = runCatching {
+    check(getInt(KEY_INSTANCE_LIST_SCHEMA_VERSION, -1) == INSTANCE_LIST_SCHEMA_VERSION)
+    val count = getInt(KEY_INSTANCE_COUNT, -1)
+    check(count in 0..MAX_INSTANCE_LIST_SIZE)
+    val expectedKeys = buildSet {
+        add(KEY_INSTANCE_LIST_SCHEMA_VERSION)
+        add(KEY_INSTANCE_COUNT)
+        repeat(count) { index -> add(instanceKey(index)) }
+    }
+    check(keySet() == expectedKeys)
+    val records = (0 until count).map { index ->
+        getBundle(instanceKey(index))?.toInstanceRecordOrNull()
+            ?: error("missing instance record $index")
+    }
+    check(records.map(VirtualInstanceRecord::instanceId).distinct().size == records.size)
+    records
+}.getOrNull()
+
+private fun VirtualInstanceRecord.toInstanceRecordBundle(
+    bundleFactory: () -> Bundle
+): Bundle = bundleFactory().apply {
+    putInt(KEY_RECORD_SCHEMA_VERSION, schemaVersion)
+    putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
+    putString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME, originPackageName)
+    putString(EngineRuntimeIpcContract.KEY_VIRTUAL_PACKAGE_NAME, virtualPackageName)
+    putString(KEY_DISPLAY_NAME, displayName)
+    putString(KEY_ICON_POLICY, iconPolicy.name)
+    putString(KEY_DATA_ROOT, dataRoot)
+    putString(KEY_COMPATIBILITY_MODE, compatibilityMode.name)
+    putString(KEY_PROTECTED_BASELINE_POLICY, protectedBaselinePolicy)
+    putLong(KEY_CREATED_AT_MS, createdAtMs)
+    putLong(KEY_UPDATED_AT_MS, updatedAtMs)
+    lastLaunchAtMs?.let { putLong(KEY_LAST_LAUNCH_AT_MS, it) }
+    putInt(KEY_LAUNCH_COUNT, launchCount)
+    putString(KEY_INSTANCE_STATE, state.name)
+    putString(KEY_CREATION_REQUEST_ID, creationRequestId)
+    putString(KEY_CREATION_REQUEST_FINGERPRINT, creationRequestFingerprint)
+}
+
+private fun Bundle.toInstanceRecordOrNull(): VirtualInstanceRecord? = runCatching {
+    check(keySet() == INSTANCE_RECORD_KEYS || keySet() == INSTANCE_RECORD_KEYS_WITH_LAST_LAUNCH)
+    VirtualInstanceRecord(
+        schemaVersion = getInt(KEY_RECORD_SCHEMA_VERSION, -1).also { check(it > 0) },
+        instanceId = requiredString(EngineRuntimeIpcContract.KEY_INSTANCE_ID),
+        originPackageName = requiredString(EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME),
+        virtualPackageName = requiredString(EngineRuntimeIpcContract.KEY_VIRTUAL_PACKAGE_NAME),
+        displayName = requiredString(KEY_DISPLAY_NAME),
+        iconPolicy = requiredEnum(KEY_ICON_POLICY),
+        dataRoot = requiredString(KEY_DATA_ROOT),
+        compatibilityMode = requiredEnum(KEY_COMPATIBILITY_MODE),
+        protectedBaselinePolicy = requiredString(KEY_PROTECTED_BASELINE_POLICY),
+        createdAtMs = getLong(KEY_CREATED_AT_MS, -1L).also { check(it >= 0L) },
+        updatedAtMs = getLong(KEY_UPDATED_AT_MS, -1L).also { check(it >= 0L) },
+        lastLaunchAtMs = getLong(KEY_LAST_LAUNCH_AT_MS)
+            .takeIf { containsKey(KEY_LAST_LAUNCH_AT_MS) }
+            ?.also { check(it >= 0L) },
+        launchCount = getInt(KEY_LAUNCH_COUNT, -1).also { check(it >= 0) },
+        state = requiredEnum(KEY_INSTANCE_STATE),
+        creationRequestId = optionalNonBlankString(KEY_CREATION_REQUEST_ID),
+        creationRequestFingerprint = optionalNonBlankString(KEY_CREATION_REQUEST_FINGERPRINT)
+    )
+}.getOrNull()
+
+private fun instanceKey(index: Int): String = "instance.$index"
+
 private fun EngineOperationEvidence.toEngineEvidenceEntryBundle(
     bundleFactory: () -> Bundle
 ): Bundle = bundleFactory().apply {
@@ -404,6 +492,7 @@ private inline fun <reified T : Enum<T>> Bundle.requiredEnum(key: String): T =
     enumValueOf(requiredString(key))
 
 internal interface EngineVirtualizationRemote {
+    fun listInstances(): List<VirtualInstanceRecord>? = null
     fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult?
     fun refreshPackage(request: EnginePackageInstallRequest): EngineRemoteResult? = null
     fun createInstance(originPackageName: String): EngineRemoteResult?
@@ -419,6 +508,9 @@ internal interface EngineVirtualizationRemote {
 }
 
 private object BinderEngineVirtualizationRemote : EngineVirtualizationRemote {
+    override fun listInstances(): List<VirtualInstanceRecord>? =
+        EngineRuntimeIpcClients.engineListInstances()
+
     override fun installOrRefreshPackage(originPackageName: String): EngineRemoteResult? =
         EngineRuntimeIpcClients.engineInstallOrRefreshPackage(originPackageName)
 
@@ -491,11 +583,16 @@ class IpcVirtualizationEngine @Inject constructor(
         core.queryCapabilities(instanceId)
 
     override fun exportEvidence(instanceId: String): EngineEvidenceReport = core.exportEvidence(instanceId)
+
+    override fun listInstances(): List<VirtualInstanceRecord> = core.listInstances()
 }
 
 internal class IpcVirtualizationEngineCore(
     private val remote: EngineVirtualizationRemote
 ) : VirtualizationEngine {
+    override fun listInstances(): List<VirtualInstanceRecord> =
+        runCatching(remote::listInstances).getOrNull().orEmpty()
+
     override fun installOrRefreshPackage(originPackageName: String): EngineResult =
         complete(
             operation = "installOrRefreshPackage",
@@ -665,3 +762,37 @@ private const val KEY_SPLIT_APK_PATHS = "splitApkPaths"
 private const val KEY_SPLIT_PUBLIC_SOURCE_DIRS = "splitPublicSourceDirs"
 private const val KEY_SPLIT_NAMES = "splitNames"
 private const val KEY_ISOLATED_SPLITS = "isolatedSplits"
+private const val KEY_DEBUGGABLE = "debuggable"
+private const val KEY_SHARED_USER_ID = "sharedUserId"
+private const val KEY_SHARED_USER_LABEL = "sharedUserLabel"
+private const val KEY_INSTANCE_LIST_SCHEMA_VERSION = "instanceListSchemaVersion"
+private const val KEY_INSTANCE_COUNT = "instanceCount"
+private const val KEY_RECORD_SCHEMA_VERSION = "recordSchemaVersion"
+private const val KEY_ICON_POLICY = "iconPolicy"
+private const val KEY_PROTECTED_BASELINE_POLICY = "protectedBaselinePolicy"
+private const val KEY_CREATED_AT_MS = "createdAtMs"
+private const val KEY_UPDATED_AT_MS = "updatedAtMs"
+private const val KEY_LAST_LAUNCH_AT_MS = "lastLaunchAtMs"
+private const val KEY_LAUNCH_COUNT = "launchCount"
+private const val KEY_INSTANCE_STATE = "instanceState"
+private const val KEY_CREATION_REQUEST_FINGERPRINT = "creationRequestFingerprint"
+private const val INSTANCE_LIST_SCHEMA_VERSION = 1
+private const val MAX_INSTANCE_LIST_SIZE = 10_000
+private val INSTANCE_RECORD_KEYS = setOf(
+    KEY_RECORD_SCHEMA_VERSION,
+    EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+    EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME,
+    EngineRuntimeIpcContract.KEY_VIRTUAL_PACKAGE_NAME,
+    KEY_DISPLAY_NAME,
+    KEY_ICON_POLICY,
+    KEY_DATA_ROOT,
+    KEY_COMPATIBILITY_MODE,
+    KEY_PROTECTED_BASELINE_POLICY,
+    KEY_CREATED_AT_MS,
+    KEY_UPDATED_AT_MS,
+    KEY_LAUNCH_COUNT,
+    KEY_INSTANCE_STATE,
+    KEY_CREATION_REQUEST_ID,
+    KEY_CREATION_REQUEST_FINGERPRINT
+)
+private val INSTANCE_RECORD_KEYS_WITH_LAST_LAUNCH = INSTANCE_RECORD_KEYS + KEY_LAST_LAUNCH_AT_MS

@@ -69,7 +69,10 @@ data class EngineRuntimeStateRecord(
     val signerSha256Digests: List<String> = emptyList(),
     val hasMultipleSigners: Boolean = false,
     val sourceSha256: String? = null,
-    val splitSha256s: List<String> = emptyList()
+    val splitSha256s: List<String> = emptyList(),
+    val debuggable: Boolean = false,
+    val sharedUserId: String? = null,
+    val sharedUserLabel: Int = 0
 ) {
     fun toRuntime(): VirtualInstanceRuntime {
         val snapshot = VirtualPackageSnapshot(
@@ -105,7 +108,10 @@ data class EngineRuntimeStateRecord(
             permissions = permissions,
             originCertSha256 = originCertSha256,
             signerSha256Digests = signerSha256Digests,
-            hasMultipleSigners = hasMultipleSigners
+            hasMultipleSigners = hasMultipleSigners,
+            debuggable = debuggable,
+            sharedUserId = sharedUserId,
+            sharedUserLabel = sharedUserLabel
         )
         return VirtualInstanceRuntime(
             instanceId = instanceId,
@@ -173,7 +179,10 @@ data class EngineRuntimeStateRecord(
                 signerSha256Digests = snapshot.signerSha256Digests,
                 hasMultipleSigners = snapshot.hasMultipleSigners,
                 sourceSha256 = snapshot.sourceSha256,
-                splitSha256s = snapshot.splitSha256s
+                splitSha256s = snapshot.splitSha256s,
+                debuggable = snapshot.debuggable,
+                sharedUserId = snapshot.sharedUserId,
+                sharedUserLabel = snapshot.sharedUserLabel
             )
         }
     }
@@ -408,6 +417,9 @@ class FileBackedEngineRuntimeStateStore(
             record.originCertSha256?.let { properties.setProperty(prefix + ORIGIN_CERT_SHA256, it) }
             properties.setProperty(prefix + SIGNER_SHA256_DIGESTS, record.signerSha256Digests.encodeStringList())
             properties.setProperty(prefix + HAS_MULTIPLE_SIGNERS, record.hasMultipleSigners.toString())
+            properties.setProperty(prefix + DEBUGGABLE, record.debuggable.toString())
+            record.sharedUserId?.let { properties.setProperty(prefix + SHARED_USER_ID, it) }
+            properties.setProperty(prefix + SHARED_USER_LABEL, record.sharedUserLabel.toString())
         }
         val tempFile = tempFile()
         try {
@@ -541,7 +553,10 @@ class FileBackedEngineRuntimeStateStore(
                 originCertSha256 = properties.getProperty(prefix + ORIGIN_CERT_SHA256)
                     .normalizedOptionalManifestValue(),
                 signerSha256Digests = properties.getProperty(prefix + SIGNER_SHA256_DIGESTS).decodeStringList(),
-                hasMultipleSigners = properties.getProperty(prefix + HAS_MULTIPLE_SIGNERS).toBoolean()
+                hasMultipleSigners = properties.getProperty(prefix + HAS_MULTIPLE_SIGNERS).toBoolean(),
+                debuggable = properties.getProperty(prefix + DEBUGGABLE).toBoolean(),
+                sharedUserId = properties.getProperty(prefix + SHARED_USER_ID)?.takeIf(String::isNotBlank),
+                sharedUserLabel = properties.getProperty(prefix + SHARED_USER_LABEL).orEmpty().toIntOrNull() ?: 0
             )
         }.getOrNull()
     }
@@ -888,6 +903,9 @@ class FileBackedEngineRuntimeStateStore(
         private const val ORIGIN_CERT_SHA256 = "originCertSha256"
         private const val SIGNER_SHA256_DIGESTS = "signerSha256Digests"
         private const val HAS_MULTIPLE_SIGNERS = "hasMultipleSigners"
+        private const val DEBUGGABLE = "debuggable"
+        private const val SHARED_USER_ID = "sharedUserId"
+        private const val SHARED_USER_LABEL = "sharedUserLabel"
         private const val COUNT = ".count"
         private const val MAP_KEY = "key"
         private const val MAP_VALUE = "value"

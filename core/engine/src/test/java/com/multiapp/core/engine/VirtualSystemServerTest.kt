@@ -105,7 +105,8 @@ class VirtualSystemServerTest {
 
         assertEquals(EngineSubsystem.PROVIDER, provider.subsystem)
         assertTrue("same-process-preinstall" in provider.supportedOperations)
-        assertTrue("custom-process-provider" in provider.unsupportedOperations)
+        assertTrue("custom-process-provider" in provider.supportedOperations)
+        assertTrue("external-uri-grant" in provider.unsupportedOperations)
 
         assertEquals(EngineSubsystem.PERMISSION, permission.subsystem)
         assertTrue("check-permission" in permission.supportedOperations)
@@ -113,7 +114,8 @@ class VirtualSystemServerTest {
 
         assertEquals(EngineSubsystem.APP_OPS, appOps.subsystem)
         assertTrue("check-operation" in appOps.supportedOperations)
-        assertTrue("note-operation" in appOps.unsupportedOperations)
+        assertTrue("note-operation" in appOps.supportedOperations)
+        assertFalse("note-operation" in appOps.unsupportedOperations)
 
         assertEquals(EngineSubsystem.SERVICE, service.subsystem)
         assertTrue("manifest-route-plan" in service.supportedOperations)
@@ -123,14 +125,19 @@ class VirtualSystemServerTest {
         assertTrue("on-start-command-result" in service.supportedOperations)
         assertTrue("bind-service" in service.supportedOperations)
         assertTrue("unbind-service" in service.supportedOperations)
-        assertTrue("cross-process-service" in service.unsupportedOperations)
-        assertTrue("binder-death-rebind" in service.unsupportedOperations)
+        assertTrue("cross-process-service" in service.supportedOperations)
+        assertTrue("binder-death-rebind" in service.supportedOperations)
 
         assertEquals(EngineSubsystem.BROADCAST, broadcast.subsystem)
         assertTrue("manifest-route-plan" in broadcast.supportedOperations)
         assertTrue("explicit-receiver-route" in broadcast.supportedOperations)
         assertTrue("implicit-receiver-route" in broadcast.supportedOperations)
-        assertTrue("ordered" in broadcast.unsupportedOperations)
+        assertTrue("ordered-dispatch" in broadcast.supportedOperations)
+        assertTrue("receiver-permission-filter" in broadcast.supportedOperations)
+        assertTrue("receiver-app-op" in broadcast.supportedOperations)
+        assertTrue("abort" in broadcast.supportedOperations)
+        assertTrue("result-receiver" in broadcast.supportedOperations)
+        assertTrue("sticky" in broadcast.supportedOperations)
 
         assertEquals(EngineSubsystem.STORAGE, storage.subsystem)
         assertTrue("canonical-containment" in storage.supportedOperations)
@@ -742,7 +749,7 @@ class VirtualSystemServerTest {
     }
 
     @Test
-    fun `provider service fails closed for unimplemented observer grant and notify semantics`() {
+    fun `provider service fails closed for unimplemented uri-grant control semantics`() {
         val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
         val runtime = server.runtimeService.register(
             runtime(
@@ -756,9 +763,6 @@ class VirtualSystemServerTest {
             )
         )
         val operations = linkedMapOf(
-            EngineProviderOperation.NOTIFY_CHANGE to "notify-change",
-            EngineProviderOperation.REGISTER_CONTENT_OBSERVER to "content-observer",
-            EngineProviderOperation.UNREGISTER_CONTENT_OBSERVER to "content-observer",
             EngineProviderOperation.GRANT_URI_PERMISSION to "uri-grant",
             EngineProviderOperation.REVOKE_URI_PERMISSION to "uri-grant"
         )
@@ -777,10 +781,53 @@ class VirtualSystemServerTest {
             assertEquals(EngineResultStatus.UNSUPPORTED, plan.verdict)
             assertTrue(plan.targets.isEmpty())
             assertEquals(setOf(semantic), plan.unsupportedOperations)
-            assertEquals("provider_semantics_unsupported:$semantic", plan.message)
         }
     }
 
+    @Test
+    fun `provider service allows notify-change and content-observer through plan`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(
+            runtime(
+                providers = listOf(
+                    ResolvedComponent(
+                        name = "com.test.app.DataProvider",
+                        authorities = listOf("com.test.app.provider"),
+                        grantUriPermissions = true
+                    )
+                )
+            )
+        )
+        val operations = listOf(
+            EngineProviderOperation.NOTIFY_CHANGE,
+            EngineProviderOperation.REGISTER_CONTENT_OBSERVER,
+            EngineProviderOperation.UNREGISTER_CONTENT_OBSERVER
+        )
+
+        operations.forEach { operation ->
+            val plan = server.providerService.planProvider(
+                instanceId = runtime.instanceId,
+                request = VirtualProviderDispatchPlanRequest(
+                    operation = operation,
+                    guestAuthority = "com.test.app.provider",
+                    processSlot = runtime.processSlot,
+                    routeTokenPresent = true,
+                    routeTokenVerified = true,
+                    callerInstanceId = runtime.instanceId,
+                    targetInstanceId = runtime.instanceId,
+                    callingUid = 1000,
+                    callingPid = 12345,
+                    hostUid = 1000,
+                    engineCallingUid = 1000,
+                    engineCallingPid = 12345
+                )
+            )
+
+            assertEquals(EngineResultStatus.PARTIAL, plan.verdict)
+            assertFalse("notify-change" in plan.unsupportedOperations)
+            assertFalse("content-observer" in plan.unsupportedOperations)
+        }
+    }
     @Test
     fun `provider service records engine dispatch evidence without exposing loader result types`() {
         val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
@@ -1393,9 +1440,9 @@ class VirtualSystemServerTest {
         assertEquals(EngineResultStatus.PARTIAL, plan.verdict)
         assertEquals("explicit_service_stop_route_planned", plan.message)
         assertEquals("explicitStop", plan.targets.single().reason)
-        assertTrue("cross-process-service" in plan.unsupportedOperations)
-        assertTrue("binder-death-rebind" in plan.unsupportedOperations)
-        assertTrue("sticky-restart" in plan.unsupportedOperations)
+        assertFalse("cross-process-service" in plan.unsupportedOperations)
+        assertFalse("binder-death-rebind" in plan.unsupportedOperations)
+        assertFalse("sticky-restart" in plan.unsupportedOperations)
     }
 
     @Test
@@ -1413,15 +1460,15 @@ class VirtualSystemServerTest {
             )
         )
 
-        assertEquals(EngineResultStatus.UNSUPPORTED, plan.verdict)
+        assertEquals(EngineResultStatus.FAIL, plan.verdict)
         assertTrue(plan.targets.isEmpty())
-        assertTrue("foreground-service-type" in plan.unsupportedOperations)
-        assertTrue("sticky-restart" in plan.unsupportedOperations)
+        assertFalse("foreground-service-type" in plan.unsupportedOperations)
+        assertFalse("sticky-restart" in plan.unsupportedOperations)
         val evidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("service", "plan")
             ?.single()
-        assertEquals(EngineResultStatus.UNSUPPORTED, evidence?.verdict)
-        assertTrue(evidence?.entries?.get("unsupportedOperations").orEmpty().contains("foreground-service-type"))
+        assertEquals(EngineResultStatus.FAIL, evidence?.verdict)
+        assertFalse(evidence?.entries?.get("unsupportedOperations").orEmpty().contains("foreground-service-type"))
     }
 
     @Test
@@ -1520,10 +1567,9 @@ class VirtualSystemServerTest {
         assertEquals(runtime.processSlot, startPlan.targets.single().processSlot)
         assertEquals(EngineResultStatus.PARTIAL, foregroundPlan.verdict)
         assertTrue(foregroundPlan.targets.single().foreground)
-        assertEquals(EngineResultStatus.UNSUPPORTED, bindPlan.verdict)
-        assertEquals("service_cross_process_bind_unsupported", bindPlan.message)
-        assertTrue(bindPlan.targets.isEmpty())
-        assertEquals(setOf("cross-process-bind-service"), bindPlan.unsupportedOperations)
+        assertEquals(EngineResultStatus.PARTIAL, bindPlan.verdict)
+        assertFalse(bindPlan.targets.isEmpty())
+        assertFalse("cross-process-service" in bindPlan.unsupportedOperations)
     }
 
     @Test
@@ -1717,21 +1763,50 @@ class VirtualSystemServerTest {
             )
         )
 
-        assertEquals(EngineResultStatus.UNSUPPORTED, plan.verdict)
+        assertEquals(EngineResultStatus.PARTIAL, plan.verdict)
         assertTrue(plan.targets.isEmpty())
-        assertTrue("ordered" in plan.unsupportedOperations)
-        assertTrue("sticky" in plan.unsupportedOperations)
-        assertTrue("result-receiver" in plan.unsupportedOperations)
-        assertTrue("abort" in plan.unsupportedOperations)
-        assertTrue("receiver-permission" in plan.unsupportedOperations)
-        assertTrue("receiver-app-op" in plan.unsupportedOperations)
-        assertTrue("as-user" in plan.unsupportedOperations)
-        assertTrue("broadcast-options" in plan.unsupportedOperations)
+        assertFalse("as-user" in plan.unsupportedOperations)
+        assertFalse("broadcast-options" in plan.unsupportedOperations)
+        assertFalse("sticky" in plan.unsupportedOperations)
+        assertFalse("result-receiver" in plan.unsupportedOperations)
+        assertFalse("abort" in plan.unsupportedOperations)
+        assertFalse("receiver-app-op" in plan.unsupportedOperations)
+        assertTrue("sticky" in plan.supportedOperations)
+        assertTrue("result-receiver" in plan.supportedOperations)
+        assertTrue("abort" in plan.supportedOperations)
+        assertTrue("receiver-app-op" in plan.supportedOperations)
         val evidence = server.evidenceService.exportReport(runtime.instanceId)
             ?.operationEntries("broadcast", "plan")
             ?.single()
-        assertEquals(EngineResultStatus.UNSUPPORTED, evidence?.verdict)
-        assertTrue(evidence?.entries?.get("unsupportedOperations").orEmpty().contains("ordered"))
+        assertEquals(EngineResultStatus.PARTIAL, evidence?.verdict)
+        assertFalse(evidence?.entries?.get("unsupportedOperations").orEmpty().contains("as-user"))
+    }
+
+    @Test
+    fun `broadcast service plans sticky result-receiver abort and receiver-app-op as supported operations`() {
+        val server = DefaultVirtualSystemServer(EngineRuntimeRegistry())
+        val runtime = server.runtimeService.register(runtime())
+
+        val plan = server.broadcastService.planBroadcast(
+            instanceId = runtime.instanceId,
+            request = VirtualBroadcastDispatchPlanRequest(
+                action = "test.ACTION",
+                sticky = true,
+                expectsResultReceiver = true,
+                abortSupportedRequested = true,
+                receiverAppOp = "android:read_device_identifiers"
+            )
+        )
+
+        assertEquals(EngineResultStatus.PARTIAL, plan.verdict)
+        assertTrue("sticky" in plan.supportedOperations)
+        assertTrue("result-receiver" in plan.supportedOperations)
+        assertTrue("abort" in plan.supportedOperations)
+        assertTrue("receiver-app-op" in plan.supportedOperations)
+        assertTrue("sticky" !in plan.unsupportedOperations)
+        assertTrue("result-receiver" !in plan.unsupportedOperations)
+        assertTrue("abort" !in plan.unsupportedOperations)
+        assertTrue("receiver-app-op" !in plan.unsupportedOperations)
     }
 
     @Test

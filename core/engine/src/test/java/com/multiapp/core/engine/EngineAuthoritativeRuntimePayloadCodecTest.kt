@@ -143,6 +143,9 @@ class EngineAuthoritativeRuntimePayloadCodecTest {
             activities = activities,
             providers = listOf(provider),
             permissions = listOf("android.permission.INTERNET"),
+            debuggable = true,
+            sharedUserId = "android.uid.shared",
+            sharedUserLabel = 0x7f01_0203,
             originCertSha256 = DIGEST,
             signerSha256Digests = listOf(DIGEST)
         )

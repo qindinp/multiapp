@@ -18,6 +18,7 @@ import android.os.Bundle
 import android.os.CancellationSignal
 import android.os.ParcelFileDescriptor
 import android.os.Process
+import android.util.Log
 import androidx.annotation.RequiresApi
 import com.multiapp.core.common.AndroidCompat
 import com.multiapp.core.common.findField
@@ -495,7 +496,7 @@ class EngineRoutingContentProvider internal constructor(
         if (targetInstanceId == config.instanceId && authority !in guestAuthorities()) {
             return null
         }
-        val route = runCatching {
+        val routeResult = runCatching {
             routeIssuer(
                 config.instanceId,
                 targetInstanceId,
@@ -503,7 +504,16 @@ class EngineRoutingContentProvider internal constructor(
                 operationName,
                 null
             ).toEngineRoute()
-        }.getOrNull() ?: return null
+        }
+        val route = routeResult.getOrElse { error ->
+            Log.w(
+                "EngineRoutingProvider",
+                "Provider route token issue failed for instanceId=${config.instanceId}, " +
+                    "authority=$authority, operation=$operationName",
+                error
+            )
+            return null
+        }
         if (
             route.callerInstanceId != config.instanceId ||
             route.targetInstanceId != targetInstanceId ||

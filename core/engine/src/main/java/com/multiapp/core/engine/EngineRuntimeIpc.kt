@@ -17,6 +17,7 @@ import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualInstanceRuntime
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import com.multiapp.core.model.engine.VirtualizationEngine
+import com.multiapp.core.model.instance.VirtualInstanceRecord
 import com.multiapp.core.model.virtual.VirtualActivityPendingNewIntent
 import com.multiapp.core.model.virtual.VirtualActivityRecord
 import com.multiapp.core.model.virtual.VirtualActivityResult
@@ -188,6 +189,7 @@ object EngineRuntimeIpcContract {
     const val KEY_REQUEST_CODE = "requestCode"
     const val KEY_ACTIVITY_ALLOCATION_REQUEST = "activityAllocationRequest"
     const val KEY_ACTIVITY_LAUNCH_IDENTITY = "activityLaunchIdentity"
+    const val KEY_LAUNCH_REUSED = "launchReused"
     const val KEY_RESULT_WHO = "resultWho"
     const val KEY_FRAMEWORK_DISPATCH_ATTEMPTED = "frameworkDispatchAttempted"
     const val KEY_FRAMEWORK_DISPATCH_INVOKED = "frameworkDispatchInvoked"
@@ -391,12 +393,55 @@ class EngineRuntimeBinderEndpoint(
         EngineAuthoritativeRuntimeStream::open
 ) : IEngineRuntimeService.Stub() {
 
+    private val activityLaunchCommitter = EngineActivityLaunchCommitter(
+        activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+        validator = EngineActivityLaunchCommitValidator { identity, pid ->
+            activityLaunchCapabilities.validateCommit(identity, pid).let { validation ->
+                EngineActivityLaunchCommitValidation(
+                    accepted = validation.accepted,
+                    reason = validation.reason
+                )
+            }
+        },
+        persist = ::persistCommittedActivityLaunch
+    )
+
+    private val activityLaunchPreparer = EngineActivityLaunchCommitter(
+        activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
+        validator = EngineActivityLaunchCommitValidator { identity, _ ->
+            activityLaunchCapabilities.validatePrepare(identity).let { validation ->
+                EngineActivityLaunchCommitValidation(
+                    accepted = validation.accepted,
+                    reason = validation.reason
+                )
+            }
+        },
+        persist = ::persistCommittedActivityLaunch
+    )
+
+    private fun persistCommittedActivityLaunch(instanceId: String) {
+        val record = EngineHostedProcessRuntimeDefaults.activityRecordManager
+            .exportTasks()
+            .asSequence()
+            .flatMap { it.activities.asSequence() }
+            .lastOrNull { it.instanceId == instanceId }
+            ?: error("committed Activity launch record is missing")
+        val persisted = activityService.markActivityState(instanceId, record.token, record.state)
+        check(persisted.verdict == EngineResultStatus.PASS) { persisted.message }
+    }
+
     init {
         require(serverGenerationId.isNotBlank()) { "serverGenerationId must not be blank" }
     }
 
     override fun getServerGenerationId(): String =
         serverGenerationId.takeIf { callingUid() == hostUid }.orEmpty()
+
+    override fun engineListInstances(): Bundle = managementAuthorizedBundle {
+        val engine = virtualizationEngine
+            ?: return@managementAuthorizedBundle emptyInstanceListBundle()
+        engine.listInstances().toInstanceListBundle()
+    }
 
     override fun engineInstallOrRefreshPackage(originPackageName: String): Bundle = managementAuthorizedBundle {
         val engine = virtualizationEngine
@@ -1129,6 +1174,28 @@ class EngineRuntimeBinderEndpoint(
                     "invalid_activity_allocation_request"
                 )
             activityLaunchAllocator.allocate(decoded, callingPid()).toIpcBundle()
+        }
+
+    override fun prepareActivityLaunch(instanceId: String, request: Bundle): Bundle =
+        managementAuthorizedBundle {
+            val decoded = request.toActivityLaunchCommitRequestOrNull()
+                ?.takeIf { it.identity.instanceId == instanceId && it.record.instanceId == instanceId }
+                ?: return@managementAuthorizedBundle invalidRequestBundle(
+                    instanceId,
+                    "invalid_activity_launch_prepare_request"
+                )
+            activityLaunchPreparer.commit(decoded, callingPid()).toIpcBundle()
+        }
+
+    override fun commitActivityLaunch(instanceId: String, request: Bundle): Bundle =
+        runtimeAuthorizedBundle(instanceId) {
+            val decoded = request.toActivityLaunchCommitRequestOrNull()
+                ?.takeIf { it.identity.instanceId == instanceId && it.record.instanceId == instanceId }
+                ?: return@runtimeAuthorizedBundle invalidRequestBundle(
+                    instanceId,
+                    "invalid_activity_launch_commit_request"
+                )
+            activityLaunchCommitter.commit(decoded, callingPid()).toIpcBundle()
         }
 
     override fun releaseActivityLaunch(instanceId: String, allocation: Bundle): Boolean {
@@ -3244,6 +3311,12 @@ object EngineRuntimeIpcClients {
 
     fun isConnected(): Boolean = activeService() != null
 
+    internal fun engineListInstances(): List<VirtualInstanceRecord>? {
+        val active = activeService() ?: return null
+        val response = runCatching { active.engineListInstances() }.getOrNull() ?: return null
+        return response.toInstanceListOrNull()
+    }
+
     internal fun engineInstallOrRefreshPackage(originPackageName: String): EngineRemoteResult? =
         invokeEngineResult { service -> service.engineInstallOrRefreshPackage(originPackageName) }
 
@@ -3703,6 +3776,24 @@ object EngineRuntimeIpcClients {
         }.getOrNull() ?: return null
         return response.toActivityLaunchAllocationOrNull()
             ?.takeIf { allocation -> allocation.request == request }
+    }
+
+    fun commitActivityLaunch(
+        request: EngineActivityLaunchCommitRequest
+    ): EngineActivityLaunchCommitResult? {
+        val response = runCatching {
+            activeService()?.commitActivityLaunch(request.identity.instanceId, request.toIpcBundle())
+        }.getOrNull() ?: return null
+        return response.toActivityLaunchCommitResultOrNull()
+    }
+
+    fun prepareActivityLaunch(
+        request: EngineActivityLaunchCommitRequest
+    ): EngineActivityLaunchCommitResult? {
+        val response = runCatching {
+            activeService()?.prepareActivityLaunch(request.identity.instanceId, request.toIpcBundle())
+        }.getOrNull() ?: return null
+        return response.toActivityLaunchCommitResultOrNull()
     }
 
     fun releaseActivityLaunch(allocation: VirtualActivityLaunchAllocation): Boolean? {
@@ -4468,6 +4559,53 @@ private fun Bundle.toActivityLaunchAllocationOrNull(): VirtualActivityLaunchAllo
     )
 }.getOrNull()
 
+private fun EngineActivityLaunchCommitRequest.toIpcBundle(): Bundle = Bundle().apply {
+    putBundle(EngineRuntimeIpcContract.KEY_ACTIVITY_LAUNCH_IDENTITY, identity.toLoaderIdentity().toIpcBundle())
+    putBundle(EngineRuntimeIpcContract.KEY_ACTIVITY, record.toIpcBundle())
+    putInt(EngineRuntimeIpcContract.KEY_INTENT_FLAGS, intentFlags)
+    putBundle(EngineRuntimeIpcContract.KEY_DATA_INTENT, dataIntent?.toIpcBundle())
+}
+
+private fun Bundle.toActivityLaunchCommitRequestOrNull(): EngineActivityLaunchCommitRequest? = runCatching {
+    if (keySet() != ACTIVITY_LAUNCH_COMMIT_REQUEST_FIELDS) return@runCatching null
+    val identity = getBundle(EngineRuntimeIpcContract.KEY_ACTIVITY_LAUNCH_IDENTITY)
+        ?.toLoaderActivityLaunchIdentityOrNull()
+        ?.toEngineIdentity()
+        ?: return@runCatching null
+    val recordBundle = getBundle(EngineRuntimeIpcContract.KEY_ACTIVITY)
+        ?.takeIf { it.keySet() == ACTIVITY_RECORD_FIELDS }
+        ?: return@runCatching null
+    EngineActivityLaunchCommitRequest(
+        identity = identity,
+        record = recordBundle.toVirtualActivityRecordOrNull() ?: return@runCatching null,
+        intentFlags = getInt(EngineRuntimeIpcContract.KEY_INTENT_FLAGS),
+        dataIntent = getBundle(EngineRuntimeIpcContract.KEY_DATA_INTENT)?.toVirtualIntentSnapshotOrNull()
+    )
+}.getOrNull()
+
+private fun EngineActivityLaunchCommitResult.toIpcBundle(): Bundle = Bundle().apply {
+    putBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED, accepted)
+    putBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT, idempotent)
+    putBundle(EngineRuntimeIpcContract.KEY_ACTIVITY, activity?.toIpcBundle())
+    putBoolean(EngineRuntimeIpcContract.KEY_LAUNCH_REUSED, launchReused)
+    putString(EngineRuntimeIpcContract.KEY_REASON, reason)
+}
+
+private fun Bundle.toActivityLaunchCommitResultOrNull(): EngineActivityLaunchCommitResult? = runCatching {
+    if (keySet() != ACTIVITY_LAUNCH_COMMIT_RESULT_FIELDS) return@runCatching null
+    val activityBundle = getBundle(EngineRuntimeIpcContract.KEY_ACTIVITY)
+    val activity = activityBundle?.takeIf { it.keySet() == ACTIVITY_RECORD_FIELDS }
+        ?.toVirtualActivityRecordOrNull()
+    if (activityBundle != null && activity == null) return@runCatching null
+    EngineActivityLaunchCommitResult(
+        accepted = getBoolean(EngineRuntimeIpcContract.KEY_ACCEPTED),
+        idempotent = getBoolean(EngineRuntimeIpcContract.KEY_IDEMPOTENT),
+        activity = activity,
+        launchReused = getBoolean(EngineRuntimeIpcContract.KEY_LAUNCH_REUSED),
+        reason = getString(EngineRuntimeIpcContract.KEY_REASON).orEmpty()
+    )
+}.getOrNull()
+
 private fun VirtualActivityLaunchIdentity.toIpcBundle(): Bundle = Bundle().apply {
     putString(EngineRuntimeIpcContract.KEY_LAUNCH_CAPABILITY_TOKEN, capabilityToken)
     putString(EngineRuntimeIpcContract.KEY_INSTANCE_ID, instanceId)
@@ -4516,6 +4654,19 @@ private val ACTIVITY_LAUNCH_IDENTITY_FIELDS = setOf(
     EngineRuntimeIpcContract.KEY_PROCESS_SLOT,
     EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME,
     EngineRuntimeIpcContract.KEY_ACTIVITY_CLASS_NAME
+)
+private val ACTIVITY_LAUNCH_COMMIT_REQUEST_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_ACTIVITY_LAUNCH_IDENTITY,
+    EngineRuntimeIpcContract.KEY_ACTIVITY,
+    EngineRuntimeIpcContract.KEY_INTENT_FLAGS,
+    EngineRuntimeIpcContract.KEY_DATA_INTENT
+)
+private val ACTIVITY_LAUNCH_COMMIT_RESULT_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_ACCEPTED,
+    EngineRuntimeIpcContract.KEY_IDEMPOTENT,
+    EngineRuntimeIpcContract.KEY_ACTIVITY,
+    EngineRuntimeIpcContract.KEY_LAUNCH_REUSED,
+    EngineRuntimeIpcContract.KEY_REASON
 )
 private val ACTIVITY_PLAN_REQUEST_FIELDS = setOf(
     EngineRuntimeIpcContract.KEY_ACTION,
@@ -4982,6 +5133,25 @@ private fun Bundle.toVirtualActivityRecordOrNull(): VirtualActivityRecord? = run
         result = getBundle(EngineRuntimeIpcContract.KEY_ACTIVITY_RESULT)?.toVirtualActivityResultOrNull()
     )
 }.getOrNull()
+
+private val ACTIVITY_RECORD_FIELDS = setOf(
+    EngineRuntimeIpcContract.KEY_TOKEN,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_ID,
+    EngineRuntimeIpcContract.KEY_INSTANCE_ID,
+    EngineRuntimeIpcContract.KEY_ORIGIN_PACKAGE_NAME,
+    EngineRuntimeIpcContract.KEY_GUEST_ACTIVITY_CLASS_NAME,
+    EngineRuntimeIpcContract.KEY_PROXY_ACTIVITY_CLASS_NAME,
+    EngineRuntimeIpcContract.KEY_LAUNCH_MODE,
+    EngineRuntimeIpcContract.KEY_CREATED_AT_MS,
+    EngineRuntimeIpcContract.KEY_TASK_ID,
+    EngineRuntimeIpcContract.KEY_INTENT_FLAGS,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_STATE,
+    EngineRuntimeIpcContract.KEY_TASK_AFFINITY,
+    EngineRuntimeIpcContract.KEY_PENDING_NEW_INTENTS,
+    EngineRuntimeIpcContract.KEY_RESULT_TO_TOKEN,
+    EngineRuntimeIpcContract.KEY_REQUEST_CODE,
+    EngineRuntimeIpcContract.KEY_ACTIVITY_RESULT
+)
 
 private fun VirtualActivityResult.toIpcBundle(): Bundle = Bundle().apply {
     putInt(EngineRuntimeIpcContract.KEY_RESULT_CODE, resultCode)

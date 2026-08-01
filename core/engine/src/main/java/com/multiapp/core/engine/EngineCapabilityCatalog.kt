@@ -131,36 +131,36 @@ internal object EngineCapabilityCatalog {
 
     private val DECLARED_SUBSYSTEM_OPERATIONS = mapOf(
         EngineSubsystem.ACTIVITY to (
-            setOf("launch", "proxy-slot", "process-slot", "task-state-persistence", "result-record") to
-                setOf("result-delivery", "finish-result-delivery", "recents-device-proof")
+            setOf("launch", "proxy-slot", "process-slot", "launch-mode-slot", "proxy-process-death-recovery-evidence", "task-state-persistence", "lifecycle-state-persistence", "finish-record", "result-record", "on-new-intent-record", "back-stack-state", "result-delivery", "finish-result-delivery") to
+                setOf("recents-device-proof")
             ),
         EngineSubsystem.PROVIDER to (
-            setOf("route-token", "same-process-preinstall", "uri-grant-check") to
-                setOf("external-uri-grant", "custom-process-provider")
+            setOf("route-token", "same-process-preinstall", "authority-lookup", "operation-route-plan", "uri-grant-record", "uri-grant-check", "uri-grant-revoke", "persisted-uri-grant-take", "persisted-uri-grant-release", "custom-process-provider") to
+                setOf("external-uri-grant")
             ),
         EngineSubsystem.PERMISSION to (
-            setOf("check-permission", "persistent-instance-grant") to
-                setOf("runtime-permission-dialog", "permission-flags", "one-time-permission", "auto-reset")
+            setOf("check-permission", "persistent-instance-grant", "explicit-grant", "explicit-revoke", "permission-flags", "one-time-permission") to
+                setOf("runtime-permission-dialog", "auto-reset", "shared-uid-permission")
             ),
         EngineSubsystem.APP_OPS to (
-            setOf("check-operation", "persistent-instance-mode") to
-                setOf("note-operation", "start-operation", "finish-operation", "attribution-chain")
+            setOf("check-operation", "check-operation-raw", "persistent-instance-mode", "note-operation", "start-operation", "finish-operation") to
+                setOf("attribution-chain")
             ),
         EngineSubsystem.SERVICE to (
-            setOf("start-service-dispatch", "stop-service-route", "bind-service", "unbind-service") to
-                setOf("cross-process-service", "binder-death-rebind", "foreground-service-type", "sticky-restart")
+            setOf("manifest-route-plan", "explicit-service-route", "implicit-service-route", "start-service-dispatch", "stop-service-route", "on-start-command-result", "bind-service", "unbind-service", "on-bind-result", "on-unbind-result", "process-slot-service-stub", "sticky-restart", "cross-process-service", "binder-death-rebind") to
+                emptySet()
             ),
         EngineSubsystem.BROADCAST to (
-            setOf("manifest-route-plan", "explicit-receiver-route", "implicit-receiver-route") to
-                setOf("ordered", "sticky", "result-receiver", "abort", "receiver-permission", "cross-process-route")
+            setOf("manifest-route-plan", "explicit-receiver-route", "implicit-receiver-route", "ordered-dispatch", "receiver-permission-filter", "receiver-app-op", "abort", "result-receiver", "sticky", "as-user", "broadcast-options") to
+                setOf("cross-process-route")
             ),
         EngineSubsystem.STORAGE to (
-            setOf("java-private-path", "process-slot-native-binding", "canonical-containment") to
-                setOf("external-storage-policy", "media-provider-isolation")
+            setOf("java-private-path", "process-slot-native-binding", "canonical-containment", "external-storage-policy") to
+                setOf("media-provider-isolation")
             ),
         EngineSubsystem.NATIVE to (
-            setOf("private-path-redirect", "path-containment", "process-slot-binding") to
-                setOf("linker-namespace", "runtime-native-load", "register-natives-verdict")
+            setOf("private-path-redirect", "path-containment", "process-slot-binding", "linker-namespace") to
+                setOf("runtime-native-load", "register-natives-verdict")
             )
     )
 }

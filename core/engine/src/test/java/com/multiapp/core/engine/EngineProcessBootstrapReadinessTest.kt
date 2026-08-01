@@ -98,6 +98,8 @@ class EngineProcessBootstrapReadinessTest {
         assertEquals(null, result.launcherActivityClassName)
         assertEquals("COMPONENT_RUNTIME", result.evidence["bootstrapKind"])
         assertEquals("$ORIGIN_PACKAGE:remote", result.evidence["effectiveGuestProcessName"])
+        assertEquals("SUCCESS", result.evidence["packageManagerProxy.status"])
+        assertEquals("true", result.evidence["packageManagerProxy.globalPmsProxyEnabled"])
     }
 
     @Test
@@ -182,7 +184,12 @@ class EngineProcessBootstrapReadinessTest {
             ),
             BootstrapResult.success(
                 stage = RuntimeStage.PACKAGE_MANAGER_PROXY,
-                message = "PMS proxy installed"
+                message = "PMS proxy installed",
+                evidence = listOf(
+                    BootstrapEvidence("globalPmsProxyEnabled", "true"),
+                    BootstrapEvidence("sPackageManagerPatched", "true"),
+                    BootstrapEvidence("uidAggregateVirtualizationMode", "merge-packages-preserve-name")
+                )
             )
         )
         return HostedBootstrapResult(

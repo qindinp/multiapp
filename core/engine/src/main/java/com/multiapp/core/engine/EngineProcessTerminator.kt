@@ -3,6 +3,7 @@ package com.multiapp.core.engine
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Process
+import com.multiapp.core.model.engine.EngineProcessSlotContract
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import javax.inject.Inject
@@ -163,14 +164,8 @@ class AndroidEngineProcessTerminator internal constructor(
         return rejected("TERMINATION_TIMEOUT", processId)
     }
 
-    private fun isGuestProcessSlot(processSlot: String): Boolean {
-        val prefix = "$hostPackageName:v"
-        val suffix = processSlot.takeIf { it.startsWith(prefix) }
-            ?.removePrefix(prefix)
-            ?: return false
-        val index = suffix.toIntOrNull() ?: return false
-        return suffix == index.toString() && index in 0 until GUEST_PROCESS_SLOT_COUNT
-    }
+    private fun isGuestProcessSlot(processSlot: String): Boolean =
+        EngineProcessSlotContract.isCanonicalProcessSlot(hostPackageName, processSlot)
 
     private fun targetIdentity(processId: Int, processSlot: String): TargetIdentity {
         val probe = runCatching { processProbe(processId) }
@@ -211,7 +206,6 @@ class AndroidEngineProcessTerminator internal constructor(
     }
 
     private companion object {
-        const val GUEST_PROCESS_SLOT_COUNT = 8
         const val DEFAULT_TERMINATION_TIMEOUT_MS = 2_000L
         const val DEFAULT_TERMINATION_POLL_MS = 25L
         const val NANOS_PER_MILLISECOND = 1_000_000L

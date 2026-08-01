@@ -52,8 +52,8 @@ internal class RegistryBackedVirtualAppOpsService(
 ) : RegistryBackedRuntimeBoundSubsystemService(
     runtimeService = runtimeService,
     subsystem = EngineSubsystem.APP_OPS,
-    supportedOperations = setOf("check-operation", "check-operation-raw", "persistent-instance-mode"),
-    unsupportedOperations = setOf("note-operation", "start-operation", "finish-operation", "attribution-chain")
+    supportedOperations = setOf("check-operation", "check-operation-raw", "persistent-instance-mode", "note-operation", "start-operation", "finish-operation"),
+    unsupportedOperations = setOf("attribution-chain")
 ), VirtualAppOpsService {
     override fun queryMode(
         instanceId: String,
@@ -249,8 +249,8 @@ internal class RegistryBackedVirtualAppOpsService(
     }
 
     private fun String.isSupportedCheckMethod(): Boolean =
-        this == "checkOperation" || this == "checkOperationRaw" || this == "checkAudioOperation"
+        this == "checkOperation" || this == "checkOperationRaw" || this == "checkAudioOperation" || this == "noteOperation" || this == "startOperation" || this == "finishOperation"
 
     private fun String.isMutationMethod(): Boolean =
-        startsWith("set") || startsWith("reset")
+        (startsWith("set") || startsWith("reset")) && this !in setOf("noteOperation", "startOperation", "finishOperation")
 }

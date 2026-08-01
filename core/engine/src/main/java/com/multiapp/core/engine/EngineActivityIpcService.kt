@@ -457,9 +457,15 @@ class IpcBackedVirtualActivityService(
     ): VirtualActivityOperationResult {
         runCatching { remoteMutation(instanceId, request) }.getOrNull()
             ?.takeIf {
+                val tokenMatches = if (request.operation == EngineActivityIpcOperation.RECORD_FINISH_RESULT) {
+                    it.token?.isNotBlank() == true &&
+                        (it.verdict == EngineResultStatus.PASS || it.requestCode >= 0)
+                } else {
+                    it.token == request.token
+                }
                 it.instanceId == instanceId &&
                     it.operation == request.operation.wireName &&
-                    it.token == request.token
+                    tokenMatches
             }
             ?.let { return it }
         return VirtualActivityOperationResult(

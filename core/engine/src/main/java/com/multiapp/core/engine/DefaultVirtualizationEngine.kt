@@ -458,6 +458,21 @@ internal class DefaultVirtualizationEngineCore(
         }
 
     private fun launchInstanceLocked(request: LaunchInstanceRequest): EngineResult {
+        fun recordForegroundLaunchStage(
+            instanceId: String,
+            stage: String,
+            entries: Map<String, String> = emptyMap()
+        ) {
+            systemServer.runtimeService.registerOperationEvidence(
+                instanceId,
+                EngineOperationEvidence(
+                    component = "activity",
+                    operation = "foreground-launch",
+                    verdict = EngineResultStatus.PASS,
+                    entries = mapOf("stage" to stage) + entries
+                )
+            )
+        }
         val instance = instanceManager.getInstance(request.instanceId)
             ?: return EngineResult.fail(
                 operation = OP_LAUNCH,
@@ -620,6 +635,11 @@ internal class DefaultVirtualizationEngineCore(
             bootstrap = bootstrap,
             message = "Process bootstrap became stale before PREWARMED promotion"
         )
+        recordForegroundLaunchStage(
+            instanceId = instance.instanceId,
+            stage = "PREWARMED_PROMOTED",
+            entries = mapOf("processSlot" to runtime.processSlot)
+        )
         if (!registerProcessDeath(runtime, bootstrap)) {
             runtimeRegistry.markDeadIfCurrent(
                 instanceId = runtime.instanceId,
@@ -658,6 +678,11 @@ internal class DefaultVirtualizationEngineCore(
                 message = "Target process died or runtime generation changed before foreground launch"
             )
         }
+        recordForegroundLaunchStage(
+            instanceId = instance.instanceId,
+            stage = "ALLOCATION_START",
+            entries = mapOf("guestActivityClassName" to launcherActivityClassName)
+        )
         val launchAllocation = activityLaunchAllocator.allocate(
             request = VirtualActivityLaunchAllocationRequest(
                 instanceId = runtime.instanceId,
@@ -679,6 +704,19 @@ internal class DefaultVirtualizationEngineCore(
                 message = launchAllocation.reason
             )
         }
+        recordForegroundLaunchStage(
+            instanceId = instance.instanceId,
+            stage = "ALLOCATION_COMPLETE",
+            entries = mapOf(
+                "proxySlot" to allocatedProxySlot,
+                "guestActivityClassName" to launcherActivityClassName
+            )
+        )
+        recordForegroundLaunchStage(
+            instanceId = instance.instanceId,
+            stage = "PROXY_LAUNCH_START",
+            entries = mapOf("proxySlot" to allocatedProxySlot)
+        )
         val launchFailure = runCatching {
             activityLauncher.launch(
                 EngineLaunchSpec(
@@ -699,7 +737,8 @@ internal class DefaultVirtualizationEngineCore(
                     bootstrapState = bootstrap.state,
                     bootstrapVerdict = bootstrap.verdict,
                     providerRoutingEnabled = decision.providerRoutingEnabled,
-                    legacyProviderHookEnabled = decision.providerRoutingEnabled && decision.lsplantEnabled
+                    legacyProviderHookEnabled = decision.providerRoutingEnabled && decision.lsplantEnabled,
+                    launchAction = request.launchAction
                 )
             )
         }.exceptionOrNull()
@@ -727,6 +766,11 @@ internal class DefaultVirtualizationEngineCore(
                 message = launchFailure.message ?: "foreground proxy Activity launch failed"
             )
         }
+        recordForegroundLaunchStage(
+            instanceId = instance.instanceId,
+            stage = "PROXY_LAUNCH_RETURNED",
+            entries = mapOf("proxySlot" to allocatedProxySlot)
+        )
         if (!isForegroundLaunchGenerationCurrent(runtime, bootstrap)) {
             activityLaunchCapabilities.revoke(launchIdentity.capabilityToken)
             return staleBootstrapResult(
@@ -1046,7 +1090,10 @@ internal class DefaultVirtualizationEngineCore(
             permissions = installRecord.permissions,
             originCertSha256 = installRecord.originCertSha256.takeIf { it.isNotBlank() },
             signerSha256Digests = installRecord.signerSha256Digests,
-            hasMultipleSigners = installRecord.hasMultipleSigners
+            hasMultipleSigners = installRecord.hasMultipleSigners,
+            debuggable = installRecord.debuggable,
+            sharedUserId = installRecord.sharedUserId,
+            sharedUserLabel = installRecord.sharedUserLabel
         )
     }
 
@@ -1193,6 +1240,10 @@ internal class DefaultVirtualizationEngineCore(
     private fun pruneRuntimeSlots() {
         val validInstanceIds = instanceManager.listInstances().mapTo(linkedSetOf()) { it.instanceId }
         slotStore.prune(validInstanceIds)
+        (systemServer as? DefaultVirtualSystemServer)?.reconcileProxyActivitySlots(
+            validInstanceIds = validInstanceIds,
+            knownProxyActivityClassNames = EngineProxyActivitySlots.classNames(hostPackageName).toSet()
+        )
     }
 
     private fun processSlotCandidatesForProxySlots(proxyCandidates: List<String>): List<String> =
@@ -1210,6 +1261,9 @@ internal class DefaultVirtualizationEngineCore(
                 ProxyActivityRegistry.normalizeLaunchMode(launchModesByClassName[className]) == normalizedLaunchMode
             }
     }
+
+    override fun listInstances(): List<VirtualInstanceRecord> =
+        instanceManager.listInstances()
 
     companion object {
         private const val INSTANCE_OPERATION_LOCK_COUNT = 32
@@ -1276,7 +1330,8 @@ data class EngineLaunchSpec(
     val bootstrapState: EngineProcessBootstrapState,
     val bootstrapVerdict: EngineResultStatus,
     val providerRoutingEnabled: Boolean,
-    val legacyProviderHookEnabled: Boolean
+    val legacyProviderHookEnabled: Boolean,
+    val launchAction: String? = null
 )
 
 fun interface EngineActivityLauncher {

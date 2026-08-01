@@ -1,10 +1,13 @@
 package com.multiapp.core.engine
 
 import android.content.Context
+import android.util.Log
 import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorders
 import com.multiapp.core.loader.VirtualAmsApiEvidenceRecorder
 import com.multiapp.core.loader.VirtualAmsComponentDispatchers
 import com.multiapp.core.loader.VirtualActivityLaunchAllocationProviders
+import com.multiapp.core.loader.ActivityFinishResultHookInstaller
+import com.multiapp.core.loader.VirtualActivityResultFrameworkBridge
 import com.multiapp.core.loader.VirtualAppOpsDispatchers
 import com.multiapp.core.loader.VirtualBroadcastRecorders
 import com.multiapp.core.loader.VirtualBroadcastRecorder
@@ -34,6 +37,8 @@ data class EngineContentRuntimeInstallResult(
     val reason: String
 )
 
+private const val PROVIDER_ROUTE_TAG = "EngineProviderRoute"
+
 object EngineRuntimeInstallers {
     @Volatile
     private var processHostContext: Context? = null
@@ -59,7 +64,7 @@ object EngineRuntimeInstallers {
     private fun installProviderRouteTokenAuthority() {
         ProviderRouteTokenRegistry.installAuthoritativeIssuer(
             ProviderRouteTokenIssuer { caller, target, authority, operation, requestedProcessSlot ->
-                EngineRuntimeIpcClients.issueProviderRouteToken(
+                val result = EngineRuntimeIpcClients.issueProviderRouteToken(
                     callerInstanceId = caller,
                     request = EngineProviderRouteTokenIssueRequest(
                         targetInstanceId = target,
@@ -67,9 +72,27 @@ object EngineRuntimeInstallers {
                         operation = operation,
                         requestedProcessSlot = requestedProcessSlot
                     )
-                )?.takeIf(EngineProviderRouteTokenAuthorityResult::accepted)
-                    ?.route
-                    ?.toIdentityProviderRouteToken()
+                )
+                when {
+                    result == null -> {
+                        Log.w(
+                            PROVIDER_ROUTE_TAG,
+                            "Provider route token authority unavailable for caller=$caller, " +
+                                "target=$target, authority=$authority, operation=$operation"
+                        )
+                        null
+                    }
+                    !result.accepted -> {
+                        Log.w(
+                            PROVIDER_ROUTE_TAG,
+                            "Provider route token rejected: status=${result.status}, " +
+                                "message=${result.message}, caller=$caller, target=$target, " +
+                                "authority=$authority, operation=$operation"
+                        )
+                        null
+                    }
+                    else -> result.route?.toIdentityProviderRouteToken()
+                }
             }
         )
     }
@@ -150,12 +173,16 @@ object EngineRuntimeInstallers {
 
     fun installInstrumentation(context: Context): Result<Unit> {
         rememberProcessHostContext(context)
+        val activityOperations = EngineVirtualActivityOperationsFactory.hotPath(context.filesDir)
+        VirtualActivityResultFrameworkBridge.install(activityOperations)
         return VirtualInstrumentationInstaller.install(
             processRuntime = EngineHostedProcessRuntimeDefaults.loaderRuntime,
             activityRecordManager = EngineHostedProcessRuntimeDefaults.activityRecordManager,
-            activityOperations = EngineVirtualActivityOperationsFactory.hotPath(context.filesDir),
+            activityOperations = activityOperations,
             processHostContext = resolveProcessHostContext(context)
-        )
+        ).onSuccess {
+            ActivityFinishResultHookInstaller.install()
+        }
     }
 
     fun installBroadcastRecorder(recorder: EngineBroadcastRecorder) {

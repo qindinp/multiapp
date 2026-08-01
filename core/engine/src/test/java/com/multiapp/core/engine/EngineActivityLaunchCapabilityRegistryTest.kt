@@ -13,6 +13,30 @@ import kotlin.test.assertTrue
 
 class EngineActivityLaunchCapabilityRegistryTest {
     @Test
+    fun `prepare validation lets the trusted host persist a launch before target process authorization`() {
+        val registry = EngineActivityLaunchCapabilityRegistry(tokenFactory = { "capability-prepare" })
+        val identity = registry.issue(runtime(), PROCESS_ID, PROXY_ACTIVITY, GUEST_ACTIVITY)
+
+        val preparation = registry.validatePrepare(identity)
+
+        assertTrue(preparation.accepted)
+        assertFalse(preparation.idempotent)
+        assertTrue(registry.authorize(identity, PROCESS_ID).accepted)
+    }
+
+    @Test
+    fun `commit validation proves identity and pid without consuming the launch capability`() {
+        val registry = EngineActivityLaunchCapabilityRegistry(tokenFactory = { "capability-commit" })
+        val identity = registry.issue(runtime(), PROCESS_ID, PROXY_ACTIVITY, GUEST_ACTIVITY)
+
+        val validation = registry.validateCommit(identity, PROCESS_ID)
+
+        assertTrue(validation.accepted)
+        assertFalse(validation.idempotent)
+        assertTrue(registry.authorize(identity, PROCESS_ID).accepted)
+    }
+
+    @Test
     fun `capability binds complete launch identity and target pid and rejects replay`() {
         var tokenIndex = 0
         val registry = EngineActivityLaunchCapabilityRegistry(
