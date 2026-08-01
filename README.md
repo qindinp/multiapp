@@ -160,4 +160,9 @@ CI 会解析 JUnit XML，强制关键 hosted tests 已执行且 `skipped=0`，�
 
 ## 许可证
 
-当前仓库未包含独立的 `LICENSE` 文件。在补充明确许可证前，不应仅根据旧 README 的文字假定代码可按 MIT 或其他许可证再分发。
+本项目以 **Apache License 2.0** 授权（详见仓库根目录 `LICENSE`，2026-08-01 补充）。
+
+注意：
+- 第三方组件许可归属见 `NOTICE.md`；`legacy` 实验变体包含 LGPL-2.1 组件（LSPlant），
+  `hosted` 发布变体不打包该组件（D1 决策）。
+- 安全漏洞披露流程见 `SECURITY.md`。

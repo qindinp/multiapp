@@ -227,10 +227,10 @@
       "id": "P0-REL-03",
       "title": "LICENSE and NOTICE files present and correct",
       "tier": "P0",
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": "license-check",
       "auditFindings": [
-        "code-review: Repository lacks independent LICENSE file"
+        "2026-08-01: LICENSE（Apache-2.0）、NOTICE.md（第三方组件许可概览 + legacy 组件 LGPL 标注）、SECURITY.md（漏洞披露流程）已补充；README 许可证段落更新"
       ]
     },
     {
@@ -254,10 +254,10 @@
       "id": "P1-SEC-01",
       "title": "Bootstrap process slot parser canonical enforcement",
       "tier": "P1",
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": "bootstrap-parser-negative-tests",
       "auditFindings": [
-        "runtime-auditor: substringAfterLast(':v').toIntOrNull aliases host:v03/foreign.prefix/multi-delimiter to canonical slot"
+        "2026-08-01: EngineProcessBootstrapTransport 槽位解析严格化（多分隔符注入/前导零别名/foreign 包名拒绝）+ 8 例负测（commit 9ad9d26）"
       ]
     },
     {
@@ -420,16 +420,16 @@
   "summary": {
     "p0": {
       "total": 25,
-      "pass": 6,
+      "pass": 7,
       "fail": 0,
-      "blocked": 19,
+      "blocked": 18,
       "notApplicable": 0
     },
     "p1": {
       "total": 12,
-      "pass": 2,
+      "pass": 3,
       "fail": 0,
-      "blocked": 10,
+      "blocked": 9,
       "notApplicable": 0
     },
     "p2": {
