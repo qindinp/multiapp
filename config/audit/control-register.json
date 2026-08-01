@@ -151,10 +151,11 @@
       "id": "P0-CMP-07",
       "title": "Native library and linker namespace fail closed",
       "tier": "P0",
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": "native-linker-tests",
       "auditFindings": [
-        "code-review: VirtualClassLoader linker namespace creation failure is non-fatal fallback (catches Exception, logs warning, continues with default namespace)"
+        "2026-08-01 已闭环: 原始发现针对死代码 VirtualClassLoader（core:apk，零调用方，已删除 -794 行）；hosted 实际路径 HostedRuntimeBootstrap.createClassloaderNamespace 已 fail-closed（errorMessage → UnsatisfiedLinkError，反射失败 → IllegalStateException）",
+        "真机 namespace 行为验证（含带 native 的白名单应用）仍列 W3 设备阶段确认项"
       ]
     },
     {
@@ -419,9 +420,9 @@
   "summary": {
     "p0": {
       "total": 25,
-      "pass": 5,
+      "pass": 6,
       "fail": 0,
-      "blocked": 20,
+      "blocked": 19,
       "notApplicable": 0
     },
     "p1": {
