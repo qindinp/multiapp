@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "releaseTarget": "commercial-ga",
+  "compatibilityPromise": "explicit-application-whitelist",
+  "versionPolicy": "current-stable-N-and-previous-stable-N-1",
+  "applications": [
+    {"category":"social","displayName":"微信","packageName":"com.tencent.mm","versions":[],"fundsFlowAllowed":false},
+    {"category":"payment-and-services","displayName":"支付宝","packageName":"com.eg.android.AlipayGphone","versions":[],"fundsFlowAllowed":false},
+    {"category":"commerce","displayName":"淘宝","packageName":"com.taobao.taobao","versions":[],"fundsFlowAllowed":false},
+    {"category":"short-video","displayName":"抖音","packageName":"com.ss.android.ugc.aweme","versions":[],"fundsFlowAllowed":false},
+    {"category":"reading","displayName":"QQ 阅读","packageName":"com.qq.reader","versions":[],"fundsFlowAllowed":false},
+    {"category":"browser-webview","displayName":"Microsoft Edge","packageName":"com.microsoft.emmx","versions":[],"fundsFlowAllowed":false}
+  ],
+  "requiredCapabilities": [
+    "install-refresh","two-instances","independent-login","cold-warm-launch","activity-navigation",
+    "service-provider-broadcast-used-by-app","notification-routing","file-media-isolation","webview-isolation",
+    "guest-engine-host-death-recovery","clear-instance-data","delete-instance"
+  ],
+  "explicitNonGoals": [
+    "arbitrary-third-party-apps","system-apps","isolated-split","root-magisk-xposed-features",
+    "cross-device-instance-migration","work-profile-equivalence","risk-control-bypass","real-funds-transactions"
+  ],
+  "rules": {
+    "whiteListDependencyCannotBeWaived": true,
+    "applicationUpdateExpiresEvidence": true,
+    "requiresBaseAndSplitSha256": true,
+    "requiresSigningCertificateSha256": true,
+    "requiresReleaseArtifactBinding": true
+  }
+}

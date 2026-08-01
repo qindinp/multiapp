@@ -1,0 +1,414 @@
+{
+  "schemaVersion": 2,
+  "verdictRule": "Any applicable P0 not PASS keeps the product BLOCKED",
+  "states": ["PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE", "EXPIRED"],
+  "goThresholds": {
+    "p0PassPercent": 100,
+    "p1PassPercent": 90,
+    "p2PassPercent": 75,
+    "openS0": 0,
+    "openS1": 0,
+    "openCorePathS2": 0
+  },
+  "emptyCollectionPolicy": "A control tier (P0/P1/P2) with zero controls is treated as NOT_APPLICABLE for percentage thresholds; if any tier has controls but none are PASS, that tier fails at 0%.",
+  "auditBaseline": {
+    "repositoryHead": "efaea66dcb8e54f942bbb545a3c58e51d356c04a",
+    "objectGraphIntegrity": "PASS",
+    "cleanWorktree": false,
+    "releaseEvidenceEligible": false,
+    "reason": "Repository objects and refs are repaired from trusted origin, but the preserved working tree contains 162 uncommitted changes and has not completed the Release gate."
+  },
+  "controls": [
+    {
+      "id": "P0-ENG-01",
+      "title": "Repository and build provenance",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "git-fsck-full-plus-clean-audited-commit",
+      "auditFindings": []
+    },
+    {
+      "id": "P0-ARC-01",
+      "title": "Hosted v2 is the only production path; no Legacy stub/Xposed/loader.dex in Release",
+      "tier": "P0",
+      "status": "FAIL",
+      "evidence": "release-artifact-inventory",
+      "auditFindings": [
+        "release-auditor: Legacy StubBuilder/InstanceManager/StubInstaller/loader.dex/LSPlant present in debug APK and will be in Release; no formal hosted/legacy flavor boundary",
+        "release-auditor: generateLoaderDex writes into source assets dir, debug classes embedded in Release; reproducibility FAIL",
+        "release-auditor: Legacy Xposed path has NoClassDefFoundError (xposed classes not in loader.dex)"
+      ]
+    },
+    {
+      "id": "P0-ARC-02",
+      "title": "Engine is the sole authoritative writer",
+      "tier": "P0",
+      "status": "PASS",
+      "evidence": "static-analysis-plus-jvm-tests",
+      "auditFindings": [
+        "runtime-auditor: EngineServerRuntime is sole Binder writer; all 73 AIDL endpoints require host UID; management endpoints additionally require host process name"
+      ]
+    },
+    {
+      "id": "P0-ARC-03",
+      "title": "All 24 guest slots are structurally and dynamically equivalent",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "slot-parity-and-device-run",
+      "auditFindings": [
+        "runtime-auditor: Static structural parity PASS (Manifest v0-v23, process assignments, authorities all consistent)",
+        "runtime-auditor: Dynamic parity BLOCKED (no device for real slot launch/kill/restart)"
+      ]
+    },
+    {
+      "id": "P0-SEC-01",
+      "title": "Every Binder mutation has caller-specific secondary authority",
+      "tier": "P0",
+      "status": "PASS",
+      "evidence": "endpoint-authority-inventory",
+      "auditFindings": [
+        "runtime-auditor: All 73 AIDL endpoints inventoried; all mutations require runtime/management/component authority beyond host UID",
+        "runtime-auditor: queryRuntime exposes metadata to non-authoritative same-UID callers (liveAuthority=false) - LOW risk, no state mutation"
+      ]
+    },
+    {
+      "id": "P0-SEC-02",
+      "title": "Stale generation/token/lease replay fails closed",
+      "tier": "P0",
+      "status": "PASS",
+      "evidence": "negative-runtime-security-tests",
+      "auditFindings": [
+        "runtime-auditor: serverGenerationId, runtimeEpoch, engineSessionId, processStartTicks, route tokens, service leases all have anti-replay with fail-closed semantics",
+        "runtime-auditor: F1 (MEDIUM): Bootstrap process slot parser can alias v03/foreign/multi-delimiter to canonical slot - needs fix and negative tests"
+      ]
+    },
+    {
+      "id": "P0-TXN-01",
+      "title": "Install/create/refresh/clear/delete are crash atomic",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "fault-injection-matrix",
+      "auditFindings": [
+        "runtime-auditor: F2 (HIGH): No durable WAL/journal for crash atomicity; Activity/Service/Provider commit actions happen before durable state; server crash loses in-flight operations (at-most-once, not exactly-once)",
+        "runtime-auditor: New serverGenerationId after crash makes old tokens fail closed, but cannot prove exactly-once semantics"
+      ]
+    },
+    {
+      "id": "P0-CMP-01",
+      "title": "Activity data plane satisfies whitelist use",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "guest-observed-activity-tests"
+    },
+    {
+      "id": "P0-CMP-02",
+      "title": "Service data plane satisfies whitelist use",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "guest-observed-service-tests"
+    },
+    {
+      "id": "P0-CMP-03",
+      "title": "Provider data plane satisfies whitelist use",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "guest-observed-provider-tests"
+    },
+    {
+      "id": "P0-CMP-04",
+      "title": "Broadcast data plane satisfies whitelist use",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "guest-observed-broadcast-tests"
+    },
+    {
+      "id": "P0-CMP-05",
+      "title": "Permission and AppOps virtualization satisfies whitelist use",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "guest-observed-permission-tests"
+    },
+    {
+      "id": "P0-CMP-06",
+      "title": "Storage and media file isolation satisfies whitelist use",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "storage-isolation-tests",
+      "auditFindings": [
+        "runtime-auditor: Storage/media data plane NOT in current audit scope; no dedicated P0 previously tracked"
+      ]
+    },
+    {
+      "id": "P0-CMP-07",
+      "title": "Native library and linker namespace fail closed",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "native-linker-tests",
+      "auditFindings": [
+        "code-review: VirtualClassLoader linker namespace creation failure is non-fatal fallback (catches Exception, logs warning, continues with default namespace)"
+      ]
+    },
+    {
+      "id": "P0-CMP-08",
+      "title": "WebView data directory and renderer isolation",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "webview-isolation-tests",
+      "auditFindings": [
+        "code-review: No setDataDirectorySuffix() found in production code; WebView data directory isolation not proven"
+      ]
+    },
+    {
+      "id": "P0-CMP-09",
+      "title": "Notification routing for guest apps",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "notification-routing-tests"
+    },
+    {
+      "id": "P0-CMP-10",
+      "title": "Host/engine death recovery without state corruption",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "host-death-recovery-tests"
+    },
+    {
+      "id": "P0-ISO-01",
+      "title": "Two instances of the same origin package do not leak state",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "dual-instance-isolation",
+      "auditFindings": [
+        "qa-auditor: JVM dual instance baseline PASS (11/11); minimal fixture instrumentation ready but no device to execute"
+      ]
+    },
+    {
+      "id": "P0-COMPAT-01",
+      "title": "All six whitelist applications pass N and N-1",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "compatibility-dossiers",
+      "auditFindings": [
+        "qa-auditor: 6/6 BLOCKED - no APK, no version hash, no signing, no test account, no device"
+      ]
+    },
+    {
+      "id": "P0-STAB-01",
+      "title": "Release qualification has zero unexplained crash/ANR/isolation breach",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "device-soak"
+    },
+    {
+      "id": "P0-REL-01",
+      "title": "Release APK signing integrity",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "signing-verification"
+    },
+    {
+      "id": "P0-REL-02",
+      "title": "SBOM generation and dependency audit",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "sbom-audit"
+    },
+    {
+      "id": "P0-REL-03",
+      "title": "LICENSE and NOTICE files present and correct",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "license-check",
+      "auditFindings": [
+        "code-review: Repository lacks independent LICENSE file"
+      ]
+    },
+    {
+      "id": "P0-REL-04",
+      "title": "Privacy policy and sensitive permissions justified per channel",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "privacy-permission-audit",
+      "auditFindings": [
+        "code-review: REQUEST_INSTALL_PACKAGES, REQUEST_DELETE_PACKAGES, MANAGE_EXTERNAL_STORAGE, QUERY_ALL_PACKAGES require per-channel justification"
+      ]
+    },
+    {
+      "id": "P0-OPS-01",
+      "title": "Production monitoring rollback and evidence expiry are operational",
+      "tier": "P0",
+      "status": "BLOCKED",
+      "evidence": "release-drill"
+    },
+    {
+      "id": "P1-SEC-01",
+      "title": "Bootstrap process slot parser canonical enforcement",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "bootstrap-parser-negative-tests",
+      "auditFindings": [
+        "runtime-auditor: substringAfterLast(':v').toIntOrNull aliases host:v03/foreign.prefix/multi-delimiter to canonical slot"
+      ]
+    },
+    {
+      "id": "P1-SEC-02",
+      "title": "Foreign UID endpoint rejection matrix",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "foreign-uid-rejection-tests",
+      "auditFindings": [
+        "runtime-auditor: Missing unified foreign UID x endpoint class matrix"
+      ]
+    },
+    {
+      "id": "P1-SEC-03",
+      "title": "PID reuse + wrong processStartTicks rejection",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "pid-reuse-rejection-tests"
+    },
+    {
+      "id": "P1-SEC-04",
+      "title": "Route token wrong target/instance/startTicks rejection",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "route-token-negative-tests"
+    },
+    {
+      "id": "P1-ARC-01",
+      "title": "Hosted/Legacy build variant separation",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "build-variant-audit",
+      "auditFindings": [
+        "release-auditor: No formal hosted/legacy product flavor; single app variant carries all Legacy artifacts"
+      ]
+    },
+    {
+      "id": "P1-ARC-02",
+      "title": "Loader dex build reproducibility (variant-aware output, declared inputs/outputs)",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "loader-dex-build-audit",
+      "auditFindings": [
+        "release-auditor: generateLoaderDex modifies source assets dir, no inputs/outputs declaration, debug classes in Release"
+      ]
+    },
+    {
+      "id": "P1-CMP-01",
+      "title": "All 24 slots real device launch/kill/restart",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "device-slot-matrix"
+    },
+    {
+      "id": "P1-PERF-01",
+      "title": "Cold/warm start and first frame latency within thresholds",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "macrobenchmark-results"
+    },
+    {
+      "id": "P1-STAB-01",
+      "title": "24-hour ROM soak test",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "24h-soak-results"
+    },
+    {
+      "id": "P1-TEST-01",
+      "title": "Unit test gate: zero failures, zero unexpected skips",
+      "tier": "P1",
+      "status": "FAIL",
+      "evidence": "junit-xml-inventory",
+      "auditFindings": [
+        "qa-auditor: 1 failure (StubBuilderManifestTest: Cannot get Context outside Android runtime), 13 skipped (HookEngineTest 11, CoreFlowIntegrationTest 1, PackageGenerationReconcilerTest 1)"
+      ]
+    },
+    {
+      "id": "P1-POLICY-01",
+      "title": "queryRuntime metadata visibility contract for same-UID non-authoritative callers",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "product-policy-decision",
+      "auditFindings": [
+        "runtime-auditor: queryRuntime returns instance metadata (epoch/session/slot/PID) to same-UID callers with liveAuthority=false; product decision needed"
+      ]
+    },
+    {
+      "id": "P1-CRASH-01",
+      "title": "Crash atomicity durable journal or explicitly degraded semantics",
+      "tier": "P1",
+      "status": "BLOCKED",
+      "evidence": "crash-atomicity-implementation",
+      "auditFindings": [
+        "runtime-auditor: All server state is in-memory; no WAL/journal; decide: implement durable journal OR degrade to at-most-once and document"
+      ]
+    },
+    {
+      "id": "P2-PERF-01",
+      "title": "Memory and CPU baseline under soak",
+      "tier": "P2",
+      "status": "BLOCKED",
+      "evidence": "perf-soak-results"
+    },
+    {
+      "id": "P2-TEST-01",
+      "title": "72-hour combination soak with six whitelist apps",
+      "tier": "P2",
+      "status": "BLOCKED",
+      "evidence": "72h-soak-results"
+    },
+    {
+      "id": "P2-STORE-01",
+      "title": "Per-channel store policy compliance",
+      "tier": "P2",
+      "status": "BLOCKED",
+      "evidence": "store-policy-appendices"
+    },
+    {
+      "id": "P2-RC-01",
+      "title": "RC independent review and canary rollout",
+      "tier": "P2",
+      "status": "BLOCKED",
+      "evidence": "rc-review-report"
+    },
+    {
+      "id": "P2-OPS-01",
+      "title": "Rollback drill and evidence expiry automation",
+      "tier": "P2",
+      "status": "BLOCKED",
+      "evidence": "rollback-drill-report"
+    },
+    {
+      "id": "P2-TEST-02",
+      "title": "API 29/31/32/34/36 emulator matrix coverage",
+      "tier": "P2",
+      "status": "BLOCKED",
+      "evidence": "emulator-matrix-results",
+      "auditFindings": [
+        "qa-auditor: CI only covers API 28/30/33/35/37; missing API 29/31/32/34/36"
+      ]
+    },
+    {
+      "id": "P2-TEST-03",
+      "title": "arm32/arm64 and vendor ROM (HyperOS/MIUI/EMUI/ColorOS) device matrix",
+      "tier": "P2",
+      "status": "BLOCKED",
+      "evidence": "device-matrix-results"
+    },
+    {
+      "id": "P2-TEST-04",
+      "title": "16KB page size device validation",
+      "tier": "P2",
+      "status": "BLOCKED",
+      "evidence": "16kb-page-results"
+    }
+  ],
+  "summary": {
+    "p0": { "total": 20, "pass": 2, "fail": 1, "blocked": 17, "notApplicable": 0 },
+    "p1": { "total": 8, "pass": 0, "fail": 1, "blocked": 7, "notApplicable": 0 },
+    "p2": { "total": 7, "pass": 0, "fail": 0, "blocked": 7, "notApplicable": 0 },
+    "overallVerdict": "BLOCK"
+  }
+}

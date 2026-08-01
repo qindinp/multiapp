@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://multiapp.local/schemas/commercial-evidence-v1.json",
+  "title": "MultiApp Commercial Audit Evidence",
+  "type": "object",
+  "required": [
+    "schemaVersion", "evidenceId", "controlId", "testCaseId",
+    "runId", "result", "startedAt", "finishedAt",
+    "source", "build", "device", "execution", "artifacts", "review"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "evidenceId": { "type": "string", "minLength": 1 },
+    "controlId": { "type": "string", "pattern": "^P[0-2]-[A-Z]+-[0-9]{2}$" },
+    "testCaseId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "result": { "enum": ["PASS", "FAIL", "BLOCKED"] },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "finishedAt": { "type": "string", "format": "date-time" },
+    "source": {
+      "type": "object",
+      "required": ["repository", "commit", "treeHash", "repositoryIntegrityVerdict", "dirtyTree"],
+      "properties": {
+        "repository": { "type": "string" },
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "treeHash": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "repositoryIntegrityVerdict": { "enum": ["PASS", "FAIL", "BLOCKED"] },
+        "dirtyTree": { "type": "boolean" }
+      }
+    },
+    "build": {
+      "type": "object",
+      "required": ["variant", "apkSha256", "signingCertificateSha256", "gradleVersion", "jdkVersion", "compileSdk", "targetSdk"],
+      "properties": {
+        "variant": { "type": "string" },
+        "apkSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "aabSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "signingCertificateSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "mappingFileSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "sbomSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "gradleVersion": { "type": "string" },
+        "agpVersion": { "type": ["string", "null"] },
+        "jdkVersion": { "type": "string" },
+        "ndkVersion": { "type": ["string", "null"] },
+        "cmakeVersion": { "type": ["string", "null"] },
+        "compileSdk": { "type": "integer" },
+        "targetSdk": { "type": "integer" }
+      }
+    },
+    "guestApp": {
+      "type": "object",
+      "required": ["packageName", "versionName", "versionCode", "baseApkSha256", "signingCertificateSha256"],
+      "properties": {
+        "packageName": { "type": "string", "minLength": 1 },
+        "versionName": { "type": "string" },
+        "versionCode": { "type": "integer" },
+        "baseApkSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "splitSha256": { "type": "array", "items": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "minItems": 0 },
+        "signingCertificateSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "profileType": { "type": "string", "enum": ["N", "N_MINUS_1"] }
+      }
+    },
+    "device": {
+      "type": "object",
+      "required": ["manufacturer", "model", "fingerprint", "androidApi", "securityPatch", "romFamily", "abi", "pageSize", "webViewVersion"],
+      "properties": {
+        "manufacturer": { "type": "string" },
+        "model": { "type": "string" },
+        "fingerprint": { "type": "string" },
+        "androidApi": { "type": "integer" },
+        "securityPatch": { "type": "string" },
+        "romFamily": { "type": "string" },
+        "romVersion": { "type": "string" },
+        "abi": { "type": "string", "enum": ["arm64-v8a", "armeabi-v7a", "x86_64", "x86"] },
+        "pageSize": { "type": "integer", "enum": [4096, 16384] },
+        "webViewVersion": { "type": "string" }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["serverGenerationId", "instanceId", "runtimeEpoch", "engineSessionId", "processSlot", "hostPid", "processStartTicks"],
+      "properties": {
+        "serverGenerationId": { "type": "string", "minLength": 1 },
+        "instanceId": { "type": "string", "minLength": 1 },
+        "runtimeEpoch": { "type": "integer" },
+        "engineSessionId": { "type": "string", "minLength": 1 },
+        "processSlot": { "type": "string", "pattern": "^host:v([0-9]|1[0-9]|2[0-3])$" },
+        "hostPid": { "type": "integer" },
+        "processStartTicks": { "type": "integer" }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "required": ["preconditions", "steps", "assertions", "metrics"],
+      "properties": {
+        "preconditions": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "steps": { "type": "array", "items": { "type": "object", "required": ["stepId", "action", "result"] }, "minItems": 1 },
+        "assertions": { "type": "array", "items": { "type": "object", "required": ["assertionId", "description", "result"] }, "minItems": 1 },
+        "metrics": { "type": "object" },
+        "failureCode": { "type": ["string", "null"] },
+        "failedStage": { "type": ["string", "null"] }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "required": ["junitXmlSha256"],
+      "properties": {
+        "junitXmlSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "logcatSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "tombstoneSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "perfettoTraceSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "screenshotSha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "required": ["reviewer", "reviewedAt", "expiresAt", "defectIds"],
+      "properties": {
+        "reviewer": { "type": "string", "minLength": 1 },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "policyReferences": { "type": "array", "items": { "type": "string" } },
+        "defectIds": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "result": { "const": "PASS" } }
+      },
+      "then": {
+        "properties": {
+          "source": {
+            "properties": {
+              "dirtyTree": { "const": false },
+              "repositoryIntegrityVerdict": { "const": "PASS" }
+            },
+            "required": ["dirtyTree", "repositoryIntegrityVerdict"]
+          },
+          "guestApp": { "type": "object" },
+          "runtime": { "type": "object" }
+        },
+        "required": ["guestApp", "runtime"]
+      }
+    },
+    {
+      "if": {
+        "properties": { "source": { "properties": { "dirtyTree": { "const": true } } } }
+      },
+      "then": {
+        "properties": { "result": { "enum": ["FAIL", "BLOCKED"] } }
+      }
+    }
+  ]
+}
