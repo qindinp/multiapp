@@ -10,7 +10,6 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:common"))
     implementation(project(":core:manifest"))
-    implementation(project(":core:apk"))
     implementation(project(":core:hook"))
 
     implementation(libs.core.ktx)
