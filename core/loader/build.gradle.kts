@@ -26,8 +26,10 @@ dependencies {
     implementation(project(":core:hook"))
     implementation(project(":core:identity"))
     implementation(project(":core:manifest"))
-    implementation(project(":core:xposed"))
-    implementation(project(":core:xposed"))
+    // Xposed 仅 Legacy 路线（D1）：compileOnly 使 hosted 制品不打包其类；
+    // 调用点有 NativeHookPolicyGate 前置拦截，hosted baseline 不可达。
+    // legacy 变体由 app 的 legacyImplementation 在运行时提供。
+    compileOnly(project(":core:xposed"))
 
     implementation(libs.core.ktx)
     implementation(libs.timber)

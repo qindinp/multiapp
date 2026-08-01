@@ -60,17 +60,9 @@
 -keep class com.multiapp.core.hook.antidetection.** { *; }
 
 # --- StubBuilder (runtime reflection on Android internals) ---
+# hosted 变体不含 core:stub；以下 keep 仅对 legacy 变体有意义（D1 决策）
 -keep class com.multiapp.core.stub.StubBuilder { *; }
 -keep class com.multiapp.core.stub.ApkSigningHelper { *; }
-
-# --- InstanceManager ---
--keep class com.multiapp.core.instance.InstanceManager { *; }
--keep class com.multiapp.core.instance.InstanceInfo { *; }
--keep class com.multiapp.core.instance.InstanceStatus { *; }
-
-# --- Installer ---
--keep class com.multiapp.core.installer.StubInstaller { *; }
--keep class com.multiapp.core.installer.StubInstaller$InstallResult { *; }
 
 # --- CrashReporter ---
 -keep class com.multiapp.core.common.CrashReporter { *; }
@@ -80,3 +72,8 @@
 -dontwarn android.app.LoadedApk
 -dontwarn android.content.pm.PackageInstaller
 -dontwarn dalvik.system.InMemoryDexClassLoader
+
+# --- Legacy Xposed (compileOnly in core:loader; hosted 制品不含，D1) ---
+# LoaderFactory 中 xposed 符号引用由 NativeHookPolicyGate 前置拦截，hosted baseline 不可达；
+# 若误启用将以 NoClassDefFoundError 显式失败（fail-closed，优于静默执行未审计代码）。
+-dontwarn de.robv.android.xposed.**

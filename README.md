@@ -68,6 +68,15 @@ hosted 启动以 `InstallRecord` 和 `VirtualInstanceRecord` 为输入。`:engin
 | Notification | `PARTIAL` | 只有 caller package remap 基础；实例 ID/channel/PendingIntent 映射、持久化和 delete 清理未完成 |
 | JobScheduler/Alarm/PendingIntent/MediaProvider | `UNSUPPORTED` | engine capability catalog 默认标记为 `not-implemented`，尚无可发布的数据面 |
 
+## 事务语义（2026-08-01 决策 D2 确认）
+
+install/create/refresh/clear/delete 与组件事务当前提供 **at-most-once** 语义：
+
+- Activity/Service/Provider 的 commit 动作与 server 端状态提交之间存在崩溃窗口。`:engine` 进程崩溃后，已通过授权但未完成状态提交的副作用可能丢失（at-most-once），不会重放（not at-least-once）。
+- server 重启生成新 `serverGenerationId`，所有旧 generation 的 token/lease/capability/transaction **fail-closed**，不会产生重复副作用或跨 generation 状态混淆。
+- 当前不提供 durable journal/WAL，不承诺 exactly-once。依赖强一致事务的上层流程必须容忍"授权成功但副作用未发生"的窗口，并以 engine 查询接口为准对账。
+- durable journal（prepare-commit 日志 + recovery reconciler）已列入 `P1-CRASH-01` 迭代计划，目标 exactly-once 或明确的 at-least-once+幂等消费。
+
 更细的当前状态和开源方案对照见：
 
 - [开源引擎对照与路线结论](docs/reviews/2026-07-09-open-source-engine-comparison.md)

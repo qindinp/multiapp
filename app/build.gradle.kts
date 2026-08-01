@@ -24,6 +24,8 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // 临时基线签名：正式发布签名密钥 W5 阶段到位后替换（见 maturity-execution-plan）
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -31,6 +33,26 @@ android {
         }
         debug {
             isMinifyEnabled = false
+        }
+    }
+
+    // D1 决策（2026-08-01 确认）：hosted 为唯一商业发布变体；
+    // legacy 保留 Stub/loader.dex/Xposed 实验路径，物理隔离，不进入发布渠道。
+    flavorDimensions += "runtime"
+    productFlavors {
+        create("hosted") {
+            dimension = "runtime"
+            isDefault = true
+        }
+        create("legacy") {
+            dimension = "runtime"
+        }
+    }
+
+    sourceSets {
+        getByName("legacy") {
+            // 静态相对路径（AGP 不接受 Provider）；任务依赖由 merge*Assets 保证顺序
+            assets.srcDirs("build/generated/assets/legacy")
         }
     }
 
@@ -61,21 +83,21 @@ ksp {
     arg("correctErrorTypes", "true")
 }
 
-// 将 core:stub 生成的 loader.dex 复制到 app 模块的 assets 目录
-// AAR 不包含 assets，所以需要显式复制到 app 模块确保打包进 APK
+// loader.dex 仅属于 legacy 变体（D1 决策）：hosted 不复制、不打包。
+// 输出到 build/generated（不再写源码目录），声明 inputs/outputs 保证可复现。
 val copyLoaderDex = tasks.register<Copy>("copyLoaderDex") {
-    // 必须依赖 generateLoaderDex，否则会复制旧版 loader.dex
     dependsOn(":core:stub:generateLoaderDex")
-    from("${project(":core:stub").projectDir}/src/main/assets/loader.dex")
-    into("${projectDir}/src/main/assets")
+    val loaderDexSrc = file("${project(":core:stub").projectDir}/src/main/assets/loader.dex")
+    inputs.file(loaderDexSrc)
+    val outDir = layout.buildDirectory.dir("generated/assets/legacy").get().asFile
+    outputs.dir(outDir)
+    from(loaderDexSrc)
+    into(outDir)
     rename { "loader.dex" }
 }
 
 tasks.configureEach {
-    if (name.startsWith("merge") && name.endsWith("Assets")) {
-        dependsOn(copyLoaderDex)
-    }
-    if (name.contains("LintVital", ignoreCase = true)) {
+    if (name == "mergeLegacyDebugAssets" || name == "mergeLegacyReleaseAssets") {
         dependsOn(copyLoaderDex)
     }
 }
@@ -132,9 +154,13 @@ dependencies {
     implementation(project(":core:designsystem"))
     implementation(project(":core:apk"))
     implementation(project(":core:manifest"))
-    implementation(project(":core:stub"))
     implementation(project(":core:instance"))
     implementation(project(":core:installer"))
+
+    // Legacy 实验路径（Stub APK 构建器、loader.dex、Xposed API）：仅 legacy 变体（D1 决策）
+    // flavor 专属 configuration 在 Kotlin DSL 中需用字符串名引用
+    "legacyImplementation"(project(":core:stub"))
+    "legacyImplementation"(project(":core:xposed"))
 
     // Feature modules
     implementation(project(":feature:launcher"))

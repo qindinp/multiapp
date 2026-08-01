@@ -80,10 +80,10 @@ jobs:
           git rev-parse HEAD | tee ci-evidence/build/commit.txt
 
       - name: Lint
-        run: ./gradlew lintDebug --stacktrace
+        run: ./gradlew lintHostedDebug --stacktrace
 
       - name: JVM unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+        run: ./gradlew testHostedDebugUnitTest --stacktrace
 
       - name: Generate code coverage report
         run: ./gradlew jacocoTestReport --stacktrace
@@ -103,18 +103,21 @@ jobs:
             ci-evidence/build/
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleHostedDebug --stacktrace
 
       - name: Build release APK
-        run: ./gradlew assembleRelease --stacktrace
+        run: ./gradlew assembleHostedRelease --stacktrace
+
+      - name: Release content gate (D1: no Legacy stub/loader.dex/LSPlant/Xposed)
+        run: python tools/audit/check-release-content.py app/build/outputs/apk/hosted/release/app-hosted-release.apk
 
       - name: Record APK checksums
         shell: bash
         run: |
           set -euo pipefail
           sha256sum \
-            app/build/outputs/apk/debug/*.apk \
-            app/build/outputs/apk/release/*.apk \
+            app/build/outputs/apk/hosted/debug/*.apk \
+            app/build/outputs/apk/hosted/release/*.apk \
             | tee ci-evidence/build/apk-sha256.txt
 
       - name: Upload debug APK
@@ -124,7 +127,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/hosted/debug/*.apk
             ci-evidence/build/apk-sha256.txt
 
       - name: Upload release APK
@@ -134,7 +137,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           path: |
-            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/hosted/release/*.apk
             ci-evidence/build/apk-sha256.txt
 
   android-test:
@@ -253,7 +256,7 @@ jobs:
                 > "${evidence_dir}/minimal-fixture-install.txt" 2>&1 || fixture_status=$?
             fi
             if [ "${fixture_status}" -eq 0 ]; then
-              ./gradlew :app:connectedDebugAndroidTest --stacktrace --no-daemon || test_status=$?
+              ./gradlew :app:connectedHostedDebugAndroidTest --stacktrace --no-daemon || test_status=$?
             else
               test_status="${fixture_status}"
             fi
@@ -347,7 +350,7 @@ jobs:
             if adb shell pm path com.multiapp.app.test | grep -q '^package:'; then
               record_installed_apks "com.multiapp.app.test" "instrumentation" || evidence_status=$?
             fi
-            sha256sum app/build/outputs/apk/debug/*.apk \
+            sha256sum app/build/outputs/apk/hosted/debug/*.apk \
               > "${evidence_dir}/host-built-apk-sha256.txt" || evidence_status=$?
             sha256sum test-fixtures/minimal-app/build/outputs/apk/debug/*.apk \
               > "${evidence_dir}/minimal-fixture-built-apk-sha256.txt" || evidence_status=$?

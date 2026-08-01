@@ -37,21 +37,39 @@ subprojects {
                 toolVersion = "0.8.12"
             }
 
+            // 仅定义了 runtime flavor 的模块（当前只有 :app）使用 hosted 变体名；
+            // 无 flavor 的 application（如 test-fixtures）与 library 保持 debug 命名。
+            val appExt = extensions.findByName("android") as? com.android.build.api.dsl.ApplicationExtension
+            val hasRuntimeFlavor = appExt?.productFlavors?.any { it.dimension == "runtime" } == true
+            val testTaskName = if (hasRuntimeFlavor) "testHostedDebugUnitTest" else "testDebugUnitTest"
+            val classesVariant = if (hasRuntimeFlavor) "hostedDebug" else "debug"
+
             tasks.register<JacocoReport>("jacocoTestReport") {
-                dependsOn("testDebugUnitTest")
+                dependsOn(testTaskName)
 
                 group = "verification"
                 description = "Generate JaCoCo coverage report for debug variant"
 
-                val execFiles = fileTree(layout.buildDirectory) {
-                    include("**/testDebugUnitTest.exec")
+                // exec 文件固定位于 build/jacoco/<taskName>.exec，直接指向具体目录
+                val execFiles = fileTree(layout.buildDirectory.dir("jacoco")) {
+                    include("$testTaskName.exec")
                 }
 
-                val classFiles = fileTree(layout.buildDirectory) {
-                    include(
-                        "tmp/kotlin-classes/debug/**/*.class",
-                        "intermediates/javac/debug/**/*.class"
+                // base 收窄到具体编译输出目录，避免扫描整个 build 根触发隐式依赖检查
+                val classFiles = fileTree(layout.buildDirectory.dir("tmp/kotlin-classes/$classesVariant")) {
+                    exclude(
+                        "**/R.class",
+                        "**/R\$*.class",
+                        "**/BuildConfig.class",
+                        "**/Manifest*.*",
+                        "**/*_MembersInjector.class",
+                        "**/Dagger*Component*.*",
+                        "**/*Module_*Factory.class",
+                        "**/*_Factory.class",
+                        "**/Hilt_*.*",
+                        "**/*GeneratedInjector.*"
                     )
+                } + fileTree(layout.buildDirectory.dir("intermediates/javac/$classesVariant/classes")) {
                     exclude(
                         "**/R.class",
                         "**/R\$*.class",
