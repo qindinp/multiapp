@@ -42,12 +42,36 @@ Thumbs.db
 .idea/
 *.iml
 
-# QA evidence and artifacts
+# QA evidence and artifacts (but NOT config/evidence/)
 __pycache__/
 *.pyc
 screenshot*.png
-evidence/
+screen_*.png
+/evidence/
+
+# WorkBuddy local state (memory, plans, audit backups — never committed)
+.workbuddy/
+
+# Ad-hoc local scripts
+fix_tests.ps1
+
+# Audit execution logs moved to config/audit/ (build/ is globally ignored)
+
+# Config evidence schema (un-ignored: must be tracked)
+!config/evidence/
+!config/evidence/**
+
+# Config audit register (un-ignored: must be tracked)
+!config/audit/
+!config/audit/**
+
+# Config compatibility whitelist (un-ignored: must be tracked)
+!config/compatibility/
+!config/compatibility/**
 
 # Claude Code local state
 .claude/
 .ruff_cache/
+
+# Audit backups (sensitive; must NOT be committed)
+.workbuddy/audit-backups/
