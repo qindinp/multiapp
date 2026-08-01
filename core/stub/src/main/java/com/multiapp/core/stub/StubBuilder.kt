@@ -374,15 +374,15 @@ class StubBuilder(
                 "sdkInt" to config.deviceIdentity.sdkInt
             )
         )
-        // 加密敏感字段 (IMEI, MAC, AndroidId, Serial) — 失败时使用明文
+        // 加密敏感字段 (IMEI, MAC, AndroidId, Serial) — 失败时抛出异常终止构建
         return try {
             val encryptedMap = ConfigEncryptor.encryptSensitiveFields(
                 configMap, config.stubPackageName, config.instanceId
             )
             gson.toJson(encryptedMap)
         } catch (e: Throwable) {
-            Log.e("StubBuilder", "ConfigEncryptor failed, using plain JSON", e)
-            gson.toJson(configMap)
+            Log.e("StubBuilder", "ConfigEncryptor failed, aborting build", e)
+            throw IllegalStateException("Cannot build stub without config encryption: ${e.message}", e)
         }
     }
 
@@ -411,12 +411,19 @@ class StubBuilder(
 
     /**
      * 使用 ManifestRewriter 增量修改原 APK 的二进制 manifest
+     *
+     * 注意：此方法当前被禁用，原因如下：
+     * 1. ManifestRewriter 保留原 manifest 结构（含 meta-data），但会保留原 app 的 <permission> 声明
+     * 2. stub 包名与原 app 不同 → 系统报 INSTALL_FAILED_DUPLICATE_PERMISSION
+     * 3. 因此始终走 BinaryXmlEncoder 从零生成（不含原 app 权限声明）
+     *
+     * 如果需要保留原 manifest 结构，需要实现权限过滤逻辑。
      */
     private fun rewriteManifest(originApk: File, config: StubConfig, manifest: ManifestParser.ParsedManifest): ByteArray {
-        // ManifestRewriter 保留原 manifest 结构（含 meta-data），但会保留原 app 的 <permission> 声明。
-        // stub 包名不同 → 系统报 INSTALL_FAILED_DUPLICATE_PERMISSION。
-        // 因此始终走 BinaryXmlEncoder 从零生成（不含原 app 权限声明）。
-        error("Using fallback generator to avoid duplicate permission conflicts")
+        throw UnsupportedOperationException(
+            "ManifestRewriter disabled: causes INSTALL_FAILED_DUPLICATE_PERMISSION. " +
+            "Use BinaryXmlEncoder fallback instead."
+        )
     }
 
     /**
