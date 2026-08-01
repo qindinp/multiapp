@@ -506,7 +506,7 @@ class IdentityHookTest {
 
         @Test
         fun `rewritePath replaces originalPkg with stubPkg under data_data`() {
-            val result = invokeRewritePath(
+            val result = FileSystemHook.rewritePath(
                 "/data/data/$TEST_ORIGINAL_PKG/files/config.json",
                 TEST_ORIGINAL_PKG,
                 TEST_STUB_PKG
@@ -516,7 +516,7 @@ class IdentityHookTest {
 
         @Test
         fun `rewritePath replaces originalPkg under data_user_0`() {
-            val result = invokeRewritePath(
+            val result = FileSystemHook.rewritePath(
                 "/data/user/0/$TEST_ORIGINAL_PKG/shared_prefs/prefs.xml",
                 TEST_ORIGINAL_PKG,
                 TEST_STUB_PKG
@@ -526,7 +526,7 @@ class IdentityHookTest {
 
         @Test
         fun `rewritePath replaces originalPkg under data_user_10`() {
-            val result = invokeRewritePath(
+            val result = FileSystemHook.rewritePath(
                 "/data/user/10/$TEST_ORIGINAL_PKG/databases/db.sqlite",
                 TEST_ORIGINAL_PKG,
                 TEST_STUB_PKG
@@ -537,34 +537,34 @@ class IdentityHookTest {
         @Test
         fun `rewritePath returns path unchanged when no data prefix`() {
             val input = "/storage/emulated/0/$TEST_ORIGINAL_PKG/file.txt"
-            val result = invokeRewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
+            val result = FileSystemHook.rewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
             assertEquals(input, result)
         }
 
         @Test
         fun `rewritePath returns path unchanged when originalPkg not in path`() {
             val input = "/data/data/com.other.app/files/file.txt"
-            val result = invokeRewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
+            val result = FileSystemHook.rewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
             assertEquals(input, result)
         }
 
         @Test
         fun `rewritePath handles empty path`() {
-            val result = invokeRewritePath("", TEST_ORIGINAL_PKG, TEST_STUB_PKG)
+            val result = FileSystemHook.rewritePath("", TEST_ORIGINAL_PKG, TEST_STUB_PKG)
             assertEquals("", result)
         }
 
         @Test
         fun `rewritePath returns path unchanged for data path without package`() {
             val input = "/data/local/tmp/file.bin"
-            val result = invokeRewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
+            val result = FileSystemHook.rewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
             assertEquals(input, result)
         }
 
         @Test
         fun `rewritePath handles deep nested path`() {
             val input = "/data/data/$TEST_ORIGINAL_PKG/a/b/c/d/e/file.txt"
-            val result = invokeRewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
+            val result = FileSystemHook.rewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
             assertEquals("/data/data/$TEST_STUB_PKG/a/b/c/d/e/file.txt", result)
         }
 
@@ -572,27 +572,15 @@ class IdentityHookTest {
         fun `rewritePath handles path with multiple occurrences of originalPkg`() {
             // Only /data/data/ prefix occurrences are replaced, not bare package name occurrences
             val input = "/data/data/$TEST_ORIGINAL_PKG/$TEST_ORIGINAL_PKG/file.txt"
-            val result = invokeRewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
+            val result = FileSystemHook.rewritePath(input, TEST_ORIGINAL_PKG, TEST_STUB_PKG)
             assertEquals("/data/data/$TEST_STUB_PKG/$TEST_ORIGINAL_PKG/file.txt", result)
         }
 
         /**
-         * Invoke the private static rewritePath method on FileSystemHook.Companion
-         * via reflection.
+         * rewritePath 现为同模块 internal（@VisibleForTesting），直接调用。
+         * 旧实现经反射按简单名查找，因 internal 方法的 JVM 名混淆
+         * （rewritePath$multiapp_core_identity）返回 null 导致 9 个测试假失败。
          */
-        private fun invokeRewritePath(path: String, originalPkg: String, stubPkg: String): Any? {
-            val companionField = FileSystemHook::class.java.declaredFields
-                .firstOrNull { it.name == "Companion" }
-                ?: return null
-            companionField.isAccessible = true
-            val companion = companionField.get(null) ?: return null
-
-            val rewritePathMethod = companion::class.java.declaredMethods
-                .firstOrNull { it.name == "rewritePath" }
-                ?: return null
-            rewritePathMethod.isAccessible = true
-            return rewritePathMethod.invoke(companion, path, originalPkg, stubPkg)
-        }
     }
 
     // endregion

@@ -2,6 +2,7 @@ package com.multiapp.core.identity
 import com.multiapp.core.model.IdentityConfig
 
 import android.content.Context
+import androidx.annotation.VisibleForTesting
 import com.multiapp.core.hook.HookEngine
 import timber.log.Timber
 import java.io.File
@@ -162,26 +163,71 @@ class FileSystemHook : HookPoint {
             }
         }
 
+        private val USER_DATA_PATTERN = Regex("""/data/user/(\d+)/(.+)""")
+        private val USER_DE_PATTERN = Regex("""/data/user_de/(\d+)/(.+)""")
+
         /**
          * Rewrite a file path string, replacing occurrences of the original
          * package name with the stub package name in data directory paths.
          *
-         * 覆盖范围: /data/、/storage/、/sdcard/、/mnt/ 下所有包含原始包名的路径
+         * 覆盖范围: /data/data/、/data/user/{id}/、/data/user_de/{id}/、
+         * /storage/、/sdcard/、/mnt/ 下所有包含原始包名的路径
          */
-        private fun rewritePath(path: String, originalPkg: String, stubPkg: String): String {
+        @VisibleForTesting
+        internal fun rewritePath(path: String, originalPkg: String, stubPkg: String): String {
             if (!path.contains(originalPkg)) return path
 
-            return path
-                .replace("/data/data/$originalPkg/", "/data/data/$stubPkg/")
-                .replace("/data/user/0/$originalPkg/", "/data/user/0/$stubPkg/")
-                .replace("/data/user/10/$originalPkg/", "/data/user/10/$stubPkg/")
-                .replace("/storage/emulated/0/Android/data/$originalPkg/", "/storage/emulated/0/Android/data/$stubPkg/")
-                .replace("/storage/emulated/0/Android/obb/$originalPkg/", "/storage/emulated/0/Android/obb/$stubPkg/")
-                .replace("/storage/emulated/0/Android/media/$originalPkg/", "/storage/emulated/0/Android/media/$stubPkg/")
-                .replace("/sdcard/Android/data/$originalPkg/", "/sdcard/Android/data/$stubPkg/")
-                .replace("/sdcard/Android/obb/$originalPkg/", "/sdcard/Android/obb/$stubPkg/")
-                .replace("/sdcard/Android/media/$originalPkg/", "/sdcard/Android/media/$stubPkg/")
-                .replace("/mnt/sdcard/Android/data/$originalPkg/", "/mnt/sdcard/Android/data/$stubPkg/")
+            var result = path
+
+            // 1. 处理 /data/data/ (等同于 /data/user/0/)
+            result = result.replace(
+                "/data/data/$originalPkg/",
+                "/data/data/$stubPkg/"
+            )
+
+            // 2. 处理 /data/user/{id}/
+            result = USER_DATA_PATTERN.replace(result) { match ->
+                val userId = match.groupValues[1]
+                val remaining = match.groupValues[2]
+                if (remaining.startsWith("$originalPkg/") || remaining.contains("/$originalPkg/")) {
+                    val rewritten = remaining.replace("$originalPkg/", "$stubPkg/")
+                    "/data/user/$userId/$rewritten"
+                } else {
+                    match.value
+                }
+            }
+
+            // 3. 处理 /data/user_de/{id}/ (设备加密存储)
+            result = USER_DE_PATTERN.replace(result) { match ->
+                val userId = match.groupValues[1]
+                val remaining = match.groupValues[2]
+                if (remaining.startsWith("$originalPkg/") || remaining.contains("/$originalPkg/")) {
+                    val rewritten = remaining.replace("$originalPkg/", "$stubPkg/")
+                    "/data/user_de/$userId/$rewritten"
+                } else {
+                    match.value
+                }
+            }
+
+            // 4. 处理外部存储路径
+            val externalPaths = listOf(
+                "/storage/emulated/0/Android/data/",
+                "/storage/emulated/0/Android/obb/",
+                "/storage/emulated/0/Android/media/",
+                "/sdcard/Android/data/",
+                "/sdcard/Android/obb/",
+                "/sdcard/Android/media/",
+                "/mnt/sdcard/Android/data/"
+            )
+
+            for (prefix in externalPaths) {
+                result = result.replace(
+                    "$prefix$originalPkg/",
+                    "$prefix$stubPkg/"
+                )
+            }
+
+            return result
         }
 
         /**

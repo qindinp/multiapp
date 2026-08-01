@@ -182,13 +182,13 @@ class SignatureBypass : HookPoint {
         private fun readOriginalSignatures(originalPkg: String): Array<Signature>? {
             // 设置递归保护, 防止内部 getPackageArchiveInfo 触发已 hook 的 getPackageInfo
             recursionGuard.set(true)
-            return try {
-                readOriginalSignaturesInternal(originalPkg)
-            } catch (e: Exception) {
+            try {
+                return readOriginalSignaturesInternal(originalPkg)
+            } catch (e: Throwable) {
                 Timber.tag(TAG).e(e, "Failed to read original signatures for %s", originalPkg)
-                null
+                return null
             } finally {
-                recursionGuard.set(false)
+                recursionGuard.remove()  // 使用 remove() 清理
             }
         }
 
