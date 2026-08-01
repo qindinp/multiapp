@@ -26,12 +26,6 @@ ksp {
 
 dependencies {
     implementation(project(":core:model"))
-    implementation(project(":core:common"))
-    implementation(project(":core:manifest"))
-    implementation(project(":core:identity"))
-    implementation(project(":core:hook"))
-    implementation(project(":core:stub"))
-    implementation(project(":core:installer"))
 
     implementation(libs.core.ktx)
     implementation(libs.timber)

@@ -4,6 +4,7 @@ import com.multiapp.core.common.ConfigEncryptor
 import com.multiapp.core.manifest.StubConfig
 import com.multiapp.core.manifest.DeviceIdentityConfig
 import com.multiapp.core.model.CloneProfile
+import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
@@ -49,7 +50,9 @@ class StubBuilderConfigEncryptionTest {
 
     @Test
     fun `createConfigJson produces encrypted sensitive fields`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造会反射 ActivityThread 取系统 Context（JVM 不可用），
+        // createConfigJson 不依赖 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig()
 
         val configJson = builder.createConfigJson(config)
@@ -71,7 +74,9 @@ class StubBuilderConfigEncryptionTest {
 
     @Test
     fun `createConfigJson can be decrypted back to original values`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造会反射 ActivityThread 取系统 Context（JVM 不可用），
+        // createConfigJson 不依赖 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig()
 
         val configJson = builder.createConfigJson(config)
@@ -99,7 +104,9 @@ class StubBuilderConfigEncryptionTest {
 
     @Test
     fun `createConfigJson with empty sensitive fields does not encrypt them`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造会反射 ActivityThread 取系统 Context（JVM 不可用），
+        // createConfigJson 不依赖 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig(imei = "", macAddress = "")
 
         val configJson = builder.createConfigJson(config)
@@ -120,7 +127,9 @@ class StubBuilderConfigEncryptionTest {
 
     @Test
     fun `different instances produce different ciphertext for same values`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造会反射 ActivityThread 取系统 Context（JVM 不可用），
+        // createConfigJson 不依赖 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config1 = createTestConfig()
         val config2 = StubConfig(
             instanceId = "test_002",  // 不同的 instanceId
@@ -155,7 +164,9 @@ class StubBuilderConfigEncryptionTest {
 
     @Test
     fun `createConfigJson preserves device build info as plaintext`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造会反射 ActivityThread 取系统 Context（JVM 不可用），
+        // createConfigJson 不依赖 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig()
 
         val configJson = builder.createConfigJson(config)

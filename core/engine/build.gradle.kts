@@ -24,7 +24,6 @@ android {
 dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:common"))
-    implementation(project(":core:instance"))
     implementation(project(":core:loader"))
     implementation(project(":core:hook"))
     implementation(project(":core:identity"))

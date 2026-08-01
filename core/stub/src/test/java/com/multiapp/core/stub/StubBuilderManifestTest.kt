@@ -4,6 +4,7 @@ import com.multiapp.core.manifest.ManifestParser
 import com.multiapp.core.manifest.StubConfig
 import com.multiapp.core.manifest.DeviceIdentityConfig
 import com.multiapp.core.model.CloneProfile
+import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.io.File
@@ -45,7 +46,9 @@ class StubBuilderManifestTest {
         config: StubConfig,
         manifest: ManifestParser.ParsedManifest
     ): ByteArray {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造依赖 Android runtime（反射 ActivityThread），
+        // rewriteManifest 本身不触达 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val method = StubBuilder::class.java.getDeclaredMethod(
             "rewriteManifest",
             File::class.java,
@@ -53,12 +56,20 @@ class StubBuilderManifestTest {
             ManifestParser.ParsedManifest::class.java
         )
         method.isAccessible = true
-        return method.invoke(builder, originApk, config, manifest) as ByteArray
+        // Method.invoke 会把目标异常包装为 InvocationTargetException，
+        // 需要 unwrap 后重新抛出，否则 assertThrows 无法匹配真实异常类型。
+        try {
+            return method.invoke(builder, originApk, config, manifest) as ByteArray
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            throw (e.cause ?: e)
+        }
     }
 
     @Test
     fun `rewriteManifest throws UnsupportedOperationException`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造依赖 Android runtime（反射 ActivityThread），
+        // rewriteManifest 本身不触达 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig()
         val manifest = ManifestParser.ParsedManifest(
             packageName = "com.test.app",
@@ -81,7 +92,9 @@ class StubBuilderManifestTest {
 
     @Test
     fun `rewriteManifest exception message mentions ManifestRewriter disabled`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造依赖 Android runtime（反射 ActivityThread），
+        // rewriteManifest 本身不触达 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig()
         val manifest = ManifestParser.ParsedManifest(
             packageName = "com.test.app",
@@ -107,7 +120,9 @@ class StubBuilderManifestTest {
 
     @Test
     fun `rewriteManifest exception message mentions INSTALL_FAILED_DUPLICATE_PERMISSION`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造依赖 Android runtime（反射 ActivityThread），
+        // rewriteManifest 本身不触达 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig()
         val manifest = ManifestParser.ParsedManifest(
             packageName = "com.test.app",
@@ -133,7 +148,9 @@ class StubBuilderManifestTest {
 
     @Test
     fun `rewriteManifest exception message mentions BinaryXmlEncoder fallback`() {
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造依赖 Android runtime（反射 ActivityThread），
+        // rewriteManifest 本身不触达 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig()
         val manifest = ManifestParser.ParsedManifest(
             packageName = "com.test.app",
@@ -162,7 +179,9 @@ class StubBuilderManifestTest {
         // S1-3 修复：rewriteManifest 现在直接 throw
         // 而非返回错误或执行 catch 回退
         // 验证方法不会在内部捕获异常并吞掉
-        val builder = StubBuilder()
+        // ManifestParser() 无参构造依赖 Android runtime（反射 ActivityThread），
+        // rewriteManifest 本身不触达 parser，注入 relaxed mock 即可。
+        val builder = StubBuilder(parser = mockk(relaxed = true))
         val config = createTestConfig()
         val manifest = ManifestParser.ParsedManifest(
             packageName = "com.test.app",
