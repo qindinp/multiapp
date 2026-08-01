@@ -161,22 +161,25 @@ class HostedContainerPr10StorageEvidenceTest {
         val launchResult = virtualizationEngine.launchInstance(
             com.multiapp.core.model.engine.LaunchInstanceRequest(
                 instanceId = instance.instanceId,
-                reason = "androidTest:pr10-storage-evidence",
-                // storage evidence 仅在 FULL 模式写入（2026-08-01 真机定位）
-                evidenceMode = com.multiapp.core.model.engine.EngineEvidenceMode.FULL
+                reason = "androidTest:pr10-storage-evidence"
             )
         )
         assertTrue(
             "engine launchInstance failed for ${instance.instanceId}: ${launchResult.status}:${launchResult.message}",
             launchResult.status == EngineResultStatus.PASS
         )
-        val scenario = ActivityScenario.launch<ContainerActivity>(
-            ContainerActivity.createIntent(
-                targetContext,
-                instance.instanceId,
-                "androidTest:pr10-storage-evidence"
-            )
+        val containerIntent = ContainerActivity.createIntent(
+            targetContext,
+            instance.instanceId,
+            "androidTest:pr10-storage-evidence"
         )
+        // storage evidence 由 ContainerActivity 在 evidenceMode=FULL 时写入（intent extra，
+        // 非 launchInstance；2026-08-01 真机定位）
+        containerIntent.putExtra(
+            com.multiapp.core.model.engine.EngineLaunchIntentContract.EXTRA_ENGINE_EVIDENCE_MODE,
+            com.multiapp.core.model.engine.EngineEvidenceMode.FULL.name
+        )
+        val scenario = ActivityScenario.launch<ContainerActivity>(containerIntent)
         try {
             instrumentation.waitForIdleSync()
             waitForPr10Evidence(instance.instanceId)
