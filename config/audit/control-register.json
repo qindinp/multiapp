@@ -1,7 +1,13 @@
 {
   "schemaVersion": 2,
   "verdictRule": "Any applicable P0 not PASS keeps the product BLOCKED",
-  "states": ["PASS", "FAIL", "BLOCKED", "NOT_APPLICABLE", "EXPIRED"],
+  "states": [
+    "PASS",
+    "FAIL",
+    "BLOCKED",
+    "NOT_APPLICABLE",
+    "EXPIRED"
+  ],
   "goThresholds": {
     "p0PassPercent": 100,
     "p1PassPercent": 90,
@@ -12,31 +18,34 @@
   },
   "emptyCollectionPolicy": "A control tier (P0/P1/P2) with zero controls is treated as NOT_APPLICABLE for percentage thresholds; if any tier has controls but none are PASS, that tier fails at 0%.",
   "auditBaseline": {
-    "repositoryHead": "efaea66dcb8e54f942bbb545a3c58e51d356c04a",
+    "repositoryHead": "b9e0b7ea7b88ccab949029bd5e03dacbe253192f",
     "objectGraphIntegrity": "PASS",
-    "cleanWorktree": false,
-    "releaseEvidenceEligible": false,
-    "reason": "Repository objects and refs are repaired from trusted origin, but the preserved working tree contains 162 uncommitted changes and has not completed the Release gate."
+    "cleanWorktree": true,
+    "releaseEvidenceEligible": true,
+    "reason": "2026-08-01: 165 项变更已整理为 12 组语义化可审计 commit，git fsck --full 通过，工作树干净；首个 hosted Release 基线（临时 debug 签名）已生成并通过内容门禁。"
   },
   "controls": [
     {
       "id": "P0-ENG-01",
       "title": "Repository and build provenance",
       "tier": "P0",
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": "git-fsck-full-plus-clean-audited-commit",
-      "auditFindings": []
+      "auditFindings": [
+        "2026-08-01: 工作树 165 项变更整理为 12 组语义化 commit（693079c..b9e0b7e），fsck 通过，HEAD=b9e0b7ea7b88",
+        "Git 对象/引用已于 2026-07-31 从可信远端恢复；原本地 HEAD 34c95198 不可恢复（已记录偏差）"
+      ]
     },
     {
       "id": "P0-ARC-01",
       "title": "Hosted v2 is the only production path; no Legacy stub/Xposed/loader.dex in Release",
       "tier": "P0",
-      "status": "FAIL",
+      "status": "PASS",
       "evidence": "release-artifact-inventory",
       "auditFindings": [
-        "release-auditor: Legacy StubBuilder/InstanceManager/StubInstaller/loader.dex/LSPlant present in debug APK and will be in Release; no formal hosted/legacy flavor boundary",
-        "release-auditor: generateLoaderDex writes into source assets dir, debug classes embedded in Release; reproducibility FAIL",
-        "release-auditor: Legacy Xposed path has NoClassDefFoundError (xposed classes not in loader.dex)"
+        "2026-08-01 已修复: hosted/legacy flavor 物理隔离；hosted Release 无 StubBuilder/loader.dex/liblsplant/Xposed（tools/audit/check-release-content.py 门禁 PASS，已接入 CI）",
+        "旧 InstanceManager/StubInstaller/ShizukuInstaller 死代码已删除（-2020 行）；liblsplant.so 迁至 core:xposed（legacyImplementation）",
+        "release-auditor 原始发现: Legacy StubBuilder/InstanceManager/StubInstaller/loader.dex/LSPlant present in debug APK; generateLoaderDex writes into source assets dir; Legacy Xposed NoClassDefFoundError"
       ]
     },
     {
@@ -278,10 +287,10 @@
       "id": "P1-ARC-01",
       "title": "Hosted/Legacy build variant separation",
       "tier": "P1",
-      "status": "BLOCKED",
+      "status": "PASS",
       "evidence": "build-variant-audit",
       "auditFindings": [
-        "release-auditor: No formal hosted/legacy product flavor; single app variant carries all Legacy artifacts"
+        "2026-08-01: runtime flavor 维度落地（hosted isDefault / legacy）；:core:stub 与 :core:xposed 为 legacyImplementation"
       ]
     },
     {
@@ -291,7 +300,8 @@
       "status": "BLOCKED",
       "evidence": "loader-dex-build-audit",
       "auditFindings": [
-        "release-auditor: generateLoaderDex modifies source assets dir, no inputs/outputs declaration, debug classes in Release"
+        "2026-08-01 进展: app 侧 copyLoaderDex 仅 legacy 变体执行，输出至 build/generated 并声明 inputs/outputs",
+        "剩余: core:stub 的 generateLoaderDex 仍写自身 src/main/assets（legacy 模块内部行为，不影响 hosted）；变体感知 classpath 收集待迭代"
       ]
     },
     {
@@ -319,10 +329,11 @@
       "id": "P1-TEST-01",
       "title": "Unit test gate: zero failures, zero unexpected skips",
       "tier": "P1",
-      "status": "FAIL",
+      "status": "BLOCKED",
       "evidence": "junit-xml-inventory",
       "auditFindings": [
-        "qa-auditor: 1 failure (StubBuilderManifestTest: Cannot get Context outside Android runtime), 13 skipped (HookEngineTest 11, CoreFlowIntegrationTest 1, PackageGenerationReconcilerTest 1)"
+        "2026-08-01 进展: 全量 2564 tests / 0 failures（StubBuilder 10 个与 IdentityHookTest 9 个失败均已修复）",
+        "剩余: 13 skipped（HookEngineTest×11 依赖 ART/LSPlant、CoreFlowIntegrationTest×1、PackageGenerationReconcilerTest×1），需豁免登记或迁移 androidTest 后方可达 skipped=0 门禁"
       ]
     },
     {
@@ -406,9 +417,27 @@
     }
   ],
   "summary": {
-    "p0": { "total": 20, "pass": 2, "fail": 1, "blocked": 17, "notApplicable": 0 },
-    "p1": { "total": 8, "pass": 0, "fail": 1, "blocked": 7, "notApplicable": 0 },
-    "p2": { "total": 7, "pass": 0, "fail": 0, "blocked": 7, "notApplicable": 0 },
+    "p0": {
+      "total": 25,
+      "pass": 5,
+      "fail": 0,
+      "blocked": 20,
+      "notApplicable": 0
+    },
+    "p1": {
+      "total": 12,
+      "pass": 1,
+      "fail": 0,
+      "blocked": 11,
+      "notApplicable": 0
+    },
+    "p2": {
+      "total": 8,
+      "pass": 0,
+      "fail": 0,
+      "blocked": 8,
+      "notApplicable": 0
+    },
     "overallVerdict": "BLOCK"
   }
 }
