@@ -200,7 +200,11 @@
       "evidence": "compatibility-dossiers/2026-08-01-realapp-smoke.md",
       "auditFindings": [
         "2026-08-01 设备基线首测（popsicle API36）：导入层 7/7 PASS（含微信 266MB 加固 APK）；启动层 3/7 PASS（酷狗/高德/minimal）",
-        "失败 4 项 = 2 类已定位产品缺口：(A) authoritative runtime state missing ×3（微信/起点/WPS，guest PREPARE 查询 engine runtime miss，与 Pr10 跨进程同步同源）(B) self-provider UID 隔离冲突 ×1（微博 AppMonitorProvider，Provider data plane 缺口）",
+        "2026-08-03 A 类已修复（metadata 组件去重，950502f）：微信/起点/WPS 从 STALE fail-closed 推进到 Application 创建阶段",
+        "2026-08-03 三类根因完整定位（d8de18a 完整异常栈）：",
+        "  B 类 self-provider UID 隔离（核心缺口，微博/微信/WPS 全中）：guest uid=10473≠origin uid，访问自营非导出 provider/service 被系统拒绝（AppMonitorProvider / ExceptionMonitorService / ProcessPitProviderPersist）→ Provider data plane 虚拟化（W3）",
+        "  C 类 native 加固壳（起点）：StubApp.interface20() UnsatisfiedLinkError，LoadedApk 沙箱未加载壳 so → origin lib/ 提取 + nativeLibraryDir 注入（W3）",
+        "  微信额外：GT HotPool NPE（内部逻辑依赖缺失上下文）",
         "dossier: docs/compatibility-dossiers/2026-08-01-realapp-smoke.md"
       ]
     },
