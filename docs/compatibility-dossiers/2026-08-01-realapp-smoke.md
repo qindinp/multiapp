@@ -86,3 +86,37 @@
 1. CompatDiag 分层日志：guest PREPARE 参数 → engine 入口 → 各 return null 分支 → 客户端 IPC 层（异常/descriptor null/校验失败）——穷举所有静默失败路径
 2. 关键判别：engine 入口日志打但后续分支全不打 → 请求到达 handler 且走通校验 → 聚焦**最后一步无日志的返回**（`EngineAuthoritativeRuntimeStream.open` 的 `runCatching.getOrNull` 吞异常 + Timber 日志）
 3. 教训：静默 `runCatching.getOrNull()` 是调试黑洞，fail-closed 路径应带原因 message
+
+---
+
+## 2026-08-03 B 类根因闭环：BASELINE lsplantEnabled=false 导致 ContentProviderHook 未安装
+
+**B 类（self-provider UID 隔离）根因已定位**，微博的 UID 拒绝在 hook 启用后消除（验证已证明）。
+
+### 根因链（真机多轮定位）
+
+```
+EngineProfile.BASELINE 的 lsplantEnabled=false（CompatibilityProfilePolicy.kt:41）
+  → legacyProviderHookEnabled = providerRoutingEnabled(true) && lsplantEnabled(false) = false
+  → HostedRuntimeBootstrap.providerHookInstallEnabled = false
+  → ContentProviderHook 未安装（Skipped PROFILE_DISABLED）
+  → guest 访问 origin 自身非导出 provider（AppMonitorProvider 等）不被 authority 重写
+  → 系统 acquire 阶段 UID 检查：guest uid(10473) ≠ owner uid(10328) → 拒绝
+```
+
+**关键判别证据**：
+- authorityMap 含 AppMonitorProvider（snapshot.providers 26 项含它，authority 解析正确）——排除 manifest 解析漏
+- resolve null = 0（所有访问成功 resolve）——排除 resolve 匹配失败
+- acquireProvider hook 的 beforeCallback 从未执行（ContentProviderHook 的 Java hook 未生效）——**hook 未安装**
+- **BASELINE lsplant=true 验证**：微博从 `Permission Denial AppMonitorProvider` → `process slot draining previous generation`（**UID 拒绝已修复**，hook 生效）；酷狗/高德/minimal 仍 BOOTSTRAPPED（hook 对非加固应用无副作用）
+
+### 修复方向（架构决策，待立项）
+
+1. **BASELINE 默认启用 provider hook**（验证已证明安全，但 hook 全量启用是兼容性决策）
+2. **COMPAT_HOOK profile + allowList 放行加固应用**（当前 allowList 空导致 COMPAT_HOOK 不可用，需配置入口）
+3. 折中：按应用特征启用（manifest 含 not exported provider 的应用默认启用）
+
+### 注意事项
+
+- 微信/起点/WPS 与 B 类无关（native 壳 StubApp / RePlugin Tinker / GT 内部逻辑，是 C 类与内部逻辑）
+- 微博的新问题 `process slot draining previous generation` 是 bootstrap 代际管理的独立问题（hook 安装后进程复用冲突），非 B 类核心
