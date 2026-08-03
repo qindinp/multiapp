@@ -11,6 +11,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.util.Log
 import com.multiapp.core.engine.EngineComponentProcessLaunchTicket
 import com.multiapp.core.engine.EngineProcessBootstrapKind
 import com.multiapp.core.engine.EngineProcessBootstrapReadiness
@@ -750,9 +751,19 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
             processSlot = envelope.processSlot,
             componentAttachCapability = envelope.componentLaunchTicket?.attachCapability
         )
-            ?: return EngineProcessBootstrapIpc.resultBundle(
-                failed(envelope, EngineProcessBootstrapState.STALE, "authoritative runtime state missing")
-            )
+            ?: run {
+                // 诊断日志：runtime 查询 miss（2026-08-01 真实应用兼容性 A 类调试）
+                Log.e(
+                    "CompatDiag",
+                    "PREPARE runtime missing: instanceId=${envelope.instanceId} " +
+                        "epoch=${envelope.runtimeEpoch} session=${envelope.engineSessionId} " +
+                        "slot=${envelope.processSlot} callerPid=${android.os.Process.myPid()} " +
+                        "proc=${hostContext.packageName}:${Process.myPid()}"
+                )
+                return EngineProcessBootstrapIpc.resultBundle(
+                    failed(envelope, EngineProcessBootstrapState.STALE, "authoritative runtime state missing")
+                )
+            }
         val componentTicket = envelope.componentLaunchTicket
         val primaryProcessSlot = authoritativeRuntime.processSlot
         val authoritySnapshot = EngineRuntimeIpcClients.queryRuntime(envelope.instanceId)

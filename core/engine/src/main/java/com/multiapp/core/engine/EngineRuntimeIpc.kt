@@ -526,7 +526,17 @@ class EngineRuntimeBinderEndpoint(
     ): ParcelFileDescriptor? {
         if (!isAuthorized() || instanceId.isBlank()) return null
         val engine = virtualizationEngine ?: return null
-        val runtime = engine.queryRuntimeState(instanceId) ?: return null
+        val runtime = engine.queryRuntimeState(instanceId)
+        if (runtime == null) {
+            // 诊断日志：engine 侧 runtime 不存在（2026-08-01 真实应用兼容性 A 类调试）
+            android.util.Log.w(
+                "CompatDiag",
+                "engineOpenRuntimeState runtime null: instanceId=$instanceId " +
+                    "callerPid=${callingPid()} callerProc=${callingProcessName(callingPid())} " +
+                    "slot=${request.getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT)}"
+            )
+            return null
+        }
         val providerTarget = boundProviderTargetForCallingProcess(runtime)
         val componentIdentity = if (providerTarget == null) {
             authoritativeComponentProcessIdentity(runtime)
@@ -536,15 +546,32 @@ class EngineRuntimeBinderEndpoint(
         val requestedSlot = request.getString(EngineRuntimeIpcContract.KEY_PROCESS_SLOT)
         val processRuntime = when {
             providerTarget != null -> {
-                if (requestedSlot != providerTarget.binding.processSlot) return null
+                if (requestedSlot != providerTarget.binding.processSlot) {
+                    android.util.Log.w("CompatDiag", "engineOpenRuntimeState slot mismatch providerTarget: expected=${providerTarget.binding.processSlot} actual=$requestedSlot instanceId=$instanceId")
+                    return null
+                }
                 runtime.toProviderRouteProcessRuntime(providerTarget)
             }
             componentIdentity != null -> {
-                if (requestedSlot != componentIdentity.processSlot) return null
+                if (requestedSlot != componentIdentity.processSlot) {
+                    android.util.Log.w("CompatDiag", "engineOpenRuntimeState slot mismatch component: expected=${componentIdentity.processSlot} actual=$requestedSlot instanceId=$instanceId")
+                    return null
+                }
                 runtime.toComponentProcessRuntime(componentIdentity)
             }
             else -> {
-                if (!isAuthoritativeRuntimeStreamCaller(runtime, request)) return null
+                if (!isAuthoritativeRuntimeStreamCaller(runtime, request)) {
+                    android.util.Log.w(
+                        "CompatDiag",
+                        "engineOpenRuntimeState caller rejected: instanceId=$instanceId " +
+                            "callerPid=${callingPid()} callerProc=${callingProcessName(callingPid())} " +
+                            "requestedSlot=$requestedSlot runtimeSlot=${runtime.processSlot} " +
+                            "epoch=${request.getLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH)} " +
+                            "session=${request.getString(EngineRuntimeIpcContract.KEY_ENGINE_SESSION_ID)} " +
+                            "runtimeEpoch=${runtime.runtimeEpoch} runtimeSession=${runtime.engineSessionId}"
+                    )
+                    return null
+                }
                 runtime
             }
         }
@@ -3159,25 +3186,46 @@ class EngineRuntimeIpcClient(
         val authority = EngineRuntimeIpcContract.authority(hostContext.packageName)
         val uri = Uri.Builder().scheme("content").authority(authority).build()
         repeat(CONNECT_ATTEMPTS) { attempt ->
-            val response = callProvider(hostContext, uri)
+            val response = callProvider(hostContext, uri, attempt)
             val candidate = response?.toEngineRuntimeServiceCandidateOrNull(
                 expectedProcessName = EngineRuntimeIpcContract.engineProcessName(hostContext.packageName),
                 clientProcessId = Process.myPid()
             )
             if (candidate != null) return candidate
+            android.util.Log.e(
+                "CompatDiag",
+                "connect attempt $attempt failed: proc=${Process.myPid()} authority=$authority " +
+                    "response=${response != null} pid=${Process.myPid()}"
+            )
             if (attempt + 1 < CONNECT_ATTEMPTS) SystemClock.sleep(CONNECT_RETRY_DELAY_MS)
         }
         return null
     }
 
-    private fun callProvider(hostContext: Context, uri: Uri): Bundle? {
+    private fun callProvider(hostContext: Context, uri: Uri, attempt: Int): Bundle? {
         val client = runCatching {
             hostContext.contentResolver.acquireUnstableContentProviderClient(uri)
-        }.getOrNull() ?: return null
+        }.getOrElse { error ->
+            android.util.Log.e(
+                "CompatDiag",
+                "acquireUnstable failed: attempt=$attempt proc=${Process.myPid()} err=${error.javaClass.simpleName}:${error.message?.take(80)}"
+            )
+            return null
+        }
+        if (client == null) {
+            android.util.Log.e("CompatDiag", "acquireUnstable returned null: attempt=$attempt proc=${Process.myPid()} uri=$uri")
+            return null
+        }
         return try {
             runCatching {
                 client.call(EngineRuntimeIpcContract.METHOD_GET_BINDER, null, null)
-            }.getOrNull()
+            }.getOrElse { error ->
+                android.util.Log.e(
+                    "CompatDiag",
+                    "call GET_BINDER failed: attempt=$attempt proc=${Process.myPid()} err=${error.javaClass.simpleName}:${error.message?.take(80)}"
+                )
+                null
+            }
         } finally {
             runCatching { client.close() }
         }
@@ -3361,7 +3409,11 @@ object EngineRuntimeIpcClients {
             processSlot = processSlot
         )
         cacheKey?.let(authoritativeRuntimeCache::get)?.let { cached -> return cached }
-        val active = activeService() ?: return null
+        val active = activeService()
+        if (active == null) {
+            android.util.Log.e("CompatDiag", "engineQueryRuntimeState: activeService null proc=${Process.myPid()} instanceId=$instanceId")
+            return null
+        }
         val request = Bundle().apply {
             runtimeEpoch?.takeIf { it > 0L }?.let {
                 putLong(EngineRuntimeIpcContract.KEY_RUNTIME_EPOCH, it)
@@ -3378,7 +3430,21 @@ object EngineRuntimeIpcClients {
         }
         val descriptor = runCatching {
             active.engineOpenRuntimeState(instanceId, request)
-        }.getOrNull() ?: return null
+        }.getOrElse { error ->
+            android.util.Log.e(
+                "CompatDiag",
+                "engineQueryRuntimeState IPC failed: proc=${Process.myPid()} instanceId=$instanceId " +
+                    "err=${error.javaClass.simpleName}:${error.message?.take(100)}"
+            )
+            return null
+        }
+        if (descriptor == null) {
+            android.util.Log.e(
+                "CompatDiag",
+                "engineQueryRuntimeState IPC returned null: proc=${Process.myPid()} instanceId=$instanceId slot=$processSlot"
+            )
+            return null
+        }
         val runtime = EngineAuthoritativeRuntimeStream.read(descriptor)?.takeIf { decoded ->
             decoded.instanceId == instanceId &&
                 (runtimeEpoch == null || decoded.runtimeEpoch == runtimeEpoch) &&
