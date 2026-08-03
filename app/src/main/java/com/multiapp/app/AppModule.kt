@@ -194,7 +194,7 @@ object AppModule {
                             metaData = providerMetaData
                         )
                     }
-                },
+                }.distinctBy { it.name },
                 applicationMetaData = manifest.applicationMetaData.toVirtualMetaDataMap(),
                 signerSha256Digests = signingIdentity.digests,
                 hasMultipleSigners = signingIdentity.hasMultipleSigners
@@ -217,36 +217,43 @@ object AppModule {
     }
 
     private fun Array<out android.content.pm.ComponentInfo>?.toComponentInfos(): List<ComponentInfo> {
-        return this?.mapNotNull { component ->
-            component.name?.takeIf { it.isNotBlank() }?.let { name ->
-                val provider = component as? ProviderInfo
-                val uriPermissionPatterns = provider?.uriPermissionPatterns.orEmpty()
-                    .mapNotNull { it.toVirtualProviderPathPattern() }
-                ComponentInfo(
-                    name = name,
-                    exported = component.exported,
-                    authorities = providerAuthorities(provider?.authority),
-                    permission = component.componentPermission(),
-                    readPermission = provider?.readPermission?.takeIf { it.isNotBlank() },
-                    writePermission = provider?.writePermission?.takeIf { it.isNotBlank() },
-                    grantUriPermissions = provider?.grantUriPermissions == true && uriPermissionPatterns.isEmpty(),
-                    pathPermissions = provider?.pathPermissions.orEmpty().mapNotNull { permission ->
-                        val pattern = permission.toVirtualProviderPathPattern() ?: return@mapNotNull null
-                        val readPermission = permission.readPermission?.takeIf { it.isNotBlank() }
-                        val writePermission = permission.writePermission?.takeIf { it.isNotBlank() }
-                        if (readPermission == null && writePermission == null) return@mapNotNull null
-                        VirtualProviderPathPermission(pattern, readPermission, writePermission)
-                    },
-                    uriPermissionPatterns = uriPermissionPatterns,
-                    launchMode = (component as? ActivityInfo)?.launchModeString(),
-                    processName = component.processName?.takeIf { it.isNotBlank() },
-                    taskAffinity = (component as? ActivityInfo)?.taskAffinity?.takeIf { it.isNotBlank() },
-                    themeId = (component as? ActivityInfo)?.theme ?: 0,
-                    metaData = component.metaData.toModelMetaData(),
-                    targetActivityName = (component as? ActivityInfo)?.targetActivity?.takeIf { it.isNotBlank() }
-                )
+        // distinctBy name：真实应用 manifest 可声明同名组件（系统安装时去重保留其一，
+        // PackageManager 返回数组仍含重复项）；snapshot 校验要求组件名唯一（2026-08-03
+        // 真机定位：微信/起点/WPS 因重复 Activity 导致 runtime stream encode 失败）
+        return this?.asSequence()
+            ?.mapNotNull { component ->
+                component.name?.takeIf { it.isNotBlank() }?.let { name ->
+                    val provider = component as? ProviderInfo
+                    val uriPermissionPatterns = provider?.uriPermissionPatterns.orEmpty()
+                        .mapNotNull { it.toVirtualProviderPathPattern() }
+                    ComponentInfo(
+                        name = name,
+                        exported = component.exported,
+                        authorities = providerAuthorities(provider?.authority),
+                        permission = component.componentPermission(),
+                        readPermission = provider?.readPermission?.takeIf { it.isNotBlank() },
+                        writePermission = provider?.writePermission?.takeIf { it.isNotBlank() },
+                        grantUriPermissions = provider?.grantUriPermissions == true && uriPermissionPatterns.isEmpty(),
+                        pathPermissions = provider?.pathPermissions.orEmpty().mapNotNull { permission ->
+                            val pattern = permission.toVirtualProviderPathPattern() ?: return@mapNotNull null
+                            val readPermission = permission.readPermission?.takeIf { it.isNotBlank() }
+                            val writePermission = permission.writePermission?.takeIf { it.isNotBlank() }
+                            if (readPermission == null && writePermission == null) return@mapNotNull null
+                            VirtualProviderPathPermission(pattern, readPermission, writePermission)
+                        },
+                        uriPermissionPatterns = uriPermissionPatterns,
+                        launchMode = (component as? ActivityInfo)?.launchModeString(),
+                        processName = component.processName?.takeIf { it.isNotBlank() },
+                        taskAffinity = (component as? ActivityInfo)?.taskAffinity?.takeIf { it.isNotBlank() },
+                        themeId = (component as? ActivityInfo)?.theme ?: 0,
+                        metaData = component.metaData.toModelMetaData(),
+                        targetActivityName = (component as? ActivityInfo)?.targetActivity?.takeIf { it.isNotBlank() }
+                    )
+                }
             }
-        }.orEmpty()
+            ?.distinctBy { it.name }
+            ?.toList()
+            .orEmpty()
     }
 
     private fun Array<String>?.filterNotBlank(): List<String> =
@@ -258,6 +265,9 @@ object AppModule {
         }.getOrDefault(false)
 
     private fun List<ManifestParser.ComponentInfo>.toInstallComponentInfos(packageName: String): List<ComponentInfo> {
+        // distinctBy name：真实应用 manifest 可声明同名组件（系统安装时去重保留其一）；
+        // snapshot 校验要求组件名唯一（2026-08-03 真机定位：微信/起点/WPS 重复 Activity
+        // 导致 runtime stream encode 失败 → PREPARE miss → launchInstance FAIL）
         return mapNotNull { component ->
             normalizeManifestComponentName(packageName, component.name)?.let { name ->
                 ComponentInfo(
@@ -272,7 +282,7 @@ object AppModule {
                     targetActivityName = normalizeManifestComponentName(packageName, component.targetActivityName)
                 )
             }
-        }
+        }.distinctBy { it.name }
     }
 
     internal fun providerAuthorities(authority: String?): List<String> = authority

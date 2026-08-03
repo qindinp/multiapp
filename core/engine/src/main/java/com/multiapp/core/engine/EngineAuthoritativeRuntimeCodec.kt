@@ -214,7 +214,14 @@ private fun VirtualInstanceRuntime.requireValidAuthoritativeRuntime(): VirtualIn
     check(packageSnapshot.originPackageName == originPackageName)
     check(packageSnapshot.virtualPackageName == virtualPackageName)
     check(packageSnapshot.dataDir == dataRoot)
-    check(authoritativeRuntimeTextSize() <= MAX_TOTAL_TEXT_LENGTH)
+    val authoritativeTextSize = authoritativeRuntimeTextSize()
+    check(authoritativeTextSize <= MAX_TOTAL_TEXT_LENGTH) {
+        "authoritative runtime text size $authoritativeTextSize exceeds MAX_TOTAL_TEXT_LENGTH=$MAX_TOTAL_TEXT_LENGTH " +
+            "(instanceId=$instanceId origin=${originPackageName} " +
+            "activities=${packageSnapshot.activities.size} services=${packageSnapshot.services.size} " +
+            "receivers=${packageSnapshot.receivers.size} providers=${packageSnapshot.providers.size} " +
+            "permissions=${packageSnapshot.permissions.size} nativeLibs=${packageSnapshot.nativeLibraries.size})"
+    }
     return this
 }
 
@@ -254,10 +261,10 @@ private fun VirtualPackageSnapshot.requireValidAuthoritativeSnapshot() {
     services.requireValidComponents()
     receivers.requireValidComponents()
     providers.requireValidComponents()
-    check(activities.hasUniqueComponentNames())
-    check(services.hasUniqueComponentNames())
-    check(receivers.hasUniqueComponentNames())
-    check(providers.hasUniqueComponentNames())
+    check(activities.hasUniqueComponentNames()) { "activities duplicate names: ${activities.duplicateComponentNames()}" }
+    check(services.hasUniqueComponentNames()) { "services duplicate names: ${services.duplicateComponentNames()}" }
+    check(receivers.hasUniqueComponentNames()) { "receivers duplicate names: ${receivers.duplicateComponentNames()}" }
+    check(providers.hasUniqueComponentNames()) { "providers duplicate names: ${providers.duplicateComponentNames()}" }
 }
 
 private fun List<ResolvedComponent>.requireValidComponents() {
@@ -275,7 +282,9 @@ private fun List<ResolvedComponent>.requireValidComponents() {
         component.targetActivityName.requireOptionalBoundedText()
         component.intentFilters.requireBoundedTextList(MAX_FILTER_COUNT)
         component.authorities.requireBoundedTextList(MAX_AUTHORITY_COUNT)
-        check(component.authorities.size == component.authorities.distinct().size)
+        check(component.authorities.size == component.authorities.distinct().size) {
+            "provider authorities duplicated for ${component.name}: ${component.authorities}"
+        }
         check(component.resolvedIntentFilters.size <= MAX_FILTER_COUNT)
         component.resolvedIntentFilters.forEach(ResolvedIntentFilter::requireValidAuthoritativeFilter)
         component.metaData.requireValidStringMap()
@@ -786,6 +795,13 @@ private inline fun <reified T : Enum<T>> Bundle.requiredEnum(key: String): T =
 
 private fun List<ResolvedComponent>.hasUniqueComponentNames(): Boolean =
     size == map { it.name }.distinct().size
+
+private fun List<ResolvedComponent>.duplicateComponentNames(): List<String> {
+    val seen = mutableSetOf<String>()
+    return mapNotNull { component ->
+        if (!seen.add(component.name)) component.name else null
+    }.distinct()
+}
 
 private fun VirtualInstanceRuntime.authoritativeRuntimeTextSize(): Int {
     val snapshot = packageSnapshot

@@ -44,3 +44,45 @@
 - 诊断式测试：不 assert 导入/启动成功，失败本身即兼容性数据；dossier 写 `filesDir/compat_dossier/YYYY-MM-DD.txt`
 - 候选应用从设备 `pm list packages -3` 实选，覆盖：加固/大型、阅文系、社交、办公、轻量、so 密集 六种特征
 - 每应用 `deleteInstance` 清理，无设备残留
+
+---
+
+## 2026-08-03 更新：A 类根因定位并修复（metadata 组件去重）
+
+**A 类（`authoritative runtime state missing`）根因已定位并修复**，微信/起点/WPS 从 fail-closed STALE 推进到 Application 创建阶段。
+
+### 根因链（多轮真机定位）
+
+```
+真实应用 manifest 同名 Activity 重复声明（微信 3 / 起点 2 / WPS 1）
+  → metadata 导入时组件列表含重复项（PackageManager 与 ManifestParser 双路径均未去重）
+  → EngineAuthoritativeRuntimeCodec.requireValidAuthoritativeSnapshot
+    hasUniqueComponentNames 校验失败（Check failed）
+  → EngineAuthoritativeRuntimeStream.open() encode 抛异常 → 返回 null
+  → engineOpenRuntimeState 返回 null → IPC returned null
+  → guest PREPARE "authoritative runtime state missing" → launchInstance FAIL
+```
+
+**关键事实**：系统安装时对同名组件去重保留其一（应用可正常安装运行），但 MultiApp 的 metadata 读取未做同语义去重 → snapshot 校验拒绝。**不是** Pr10 的跨进程 runtime 同步问题（已排除：engine 进程全程存活、FileBacked store、registry 单一、hook 不劫持）。
+
+### 修复（commit 待定）
+
+`AppModule.toComponentInfos` / `toInstallComponentInfos` / providers 路径 三处加 `distinctBy { it.name }`（与系统语义一致）。同时 Codec.kt 的 fail-closed check 加带原因 message（产品改进：snapshot 校验失败时输出具体组件重复名）。
+
+### 修复后真机结果（popsicle API36）
+
+| 应用 | 修复前 | 修复后 |
+|------|--------|--------|
+| 微信 | FAIL `authoritative runtime state missing` (evidence 0) | FAIL `bootstrap provider returned a malformed or stale response` (evidence 1) |
+| 起点 | FAIL `authoritative runtime state missing` (0) | FAIL `LoadedApk.makeApplication failed: InvocationTargetException` (evidence 3) |
+| WPS | FAIL `authoritative runtime state missing` (0) | FAIL `LoadedApk.makeApplication failed: InvocationTargetException` (evidence 3) |
+| 微博 | FAIL provider denial | FAIL provider denial（同） |
+| 酷狗/高德/minimal | BOOTSTRAPPED | BOOTSTRAPPED（同） |
+
+**A 类已闭环**（不再是 fail-closed STALE）。微信/起点/WPS 现暴露**加固应用真实缺口**：guest Application 创建失败（`LoadedApk.makeApplication InvocationTargetException`，加固壳 Application 初始化）——这是加固兼容性的下一阶段挑战（W3+），微信的 `malformed or stale response` 疑为加固初始化超时。
+
+### 调试方法论（可复用）
+
+1. CompatDiag 分层日志：guest PREPARE 参数 → engine 入口 → 各 return null 分支 → 客户端 IPC 层（异常/descriptor null/校验失败）——穷举所有静默失败路径
+2. 关键判别：engine 入口日志打但后续分支全不打 → 请求到达 handler 且走通校验 → 聚焦**最后一步无日志的返回**（`EngineAuthoritativeRuntimeStream.open` 的 `runCatching.getOrNull` 吞异常 + Timber 日志）
+3. 教训：静默 `runCatching.getOrNull()` 是调试黑洞，fail-closed 路径应带原因 message
