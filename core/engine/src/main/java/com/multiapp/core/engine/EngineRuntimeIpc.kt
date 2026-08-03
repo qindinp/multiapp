@@ -524,7 +524,16 @@ class EngineRuntimeBinderEndpoint(
         instanceId: String,
         request: Bundle
     ): ParcelFileDescriptor? {
-        if (!isAuthorized() || instanceId.isBlank()) return null
+        if (!isAuthorized() || instanceId.isBlank()) {
+            // 诊断日志：isAuthorized 前置失败（2026-08-03 A 类调试补充）
+            android.util.Log.w(
+                "CompatDiag",
+                "engineOpenRuntimeState pre-auth rejected: instanceId=$instanceId blank=${instanceId.isBlank()} " +
+                    "callerPid=${callingPid()} callerProc=${callingProcessName(callingPid())} " +
+                    "authorized=${runCatching { isAuthorized() }.getOrDefault(false)}"
+            )
+            return null
+        }
         val engine = virtualizationEngine ?: return null
         val runtime = engine.queryRuntimeState(instanceId)
         if (runtime == null) {
