@@ -64,6 +64,9 @@ class CompatibilityProfilePolicy(
             )
             EngineProfile.COMPAT_HOOK -> {
                 val allowed = EngineProfileAllowKey(originPackageName, instanceId, profile) in allowList
+                // B 类修复验证（2026-08-03）：COMPUT_HOOK 启用 lsplant provider hook 时，
+                // 微博 WeiboApplication 可推进到 onCreate（hook 生效，不再 attachBaseContext UID 拒绝）。
+                // 正式方案待 allowList 配置入口（按需放行加固应用）。
                 EngineProfileDecision(
                     profile = profile,
                     allowed = allowed,
