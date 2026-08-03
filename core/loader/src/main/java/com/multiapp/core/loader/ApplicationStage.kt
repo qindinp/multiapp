@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.os.Looper
 import com.multiapp.core.model.virtual.VirtualContextConfig
+import timber.log.Timber
 
 class ApplicationStage(
     private val hostContext: Context?,
@@ -807,6 +808,14 @@ class LoadedApkGuestApplicationCreator(
         )
         val application = runCatching { makeApplicationInvoker(loadedApk, null) }
             .getOrElse { error ->
+                // 加固应用兼容性调试（2026-08-03）：target exception 完整栈是加固壳
+                // Application 初始化失败的唯一第一手证据（InvocationTargetException 仅显示包装）
+                Timber.tag("GuestAppCreate").e(
+                    error,
+                    "makeApplication failed for %s (loadedApk=%s)",
+                    snapshot.originPackageName,
+                    loadedApk.javaClass.name
+                )
                 throw LoadedApkApplicationCreationException(
                     message = "LoadedApk.makeApplication failed: ${error.message ?: error.javaClass.name}",
                     cause = error,
