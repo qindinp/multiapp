@@ -19,6 +19,7 @@ class RuntimeBootstrapTest {
                 RuntimeStage.RESOURCES,
                 RuntimeStage.PACKAGE_MANAGER_PROXY,
                 RuntimeStage.CLASS_LOADER,
+                RuntimeStage.PACKER_RUNTIME,
                 RuntimeStage.GUEST_CONTEXT,
                 RuntimeStage.APPLICATION,
                 RuntimeStage.LAUNCHER_ACTIVITY

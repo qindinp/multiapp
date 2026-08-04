@@ -239,8 +239,7 @@ class JiaguRuntime : PackerRuntime {
             return
         }
 
-        val isQqReader = context.originalPackageName == "com.qq.reader" ||
-            context.cloneProfile == "QQ_READER_SPECIAL"
+        val isQqReader = isQqReaderFamily(context)
         if (isQqReader && loadResult.jiaguLoaded) {
             try {
                 val dumpDirs = mutableListOf(java.io.File(context.dataDir ?: "/data/local/tmp", "dump"))
@@ -298,11 +297,10 @@ class JiaguRuntime : PackerRuntime {
         val bridge = NativeHookBridge.getInstance()
         val callerClass = resolveStubAppClass(guestCl) ?: return
         val targetClass = callerClass.name
-        val isQqReader = context.originalPackageName == "com.qq.reader" ||
-            context.cloneProfile == "QQ_READER_SPECIAL"
+        val isQqReader = isQqReaderFamily(context)
         val stubFallbackMode = getSystemProperty("debug.multiapp.stubapp.fallback", "0")
 
-        if (isQqReader && loadResult.jiaguLoaded && stubFallbackMode == "0") {
+        if (loadResult.jiaguLoaded && stubFallbackMode == "0") {
             val report = bridge.getStubAppBindingReport()
             Log.w(TAG, "installStubFallback: before fallback: $report")
             if (!report.contains("interface11=bound") || !report.contains("interface20=bound")) {
@@ -314,23 +312,25 @@ class JiaguRuntime : PackerRuntime {
             } else if (!report.contains("originalJiaguComplete=1")) {
                 Log.w(TAG, "installStubFallback: StubApp natives are bound, but original Jiagu count>=10 completion was not observed")
             }
-            val app = currentApplication()
-            if (app != null) {
-                val interface5Ok = bridge.callOriginalStubInterface5(guestCl, targetClass, app)
-                Log.w(TAG, "installStubFallback: original interface5(app) before YWLogin <clinit> ok=$interface5Ok")
-                try {
-                    Class.forName("com.yuewen.ywlogin.login.YWLoginManager", true, guestCl)
-                    val ywReport = bridge.getYwLoginBindingReport()
-                    Log.d(TAG, "installStubFallback: YWLogin after <clinit>: $ywReport")
-                    if (ywReport.contains("pwdLogin=bound")) {
-                        Log.i(TAG, "installStubFallback: YWLogin native methods registered!")
+            if (isQqReader) {
+                val app = currentApplication()
+                if (app != null) {
+                    val interface5Ok = bridge.callOriginalStubInterface5(guestCl, targetClass, app)
+                    Log.w(TAG, "installStubFallback: original interface5(app) before YWLogin <clinit> ok=$interface5Ok")
+                    try {
+                        Class.forName("com.yuewen.ywlogin.login.YWLoginManager", true, guestCl)
+                        val ywReport = bridge.getYwLoginBindingReport()
+                        Log.d(TAG, "installStubFallback: YWLogin after <clinit>: $ywReport")
+                        if (ywReport.contains("pwdLogin=bound")) {
+                            Log.i(TAG, "installStubFallback: YWLogin native methods registered!")
+                        }
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "installStubFallback: YWLoginManager <clinit> failed: ${e.message}")
                     }
-                } catch (e: Throwable) {
-                    Log.w(TAG, "installStubFallback: YWLoginManager <clinit> failed: ${e.message}")
+                    try { bridge.registerBusinessStubs(guestCl) } catch (_: Throwable) {}
+                } else {
+                    Log.w(TAG, "installStubFallback: original interface5/YWLogin <clinit> delayed: current application is null")
                 }
-                try { bridge.registerBusinessStubs(guestCl) } catch (_: Throwable) {}
-            } else {
-                Log.w(TAG, "installStubFallback: original interface5/YWLogin <clinit> delayed: current application is null")
             }
             return
         }
@@ -342,6 +342,14 @@ class JiaguRuntime : PackerRuntime {
         }
     }
 
+    /**
+     * 阅文系阅读应用（QQ 阅读 / 起点读书）共享同一套 360 Jiagu 壳与 YWLogin
+     * 登录 SDK，需要相同的 stub 降级与业务 stub 延迟策略。
+     */
+    private fun isQqReaderFamily(context: PackerRuntimeContext): Boolean =
+        context.originalPackageName == "com.qq.reader" ||
+            context.originalPackageName == "com.qidian.QDReader" ||
+            context.cloneProfile == "QQ_READER_SPECIAL"
     private fun resolveStubAppClass(guestCl: ClassLoader): Class<*>? {
         for (candidate in STUB_APP_CANDIDATES) {
             try { return Class.forName(candidate, false, guestCl) } catch (_: Throwable) {}

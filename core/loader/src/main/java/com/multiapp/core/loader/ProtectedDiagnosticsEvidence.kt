@@ -53,7 +53,7 @@ internal object ProtectedDiagnosticsEvidenceFormatter {
         val diagnostics = result.diagnostics
         val verdict = buildVerdict(result, diagnostics)
         val policyLines = policyEvidenceLines(policy)
-        val commonLines = commonLines(result, policy) + policyLines
+        val commonLines = commonLines(result, policy) + policyLines + packerEvidenceLines(result)
 
         return listOf(
             ProtectedDiagnosticsEvidenceFile(
@@ -128,6 +128,20 @@ internal object ProtectedDiagnosticsEvidenceFormatter {
 
     private fun diagnosticsMode(policy: NativeHookPolicy): String =
         if (policy.registerNativesLogger) "hosted-register-natives-only-diagnostics" else "hosted-protected-baseline"
+
+    private fun packerEvidenceLines(result: HostedBootstrapResult): List<String> {
+        val stage = result.stageResults.firstOrNull { it.stage == RuntimeStage.PACKER_RUNTIME }
+            ?: return emptyList()
+        val evidence = stage.evidence.associate { it.key to it.value }
+        return listOf(
+            "packerStageStatus=" + stage.status.name,
+            "packerName=" + propertyValue(evidence["packerName"].orEmpty()),
+            "packerSkipReason=" + propertyValue(evidence["packerSkipReason"].orEmpty()),
+            "packerJiaguLoaded=" + propertyValue(evidence["jiaguLoaded"].orEmpty()),
+            "packerStubVerified=" + propertyValue(evidence["stubNativesVerified"].orEmpty()),
+            "packerMessage=" + propertyValue(stage.message)
+        )
+    }
 
     private fun policyEvidenceLines(policy: NativeHookPolicy): List<String> {
         val evidence = NativeHookPolicyGate.baselineEvidence(policy)

@@ -43,6 +43,7 @@ class ProtectedDiagnosticsEvidenceFormatterTest {
         assertTrue(verdict.contains("namespaceVerdict=UNKNOWN"), verdict)
         assertTrue(verdict.contains("classLoaderVerdict=PASS"), verdict)
         assertTrue(verdict.contains("compatibilityClaim=false"), verdict)
+        assertTrue(verdict.contains("packerStageStatus=SKIPPED"), verdict)
     }
 
     @Test
@@ -139,6 +140,11 @@ class ProtectedDiagnosticsEvidenceFormatterTest {
         val stageResults = listOf(
             BootstrapResult.success(RuntimeStage.NATIVE_LIBS),
             BootstrapResult.success(RuntimeStage.CLASS_LOADER),
+            BootstrapResult.skipped(
+                stage = RuntimeStage.PACKER_RUNTIME,
+                message = "packer adaptation skipped",
+                evidence = listOf(BootstrapEvidence("packerSkipReason", "NO_PACKER_DETECTED"))
+            ),
             BootstrapResult.failed(RuntimeStage.APPLICATION, "interface20 missing")
         )
         val diagnosticsEvidence = listOfNotNull(

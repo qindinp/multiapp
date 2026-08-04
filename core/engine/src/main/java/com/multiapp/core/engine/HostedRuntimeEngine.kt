@@ -171,6 +171,7 @@ class DefaultHostedRuntimeEngine @Inject constructor(
             installRecordStore = ReadOnlyRuntimeInstallRecordStore(installRecord),
             hostContext = hostContext,
             providerHookInstallEnabled = providerHookEnabled,
+            packerRuntimeEnabled = providerHookEnabled,
             applicationThreadRunner = MainLooperApplicationThreadRunner(),
             applicationOnCreateInvoker = { application ->
                 val activityThread = ActivityThreadCompat.currentActivityThread()

@@ -31,6 +31,21 @@ class QqReaderProfileTest {
     }
 
     @Test
+    fun `isQqReaderPackage returns true for Qidian exact match`() {
+        assertTrue(QqReaderProfile.isQqReaderPackage("com.qidian.QDReader"))
+    }
+
+    @Test
+    fun `isQqReaderPackage returns true for Qidian sub-package`() {
+        assertTrue(QqReaderProfile.isQqReaderPackage("com.qidian.QDReader.debug"))
+    }
+
+    @Test
+    fun `isQqReaderPackage returns false for other Qidian apps`() {
+        assertFalse(QqReaderProfile.isQqReaderPackage("com.qidian.other"))
+    }
+
+    @Test
     fun `isQqReaderPackage returns false for similar but different package`() {
         assertFalse(QqReaderProfile.isQqReaderPackage("com.qq.read"))
         assertFalse(QqReaderProfile.isQqReaderPackage("com.qq.readerx"))

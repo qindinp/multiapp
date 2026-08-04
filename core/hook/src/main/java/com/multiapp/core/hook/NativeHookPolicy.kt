@@ -28,11 +28,13 @@ data class NativeHookPolicy(
     val noOpPatches: Boolean = false
 ) {
     init {
-        require(!businessNativeStubs) {
-            "Protected app policy must not enable business native stubs"
+        // Only COMPATIBILITY mode may enable business native stubs/wrappers;
+        // strict baseline and hook-free diagnostic policies must stay clean.
+        require(mode == NativeHookPolicyMode.COMPATIBILITY || !businessNativeStubs) {
+            "Protected app policy must not enable business native stubs outside COMPATIBILITY"
         }
-        require(!businessNativeWrappers) {
-            "Protected app policy must not enable business native wrappers"
+        require(mode == NativeHookPolicyMode.COMPATIBILITY || !businessNativeWrappers) {
+            "Protected app policy must not enable business native wrappers outside COMPATIBILITY"
         }
         require(mode != NativeHookPolicyMode.BASELINE || isStrictBaseline()) {
             "Baseline policy must be hook-free and diagnostic-free"

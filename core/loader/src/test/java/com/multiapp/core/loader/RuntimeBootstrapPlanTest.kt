@@ -20,6 +20,7 @@ class RuntimeBootstrapPlanTest {
             RuntimeStage.RESOURCES,
             RuntimeStage.PACKAGE_MANAGER_PROXY,
             RuntimeStage.CLASS_LOADER,
+            RuntimeStage.PACKER_RUNTIME,
             RuntimeStage.APPLICATION,
             RuntimeStage.LAUNCHER_ACTIVITY
         )
@@ -79,6 +80,7 @@ class RuntimeBootstrapPlanTest {
             RuntimeStage.RESOURCES,
             RuntimeStage.PACKAGE_MANAGER_PROXY,
             RuntimeStage.CLASS_LOADER,
+            RuntimeStage.PACKER_RUNTIME,
             RuntimeStage.APPLICATION,
             RuntimeStage.LAUNCHER_ACTIVITY
         )

@@ -223,7 +223,9 @@ object QqReaderProfile {
      */
     fun isQqReaderPackage(packageName: String?): Boolean {
         return packageName == "com.qq.reader" ||
-            packageName?.startsWith("com.qq.reader.") == true
+            packageName?.startsWith("com.qq.reader.") == true ||
+            packageName == "com.qidian.QDReader" ||
+            packageName?.startsWith("com.qidian.QDReader.") == true
     }
 
     fun diagnosticsGate(

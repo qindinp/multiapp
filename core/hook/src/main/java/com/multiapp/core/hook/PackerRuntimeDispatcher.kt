@@ -14,7 +14,7 @@ import java.io.File
  * 从 LoaderFactory.preloadPackerLibViaGuestClassLoader() 中提取调度逻辑，
  * 使 LoaderFactory 只需调用 dispatcher.execute(context) 即可完成壳加载。
  */
-class PackerRuntimeDispatcher {
+class PackerRuntimeDispatcher : PackerRuntimeAdaptation {
 
     companion object {
         private const val TAG = "PackerRuntimeDispatcher"
@@ -42,6 +42,7 @@ class PackerRuntimeDispatcher {
         if (registerDefaults) {
             // 注册所有已知的 PackerRuntime 实现
             register(JiaguRuntime())
+            register(GenericPackerRuntime())
         }
     }
 
@@ -61,7 +62,7 @@ class PackerRuntimeDispatcher {
      * @param originApkPath 原始 APK 路径
      * @return 匹配的 Runtime，或 null
      */
-    fun detect(originLibDir: File?, originApkPath: String?): PackerRuntime? {
+    override fun detect(originLibDir: File?, originApkPath: String?): PackerRuntime? {
         for (runtime in runtimes) {
             try {
                 if (runtime.detect(originLibDir, originApkPath)) {
@@ -84,7 +85,7 @@ class PackerRuntimeDispatcher {
      * @param context 运行时上下文
      * @return 加载结果，如果未检测到加固壳则返回 null
      */
-    fun execute(context: PackerRuntimeContext): PackerLoadResult? {
+    override fun execute(context: PackerRuntimeContext): PackerLoadResult? {
         val originLibDir = context.originLibDir?.let { File(it) }
         val runtime = detect(originLibDir, context.originApkPath)
             ?: return null

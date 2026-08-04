@@ -16,6 +16,11 @@ object PackerDetector {
 
     private const val TAG = "PackerDetector"
 
+    private val detectionCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Shell 特征类名位于 DEX 头部的字符串池中；只读前缀避免全量解压大 APK。 */
+    private const val MAX_DEX_SCAN_BYTES = 2 * 1024 * 1024
+
     /**
      * 自动检测 APK 使用的加固壳类型。
      *
@@ -25,12 +30,17 @@ object PackerDetector {
     fun detect(apkPath: String): String {
         Timber.tag(TAG).i("Detecting packer type for: $apkPath")
         val apkFile = File(apkPath)
+        val cacheKey = "$apkPath|" + apkFile.length() + "|" + apkFile.lastModified()
+        detectionCache[cacheKey]?.let { cached ->
+            Timber.tag(TAG).i("Packer type cache hit for: $apkPath -> $cached")
+            return cached
+        }
         if (!apkFile.exists()) {
             Timber.tag(TAG).w("APK file does not exist: $apkPath")
             return "unknown"
         }
 
-        return try {
+        val result = try {
             ZipFile(apkFile).use { zip ->
                 detectByNativeLibs(zip)
                     ?: detectByClasses(zip)
@@ -41,6 +51,8 @@ object PackerDetector {
             Timber.tag(TAG).w(e, "Failed to detect packer type")
             "unknown"
         }
+        detectionCache[cacheKey] = result
+        return result
     }
 
     // ---------------------------------------------------------------------------
@@ -109,7 +121,7 @@ object PackerDetector {
 
         for (entry in dexEntries) {
             val content = try {
-                zip.getInputStream(entry).readBytes()
+                zip.getInputStream(entry).use { readDexPrefix(it) }
             } catch (e: Exception) {
                 Timber.tag(TAG).w("Failed to read ${entry.name}: ${e.message}")
                 continue
@@ -124,6 +136,20 @@ object PackerDetector {
     /**
      * 在 DEX 二进制内容中搜索壳特征类名模式。
      */
+    /**
+     * 只读输入流前 MAX_DEX_SCAN_BYTES 字节，避免对大 DEX 全量解压。
+     */
+    private fun readDexPrefix(input: java.io.InputStream): ByteArray {
+        val buffer = ByteArray(MAX_DEX_SCAN_BYTES)
+        var offset = 0
+        while (offset < MAX_DEX_SCAN_BYTES) {
+            val read = input.read(buffer, offset, MAX_DEX_SCAN_BYTES - offset)
+            if (read < 0) break
+            offset += read
+        }
+        return if (offset == MAX_DEX_SCAN_BYTES) buffer else buffer.copyOf(offset)
+    }
+
     private fun searchClassPatterns(dexBytes: ByteArray): String? {
         // 将字节转为 ISO-8859-1 兼容字符串用于模式匹配
         val content = String(dexBytes, Charsets.ISO_8859_1)

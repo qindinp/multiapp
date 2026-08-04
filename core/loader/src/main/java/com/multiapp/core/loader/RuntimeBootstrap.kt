@@ -8,6 +8,7 @@ enum class RuntimeStage(val order: Int) {
     RESOURCES(40),
     PACKAGE_MANAGER_PROXY(45),
     CLASS_LOADER(50),
+    PACKER_RUNTIME(55),
     GUEST_CONTEXT(60),
     APPLICATION(70),
     LAUNCHER_ACTIVITY(80);
@@ -36,6 +37,7 @@ enum class StageReversibility {
             RuntimeStage.RESOURCES -> PARTIALLY_REVERSIBLE
             RuntimeStage.PACKAGE_MANAGER_PROXY -> PARTIALLY_REVERSIBLE
             RuntimeStage.CLASS_LOADER -> IRREVERSIBLE
+            RuntimeStage.PACKER_RUNTIME -> IRREVERSIBLE
             RuntimeStage.APPLICATION -> IRREVERSIBLE
             RuntimeStage.LAUNCHER_ACTIVITY -> IRREVERSIBLE
         }

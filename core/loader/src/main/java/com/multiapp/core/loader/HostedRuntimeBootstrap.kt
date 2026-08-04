@@ -105,6 +105,7 @@ class HostedRuntimeBootstrap(
         resolveLauncherFromActivities(record.activities)
     },
     private val providerHookInstallEnabled: Boolean = false,
+    private val packerRuntimeEnabled: Boolean = false,
     private val providerHookInstaller: VirtualProviderHookInstaller = VirtualProviderHookInstaller(),
     private val packageManagerProxyInstaller: VirtualPackageManagerGlobalInstallAction = VirtualPackageManagerGlobalInstaller(),
     private val runtimeUidProvider: () -> Int = {
@@ -389,6 +390,13 @@ class HostedRuntimeBootstrap(
             "Prepared bootstrap must include package snapshot"
         }
 
+        val packerOutput = PackerRuntimeStage(
+            packerEnabled = packerRuntimeEnabled,
+            hostContextProvider = { hostContext }
+        ).execute(preparedContext)
+        stageResults.add(packerOutput.result)
+
+        val applicationInput = packerOutput.context
         val applicationOutput = ApplicationStage(
             hostContext = hostContext,
             applicationClassNameResolver = applicationClassNameResolver,
@@ -400,7 +408,7 @@ class HostedRuntimeBootstrap(
             runtimePublisher = runtimePublisher,
             clock = clock,
             effectiveGuestProcessName = effectiveGuestProcessName
-        ).execute(preparedContext)
+        ).execute(applicationInput)
         stageResults.add(applicationOutput.result)
 
         val launcherActivityOutput = LauncherActivityStage(
@@ -534,6 +542,30 @@ class HostedRuntimeBootstrap(
                     source = "HostedRuntimeBootstrap"
                 )
             )
+        }
+
+        val packerStage = stageResults.firstOrNull { it.stage == RuntimeStage.PACKER_RUNTIME }
+        if (packerStage != null) {
+            val packerEvidence = packerStage.evidence.associate { it.key to it.value }
+            evidence.add(
+                NativeDiagnosticsEvidence(
+                    key = "packer_stage_status",
+                    value = packerStage.status.name,
+                    source = "HostedRuntimeBootstrap"
+                )
+            )
+            packerEvidence["packerName"]?.let {
+                evidence.add(NativeDiagnosticsEvidence("packer_name", it, "HostedRuntimeBootstrap"))
+            }
+            packerEvidence["packerSkipReason"]?.let {
+                evidence.add(NativeDiagnosticsEvidence("packer_skip_reason", it, "HostedRuntimeBootstrap"))
+            }
+            packerEvidence["jiaguLoaded"]?.let {
+                evidence.add(NativeDiagnosticsEvidence("packer_jiagu_loaded", it, "HostedRuntimeBootstrap"))
+            }
+            packerEvidence["stubNativesVerified"]?.let {
+                evidence.add(NativeDiagnosticsEvidence("packer_stub_verified", it, "HostedRuntimeBootstrap"))
+            }
         }
 
         val applicationStage = stageResults.firstOrNull { it.stage == RuntimeStage.APPLICATION }

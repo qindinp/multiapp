@@ -827,9 +827,26 @@ class LoadedApkGuestApplicationCreator(
             "LoadedApk.makeApplication returned",
             mapOf("actualClass" to application.javaClass.name)
         )
+        val hostPackageName = runCatching { request.hostContext.packageName }.getOrNull().orEmpty()
+        val fallbackServiceDispatcher = DefaultVirtualAmsComponentDispatcher(
+            hostContext = request.hostContext,
+            hostPackageName = hostPackageName,
+            packageSnapshot = snapshot,
+            instanceId = request.virtualContextConfig.instanceId,
+            processSlot = request.virtualContextConfig.processSlot
+        )
+        val serviceDispatcher = VirtualAmsComponentDispatchers.createOrNull(
+            VirtualAmsComponentDispatcherFactoryRequest(
+                hostContext = request.hostContext,
+                config = request.virtualContextConfig,
+                fallback = fallbackServiceDispatcher
+            )
+        ) ?: fallbackServiceDispatcher
         val redirectApplied = ExternalStorageRedirectContextWrapper.redirectApplicationContext(
-            application,
-            request.virtualContextConfig.dataDir
+            application = application,
+            dataRoot = request.virtualContextConfig.dataDir,
+            serviceDispatcher = serviceDispatcher,
+            guestClassLoader = request.guestClassLoader
         )
         request.progress(
             if (redirectApplied) "EXTERNAL_STORAGE_REDIRECTED" else "EXTERNAL_STORAGE_REDIRECT_SKIPPED",
@@ -838,7 +855,10 @@ class LoadedApkGuestApplicationCreator(
             } else {
                 "Application external storage redirect skipped (base context unavailable)"
             },
-            mapOf("dataRoot" to request.virtualContextConfig.dataDir)
+            mapOf(
+                "dataRoot" to request.virtualContextConfig.dataDir,
+                "serviceDispatchApplied" to (serviceDispatcher != null).toString()
+            )
         )
         val bindResult = runCatching {
             applicationBinder(activityThread, installResult, state, application)

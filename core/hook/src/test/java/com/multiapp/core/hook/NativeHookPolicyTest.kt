@@ -81,6 +81,33 @@ class NativeHookPolicyTest {
     }
 
     @Test
+    fun `compatibility policy allows business native stubs`() {
+        val policy = NativeHookPolicy.fromCapabilities(
+            NativeHookPolicyMode.COMPATIBILITY,
+            setOf(
+                NativeHookCapability.CONTAINER_IDENTITY_VIRTUALIZATION,
+                NativeHookCapability.PACKAGE_MANAGER_VIRTUALIZATION,
+                NativeHookCapability.PATH_VIRTUALIZATION,
+                NativeHookCapability.BUSINESS_NATIVE_STUBS
+            )
+        )
+        assertTrue(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_STUBS))
+    }
+
+    @Test
+    fun `compatibility policy rejects nothing for stub gate when capability present`() {
+        val policy = NativeHookPolicy.fromCapabilities(
+            NativeHookPolicyMode.COMPATIBILITY,
+            setOf(
+                NativeHookCapability.BUSINESS_NATIVE_STUBS,
+                NativeHookCapability.BUSINESS_NATIVE_WRAPPERS
+            )
+        )
+        assertTrue(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_STUBS))
+        assertTrue(policy.isEnabled(NativeHookCapability.BUSINESS_NATIVE_WRAPPERS))
+    }
+
+    @Test
     fun `strict baseline rejects hook and diagnostic capabilities`() {
         val forbidden = setOf(
             NativeHookCapability.LSPLANT_METHOD_HOOKS,
