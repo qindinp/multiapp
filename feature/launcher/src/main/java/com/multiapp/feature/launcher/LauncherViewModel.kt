@@ -234,7 +234,7 @@ class LauncherViewModel @Inject constructor(
         if (!launchRequestsInFlight.add(instanceId)) return
         viewModelScope.launch(launcherIoDispatcher) {
             try {
-                val result = virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = instanceId))
+                val result = virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = instanceId, providerHookEnabled = true))
                 if (!result.success) {
                     Timber.e("Failed to launch instance via engine: ${result.message}")
                     _uiState.update {

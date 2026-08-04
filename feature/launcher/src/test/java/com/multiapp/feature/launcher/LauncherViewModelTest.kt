@@ -306,7 +306,7 @@ class LauncherViewModelTest {
 
         viewModel.launchInstance("instance-1")
 
-        verify { virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1")) }
+        verify { virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1", providerHookEnabled = true)) }
     }
 
     @Test
@@ -351,7 +351,7 @@ class LauncherViewModelTest {
         runCurrent()
 
         verify(exactly = 1) {
-            virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1"))
+            virtualizationEngine.launchInstance(LaunchInstanceRequest(instanceId = "instance-1", providerHookEnabled = true))
         }
     }
 
