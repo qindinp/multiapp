@@ -7,11 +7,30 @@ import com.multiapp.core.hook.PackerRuntimeContext
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.VirtualInstanceRecord
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.Path
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class PackerRuntimeStageTest {
+
+    @TempDir
+    lateinit var tempDir: Path
+
+    private fun createZip(vararg entries: String): Path {
+        val zipPath = tempDir.resolve("stage_${System.nanoTime()}.zip")
+        ZipOutputStream(FileOutputStream(zipPath.toFile())).use { zos ->
+            for (name in entries) {
+                zos.putNextEntry(ZipEntry(name))
+                zos.closeEntry()
+            }
+        }
+        return zipPath
+    }
 
     private fun instanceRecord(): VirtualInstanceRecord = VirtualInstanceRecord(
         instanceId = "inst-1",
@@ -180,5 +199,41 @@ class PackerRuntimeStageTest {
     fun compatibilityHookPolicyEnablesCmdlineSpoof() {
         val policy = PackerRuntimeStage.compatibilityHookPolicy()
         assertTrue(policy.cmdlineSpoof, "packed-app COMPATIBILITY policy must spoof /proc/self")
+    }
+
+    @Test
+    fun `success evidence records typed packer family from apk`() {
+        // 真实 360 Jiagu APK fixture -> stage 用 PackerDetector.detectEvidence 记录家族证据
+        val apkPath = createZip("lib/arm64-v8a/libjiagu.so")
+        val stage = PackerRuntimeStage(
+            packerEnabled = true,
+            dispatcherProvider = {
+                fakeDispatcher(listOf(fakeRuntime(detected = true, loadOk = true)))
+            }
+        )
+        val output = stage.execute(baseInput().copy(originApkPath = apkPath.toString()))
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("QIHOO_360", evidence["packerFamily"] ?: "")
+        assertEquals("HIGH", evidence["packerConfidence"] ?: "")
+        assertEquals("ROUTE_SPECIFIC", evidence["packerStrategy"] ?: "")
+        assertTrue(
+            (evidence["packerSignals"] ?: "").contains("L1_SO:libjiagu.so"),
+            "expected L1_SO:libjiagu.so in packerSignals: ${evidence["packerSignals"]}"
+        )
+    }
+
+    @Test
+    fun `no packer skip records UNKNOWN family evidence`() {
+        val stage = PackerRuntimeStage(
+            packerEnabled = true,
+            dispatcherProvider = {
+                fakeDispatcher(listOf(fakeRuntime(detected = false, loadOk = false)))
+            }
+        )
+        val output = stage.execute(baseInput())
+        assertEquals(BootstrapStatus.SKIPPED, output.result.status)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertEquals("UNKNOWN", evidence["packerFamily"] ?: "")
     }
 }

@@ -1,5 +1,6 @@
 package com.multiapp.core.hook
 
+import com.multiapp.core.hook.antidetection.PackerFamily
 import java.io.File
 
 /**
@@ -19,6 +20,17 @@ interface PackerRuntime {
 
     /** 运行时名称，用于日志和诊断 */
     val name: String
+
+    /**
+     * 该运行时是否支持指定的加固家族（Phase1 按家族路由）。
+     *
+     * [PackerRuntimeDispatcher] 在 detect() 阶段优先查询此方法进行家族路由：
+     * 先匹配 [PackerFamily] 专用适配器，再回退到传统顺序遍历 detect()。
+     *
+     * 默认返回 false（通用运行时不做家族声明，走 detect() 兜底）；
+     * 专用运行时按需覆写，如 [JiaguRuntime] 覆写 QIHOO_360 = true。
+     */
+    fun supportsFamily(family: PackerFamily): Boolean = false
 
     /**
      * 检测 APK 是否由此加固壳保护。

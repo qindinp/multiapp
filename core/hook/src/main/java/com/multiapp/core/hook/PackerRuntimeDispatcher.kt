@@ -1,15 +1,18 @@
 package com.multiapp.core.hook
 
 import android.util.Log
+import com.multiapp.core.hook.antidetection.PackerDetector
+import com.multiapp.core.hook.antidetection.PackerFamily
 import java.io.File
 
 /**
  * PackerRuntimeDispatcher — 根据 APK 特征自动选择合适的 PackerRuntime
  *
- * 使用策略：
- * 1. 遍历所有已注册的 PackerRuntime
- * 2. 调用 detect() 检测 APK 特征
- * 3. 选择第一个匹配的 Runtime 执行加载流程
+ * 使用策略（Phase1 起优先按家族路由）：
+ * 1. 用 [PackerDetector.detectEvidence] 识别 APK 的加固家族
+ * 2. 优先查询 family → 适配器映射（supportsFamily 声明），命中即返回
+ * 3. 回退：按注册顺序遍历所有 Runtime 调用 detect() 匹配
+ * 4. 选择匹配的 Runtime 执行加载流程
  *
  * 从 LoaderFactory.preloadPackerLibViaGuestClassLoader() 中提取调度逻辑，
  * 使 LoaderFactory 只需调用 dispatcher.execute(context) 即可完成壳加载。
@@ -58,11 +61,44 @@ class PackerRuntimeDispatcher : PackerRuntimeAdaptation {
     /**
      * 根据 APK 特征检测并返回匹配的 PackerRuntime。
      *
+     * Phase1 家族路由：
+     * - 先用 [PackerDetector.detectEvidence] 识别家族（APK 路径可用时）；
+     * - 已知家族（非 UNKNOWN/OTHER）→ 按注册顺序找 supportsFamily 声明的运行时；
+     * - 未命中或家族未知 → 回退传统顺序遍历 detect()。
+     *
      * @param originLibDir  原始 APK 解压后的 native lib 目录
      * @param originApkPath 原始 APK 路径
      * @return 匹配的 Runtime，或 null
      */
     override fun detect(originLibDir: File?, originApkPath: String?): PackerRuntime? {
+        val family = originApkPath?.let {
+            try {
+                PackerDetector.detectEvidence(it).family
+            } catch (e: Throwable) {
+                Log.w(TAG, "family detection failed for $originApkPath: ${e.message}")
+                PackerFamily.UNKNOWN
+            }
+        } ?: PackerFamily.UNKNOWN
+
+        if (family == PackerFamily.QIHOO_360 ||
+            family == PackerFamily.TENCENT_JIAGU ||
+            family == PackerFamily.IJIMAI ||
+            family == PackerFamily.BANGCLE ||
+            family == PackerFamily.ALIBABA
+        ) {
+            for (runtime in runtimes) {
+                try {
+                    if (runtime.supportsFamily(family)) {
+                        Log.i(TAG, "Family-routed packer: family=${family.name} runtime=${runtime.name}")
+                        return runtime
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "supportsFamily() failed for ${runtime.name}: ${e.message}")
+                }
+            }
+            Log.d(TAG, "No family-specific runtime for ${family.name}; falling back to detect()")
+        }
+
         for (runtime in runtimes) {
             try {
                 if (runtime.detect(originLibDir, originApkPath)) {

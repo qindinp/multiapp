@@ -1,6 +1,7 @@
 package com.multiapp.core.hook
 
 import android.util.Log
+import com.multiapp.core.hook.antidetection.PackerFamily
 import java.io.File
 
 /**
@@ -20,6 +21,9 @@ class JiaguRuntime : PackerRuntime {
     }
 
     override val name: String = "Jiagu360"
+
+    /** 360 家族（含 libslib/libdexvmp/libpatchtools 变体）由本运行时适配。 */
+    override fun supportsFamily(family: PackerFamily): Boolean = family == PackerFamily.QIHOO_360
 
     override fun detect(originLibDir: File?, originApkPath: String?): Boolean {
         if (originLibDir == null || !originLibDir.isDirectory) return false
@@ -265,6 +269,13 @@ class JiaguRuntime : PackerRuntime {
                 try { bridge.registerBusinessStubs(guestCl) } catch (_: Throwable) {}
             }
             try { bridge.registerQrencryptStubs(guestCl) } catch (_: Throwable) {}
+            // 微博 SLib 定向 stub：按类注册空实现（保守策略，非 blanket 白名单）。
+            // SLib 类加载后（System.loadLibrary("slib") / clinit 后）调用；
+            // 若尚未加载则返回 false，installStubFallback 会再试一次。
+            try {
+                val slibRegistered = bridge.registerSlibStubNatives(guestCl)
+                Log.i(TAG, "installPostLoadHooks: SLib stub natives registered=$slibRegistered")
+            } catch (_: Throwable) {}
         } else {
             Log.i(TAG, "installPostLoadHooks: business native stubs policy gate ${stubsDecision.status} ${stubsDecision.evidence}")
         }
@@ -295,6 +306,15 @@ class JiaguRuntime : PackerRuntime {
         }
         val guestCl = context.guestClassLoader
         val bridge = NativeHookBridge.getInstance()
+
+        // SLib 定向 stub 尝试：installPostLoadHooks 时若 SLib 尚未加载（壳仍在解密
+        // DEX），此处再试一次，保证微博 libslib 场景的 native 方法有兜底实现。
+        // 必须在 resolveStubAppClass 提前返回之前执行——SLib-only 壳可能没有 StubApp。
+        try {
+            val slibRegistered = bridge.registerSlibStubNatives(guestCl)
+            Log.i(TAG, "installStubFallback: SLib stub natives registered=$slibRegistered")
+        } catch (_: Throwable) {}
+
         val callerClass = resolveStubAppClass(guestCl) ?: return
         val targetClass = callerClass.name
         val isQqReader = isQqReaderFamily(context)

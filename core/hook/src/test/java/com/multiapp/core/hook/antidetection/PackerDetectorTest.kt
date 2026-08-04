@@ -15,6 +15,8 @@ import java.nio.file.Path
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class PackerDetectorTest {
 
@@ -659,6 +661,117 @@ class PackerDetectorTest {
                 zos.closeEntry()
             }
             return zipPath
+        }
+    }
+
+    // =========================================================================
+    // 12. Phase1: 360 家族变体聚合（libslib/libdexvmp/libpatchtools -> QIHOO_360）
+    // =========================================================================
+
+    @Nested
+    inner class QihooFamilyVariants {
+
+        @Test
+        fun `libslib dot so detected as 360 Jiagu legacy label`() {
+            val apkPath = createZip("lib/arm64-v8a/libslib.so").toString()
+            assertEquals("360 Jiagu", PackerDetector.detect(apkPath))
+        }
+
+        @Test
+        fun `libdexvmp dot so detected as 360 Jiagu legacy label`() {
+            val apkPath = createZip("lib/arm64-v8a/libdexvmp.so").toString()
+            assertEquals("360 Jiagu", PackerDetector.detect(apkPath))
+        }
+
+        @Test
+        fun `libpatchtools dot so detected as 360 Jiagu legacy label`() {
+            val apkPath = createZip("lib/armeabi-v7a/libpatchtools.so").toString()
+            assertEquals("360 Jiagu", PackerDetector.detect(apkPath))
+        }
+
+        @Test
+        fun `libslib prefixed variants are also aggregated`() {
+            val apkPath = createZip("lib/arm64-v8a/libslib_arm.so").toString()
+            assertEquals("360 Jiagu", PackerDetector.detect(apkPath))
+        }
+
+        @Test
+        fun `mixed 360 variants aggregate to single QIHOO_360 family`() {
+            val apkPath = createZip(
+                "lib/arm64-v8a/libslib.so",
+                "lib/arm64-v8a/libdexvmp.so",
+                "lib/arm64-v8a/libpatchtools.so"
+            ).toString()
+            val evidence = PackerDetector.detectEvidence(apkPath)
+            assertEquals(PackerFamily.QIHOO_360, evidence.family)
+            assertEquals(PackerConfidence.HIGH, evidence.confidence)
+            assertEquals(PackerDetectionStrategy.ROUTE_SPECIFIC, evidence.strategy)
+            assertTrue(evidence.detected)
+            assertEquals(3, evidence.signals.size)
+        }
+    }
+
+    // =========================================================================
+    // 13. Phase1: 类型化 evidence（family/confidence/signals/strategy）
+    // =========================================================================
+
+    @Nested
+    inner class TypedEvidence {
+
+        @Test
+        fun `libjiagu evidence carries typed family confidence and strategy`() {
+            val apkPath = createZip("lib/arm64-v8a/libjiagu.so").toString()
+            val evidence = PackerDetector.detectEvidence(apkPath)
+            assertEquals(PackerFamily.QIHOO_360, evidence.family)
+            assertEquals(PackerConfidence.HIGH, evidence.confidence)
+            assertEquals(PackerDetectionStrategy.ROUTE_SPECIFIC, evidence.strategy)
+            assertTrue(evidence.detected)
+            assertTrue(evidence.signals.isNotEmpty())
+            assertEquals(PackerSignalLevel.L1_SO, evidence.signals.first().level)
+            assertEquals("libjiagu.so", evidence.signals.first().pattern)
+        }
+
+        @Test
+        fun `single dex signal is MEDIUM confidence`() {
+            val apkPath = createZipWithContent(
+                "classes.dex",
+                "Lcom/qihoo/util/StubApp;"
+            ).toString()
+            val evidence = PackerDetector.detectEvidence(apkPath)
+            assertEquals(PackerFamily.QIHOO_360, evidence.family)
+            assertEquals(PackerConfidence.MEDIUM, evidence.confidence)
+            assertEquals(PackerSignalLevel.L2_DEX, evidence.signals.first().level)
+        }
+
+        @Test
+        fun `clean apk evidence is UNKNOWN with BYPASS strategy`() {
+            val apkPath = createZip("assets/config.json").toString()
+            val evidence = PackerDetector.detectEvidence(apkPath)
+            assertEquals(PackerFamily.UNKNOWN, evidence.family)
+            assertEquals(PackerDetectionStrategy.BYPASS, evidence.strategy)
+            assertFalse(evidence.detected)
+            assertTrue(evidence.signals.isEmpty())
+        }
+
+        @Test
+        fun `missing file evidence is UNKNOWN`() {
+            val evidence = PackerDetector.detectEvidence("/no/such/file.apk")
+            assertEquals(PackerFamily.UNKNOWN, evidence.family)
+            assertFalse(evidence.detected)
+        }
+
+        @Test
+        fun `legacy label mapping round trip`() {
+            assertEquals("360 Jiagu", PackerFamily.QIHOO_360.legacyLabel)
+            assertEquals("Tencent Jiagu", PackerFamily.TENCENT_JIAGU.legacyLabel)
+            assertEquals("iJiami", PackerFamily.IJIMAI.legacyLabel)
+            assertEquals("Bangcle", PackerFamily.BANGCLE.legacyLabel)
+            assertEquals("Alibaba", PackerFamily.ALIBABA.legacyLabel)
+            assertEquals("other", PackerFamily.OTHER.legacyLabel)
+            assertEquals("unknown", PackerFamily.UNKNOWN.legacyLabel)
+            assertEquals(PackerFamily.QIHOO_360, PackerFamily.fromLegacyLabel("360 Jiagu"))
+            assertEquals(PackerFamily.UNKNOWN, PackerFamily.fromLegacyLabel(null))
+            assertEquals(PackerFamily.OTHER, PackerFamily.fromLegacyLabel("unknown-label"))
         }
     }
 }

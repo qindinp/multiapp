@@ -646,6 +646,27 @@ class NativeHookBridge {
         }
     }
 
+    /**
+     * 微博 SLib 定向 stub：按类注册空实现（保守策略，非 blanket 白名单）。
+     *
+     * SLib 类加载后（System.loadLibrary("slib") / clinit 后）调用；若尚未加载则
+     * 返回 false，[JiaguRuntime.installStubFallback] 会再试一次。
+     *
+     * Phase1 现状：Kotlin 入口已就绪；C++ nativeRegisterSlibStubNatives 尚未
+     * 落地（P0-2 遗留），native 库未加载时直接返回 false，native 调用失败时
+     * 由 try/catch 兜底，不影响既有加固加载流程。
+     */
+    fun registerSlibStubNatives(classLoader: ClassLoader): Boolean {
+        if (!nativeLibLoaded) return false
+        return try {
+            rememberHookClassLoader()
+            nativeRegisterSlibStubNatives(classLoader)
+        } catch (e: Throwable) {
+            Timber.tag(TAG).w(e, "registerSlibStubNatives failed")
+            false
+        }
+    }
+
     private fun defaultProcessSlot(instanceId: String): String {
         return System.getProperty("multiapp.processSlot")
             ?.takeIf { it.isNotBlank() }
@@ -1472,6 +1493,7 @@ class NativeHookBridge {
     private external fun nativeRememberHookClassLoader(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterOnlineChapterDownloadFallbackStubs(classLoader: ClassLoader): Boolean
     private external fun nativeRegisterAllMissingNativeMethods(classLoader: ClassLoader): Int
+    private external fun nativeRegisterSlibStubNatives(classLoader: ClassLoader): Boolean
     private external fun nativeSetIntegrityRedirect(fromPath: String, toPath: String)
     private external fun nativeSetJiaguPackageSpoof(stubPackageName: String, originalPackageName: String)
     private external fun nativeClearIntegrityRedirect()

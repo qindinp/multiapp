@@ -141,7 +141,14 @@ class GenericPackerRuntime : PackerRuntime {
         }
 
     override fun installPostLoadHooks(context: PackerRuntimeContext, loadResult: PackerLoadResult) {
-        // No shell-specific post-load hooks yet; the safety net above is enough.
+        // 微博 SLib 定向 stub：按类注册空实现（保守策略，非 blanket 白名单）。
+        // 微博 APK 含 libslib.so → 家族聚合为 QIHOO_360，本兜底路径亦需覆盖。
+        try {
+            val slibRegistered = context.bridge.registerSlibStubNatives(context.guestClassLoader)
+            Log.i(TAG, "installPostLoadHooks: SLib stub natives registered=$slibRegistered")
+        } catch (e: Throwable) {
+            Log.w(TAG, "installPostLoadHooks: SLib stub registration failed: " + e.message)
+        }
     }
 
     override fun installStubFallback(context: PackerRuntimeContext, loadResult: PackerLoadResult) {
@@ -149,6 +156,13 @@ class GenericPackerRuntime : PackerRuntime {
             context.bridge.registerAllMissingNativeMethods(context.guestClassLoader)
         } catch (e: Throwable) {
             Log.w(TAG, "installStubFallback failed: " + e.message)
+        }
+        // SLib 二次尝试：post-load 时 SLib 可能尚未加载，fallback 阶段再注册一次。
+        try {
+            val slibRegistered = context.bridge.registerSlibStubNatives(context.guestClassLoader)
+            Log.i(TAG, "installStubFallback: SLib stub natives registered=$slibRegistered")
+        } catch (e: Throwable) {
+            Log.w(TAG, "installStubFallback: SLib stub registration failed: " + e.message)
         }
     }
 

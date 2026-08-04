@@ -8,6 +8,8 @@ import com.multiapp.core.hook.NativeHookPolicyMode
 import com.multiapp.core.hook.PackerRuntimeContext
 import com.multiapp.core.hook.PackerRuntimeAdaptation
 import com.multiapp.core.hook.PackerRuntimeDispatcher
+import com.multiapp.core.hook.antidetection.PackerDetectionEvidence
+import com.multiapp.core.hook.antidetection.PackerDetector
 import java.io.File
 
 /**
@@ -127,6 +129,16 @@ class PackerRuntimeStage(
             )
         }
 
+        // Typed packer detection (family/confidence/signals/strategy) recorded into
+        // stage evidence so the 兼容率报表 can aggregate per-family outcomes. The
+        // dispatcher re-detects internally; PackerDetector caches by apk key so the
+        // second scan is O(1). Detection failure degrades to UNKNOWN evidence.
+        val packerEvidence: PackerDetectionEvidence = runCatching {
+            PackerDetector.detectEvidence(originApkPath)
+        }.getOrElse {
+            PackerDetectionEvidence.UNKNOWN
+        }
+
         val dispatcher = runCatching { dispatcherProvider() }.getOrElse { error ->
             return BootstrapStageOutput(
                 context = input,
@@ -199,7 +211,8 @@ class PackerRuntimeStage(
                 detail = "No packed shell detected for " + instance.originPackageName,
                 originPackageName = instance.originPackageName,
                 extraEvidence = listOf(
-                    BootstrapEvidence("preDetectNativeHooks", preDetectNativeHooks.toString())
+                    BootstrapEvidence("preDetectNativeHooks", preDetectNativeHooks.toString()),
+                    BootstrapEvidence("packerFamily", packerEvidence.family.name)
                 )
             )
         }
@@ -207,6 +220,10 @@ class PackerRuntimeStage(
         val evidence = mutableListOf(
             BootstrapEvidence("packerStage", "COMPLETE"),
             BootstrapEvidence("packerName", packerName.orEmpty()),
+            BootstrapEvidence("packerFamily", packerEvidence.family.name),
+            BootstrapEvidence("packerConfidence", packerEvidence.confidence.name),
+            BootstrapEvidence("packerStrategy", packerEvidence.strategy.name),
+            BootstrapEvidence("packerSignals", packerEvidence.signals.joinToString("|") { "${it.level.name}:${it.pattern}" }),
             BootstrapEvidence("packerEnabled", packerEnabled.toString()),
             BootstrapEvidence("originPackageName", instance.originPackageName),
             BootstrapEvidence("originLibDir", originLibDir.orEmpty()),
