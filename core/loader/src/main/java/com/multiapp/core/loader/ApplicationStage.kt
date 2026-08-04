@@ -3,6 +3,7 @@ package com.multiapp.core.loader
 import android.app.Application
 import android.content.Context
 import android.os.Looper
+import android.webkit.WebView
 import com.multiapp.core.model.virtual.VirtualContextConfig
 import timber.log.Timber
 
@@ -168,6 +169,19 @@ class ApplicationStage(
                         "guest Application attachBaseContext returned",
                         mapOf("attachedContextPackageName" to creation.attachedContextPackageName.orEmpty())
                     )
+
+                    // WebView data-directory isolation (P0-CMP-08)
+                    val webViewSuffixResult = runCatching {
+                        WebView.setDataDirectorySuffix(input.instanceId)
+                    }
+                    progress(
+                        "WEBVIEW_DATA_DIR_SUFFIX",
+                        webViewSuffixResult.fold(
+                            onSuccess = { "setDataDirectorySuffix(" + input.instanceId + ") OK" },
+                            onFailure = { "setDataDirectorySuffix failed: " + it.javaClass.simpleName + ": " + it.message }
+                        )
+                    )
+
                     publishRuntimeBeforeOnCreate(input, creation.application)
                     runtimePublishedBeforeOnCreate = true
                     progress("RUNTIME_PUBLISHED", "runtime published before Application.onCreate")
