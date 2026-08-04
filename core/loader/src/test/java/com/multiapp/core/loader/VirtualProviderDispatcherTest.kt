@@ -155,6 +155,51 @@ class VirtualProviderDispatcherTest {
     }
 
     @Test
+    fun `dispatch serves providers from provisional runtime during application creation`() {
+        val snapshot = snapshot()
+        val registry = VirtualPackageRegistry().apply { register(snapshot) }
+        val processRuntime = VirtualProcessRuntime()
+        val provider = FakeProvider()
+        val providerRuntime = VirtualProviderRuntime(
+            providerFactory = ProviderFactory { _, _ -> provider },
+            providerAttacher = ProviderAttacher { _, _, _ -> }
+        )
+        val bootstrapStarted = java.util.concurrent.CountDownLatch(1)
+        val bootstrapRelease = java.util.concurrent.CountDownLatch(1)
+        val bootstrapThread = Thread {
+            processRuntime.bindApplication("inst-001") {
+                // 模拟 Application.onCreate 期间的 BINDING 中间态：provisional 已发布，bootstrap 未完成。
+                processRuntime.rememberApplication("inst-001", hostedResult(
+                    snapshot = snapshot,
+                    success = true,
+                    guestClassLoader = ClassLoader.getSystemClassLoader()
+                ))
+                bootstrapStarted.countDown()
+                bootstrapRelease.await()
+                hostedResult(snapshot, success = true, guestClassLoader = ClassLoader.getSystemClassLoader())
+            }
+        }
+        bootstrapThread.start()
+        bootstrapStarted.await()
+        try {
+            val dispatcher = VirtualProviderDispatcher(
+                hostPackageName = "com.multiapp.app",
+                packageRegistry = registry,
+                processRuntime = processRuntime,
+                providerRuntime = providerRuntime,
+                hostContext = mockk<Context>(relaxed = true)
+            )
+            val result = dispatcher.dispatch("inst-001", "com.test.minimal.probe")
+            val ready = assertIs<VirtualProviderDispatchResult.ProviderReady>(result)
+            assertSame(provider, ready.provider)
+            assertEquals(true, ready.evidence.success)
+        } finally {
+            bootstrapRelease.countDown()
+            bootstrapThread.join(5_000L)
+        }
+    }
+
+    @Test
     fun `method dispatch evidence maps PR9 provider operations`() {
         val result = VirtualProviderDispatchResult.ProviderReady(
             resolution = resolution(),

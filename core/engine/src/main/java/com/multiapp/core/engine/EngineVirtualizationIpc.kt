@@ -77,6 +77,7 @@ internal fun LaunchInstanceRequest.toEngineIpcBundle(
     putString(KEY_TASK_POLICY, taskPolicy.name)
     putString(KEY_PREWARM_POLICY, prewarmPolicy.name)
     putString(KEY_EVIDENCE_MODE, evidenceMode.name)
+    putBoolean(KEY_PROVIDER_HOOK_ENABLED, providerHookEnabled)
 }
 
 internal fun Bundle.toLaunchInstanceRequestOrNull(): LaunchInstanceRequest? = runCatching {
@@ -94,7 +95,8 @@ internal fun Bundle.toLaunchInstanceRequestOrNull(): LaunchInstanceRequest? = ru
         launchAction = optionalNonBlankString(EngineRuntimeIpcContract.KEY_ACTION),
         taskPolicy = requiredEnum(KEY_TASK_POLICY),
         prewarmPolicy = requiredEnum(KEY_PREWARM_POLICY),
-        evidenceMode = requiredEnum(KEY_EVIDENCE_MODE)
+        evidenceMode = requiredEnum(KEY_EVIDENCE_MODE),
+        providerHookEnabled = getBoolean(KEY_PROVIDER_HOOK_ENABLED)
     )
 }.getOrNull()
 
@@ -739,6 +741,7 @@ private fun capabilityFailure(instanceId: String?, message: String): EngineCapab
 private const val KEY_TASK_POLICY = "engineTaskPolicy"
 private const val KEY_PREWARM_POLICY = "enginePrewarmPolicy"
 private const val KEY_EVIDENCE_MODE = "engineEvidenceMode"
+private const val KEY_PROVIDER_HOOK_ENABLED = "engineProviderHookEnabled"
 private const val KEY_HOST_PACKAGE_NAME = "hostPackageName"
 private const val KEY_DATA_ROOT = "dataRoot"
 private const val KEY_CREATION_REQUEST_ID = "creationRequestId"

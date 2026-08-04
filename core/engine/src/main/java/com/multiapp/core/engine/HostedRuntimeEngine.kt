@@ -60,6 +60,15 @@ interface HostedRuntimeEngine {
         processSlot: String?,
         effectiveGuestProcessName: String? = null
     ): HostedRuntimeBindOutcome = bindApplication(instanceId, providerHookEnabled, processSlot)
+
+    /**
+     * 非阻塞获取 provider 分发可用的运行时（READY 或 BINDING provisional）。
+     *
+     * 供 StubContentProvider 分发路径使用：guest Application.onCreate 期间
+     * 的 provider 查询不得递归触发 [bindApplication] 等待 bootstrap 完成
+     * （会与 onCreate 互相等待而死锁），直接用已就绪的 ClassLoader/snapshot。
+     */
+    fun providerDispatchResult(instanceId: String): EngineHostedBootstrapResult? = null
 }
 
 data class HostedRuntimeBindOutcome(
@@ -134,6 +143,9 @@ class DefaultHostedRuntimeEngine @Inject constructor(
     ): EngineHostedBootstrapResult = EngineHostedBootstrapResult.fromLoader(
         runBootstrapLoader(instanceId, providerHookEnabled, processSlot, effectiveGuestProcessName)
     )
+
+    override fun providerDispatchResult(instanceId: String): EngineHostedBootstrapResult? =
+        processRuntime.providerDispatchResult(instanceId)
 
     private fun runBootstrapLoader(
         instanceId: String,

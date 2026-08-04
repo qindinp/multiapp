@@ -4,6 +4,8 @@ import com.multiapp.core.model.VirtualApp
 import com.multiapp.core.model.instance.DefaultInstanceManager
 import com.multiapp.core.model.instance.JsonInstanceRecordStore
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.condition.EnabledOnOs
+import org.junit.jupiter.api.condition.OS
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import java.security.MessageDigest
@@ -648,6 +650,13 @@ class VirtualInstallServiceTest {
         assertEquals(before, installStore.load("com.example.legacyguard"))
     }
 
+    /**
+     * 验证 tombstone 清理失败时 deleteInstallRecord 返回 false 且保留 tombstone。
+     *
+     * 依赖"非空目录删除失败"的 POSIX 语义；Windows 上 JDK 的 File.delete()
+     * 对非空目录返回 true 并整体删除（平台行为差异），此断言仅在 POSIX 平台有效。
+     */
+    @EnabledOnOs(OS.LINUX, OS.MAC)
     @Test
     fun `deleteInstallRecord reports tombstone deletion failure`() {
         val installStore = JsonInstallRecordStore(File(tempDir, "tombstone-records"))

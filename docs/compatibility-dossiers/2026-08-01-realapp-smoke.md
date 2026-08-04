@@ -120,3 +120,40 @@ EngineProfile.BASELINE 的 lsplantEnabled=false（CompatibilityProfilePolicy.kt:
 
 - 微信/起点/WPS 与 B 类无关（native 壳 StubApp / RePlugin Tinker / GT 内部逻辑，是 C 类与内部逻辑）
 - 微博的新问题 `process slot draining previous generation` 是 bootstrap 代际管理的独立问题（hook 安装后进程复用冲突），非 B 类核心
+
+---
+
+## 2026-08-04 B 类修复落地（已真机验证 + 全量回归通过）
+
+**B 类（self-provider UID 隔离）修复完成并真机验证**，微博从 `Permission Denial` → 正常完成 onCreate（不再死锁）。
+
+### 根因 1：liblsplant.so 未随 hosted APK 打包
+
+- `liblsplant.so` 只存在于 `core:xposed`（legacy 专属 flavor 的 jniLibs），hosted APK 拿不到
+- `NativeHookBridge.initLsplant()` 用 dlopen 运行时加载它 → `dlopen failed: library "liblsplant.so" not found` → LSPlant 未初始化 → `ContentProviderHook installedMethods=0/13`（所有 hook 全部失败）
+- 证据：`installedMethods=0/13`，`initLsplant: result=false`
+- **修复**：so 归位到调用方 `core:hook/src/main/jniLibs/`（hosted 依赖链已含 core:hook），验证 `jar tf app-debug.apk | grep liblsplant` 命中
+- 验证：`installedMethods=13/13`，`initLsplant: result=true`（全部实例）
+
+### 根因 2：provider 分发递归等待 bootstrap（30s READY 死锁）
+
+- guest Application.onCreate 期间，工作线程查询自营 provider → `StubContentProvider.dispatch` → `HostedProviderRuntimeBinder.ensureBound`
+- `reusableResult()` 对非初始化线程返回 null（BINDING 阶段 provisional 仅初始化线程可见）→ 落到底 `bindApplication()` → `awaitBinding` 等待 bootstrap 完成
+- 而 bootstrap 完成 = guest onCreate 完成 = onCreate 正在等该查询返回 → **循环死锁**，30s binding 超时
+- 微博实测：`Long monitor contention ... for 24.637s`，provider 查询 `RUNTIME_NOT_BOUND`
+- **修复**：
+  - `VirtualProcessRuntime.recordForProviderDispatch()`：BINDING 阶段对任意线程返回 provisional 记录（且不因 deadline 清空）
+  - `VirtualProviderDispatcher` 改用该查询
+  - `HostedRuntimeEngine.providerDispatchResult()` / `EngineHostedProcessRuntime.providerDispatchResult()` 暴露非阻塞运行时查询
+  - `HostedProviderRuntimeBinder.ensureBound()`：先 reusableResult（READY）→ 再 providerDispatchResult（BINDING provisional）→ 最后才 bindApplication
+- 验证：微博 onCreate **7 秒完成**（原 30s 超时），AppMonitorProvider/SPProvider/DBProvider/DataCenterProvider 全部 `PROVIDER_READY`
+
+### 回归
+
+- `:core:loader / engine / identity / model / app` 五模块单测全绿
+- `VirtualInstallServiceTest.deleteInstallRecord reports tombstone deletion failure` 加 `@EnabledOnOs(LINUX, MAC)`：该断言依赖 POSIX"非空目录删除失败"语义，Windows 上 JDK 的 `File.delete()` 对非空目录返回 true 并整体删除（实测验证），属平台差异
+
+### 遗留（C 类，独立）
+
+- 微博新失败点：`No implementation found for void com.sina.weibo.security.SLib.nativeInit` —— native 壳 so（libslib.so）加载问题，C 类独立项
+- 微信/起点/WPS：native 壳/RePlugin 内部逻辑，C 类独立项

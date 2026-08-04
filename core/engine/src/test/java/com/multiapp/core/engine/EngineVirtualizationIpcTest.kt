@@ -131,7 +131,8 @@ class EngineVirtualizationIpcTest {
             launchAction = "com.test.minimal.NEW_INTENT_PROBE",
             taskPolicy = EngineTaskPolicy.REUSE_EXISTING,
             prewarmPolicy = EnginePrewarmPolicy.REQUIRED,
-            evidenceMode = EngineEvidenceMode.FULL
+            evidenceMode = EngineEvidenceMode.FULL,
+            providerHookEnabled = true
         )
         val evidence = evidence()
 

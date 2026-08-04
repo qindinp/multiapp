@@ -60,6 +60,22 @@ class HostedProviderRuntimeBinder(
             )
         }
 
+        // B 类 self-provider 兼容（2026-08-03）：guest Application.onCreate 期间的工作线程
+        // 查询自营 provider 时，bootstrap 仍在 BINDING 阶段。此时不得调用 bindApplication()
+        // 等待 bootstrap 完成——bootstrap 完成依赖 onCreate 返回，而 onCreate 正在等待本
+        // 查询返回，会互相等待死锁（微博实测 30s READY 超时）。provisional 记录中的
+        // guestClassLoader 与 package snapshot 在 Application 创建前已就绪，可直接分发。
+        runtimeEngine.providerDispatchResult(instanceId)?.let { result ->
+            return HostedProviderRuntimeBindResult.Bound(
+                instanceId = instanceId,
+                guestAuthority = guestAuthority,
+                processSlot = processSlot,
+                result = result,
+                status = "PROVISIONAL",
+                detail = "runtimeBoundForProviderProxyWhileBinding"
+            )
+        }
+
         return runCatching {
             val result = runtimeEngine.bindApplication(
                 instanceId = instanceId,

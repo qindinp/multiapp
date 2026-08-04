@@ -571,7 +571,8 @@ internal class DefaultVirtualizationEngineCore(
         val bootstrapRequest = EngineProcessBootstrapRequest(
             runtime = runtime,
             providerRoutingEnabled = decision.providerRoutingEnabled,
-            legacyProviderHookEnabled = decision.providerRoutingEnabled && decision.lsplantEnabled,
+            legacyProviderHookEnabled = decision.providerRoutingEnabled &&
+                (decision.lsplantEnabled || request.providerHookEnabled),
             evidenceMode = request.evidenceMode
         )
         val rawBootstrap = runCatching {
@@ -737,7 +738,8 @@ internal class DefaultVirtualizationEngineCore(
                     bootstrapState = bootstrap.state,
                     bootstrapVerdict = bootstrap.verdict,
                     providerRoutingEnabled = decision.providerRoutingEnabled,
-                    legacyProviderHookEnabled = decision.providerRoutingEnabled && decision.lsplantEnabled,
+                    legacyProviderHookEnabled = decision.providerRoutingEnabled &&
+                        (decision.lsplantEnabled || request.providerHookEnabled),
                     launchAction = request.launchAction
                 )
             )

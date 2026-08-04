@@ -138,6 +138,37 @@ class DefaultVirtualizationEngineTest {
     }
 
     @Test
+    fun `explicit provider hook is propagated to bootstrap and launch without compat profile`() {
+        val instance = instance()
+        val bootstrapRequests = mutableListOf<EngineProcessBootstrapRequest>()
+        val launches = mutableListOf<EngineLaunchSpec>()
+        val engine = DefaultVirtualizationEngineCore(
+            hostPackageName = "com.multiapp.app",
+            instanceManager = FakeInstanceManager(instance),
+            virtualInstallService = FakeVirtualInstallService(installRecord()),
+            activityLauncher = EngineActivityLauncher { launches += it },
+            processBootstrapper = EngineProcessBootstrapper { request ->
+                bootstrapRequests += request
+                readyBootstrap(request)
+            }
+        )
+
+        val result = engine.launchInstance(
+            LaunchInstanceRequest(
+                instanceId = instance.instanceId,
+                providerHookEnabled = true
+            )
+        )
+
+        assertEquals(EngineResultStatus.PASS, result.status)
+        assertEquals(EngineProfile.BASELINE, result.runtime?.profile)
+        assertTrue(bootstrapRequests.single().providerRoutingEnabled)
+        assertTrue(bootstrapRequests.single().legacyProviderHookEnabled)
+        assertTrue(launches.single().providerRoutingEnabled)
+        assertTrue(launches.single().legacyProviderHookEnabled)
+    }
+
+    @Test
     fun `same instance launches cannot overlap runtime generations`() {
         val instance = instance()
         val firstBootstrapEntered = CountDownLatch(1)

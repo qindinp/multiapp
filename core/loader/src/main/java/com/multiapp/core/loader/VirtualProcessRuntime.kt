@@ -197,6 +197,34 @@ class VirtualProcessRuntime(
             ?.takeIf { binding.isInitializationThread(Thread.currentThread()) }
     }
 
+    /**
+     * Runtime record view for guest ContentProvider dispatch.
+     *
+     * Unlike [get], this returns the in-flight binding's provisional record to
+     * any thread. The guest Application may query its own providers while
+     * `Application.onCreate` is still running (e.g. Weibo's worker pool during
+     * bootstrap); those background threads are not initialization threads, so a
+     * strict [get] returns null and dispatch fails with RUNTIME_NOT_BOUND,
+     * which deadlocks the bootstrap before the READY record is published.
+     *
+     * Provider dispatch only consumes [VirtualProcessRuntimeRecord.result] for
+     * the guest ClassLoader and package snapshot, both of which are available
+     * in the provisional record before the Application finishes creation.
+     *
+     * This deliberately does NOT expire the in-flight binding: heavy guest
+     * Applications may legitimately run `onCreate` past the binding deadline,
+     * and expiring here would clear the provisional record mid-initialization,
+     * starving the guest's own provider queries. Binding timeout remains the
+     * responsibility of the awaiting engine thread.
+     */
+    @Synchronized
+    fun recordForProviderDispatch(instanceId: String): VirtualProcessRuntimeRecord? {
+        records[instanceId]?.let { return it }
+        val binding = bindings[instanceId] ?: return null
+        if (binding.completedOutcome() != null) return null
+        return binding.provisionalRecord
+    }
+
     @Synchronized
     fun state(instanceId: String): VirtualProcessRuntimeState? {
         bindings[instanceId]?.let { expireBindingIfNeededLocked(instanceId, it) }
@@ -238,6 +266,14 @@ class VirtualProcessRuntime(
     }
 
     companion object {
+        /**
+         * Default virtual process binding timeout (30s).
+         *
+         * provider 分发路径不依赖本超时：guest Application.onCreate 期间的查询
+         * 走 provisional 运行时（[recordForProviderDispatch]），不会等待 bootstrap
+         * 完成，因此重型应用不再需要更长的 deadline（B 类 self-provider 兼容，
+         * 2026-08-03）。本超时只约束 READY 握手的等待方（engine）。
+         */
         const val DEFAULT_BINDING_TIMEOUT_MS: Long = 30_000L
 
         val global: VirtualProcessRuntime = VirtualProcessRuntime()

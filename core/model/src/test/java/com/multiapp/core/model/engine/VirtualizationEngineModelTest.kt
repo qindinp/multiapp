@@ -50,6 +50,7 @@ class VirtualizationEngineModelTest {
         assertEquals(EngineTaskPolicy.DEFAULT, request.taskPolicy)
         assertEquals(EnginePrewarmPolicy.DEFAULT, request.prewarmPolicy)
         assertEquals(EngineEvidenceMode.DEFAULT, request.evidenceMode)
+        assertFalse(request.providerHookEnabled)
         assertEquals(0, request.launchFlags)
         assertEquals(null, request.targetComponentClassName)
     }

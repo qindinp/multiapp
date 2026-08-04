@@ -145,6 +145,7 @@ class RealAppCompatibilitySmokeTest {
             virtualizationEngine.launchInstance(
                 LaunchInstanceRequest(
                     instanceId = instanceId,
+                    providerHookEnabled = true, // B 类修复验证：显式启用 ContentProviderHook
                     reason = "compat-smoke:${pkg}"
                 )
             )

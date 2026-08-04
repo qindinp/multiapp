@@ -302,7 +302,18 @@ data class LaunchInstanceRequest(
     val launchAction: String? = null,
     val taskPolicy: EngineTaskPolicy = EngineTaskPolicy.DEFAULT,
     val prewarmPolicy: EnginePrewarmPolicy = EnginePrewarmPolicy.DEFAULT,
-    val evidenceMode: EngineEvidenceMode = EngineEvidenceMode.DEFAULT
+    val evidenceMode: EngineEvidenceMode = EngineEvidenceMode.DEFAULT,
+    /**
+     * 显式启用 provider hook（LSPlant ContentResolver authority 重写）。
+     *
+     * 独立于 profile 的 lsplantEnabled：加固/监控类应用在 Application 初始化期
+     * 访问自营非导出 provider 时，系统 acquire 阶段按 UID 隔离拒绝（guest uid≠origin uid）。
+     * 显式启用后，即使 profile 未开启 lsplant，也安装 ContentProviderHook，
+     * 把自营 authority 重写为 stub authority 绕过 UID 检查（B 类修复，2026-08-03）。
+     *
+     * 仅在 profile 允许 provider 路由（providerRoutingEnabled）时生效。
+     */
+    val providerHookEnabled: Boolean = false
 ) {
     init {
         require(instanceId.isNotBlank()) { "instanceId must not be blank" }

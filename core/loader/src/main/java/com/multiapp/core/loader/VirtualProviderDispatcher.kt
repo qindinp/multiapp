@@ -33,7 +33,7 @@ class VirtualProviderDispatcher(
                 evidence = VirtualProviderEvidence.acquisitionNotFound(instanceId, guestAuthority)
             )
 
-        val runtimeRecord = processRuntime.get(instanceId)
+        val runtimeRecord = processRuntime.recordForProviderDispatch(instanceId)
             ?: return VirtualProviderDispatchResult.RuntimeNotBound(
                 resolution = resolution,
                 evidence = VirtualProviderEvidence.acquisition(

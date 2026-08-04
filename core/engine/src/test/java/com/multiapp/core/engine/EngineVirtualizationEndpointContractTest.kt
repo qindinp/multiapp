@@ -1104,7 +1104,8 @@ class EngineVirtualizationEndpointContractTest {
         launchFlags = 0x10200000,
         taskPolicy = EngineTaskPolicy.REUSE_EXISTING,
         prewarmPolicy = EnginePrewarmPolicy.REQUIRED,
-        evidenceMode = EngineEvidenceMode.FULL
+        evidenceMode = EngineEvidenceMode.FULL,
+        providerHookEnabled = true
     )
 
     private fun createRequest() = CreateInstanceRequest(
