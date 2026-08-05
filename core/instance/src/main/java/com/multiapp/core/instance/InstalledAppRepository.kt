@@ -39,7 +39,9 @@ class InstalledAppRepository internal constructor(
             .mapNotNull { it.toVirtualApp(packageManager, launcherActivities[it.packageName]) }
             .sortedBy { it.appName.lowercase() }
             .toList()
-        cachedApps = apps
+        // 空列表不缓存：权限未授予时 getInstalledPackages 返回空列表，
+        // 若缓存会导致授权后仍返回陈旧空列表，需保留下次查询重新拉取的能力。
+        if (apps.isNotEmpty()) cachedApps = apps
         return apps
     }
 

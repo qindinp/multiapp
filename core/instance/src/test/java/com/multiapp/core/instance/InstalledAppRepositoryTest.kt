@@ -61,6 +61,56 @@ class InstalledAppRepositoryTest {
     }
 
     @Test
+    fun `listInstalledApps does not cache empty result and re-queries on next call`() {
+        every { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) } returnsMany listOf(
+            emptyList(),
+            listOf(packageInfo("com.alpha.app", "Alpha", launcher = true))
+        )
+        every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
+            launcherResolveInfo("com.alpha.app")
+        )
+
+        val repository = InstalledAppRepository(
+            packageManagerProvider = { packageManager },
+            hostPackageName = "com.multiapp.app",
+            launcherIntentFactory = { launcherQueryIntent() }
+        )
+
+        val first = repository.listInstalledApps()
+        val second = repository.listInstalledApps()
+
+        assertEquals(emptyList(), first)
+        assertEquals(listOf("Alpha"), second.map { it.appName })
+        // 空结果未被缓存，第二次调用仍会重新查询
+        verify(exactly = 2) { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) }
+    }
+
+    @Test
+    fun `listInstalledApps forceRefresh bypasses non-empty cache`() {
+        every { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) } returnsMany listOf(
+            listOf(packageInfo("com.alpha.app", "Alpha", launcher = true)),
+            listOf(packageInfo("com.beta.app", "Beta", launcher = true))
+        )
+        every { packageManager.queryIntentActivities(any(), 0) } returns listOf(
+            launcherResolveInfo("com.alpha.app"),
+            launcherResolveInfo("com.beta.app")
+        )
+
+        val repository = InstalledAppRepository(
+            packageManagerProvider = { packageManager },
+            hostPackageName = "com.multiapp.app",
+            launcherIntentFactory = { launcherQueryIntent() }
+        )
+
+        val cached = repository.listInstalledApps()
+        val refreshed = repository.listInstalledApps(forceRefresh = true)
+
+        assertEquals(listOf("Alpha"), cached.map { it.appName })
+        assertEquals(listOf("Beta"), refreshed.map { it.appName })
+        verify(exactly = 2) { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) }
+    }
+
+    @Test
     fun `recommendedCloneTargets keeps only launchable non-system apps`() {
         every { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) } returns listOf(
             packageInfo("com.user.app", "User", launcher = true),

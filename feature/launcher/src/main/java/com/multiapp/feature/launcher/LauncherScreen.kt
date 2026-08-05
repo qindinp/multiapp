@@ -34,6 +34,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import android.content.Context
 import android.content.pm.PackageManager
@@ -556,6 +559,22 @@ private fun AppPickerSheet(
 
     LaunchedEffect(Unit) {
         viewModel.loadAllApps()
+    }
+
+    // 生命周期感知刷新：授权弹窗返回 / 应用回到前台（ON_RESUME）时，
+    // 若应用列表仍为空则强制刷新，覆盖“权限授予后列表不刷新”场景。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME &&
+                viewModel.allApps.value.isEmpty() &&
+                !viewModel.uiState.value.allAppsLoading
+            ) {
+                viewModel.loadAllApps(forceRefresh = true)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     val instanceCounts = remember(uiState.instances) {

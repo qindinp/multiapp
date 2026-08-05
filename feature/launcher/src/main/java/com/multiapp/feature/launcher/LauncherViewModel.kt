@@ -322,7 +322,9 @@ class LauncherViewModel @Inject constructor(
 
     fun loadAllApps(forceRefresh: Boolean = false) {
         val currentState = _uiState.value
-        if (!forceRefresh && currentState.allAppsLoaded) return
+        // 列表为空时允许重新加载：首次加载因权限未授予拿到空列表后，
+        // 不能因 allAppsLoaded=true 而永久跳过后续查询（权限授予后需能刷新）。
+        if (!forceRefresh && currentState.allAppsLoaded && _allApps.value.isNotEmpty()) return
         allAppsJob?.takeIf { it.isActive }?.let { activeJob ->
             if (!forceRefresh) return
             activeJob.cancel()

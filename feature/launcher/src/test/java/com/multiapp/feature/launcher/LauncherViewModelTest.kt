@@ -228,6 +228,38 @@ class LauncherViewModelTest {
     }
 
     @Test
+    fun `loadAllApps reloads when previous result was empty`() = runTest {
+        every { installedAppCatalog.listInstalledApps(any()) } returnsMany listOf(
+            emptyList(),
+            listOf(testApp())
+        )
+        val viewModel = createViewModel()
+
+        viewModel.loadAllApps()
+        viewModel.loadAllApps()
+
+        // 空列表不锁定：第二次非 forceRefresh 调用仍会重新查询
+        verify(exactly = 2) { installedAppCatalog.listInstalledApps(any()) }
+        assertEquals(listOf(testApp()), viewModel.allApps.value)
+        assertEquals(true, viewModel.uiState.value.allAppsLoaded)
+        assertNull(viewModel.uiState.value.allAppsError)
+    }
+
+    @Test
+    fun `loadAllApps does not reload when non-empty list already loaded`() = runTest {
+        val apps = listOf(testApp())
+        every { installedAppCatalog.listInstalledApps(any()) } returns apps
+        val viewModel = createViewModel()
+
+        viewModel.loadAllApps()
+        viewModel.loadAllApps()
+
+        // 非空列表保持原有缓存语义：第二次调用直接返回，不重复查询
+        verify(exactly = 1) { installedAppCatalog.listInstalledApps(any()) }
+        assertEquals(apps, viewModel.allApps.value)
+    }
+
+    @Test
     fun `loadAllApps exposes repository failure`() = runTest {
         every { installedAppCatalog.listInstalledApps(false) } throws IllegalStateException("package query failed")
         val viewModel = createViewModel()
