@@ -1,4 +1,4 @@
-package com.multiapp.core.engine
+﻿package com.multiapp.core.engine
 
 import android.os.IBinder
 import com.multiapp.core.model.engine.EngineProfile
@@ -549,4 +549,59 @@ class EngineServerRuntimeTest {
         updatedAtMs = 1L,
         state = InstanceState.READY
     )
+
+
+    @Test
+    fun `component process attach succeeds after runtime death when ticket issued before death`() {
+        val runtimeRegistry = EngineRuntimeRegistry()
+        val runtime = providerRuntime()
+        runtimeRegistry.register(runtime)
+        val processId = requireNotNull(runtime.processId) + 20
+        val processStartTicks = processId.toLong() * 10L
+        val owner = EngineServerRuntime.createForTest(
+            hostPackageName = runtime.hostPackageName,
+            instanceManager = mockk<InstanceManager>(relaxed = true),
+            virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = runtimeRegistry,
+            systemServer = DefaultVirtualSystemServer(runtimeRegistry),
+            componentProcessIdentityProbe = EngineComponentProcessIdentityProbe { candidatePid ->
+                if (candidatePid == processId) {
+                    EngineComponentProcessHostIdentity(
+                        processName = "${runtime.hostPackageName}:v1",
+                        processStartTicks = processStartTicks
+                    )
+                } else {
+                    null
+                }
+            }
+        )
+        val prepared = owner.prepare(runtime.instanceId, ":remote")
+        assertTrue(prepared.accepted, prepared.reason)
+        val launchTicket = requireNotNull(prepared.launchTicket)
+        // 主进程死亡（模拟 onClientDeath：runtime 置 DEAD；组件进程状态不再被 generationCleanup 清空）
+        runtimeRegistry.markDeadIfCurrent(
+            EngineProcessClientIdentity(
+                instanceId = runtime.instanceId,
+                runtimeEpoch = runtime.runtimeEpoch,
+                engineSessionId = runtime.engineSessionId,
+                processSlot = runtime.processSlot,
+                processId = requireNotNull(runtime.processId)
+            )
+        )
+        assertEquals(VirtualRuntimeState.DEAD, runtimeRegistry.get(runtime.instanceId)?.state)
+        val token = mockk<IBinder>(relaxed = true)
+        every { token.isBinderAlive } returns true
+        val attached = owner.attach(
+            launchTicket.attachCapability,
+            token,
+            processId,
+            launchTicket.processSlot,
+            processStartTicks
+        )
+        assertTrue(attached.accepted, "death should not block in-flight component attach: ${attached.reason}")
+        assertFalse(attached.idempotent)
+        assertEquals(processId, attached.processState?.processId)
+    }
 }
+

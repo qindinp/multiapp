@@ -1,4 +1,4 @@
-package com.multiapp.core.engine
+﻿package com.multiapp.core.engine
 
 import android.content.Context
 import com.multiapp.core.model.engine.VirtualRuntimeState
@@ -350,9 +350,11 @@ class EngineServerRuntime private constructor(
     ): String? {
         val runtime = runtimeRegistry.get(identity.instanceId)
             ?: return "component_process_runtime_not_found"
-        if (runtime.state == VirtualRuntimeState.STOPPED || runtime.state == VirtualRuntimeState.DEAD) {
+        if (runtime.state == VirtualRuntimeState.STOPPED) {
             return "component_process_runtime_not_live"
         }
+        // DEAD 允许：主进程死亡后，已分配/已附着的组件进程仍可在宽限窗口内完成 attach
+        // （孤儿收尾），与 generationCleanup 保留组件进程状态一致。
         if (
             runtime.runtimeEpoch != identity.runtimeEpoch ||
             runtime.engineSessionId != identity.engineSessionId
@@ -585,21 +587,9 @@ private fun createEngineServerRuntimeGraph(
             identity.runtimeEpoch,
             identity.engineSessionId
         )
-        componentProcessSlots.revokeGeneration(
-            identity.instanceId,
-            identity.runtimeEpoch,
-            identity.engineSessionId
-        )
-        componentProcessClients.revokeGeneration(
-            identity.instanceId,
-            identity.runtimeEpoch,
-            identity.engineSessionId
-        )
-        componentProcessLaunchCapabilities.revokeGeneration(
-            identity.instanceId,
-            identity.runtimeEpoch,
-            identity.engineSessionId
-        )
+        // 组件进程状态在运行时死亡时保留（孤儿宽限）：已分配的 slot/已附着的组件进程
+        // 可在主进程死亡后完成 attach；实例删除（ephemeralInstanceCleanup）或新 generation
+        // 分配时仍会全量清理/自动失效。
         activityOperationTransactions.revokeGeneration(
             identity.instanceId,
             identity.runtimeEpoch,
@@ -874,3 +864,5 @@ private val LIVE_PROVIDER_ENDPOINT_RUNTIME_STATES = setOf(
     VirtualRuntimeState.PREWARMED,
     VirtualRuntimeState.RUNNING
 )
+
+
