@@ -113,7 +113,9 @@ class PackerRuntimeStage(
             hookEngine = HookEngine.getInstance(),
             guestClassLoader = guestClassLoader
         )
-        android.util.Log.d("PackerRuntimeStage", "Java exit suppression hook: " + javaExitHookResult)
+        runCatching {
+            android.util.Log.d("PackerRuntimeStage", "Java exit suppression hook: " + javaExitHookResult)
+        }
 
         val originLibDir = input.nativeLibraryDir?.takeIf(String::isNotBlank)
         val nativeHookPolicy = nativeHookPolicyProvider(packerEnabled)
