@@ -79,7 +79,7 @@ class InstalledAppRepositoryTest {
         val first = repository.listInstalledApps()
         val second = repository.listInstalledApps()
 
-        assertEquals(emptyList(), first)
+        assertTrue(first.isEmpty())
         assertEquals(listOf("Alpha"), second.map { it.appName })
         // 空结果未被缓存，第二次调用仍会重新查询
         verify(exactly = 2) { packageManager.getInstalledPackages(PackageManager.GET_META_DATA) }

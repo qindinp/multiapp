@@ -229,9 +229,10 @@ class LauncherViewModelTest {
 
     @Test
     fun `loadAllApps reloads when previous result was empty`() = runTest {
+        val app = testApp()
         every { installedAppCatalog.listInstalledApps(any()) } returnsMany listOf(
             emptyList(),
-            listOf(testApp())
+            listOf(app)
         )
         val viewModel = createViewModel()
 
@@ -240,7 +241,7 @@ class LauncherViewModelTest {
 
         // 空列表不锁定：第二次非 forceRefresh 调用仍会重新查询
         verify(exactly = 2) { installedAppCatalog.listInstalledApps(any()) }
-        assertEquals(listOf(testApp()), viewModel.allApps.value)
+        assertEquals(listOf(app), viewModel.allApps.value)
         assertEquals(true, viewModel.uiState.value.allAppsLoaded)
         assertNull(viewModel.uiState.value.allAppsError)
     }
