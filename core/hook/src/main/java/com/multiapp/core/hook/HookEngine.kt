@@ -127,7 +127,6 @@ class HookEngine private constructor() {
                     if (method is java.lang.reflect.Method) method.returnType else null
                 )
                 val afterResult = afterCallback(receiver, methodArgs, defaultVal)
-                android.util.Log.d(TAG, "hookMethod: ${method.name} afterCallback returned: $afterResult")
                 return@SimpleHooker afterResult
             }
 

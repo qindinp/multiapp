@@ -1,4 +1,4 @@
-﻿package com.multiapp.app.container
+package com.multiapp.app.container
 
 import android.app.Application
 import android.app.ActivityManager
@@ -582,7 +582,8 @@ internal class ContentProviderEngineProcessBootstrapper internal constructor(
         if (result == null || !result.validates(request)) {
             return EngineProcessSlotRecycleResult(
                 status = "IDENTITY_UNAVAILABLE",
-                message = "bootstrap response did not preserve the requested generation"
+                message = "bootstrap response did not preserve the requested generation",
+                slotReusable = true
             )
         }
         val processId = result.processId
@@ -591,7 +592,8 @@ internal class ContentProviderEngineProcessBootstrapper internal constructor(
             return EngineProcessSlotRecycleResult(
                 status = "IDENTITY_UNAVAILABLE",
                 processId = processId,
-                message = "bootstrap response did not expose pid and process start ticks"
+                message = "bootstrap response did not expose pid and process start ticks",
+                slotReusable = true
             )
         }
         val recycleRequest = EngineProcessSlotRecycleRequest(

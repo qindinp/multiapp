@@ -410,7 +410,7 @@ class EngineProcessBootstrapTransportTest {
     }
 
     @Test
-    fun `bootstrap without exact process identity retains fail closed slot tombstone`() {
+    fun `bootstrap without exact process identity releases slot tombstone so retry proceeds`() {
         val executor = Executors.newSingleThreadExecutor()
         val calls = AtomicInteger()
         try {
@@ -429,10 +429,13 @@ class EngineProcessBootstrapTransportTest {
 
             assertEquals(EngineProcessBootstrapState.STALE, first.state)
             assertEquals("IDENTITY_UNAVAILABLE", first.evidence["processSlotRecycleStatus"])
-            assertEquals("false", first.evidence["processSlotReusable"])
+            // 无确切进程身份 = 没有进程可回收：tombstone 立即释放，同 slot 新 generation 可重试
+            // （真机 Round 10b：provider 进程死亡后 response=null，fail-closed tombstone 导致酷狗
+            //  "process slot still draining a previous bootstrap generation" 回归）。
+            assertEquals("true", first.evidence["processSlotReusable"])
             assertEquals(EngineProcessBootstrapState.STALE, retry.state)
-            assertEquals("true", retry.evidence["bootstrapInFlightTombstone"])
-            assertEquals(1, calls.get())
+            assertEquals(null, retry.evidence["bootstrapInFlightTombstone"])
+            assertEquals(2, calls.get())
         } finally {
             executor.shutdownNow()
         }

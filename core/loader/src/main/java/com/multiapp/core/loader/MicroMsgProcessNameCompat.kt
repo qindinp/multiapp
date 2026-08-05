@@ -5,6 +5,7 @@ import android.util.Log
 import com.multiapp.core.hook.HookEngine
 import java.io.File
 import java.lang.reflect.Method
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * WeChat (com.tencent.mm) process-name compatibility.
@@ -35,6 +36,11 @@ import java.lang.reflect.Method
 object MicroMsgProcessNameCompat {
 
     private const val TAG = "MicroMsgProcessNameCompat"
+
+    /** 每进程拦截日志限频：微信 in5.f1.a() 高频调用，per-call 日志会刷爆 logcat。 */
+    private const val MAX_INTERCEPT_LOGS = 20
+
+    private val interceptedLogBudget = AtomicInteger(MAX_INTERCEPT_LOGS)
 
     const val GUEST_PROCESS_NAME = "com.tencent.mm"
 
@@ -97,7 +103,9 @@ object MicroMsgProcessNameCompat {
                 hookEngine.hookMethod(
                     getter,
                     afterCallback = { _, _, _ ->
-                        safeLog("process name getter intercepted - $GUEST_PROCESS_NAME")
+                        if (interceptedLogBudget.getAndDecrement() > 0) {
+                            safeLog("process name getter intercepted - $GUEST_PROCESS_NAME")
+                        }
                         GUEST_PROCESS_NAME
                     }
                 )

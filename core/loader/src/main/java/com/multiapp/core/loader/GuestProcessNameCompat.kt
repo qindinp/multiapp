@@ -3,6 +3,7 @@ package com.multiapp.core.loader
 import android.util.Log
 import com.multiapp.core.hook.HookEngine
 import java.lang.reflect.Method
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 通用 guest 进程名还原（对齐 VirtualApp 运行期进程名还原思路）。
@@ -17,6 +18,11 @@ import java.lang.reflect.Method
 object GuestProcessNameCompat {
 
     private const val TAG = "GuestProcessNameCompat"
+
+    /** 每进程拦截日志限频：高频进程名读取（微信实测每毫秒数十次）会刷爆 logcat 并拖慢 bootstrap。 */
+    private const val MAX_INTERCEPT_LOGS = 20
+
+    private val interceptedLogBudget = AtomicInteger(MAX_INTERCEPT_LOGS)
 
     data class HookResult(
         val applicationGetProcessNameHooked: Boolean = false,
@@ -67,7 +73,9 @@ object GuestProcessNameCompat {
                 hookEngine.hookMethod(
                     method,
                     afterCallback = { _, _, _ ->
-                        safeLog("process name getter intercepted - $guestProcessName")
+                        if (interceptedLogBudget.getAndDecrement() > 0) {
+                            safeLog("process name getter intercepted - $guestProcessName")
+                        }
                         guestProcessName
                     }
                 )
