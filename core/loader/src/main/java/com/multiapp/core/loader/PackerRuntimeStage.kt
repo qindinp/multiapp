@@ -74,18 +74,30 @@ class PackerRuntimeStage(
         // whose shell is NOT recognized (No packer detected) still see the original
         // package name instead of the virtual :vN suffix in native reads. This also
         // covers shells that reach JiaguRuntime.prepareFiles after a successful detect.
+        // 进程名还原目标：组件进程用 effectiveGuestProcessName（如 com.tencent.mm:sandbox /
+        // cn.wps.moffice_eng），主进程退回 origin 包名。native cmdline spoof 与
+        // Java 通用 getter hook 都使用这个名字，保证微信看门狗与 WPS RePlugin 看到「自己人」。
+        val guestProcessName = input.effectiveGuestProcessName?.takeIf(String::isNotBlank)
+            ?: instance.originPackageName
         runCatching {
             NativeHookBridge.getInstance().spoofProcSelf(
                 android.os.Process.myPid(),
-                instance.originPackageName
+                guestProcessName
             )
         }
 
-        // WeChat resolves its process name from Java (Application.getProcessName /
-        // ActivityThread.currentProcessName) BEFORE reading /proc/self/cmdline, so
-        // the native spoof above is not enough: ProcessDescriptor sees ":vN", fails
-        // the enum lookup and background threads NPE + System.exit(1). Install the
-        // LSPlant hook on the guest process-name getter before Application creation.
+        // 通用 Java 进程名还原（对齐 VirtualApp 运行期进程名还原）：hook
+        // Application.getProcessName() / ActivityThread.currentProcessName() /
+        // Process.myProcessName()，组件进程返回 guest 原名，主进程返回包名。
+        val genericProcessNameHook = GuestProcessNameCompat.install(
+            guestProcessName = guestProcessName,
+            hookEngine = HookEngine.getInstance()
+        )
+        runCatching {
+            android.util.Log.d("PackerRuntimeStage", "Guest process-name hooks: " + genericProcessNameHook)
+        }
+
+        // WeChat 特判：混淆类 in5.f1.a() 绕过通用 getter 直接读进程名，仍需专属 hook。
         if (MicroMsgProcessNameCompat.isMicroMsgPackage(instance.originPackageName)) {
             val hookResult = MicroMsgProcessNameCompat.installProcessNameHook(
                 guestClassLoader,
@@ -327,4 +339,5 @@ class PackerRuntimeStage(
             ).copy(cmdlineSpoof = true)
     }
 }
+
 

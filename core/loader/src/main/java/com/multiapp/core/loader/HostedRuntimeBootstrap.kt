@@ -1,4 +1,4 @@
-package com.multiapp.core.loader
+﻿package com.multiapp.core.loader
 
 import android.annotation.SuppressLint
 import android.app.Application
@@ -169,7 +169,7 @@ class HostedRuntimeBootstrap(
         }
 
         val configOutput = ConfigStage(instanceManager, clock)
-            .execute(BootstrapStageInput(instanceId = instanceId, processSlot = processSlot))
+            .execute(BootstrapStageInput(instanceId = instanceId, processSlot = processSlot, effectiveGuestProcessName = effectiveGuestProcessName))
         stageResults.add(configOutput.result)
         if (configOutput.isTerminalFailure) {
             return terminalPreparation(
@@ -861,3 +861,4 @@ class HostedRuntimeBootstrap(
         }
     }
 }
+

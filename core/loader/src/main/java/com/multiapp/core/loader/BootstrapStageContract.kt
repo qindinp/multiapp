@@ -1,4 +1,4 @@
-package com.multiapp.core.loader
+﻿package com.multiapp.core.loader
 
 import android.app.Application
 import com.multiapp.core.model.instance.VirtualInstanceRecord
@@ -19,6 +19,7 @@ data class BootstrapStageInput(
     val originApkPath: String? = null,
     val nativeLibraryDir: String? = null,
     val processSlot: String? = null,
+    val effectiveGuestProcessName: String? = null,
     val resolvedPackage: ResolvedPackage? = null,
     val packageSnapshot: VirtualPackageSnapshot? = null,
     val providerRoutingPlan: VirtualProviderRoutingPlan? = null,
@@ -42,3 +43,4 @@ data class BootstrapStageOutput(
     val isTerminalFailure: Boolean
         get() = terminalFailure
 }
+
