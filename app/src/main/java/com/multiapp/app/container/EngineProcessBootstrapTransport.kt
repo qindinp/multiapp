@@ -1,4 +1,4 @@
-package com.multiapp.app.container
+﻿package com.multiapp.app.container
 
 import android.app.Application
 import android.app.ActivityManager
@@ -746,6 +746,15 @@ internal class ContentProviderEngineProcessBootstrapper internal constructor(
 
 open class EngineProcessBootstrapProvider : ContentProvider() {
     private val processToken = Binder()
+
+    /**
+     * 进程启动早期缓存真实 Android 进程名（hook 安装前）。GuestProcessNameCompat
+     * 会在 bootstrap 后期 hook Application.getProcessName() 返回 guest 名，因此
+     * provider 身份校验必须使用此缓存，否则二次 provider call 会误判 process mismatch。
+     */
+    private val startupProcessName: String? by lazy {
+        runCatching { Application.getProcessName() }.getOrNull()
+    }
     override fun onCreate(): Boolean = context != null
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle {
@@ -1073,6 +1082,8 @@ open class EngineProcessBootstrapProvider : ContentProvider() {
     )
 
     private fun currentProcessName(): String = when {
+        // 优先使用进程启动时缓存（不受 guest 进程名 hook 影响）
+        !startupProcessName.isNullOrBlank() -> startupProcessName.orEmpty()
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.P -> Application.getProcessName().orEmpty()
         else -> runCatching {
             File("/proc/self/cmdline").readText().substringBefore('\u0000')
@@ -1136,3 +1147,4 @@ private fun readAndroidProcessStartTicks(processId: Int): Long? {
 }
 
 private const val PROC_STAT_STARTTIME_OFFSET_AFTER_NAME = 19
+
