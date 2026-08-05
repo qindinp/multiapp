@@ -105,6 +105,16 @@ class PackerRuntimeStage(
             android.util.Log.d("PackerRuntimeStage", "MicroMsg getDataDir fallback hook: " + dataDirHookResult)
         }
 
+        // P0-1: 微信/WPS 在 guest Application.onCreate 期间 System.exit(1) 自保护。
+        // native _exit 抑制时机太晚（ART 先提交 VM 关停，libc 拦截时 VM 已僵尸），
+        // 必须在 Java 层、ART 提交 VM 关停之前吞掉。bootstrap 窗口 = 安装后 ->
+        // guest Application.onCreate 完成（ApplicationStage 关闭窗口）。
+        val javaExitHookResult = JavaExitSuppressionHook.install(
+            hookEngine = HookEngine.getInstance(),
+            guestClassLoader = guestClassLoader
+        )
+        android.util.Log.d("PackerRuntimeStage", "Java exit suppression hook: " + javaExitHookResult)
+
         val originLibDir = input.nativeLibraryDir?.takeIf(String::isNotBlank)
         val nativeHookPolicy = nativeHookPolicyProvider(packerEnabled)
 
@@ -212,6 +222,7 @@ class PackerRuntimeStage(
                 originPackageName = instance.originPackageName,
                 extraEvidence = listOf(
                     BootstrapEvidence("preDetectNativeHooks", preDetectNativeHooks.toString()),
+                    BootstrapEvidence("javaExitHook", javaExitHookResult.toString()),
                     BootstrapEvidence("packerFamily", packerEvidence.family.name)
                 )
             )
@@ -230,6 +241,7 @@ class PackerRuntimeStage(
             BootstrapEvidence("originApkPath", originApkPath),
             BootstrapEvidence("policyMode", nativeHookPolicy.mode.name),
             BootstrapEvidence("preDetectNativeHooks", preDetectNativeHooks.toString()),
+            BootstrapEvidence("javaExitHook", javaExitHookResult.toString()),
             BootstrapEvidence("jiaguLoaded", output.jiaguLoaded.toString()),
             BootstrapEvidence("stubAppLoadSucceeded", output.stubAppLoadSucceeded.toString()),
             BootstrapEvidence("stubNativesVerified", output.stubNativesVerified.toString()),

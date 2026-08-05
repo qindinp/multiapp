@@ -67,6 +67,9 @@ class ApplicationStage(
         val appClassName = resolvedAppClassName ?: Application::class.java.name
         val appClassSource = if (resolvedAppClassName == null) "DEFAULT_APPLICATION" else "MANIFEST"
         if (hostContext == null && resolvedAppClassName == null) {
+            // 无 hostContext 且无 manifest Application -> 无 guest Application 创建，
+            // 关闭 Java exit 抑制窗口，避免窗口永久打开吞掉后续真实非零退出。
+            JavaExitSuppressionHook.closeWindow()
             return BootstrapStageOutput(
                 context = input,
                 result = BootstrapResult.skipped(
@@ -112,7 +115,7 @@ class ApplicationStage(
             )
         }
 
-        return runCatching {
+        val stageOutput = runCatching {
             applicationThreadRunner.run {
                 val currentThread = Thread.currentThread()
                 val previousContextClassLoader = currentThread.contextClassLoader
@@ -332,6 +335,10 @@ class ApplicationStage(
                 )
             }
         )
+        // P0-1: guest Application 创建/onCreate 已结束（成功或失败），关闭 Java exit 抑制窗口。
+        // 之后 System.exit 非零调用一律放行，仅保留 native _exit 双保险。
+        JavaExitSuppressionHook.closeWindow()
+        return stageOutput
     }
 
     private fun normalizeThreadContextClassLoaderAfterApplicationAttach(

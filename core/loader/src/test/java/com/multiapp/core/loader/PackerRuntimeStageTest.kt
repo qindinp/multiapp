@@ -116,6 +116,30 @@ class PackerRuntimeStageTest {
             output.result.evidence.any { it.key == "preDetectNativeHooks" },
             "NO_PACKER_DETECTED must still record the pre-detect native hook attempt"
         )
+        assertTrue(
+            output.result.evidence.any { it.key == "javaExitHook" },
+            "NO_PACKER_DETECTED must record the Java exit suppression hook attempt"
+        )
+    }
+
+    @Test
+    fun `java exit suppression install attempt is recorded on success path`() {
+        val stage = PackerRuntimeStage(packerEnabled = true,
+            dispatcherProvider = {
+                fakeDispatcher(listOf(fakeRuntime(detected = true, loadOk = true)))
+            }
+        )
+        val output = stage.execute(baseInput())
+        assertEquals(BootstrapStatus.SUCCESS, output.result.status)
+        val evidence = output.result.evidence.associate { it.key to it.value }
+        assertTrue(
+            evidence.containsKey("javaExitHook"),
+            "SUCCESS evidence must record the Java exit suppression hook attempt"
+        )
+        assertTrue(
+            (evidence["javaExitHook"] ?: "").contains("systemExitHooked"),
+            "javaExitHook evidence should carry per-target install status: ${evidence["javaExitHook"]}"
+        )
     }
 
     @Test
