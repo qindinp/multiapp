@@ -73,3 +73,13 @@ Make packed (加固) real apps (WeChat/QQ reader/WPS/Weibo + Kugou/Gaode/minimal
 - NOT expected to fix WPS engine_authority (separate issue: engine IPC connection stability)
 - Next: rebuild APK, rerun RealAppCompatibilitySmokeTest, verify WeChat passes
 
+
+## Round 10b on-device evidence: FAIL root cause = provider process death during bootstrap call (2026-08-05)
+- Full 7-app sweep (RealAppCompatibilitySmokeTest) ran to completion in ~95s (not a hang). Dossier updated: Amap/Minimal BOOTSTRAPPED; WeChat/Qidian/Weibo/WPS FAIL "bootstrap provider returned a malformed or stale response"; Kugou FAIL "process slot still draining a previous bootstrap generation" (new regression).
+- Decisive logcat evidence (WeChat v13 pid 1653): host engine (pid 1442) contentResolver.call -> "Binder transaction failure ... error: -3 (No such process)", "binderTransact: time=10502ms", "ActivityThread: Removing dead content provider" -> validatedResponse: response=null -> STALE. Same second AMS: "Process com.multiapp.app:v13 (pid 1653) has died" + system_server "kill: send 9 to pid -1653". HyperSentinel: RSS 346MB->630MB in 5s.
+- Weibo/WPS/Kugou died with "cch+5 CEM" (MIUI memory reclaim during the long provider wait); Qidian died prev LAST. All FAIL apps died BEFORE the provider call completed; Amap/Minimal (fast init) survived. => The failure mode is process survival inside the bootstrap window, NOT ticket/identity validation (no "validates=false"/"process mismatch" logs at all).
+- Slowness contributor found: GuestProcessNameCompat + MicroMsgProcessNameCompat logged every intercepted getter call (Log.d per call); WeChat called the getter tens of thousands of times in seconds, flooding logcat (16.3MB) and slowing bootstrap. HookEngine also logged every afterCallback return.
+- Fixes landed in 921a03c (all unit tests green):
+  (a) GuestProcessNameCompat/MicroMsgProcessNameCompat intercept logs rate-limited to 20 per process; HookEngine per-call afterCallback debug log removed.
+  (b) EngineProcessBootstrapTransport: IDENTITY_UNAVAILABLE (STALE response without exact pid/ticks) now releases the in-flight slot tombstone (slotReusable=true) so the same slot can bootstrap a new generation instead of "process slot still draining a previous bootstrap generation" (Kugou regression). Test updated accordingly.
+- Open root-cause next step: keep the provider process alive/foreground during the long guest bootstrap (align with open-source VirtualApp/BlackBox: foreground stub Activity/service before READY, or make the provider call return fast and poll READY), because WeChat heavy cold start (hundreds of .so, RSS >600MB) exceeds the system kill window.
