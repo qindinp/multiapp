@@ -1,11 +1,18 @@
 package com.multiapp.core.loader
 
+import android.util.Log
 import com.multiapp.core.hook.PackerLoadResult
+
 import com.multiapp.core.hook.PackerRuntime
 import com.multiapp.core.hook.PackerRuntimeAdaptation
 import com.multiapp.core.hook.PackerRuntimeContext
 import com.multiapp.core.model.instance.CompatibilityMode
 import com.multiapp.core.model.instance.VirtualInstanceRecord
+import io.mockk.every
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
@@ -17,6 +24,25 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class PackerRuntimeStageTest {
+
+    // JVM 单测环境未 mock android.util.Log；PackerRuntimeStage 的诊断日志
+    // （Log.d）会命中 android.util.Log.not mocked 错误。照
+    // EngineProcessBootstrapTransportTest 的模式：mockkStatic + every + unmockkStatic。
+    @BeforeEach
+    fun mockAndroidLog() {
+        mockkStatic(Log::class)
+        every { Log.d(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>(), any<Throwable>()) } returns 0
+        every { Log.e(any<String>(), any<String>()) } returns 0
+        every { Log.e(any<String>(), any<String>(), any<Throwable>()) } returns 0
+    }
+
+    @AfterEach
+    fun unmockAndroidLog() {
+        unmockkStatic(Log::class)
+    }
+
 
     @TempDir
     lateinit var tempDir: Path
