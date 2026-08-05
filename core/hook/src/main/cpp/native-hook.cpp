@@ -11804,6 +11804,174 @@ Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterAllMissingNativeMetho
     return totalRegistered;
 }
 
+// ============ 微博 SLib (360) 定向 stub ============
+// 背景: libslib.so 已提取已加载，但导出表无 Java_com_sina_weibo_* 符号，
+// 仅 JNI_OnLoad（RegisterNatives 在虚拟环境校验失败未落地）→ 真机报
+// "No implementation found for void com.sina.weibo.security.SLib.nativeInit(String)"。
+// 策略：按类注册空实现（保守，仅限 SLib 类，不恢复 blanket 白名单）。
+// 返回类型策略: void->no-op, boolean->true, long->0, String/其他->null。
+
+static void JNICALL stub_slib_void(JNIEnv* env, jobject thiz) {
+    (void)env; (void)thiz;
+}
+
+static jboolean JNICALL stub_slib_true(JNIEnv* env, jobject thiz) {
+    (void)env; (void)thiz;
+    return JNI_TRUE;
+}
+
+static jlong JNICALL stub_slib_long_zero(JNIEnv* env, jobject thiz) {
+    (void)env; (void)thiz;
+    return (jlong)0;
+}
+
+static jobject JNICALL stub_slib_null(JNIEnv* env, jobject thiz) {
+    (void)env; (void)thiz;
+    return nullptr;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_multiapp_core_hook_NativeHookBridge_nativeRegisterSlibStubNatives(
+    JNIEnv* env, jclass clazz, jobject classLoader)
+{
+    (void)clazz;
+    if (classLoader == nullptr) {
+        LOGW("nativeRegisterSlibStubNatives: classLoader null");
+        return JNI_FALSE;
+    }
+
+    // ClassLoader.loadClass 加载 com.sina.weibo.security.SLib
+    jclass clClass = env->FindClass("java/lang/ClassLoader");
+    if (clClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeRegisterSlibStubNatives: ClassLoader class not found");
+        return JNI_FALSE;
+    }
+    jmethodID loadClass = env->GetMethodID(clClass, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    env->DeleteLocalRef(clClass);
+    if (loadClass == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeRegisterSlibStubNatives: ClassLoader.loadClass not found");
+        return JNI_FALSE;
+    }
+
+    jstring name = env->NewStringUTF("com.sina.weibo.security.SLib");
+    if (name == nullptr) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        LOGW("nativeRegisterSlibStubNatives: NewStringUTF failed");
+        return JNI_FALSE;
+    }
+    jclass targetClass = (jclass)env->CallObjectMethod(classLoader, loadClass, name);
+    env->DeleteLocalRef(name);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        // SLib 尚未加载（壳仍在解密 DEX）→ 返回 false，installStubFallback 会再试
+        LOGW("nativeRegisterSlibStubNatives: loadClass threw (SLib not loaded yet)");
+        return JNI_FALSE;
+    }
+    if (targetClass == nullptr) {
+        LOGW("nativeRegisterSlibStubNatives: SLib class not found (retry later)");
+        return JNI_FALSE;
+    }
+
+    // 反射扫描 native 方法并逐个注册（单个失败不影响其余，nativeInit 必须优先落地）
+    jclass classClass = env->FindClass("java/lang/Class");
+    jmethodID getDeclaredMethods = env->GetMethodID(classClass, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;");
+    jclass methodClass = env->FindClass("java/lang/reflect/Method");
+    jmethodID getModifiers = env->GetMethodID(methodClass, "getModifiers", "()I");
+    jmethodID getName = env->GetMethodID(methodClass, "getName", "()Ljava/lang/String;");
+    jmethodID getReturnType = env->GetMethodID(methodClass, "getReturnType", "()Ljava/lang/Class;");
+    jmethodID getParameterTypes = env->GetMethodID(methodClass, "getParameterTypes", "()[Ljava/lang/Class;");
+    jclass typeClass = env->FindClass("java/lang/reflect/Type");
+    jmethodID getTypeName = env->GetMethodID(typeClass, "getTypeName", "()Ljava/lang/String;");
+
+    jobjectArray methods = (jobjectArray)env->CallObjectMethod(targetClass, getDeclaredMethods);
+    int registered = 0;
+    if (methods != nullptr) {
+        jsize methodCount = env->GetArrayLength(methods);
+        for (jsize mi = 0; mi < methodCount; mi++) {
+            jobject method = env->GetObjectArrayElement(methods, mi);
+            if (method == nullptr) continue;
+
+            // 仅处理 native 方法 (Modifier.NATIVE = 0x100)
+            jint modifiers = env->CallIntMethod(method, getModifiers);
+            if ((modifiers & 0x100) == 0) {
+                env->DeleteLocalRef(method);
+                continue;
+            }
+
+            auto methodNameObj = (jstring)env->CallObjectMethod(method, getName);
+            const char* methodName = env->GetStringUTFChars(methodNameObj, nullptr);
+
+            jobject returnType = env->CallObjectMethod(method, getReturnType);
+            auto returnTypeNameObj = (jstring)env->CallObjectMethod(returnType, getTypeName);
+            const char* returnTypeName = env->GetStringUTFChars(returnTypeNameObj, nullptr);
+
+            jobjectArray paramTypes = (jobjectArray)env->CallObjectMethod(method, getParameterTypes);
+            jsize paramCount = paramTypes ? env->GetArrayLength(paramTypes) : 0;
+
+            // 构建 JNI 签名
+            std::string signature = "(";
+            for (jsize pi = 0; pi < paramCount; pi++) {
+                jobject paramType = env->GetObjectArrayElement(paramTypes, pi);
+                auto paramTypeNameObj = (jstring)env->CallObjectMethod(paramType, getTypeName);
+                const char* paramTypeName = env->GetStringUTFChars(paramTypeNameObj, nullptr);
+                signature += javaTypeToJni(paramTypeName);
+                env->ReleaseStringUTFChars(paramTypeNameObj, paramTypeName);
+                env->DeleteLocalRef(paramTypeNameObj);
+                env->DeleteLocalRef(paramType);
+            }
+            signature += ")";
+            signature += javaTypeToJni(returnTypeName);
+
+            // 按返回类型选择 stub
+            void* stubFn = nullptr;
+            std::string retStr(returnTypeName);
+            if (retStr == "void") {
+                stubFn = (void*)stub_slib_void;
+            } else if (retStr == "boolean" || retStr == "java.lang.Boolean") {
+                stubFn = (void*)stub_slib_true;
+            } else if (retStr == "long" || retStr == "java.lang.Long") {
+                stubFn = (void*)stub_slib_long_zero;
+            } else {
+                stubFn = (void*)stub_slib_null;
+            }
+
+            JNINativeMethod jniMethod = {
+                const_cast<char*>(methodName),
+                const_cast<char*>(signature.c_str()),
+                stubFn
+            };
+
+            jint result = env->RegisterNatives(targetClass, &jniMethod, 1);
+            if (result == JNI_OK) {
+                registered++;
+                LOGI("nativeRegisterSlibStubNatives: %s%s -> stub", methodName, signature.c_str());
+            } else {
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                LOGW("nativeRegisterSlibStubNatives: %s%s RegisterNatives failed code=%d", methodName, signature.c_str(), result);
+            }
+
+            env->ReleaseStringUTFChars(methodNameObj, methodName);
+            env->ReleaseStringUTFChars(returnTypeNameObj, returnTypeName);
+            env->DeleteLocalRef(methodNameObj);
+            env->DeleteLocalRef(returnTypeNameObj);
+            env->DeleteLocalRef(returnType);
+            if (paramTypes) env->DeleteLocalRef(paramTypes);
+            env->DeleteLocalRef(method);
+        }
+        env->DeleteLocalRef(methods);
+    }
+
+    env->DeleteLocalRef(classClass);
+    env->DeleteLocalRef(methodClass);
+    env->DeleteLocalRef(typeClass);
+    env->DeleteLocalRef(targetClass);
+
+    LOGI("nativeRegisterSlibStubNatives: SLib registered %d native methods", registered);
+    return JNI_TRUE;
+}
+
 // Java 类型名转 JNI 签名
 static std::string javaTypeToJni(const char* typeName) {
     if (strcmp(typeName, "void") == 0) return "V";
