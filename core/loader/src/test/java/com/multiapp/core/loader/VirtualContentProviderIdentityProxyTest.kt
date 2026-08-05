@@ -83,14 +83,15 @@ class VirtualContentProviderIdentityProxyTest {
     }
 
     @Test
-    fun `getHistoricalProcessExitReasons returns empty list safe default`() {
-        // 2026-08-05 Round 4 真机：微博 AqtsWrapper 后台线程调该方法，需 signature 级
-        // DUMP 权限，虚拟 uid 无权限 → 系统 AMS 拒绝杀进程。容器侧拦截返回空列表。
-        val safe = VirtualContentProviderIdentityProxy.amsPermissionGatedSafeDefault(
+    fun `getHistoricalProcessExitReasons safe default does not throw`() {
+        // 2026-08-05 Round 4/5 真机：微博 AqtsWrapper 后台线程调该方法，需 signature 级
+        // DUMP 权限，虚拟 uid 无权限 → 系统 AMS 拒绝杀进程。容器侧拦截返回安全默认值。
+        // ParceledListSlice 为 @SystemApi，JVM 单测 classpath 不含该类，反射失败返回 null
+        // 可接受；真实返回类型（ParceledListSlice）正确性由真机冒烟验证——Round 5 曾因
+        // 返回 Kotlin EmptyList 触发 ClassCastException（Couldn't convert ... to ParceledListSlice）。
+        VirtualContentProviderIdentityProxy.amsPermissionGatedSafeDefault(
             "getHistoricalProcessExitReasons"
         )
-        assertTrue(safe is List<*>)
-        assertTrue((safe as List<*>).isEmpty())
     }
 
     @Test

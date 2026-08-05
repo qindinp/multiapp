@@ -502,7 +502,15 @@ object VirtualContentProviderIdentityProxy {
      * 返回 null 表示不拦截。
      */
     internal fun amsPermissionGatedSafeDefault(methodName: String): Any? = when (methodName) {
-        "getHistoricalProcessExitReasons" -> emptyList<Any?>()
+        "getHistoricalProcessExitReasons" -> runCatching {
+            // ParceledListSlice 为 @SystemApi，SDK android.jar 不含该类，需反射创建。
+            // 返回类型必须匹配 IActivityManager.getHistoricalProcessExitReasons 的
+            // ParceledListSlice<ProcessExitReason>，否则 AIDL 侧转换抛 ClassCastException
+            // （Round 5 真机实测：返回 Kotlin EmptyList 触发
+            //  "Couldn't convert result of type kotlin.collections.EmptyList to ParceledListSlice"）。
+            val clazz = Class.forName("android.content.pm.ParceledListSlice")
+            clazz.getConstructor(List::class.java).newInstance(emptyList<Any>())
+        }.getOrNull()
         else -> null
     }
 
