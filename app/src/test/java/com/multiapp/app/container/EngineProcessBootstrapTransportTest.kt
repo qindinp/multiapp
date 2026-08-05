@@ -1,6 +1,7 @@
 package com.multiapp.app.container
 
 import android.os.IBinder
+import android.util.Log
 import com.multiapp.core.engine.EngineComponentProcessLaunchTicket
 import com.multiapp.core.engine.EngineProcessBootstrapKind
 import com.multiapp.core.engine.EngineProcessBootstrapRequest
@@ -19,13 +20,32 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import io.mockk.every
 import io.mockk.mockk
+import io.mockk.mockkStatic
+import io.mockk.unmockkStatic
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 class EngineProcessBootstrapTransportTest {
+    // JVM 单测环境未 mock android.util.Log；EngineProcessBootstrapTransport 的
+    // validatedResponse 诊断日志（Log.w）会命中 android.util.Log.not mocked 错误。
+    // 照 ContainerAmsApiEvidenceRecorderTest 的模式：mockkStatic + every + unmockkStatic。
+    @BeforeEach
+    fun mockAndroidLog() {
+        mockkStatic(Log::class)
+        every { Log.w(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>(), any<Throwable>()) } returns 0
+    }
+
+    @AfterEach
+    fun unmockAndroidLog() {
+        unmockkStatic(Log::class)
+    }
+
     @Test
     fun `package manager evidence preserves bootstrap stage fields`() {
         val fields = readyResult(

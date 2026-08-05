@@ -27,6 +27,7 @@ import com.multiapp.core.model.engine.EngineResultStatus
 import com.multiapp.core.model.engine.VirtualRuntimeState
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import android.util.Log
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
@@ -507,7 +508,22 @@ internal class ContentProviderEngineProcessBootstrapper internal constructor(
         request: EngineProcessBootstrapRequest,
         response: EngineProcessBootstrapResult?
     ): EngineProcessBootstrapResult {
-        if (response == null || !response.validates(request)) {
+        if (response == null) {
+            Log.w("BootstrapTransport", "validatedResponse: response=null instanceId=${request.runtime.instanceId} slot=${request.runtime.processSlot}")
+            return failed(
+                request,
+                EngineProcessBootstrapState.STALE,
+                "bootstrap provider returned a malformed or stale response"
+            )
+        }
+        if (!response.validates(request)) {
+            val req = request.runtime
+            Log.w("BootstrapTransport", "validatedResponse: validates=false " +
+                "instanceId[r=${req.instanceId},p=${response.instanceId}] " +
+                "epoch[r=${req.runtimeEpoch},p=${response.runtimeEpoch}] " +
+                "sessionId[r=${req.engineSessionId},p=${response.engineSessionId}] " +
+                "processName[r=${req.processSlot},p=${response.processName}] " +
+                "state=${response.state} verdict=${response.verdict} msg=${response.message}")
             return failed(
                 request,
                 EngineProcessBootstrapState.STALE,
