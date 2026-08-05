@@ -82,6 +82,28 @@ class VirtualContentProviderIdentityProxyTest {
         assertEquals(null, holder.mContentProvider)
     }
 
+    @Test
+    fun `getHistoricalProcessExitReasons returns empty list safe default`() {
+        // 2026-08-05 Round 4 真机：微博 AqtsWrapper 后台线程调该方法，需 signature 级
+        // DUMP 权限，虚拟 uid 无权限 → 系统 AMS 拒绝杀进程。容器侧拦截返回空列表。
+        val safe = VirtualContentProviderIdentityProxy.amsPermissionGatedSafeDefault(
+            "getHistoricalProcessExitReasons"
+        )
+        assertTrue(safe is List<*>)
+        assertTrue((safe as List<*>).isEmpty())
+    }
+
+    @Test
+    fun `non permission gated ams methods are not intercepted`() {
+        // 只拦截确认无副作用且容器无法合法取得数据的权限门禁方法
+        assertTrue(
+            VirtualContentProviderIdentityProxy.amsPermissionGatedSafeDefault("getContentProvider") == null
+        )
+        assertTrue(
+            VirtualContentProviderIdentityProxy.amsPermissionGatedSafeDefault("startActivity") == null
+        )
+    }
+
     private interface FakeProvider {
         fun modernCall(source: FakeAttributionSourceState, businessArg: String)
         fun legacyCall(callingPackage: String, authority: String, businessArg: String)

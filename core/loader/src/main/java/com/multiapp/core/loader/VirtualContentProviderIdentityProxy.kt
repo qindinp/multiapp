@@ -413,6 +413,14 @@ object VirtualContentProviderIdentityProxy {
         override fun invoke(proxy: Any, method: Method, args: Array<Any?>?): Any? {
             if (method.declaringClass == Any::class.java) return objectMethod(proxy, method, args)
             val currentAliases = synchronized(aliases) { aliases.toSet() }
+            // IActivityManager 权限门禁方法的容器侧安全默认值：
+            // 虚拟进程 uid 无 signature 级权限（如 android.permission.DUMP）时，透传给系统 AMS
+            // 会被拒绝（SecurityException 杀进程，微博 AqtsWrapper→SystemStateUtil 实测命中）。
+            // 返回非 null 表示在代理层拦截返回安全默认值；null 表示不拦截、正常透传。
+            amsPermissionGatedSafeDefault(method.name)?.let { safeDefault ->
+                Log.w(TAG, "AMS ${method.name} intercepted -> permission-gated safe default (DUMP)")
+                return safeDefault
+            }
             val patchedArgs = args?.copyOf()
             if (
                 method.name == "getContentProvider" &&
@@ -480,6 +488,22 @@ object VirtualContentProviderIdentityProxy {
         method.invoke(base, *(args ?: emptyArray()))
     } catch (error: InvocationTargetException) {
         throw error.targetException
+    }
+
+    /**
+     * IActivityManager 权限门禁方法的安全默认值。
+     *
+     * 背景（2026-08-05 Round 4 真机）：微博 AqtsWrapper 后台线程调
+     * ActivityManager.getHistoricalProcessExitReasons()（API 30+，需 signature 级
+     * android.permission.DUMP），虚拟进程 uid 无权限，透传系统 AMS 被拒 →
+     * 未捕获 SecurityException 杀进程。容器侧在此拦截返回空列表，避免崩溃。
+     *
+     * 仅对确定无副作用、且容器无法合法取得数据的方法返回安全默认值；
+     * 返回 null 表示不拦截。
+     */
+    internal fun amsPermissionGatedSafeDefault(methodName: String): Any? = when (methodName) {
+        "getHistoricalProcessExitReasons" -> emptyList<Any?>()
+        else -> null
     }
 
     private fun objectMethod(proxy: Any, method: Method, args: Array<Any?>?): Any? =
