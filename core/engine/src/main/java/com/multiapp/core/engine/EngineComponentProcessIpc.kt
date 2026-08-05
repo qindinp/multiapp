@@ -1,4 +1,4 @@
-package com.multiapp.core.engine
+﻿package com.multiapp.core.engine
 
 import android.os.Bundle
 import android.os.IBinder
@@ -42,6 +42,14 @@ interface EngineComponentProcessAuthority {
     ): EngineComponentProcessOperationResult
 
     fun query(instanceId: String, guestProcessName: String): EngineComponentProcessOperationResult
+    fun attachBySlot(
+        instanceId: String,
+        processSlot: String,
+        clientToken: IBinder,
+        callingPid: Int,
+        callingProcessName: String?,
+        callingProcessStartTicks: Long?
+    ): EngineComponentProcessOperationResult
 
     fun authorizeCaller(
         instanceId: String,
@@ -190,6 +198,8 @@ private fun EngineComponentProcessOperationResult.hasValidComponentProcessResult
             alreadyRunning -> launchTicket == null && processState?.live == true
             else -> processState == null && launchTicket != null
         }
+        COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION -> !alreadyRunning && launchTicket == null &&
+            processState?.live == true
         COMPONENT_PROCESS_ATTACH_OPERATION -> !alreadyRunning && launchTicket == null &&
             processState?.live == true
         COMPONENT_PROCESS_QUERY_OPERATION -> !idempotent && alreadyRunning && launchTicket == null &&
@@ -230,6 +240,7 @@ private val COMPONENT_PROCESS_RESULT_FIELDS = setOf(
 
 internal const val COMPONENT_PROCESS_PREPARE_OPERATION = "prepareComponentProcess"
 internal const val COMPONENT_PROCESS_ATTACH_OPERATION = "attachComponentProcessClient"
+internal const val COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION = "attachComponentProcessBySlot"
 internal const val COMPONENT_PROCESS_QUERY_OPERATION = "queryComponentProcessClient"
 
 internal const val MIN_COMPONENT_PROCESS_CAPABILITY_LENGTH = 32
@@ -238,5 +249,7 @@ internal const val UNKNOWN_COMPONENT_PROCESS_INSTANCE = "unknown"
 private val COMPONENT_PROCESS_OPERATIONS = setOf(
     COMPONENT_PROCESS_PREPARE_OPERATION,
     COMPONENT_PROCESS_ATTACH_OPERATION,
+    COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
     COMPONENT_PROCESS_QUERY_OPERATION
 )
+

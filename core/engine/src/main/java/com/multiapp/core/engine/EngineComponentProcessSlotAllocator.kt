@@ -1,4 +1,4 @@
-package com.multiapp.core.engine
+﻿package com.multiapp.core.engine
 
 data class EngineComponentProcessSlotGeneration(
     val instanceId: String,
@@ -72,6 +72,7 @@ class EngineComponentProcessSlotAllocator {
         >()
     private val ownersByProcessSlot = linkedMapOf<String, EngineComponentProcessSlotKey>()
     private val generations = linkedMapOf<String, GenerationState>()
+    private val processEpochsBySlot = linkedMapOf<String, Long>()
 
     /**
      * Allocates the runtime primary slot to the Application process, or atomically reserves the
@@ -164,6 +165,14 @@ class EngineComponentProcessSlotAllocator {
     fun ownerOf(processSlot: String): EngineComponentProcessSlotKey? {
         validateComponentProcessSlotText("processSlot", processSlot)
         return ownersByProcessSlot[processSlot]
+    }
+    /** 为该 slot 分配下一个进程 epoch（同 slot 新进程单调递增，防 PID 复用重放）。 */
+    @Synchronized
+    fun nextProcessEpoch(processSlot: String): Long {
+        validateComponentProcessSlotText("processSlot", processSlot)
+        val next = (processEpochsBySlot[processSlot] ?: 0L) + 1L
+        processEpochsBySlot[processSlot] = next
+        return next
     }
 
     @Synchronized
@@ -417,3 +426,4 @@ private fun validateComponentProcessSlotText(name: String, value: String) {
 }
 
 private const val MAX_COMPONENT_PROCESS_SLOT_TEXT_LENGTH = 512
+

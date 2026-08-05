@@ -1,4 +1,4 @@
-package com.multiapp.core.engine
+﻿package com.multiapp.core.engine
 
 import android.content.Context
 import android.net.Uri
@@ -854,6 +854,35 @@ class EngineRuntimeBinderEndpoint(
         val callerPid = callingPid()
         authority.attach(
             attachCapability = attachCapability,
+            clientToken = clientToken,
+            callingPid = callerPid,
+            callingProcessName = callingProcessName(callerPid),
+            callingProcessStartTicks = callingProcessStartTicks(callerPid)
+        ).toComponentProcessIpcBundle(ipcBundleFactory)
+    }
+
+    override fun attachComponentProcessBySlot(
+        instanceId: String,
+        processSlot: String,
+        clientToken: IBinder
+    ): Bundle = authorizedBundle {
+        if (instanceId.isBlank() || processSlot.isBlank()) {
+            return@authorizedBundle componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "invalid_component_process_slot_attach"
+            )
+        }
+        val authority = componentProcessAuthority
+            ?: return@authorizedBundle componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_authority_unavailable"
+            )
+        val callerPid = callingPid()
+        authority.attachBySlot(
+            instanceId = instanceId,
+            processSlot = processSlot,
             clientToken = clientToken,
             callingPid = callerPid,
             callingProcessName = callingProcessName(callerPid),
@@ -3589,6 +3618,25 @@ object EngineRuntimeIpcClients {
             }
     }
 
+    fun attachComponentProcessBySlot(
+        instanceId: String,
+        processSlot: String,
+        clientToken: IBinder
+    ): EngineComponentProcessOperationResult? {
+        if (instanceId.isBlank() || processSlot.isBlank()) return null
+        val response = runCatching {
+            activeService()?.attachComponentProcessBySlot(instanceId, processSlot, clientToken)
+        }.getOrNull() ?: return null
+        return response.toComponentProcessOperationResultOrNull()
+            ?.takeIf { result ->
+                result.operation == COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION &&
+                    result.instanceId == instanceId &&
+                    (!result.accepted || result.processState?.let { state ->
+                        state.instanceId == instanceId && state.processSlot == processSlot
+                    } == true)
+            }
+    }
+
     fun queryComponentProcessClient(
         instanceId: String,
         guestProcessName: String
@@ -6191,3 +6239,5 @@ private fun EngineProviderOperation.toProviderRouteOperationName(): String = whe
     EngineProviderOperation.REFRESH -> "refresh"
     EngineProviderOperation.UNKNOWN -> "unknown"
 }
+
+

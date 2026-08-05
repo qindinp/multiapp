@@ -1,4 +1,4 @@
-package com.multiapp.app.container
+﻿package com.multiapp.app.container
 
 import android.content.Context
 import android.content.Intent
@@ -28,6 +28,11 @@ class HostedServiceRuntimeBinder(
         EngineComponentProcessLaunchTicket,
         IBinder
     ) -> EngineComponentProcessOperationResult? = EngineRuntimeIpcClients::attachComponentProcessClient,
+    private val componentBySlotAttacher: (
+        String,
+        String,
+        IBinder
+    ) -> EngineComponentProcessOperationResult? = EngineRuntimeIpcClients::attachComponentProcessBySlot,
     private val processToken: IBinder = PROCESS_TOKEN
 ) {
     fun ensureBound(hostContext: Context, proxyIntent: Intent?): HostedServiceRuntimeBindResult {
@@ -61,19 +66,31 @@ class HostedServiceRuntimeBinder(
             )
         }
         var componentAuthority = liveComponentAuthority
-        if (!primaryAuthority.allowed && componentAuthority == null && launchTicket == null) {
-            return HostedServiceRuntimeBindResult.Failed(
-                instanceId = route.instanceId,
-                processSlot = route.processSlot,
-                errorClassName = SecurityException::class.java.name,
-                errorMessage = primaryAuthority.reason,
-                detail = "engineRuntimeAuthorityRejected"
-            )
-        }
         var pendingAttachDetail = if (componentAuthority != null && launchTicket != null) {
             "componentProcessAlreadyAttached"
         } else {
             null
+        }
+        if (!primaryAuthority.allowed && componentAuthority == null && launchTicket == null) {
+            // 无票据路径：guest 自启子进程（如微信 sandbox）由 AMS 直接拉起，没有
+            // EXTRA_ENGINE_COMPONENT_PROCESS_LAUNCH_TICKET。按 slot 自证认领——
+            // engine 校验 host UID + /proc/<pid>/cmdline == slot + slot 分配表归属。
+            val bySlotAttach = componentBySlotAttacher(route.instanceId, route.processSlot.orEmpty(), processToken)
+            val bySlotMatches = bySlotAttach?.accepted == true &&
+                bySlotAttach.processState?.instanceId == route.instanceId &&
+                bySlotAttach.processState?.processSlot == route.processSlot
+            if (bySlotMatches) {
+                componentAuthority = bySlotAttach
+                pendingAttachDetail = "componentProcessAttachedBySlot"
+            } else {
+                return HostedServiceRuntimeBindResult.Failed(
+                    instanceId = route.instanceId,
+                    processSlot = route.processSlot,
+                    errorClassName = SecurityException::class.java.name,
+                    errorMessage = bySlotAttach?.reason ?: primaryAuthority.reason,
+                    detail = "componentProcessAttachFailed"
+                )
+            }
         }
         if (componentAuthority == null && launchTicket != null) {
             val pendingAttach = componentClientAttacher(launchTicket, processToken)
@@ -221,3 +238,5 @@ sealed class HostedServiceRuntimeBindResult {
         override val status: String = "NOT_REQUESTED"
     }
 }
+
+

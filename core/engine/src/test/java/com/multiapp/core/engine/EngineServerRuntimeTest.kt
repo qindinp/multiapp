@@ -603,5 +603,68 @@ class EngineServerRuntimeTest {
         assertFalse(attached.idempotent)
         assertEquals(processId, attached.processState?.processId)
     }
+
+
+    @Test
+    fun `component process attach by slot works without ticket using real process identity`() {
+        val runtimeRegistry = EngineRuntimeRegistry()
+        val runtime = providerRuntime()
+        runtimeRegistry.register(runtime)
+        val processId = requireNotNull(runtime.processId) + 30
+        val processStartTicks = processId.toLong() * 10L
+        val owner = EngineServerRuntime.createForTest(
+            hostPackageName = runtime.hostPackageName,
+            instanceManager = mockk<InstanceManager>(relaxed = true),
+            virtualInstallService = mockk<VirtualInstallService>(relaxed = true),
+            activityLauncher = EngineActivityLauncher { },
+            runtimeRegistry = runtimeRegistry,
+            systemServer = DefaultVirtualSystemServer(runtimeRegistry),
+            componentProcessIdentityProbe = EngineComponentProcessIdentityProbe { candidatePid ->
+                if (candidatePid == processId) {
+                    EngineComponentProcessHostIdentity(
+                        processName = "${runtime.hostPackageName}:v1",
+                        processStartTicks = processStartTicks
+                    )
+                } else {
+                    null
+                }
+            }
+        )
+        val prepared = owner.prepare(runtime.instanceId, ":remote")
+        assertTrue(prepared.accepted, prepared.reason)
+        val assignment = requireNotNull(owner.allocateComponentProcessSlot(runtime.instanceId, ":remote"))
+        val token = mockk<IBinder>(relaxed = true)
+        every { token.isBinderAlive } returns true
+        val attached = owner.attachBySlot(
+            instanceId = runtime.instanceId,
+            processSlot = assignment.processSlot,
+            clientToken = token,
+            callingPid = processId,
+            callingProcessName = assignment.processSlot,
+            callingProcessStartTicks = processStartTicks
+        )
+        assertTrue(attached.accepted, "by-slot self-attach must be accepted: ${attached.reason}")
+        assertEquals(COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION, attached.operation)
+        val state = requireNotNull(attached.processState)
+        val identity = EngineComponentProcessClientIdentity(
+            instanceId = runtime.instanceId,
+            runtimeEpoch = runtime.runtimeEpoch,
+            engineSessionId = runtime.engineSessionId,
+            processEpoch = state.processEpoch,
+            clientSessionId = state.effectiveGuestProcessName,
+            effectiveGuestProcessName = state.effectiveGuestProcessName,
+            processSlot = state.processSlot,
+            processId = state.processId,
+            processStartTicks = processStartTicks
+        )
+        val queried = owner.query(runtime.instanceId, ":remote")
+        assertTrue(queried.accepted, "queried by-slot client should be live: ")
+        assertTrue(queried.alreadyRunning)
+        assertEquals(state.processId, queried.processState?.processId)
+        assertEquals(state.processSlot, queried.processState?.processSlot)
+    }
 }
+
+
+
 

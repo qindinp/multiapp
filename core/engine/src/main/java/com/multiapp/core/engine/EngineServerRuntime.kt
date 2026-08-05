@@ -293,6 +293,130 @@ class EngineServerRuntime private constructor(
         }
     }
 
+    override fun attachBySlot(
+        instanceId: String,
+        processSlot: String,
+        clientToken: android.os.IBinder,
+        callingPid: Int,
+        callingProcessName: String?,
+        callingProcessStartTicks: Long?
+    ): EngineComponentProcessOperationResult = synchronized(componentProcessAttachLock) {
+        if (instanceId.isBlank() || processSlot.isBlank()) {
+            return@attachBySlot componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_slot_invalid"
+            )
+        }
+        val owner = componentProcessSlots.ownerOf(processSlot)
+            ?: return@attachBySlot componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_slot_unallocated"
+            )
+        if (owner.instanceId != instanceId) {
+            return@attachBySlot componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_slot_instance_mismatch"
+            )
+        }
+        val runtime = runtimeRegistry.get(instanceId)
+            ?: return@attachBySlot componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_runtime_not_found"
+            )
+        if (
+            runtime.runtimeEpoch != owner.runtimeEpoch ||
+            runtime.engineSessionId != owner.engineSessionId
+        ) {
+            return@attachBySlot componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_runtime_generation_mismatch"
+            )
+        }
+        if (runtime.state == VirtualRuntimeState.STOPPED) {
+            return@attachBySlot componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_runtime_not_live"
+            )
+        }
+        if (callingProcessName != processSlot) {
+            return@attachBySlot componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_android_name_mismatch"
+            )
+        }
+        val queried = componentProcessClients.queryByKey(instanceId, owner.guestProcessName)
+        if (
+            queried.found && queried.identity != null && queried.clientToken != null &&
+            queried.identity.processId == callingPid &&
+            isComponentProcessIdentityAuthoritative(queried.identity, queried.clientToken)
+        ) {
+            return@attachBySlot EngineComponentProcessOperationResult(
+                operation = COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId = instanceId,
+                accepted = true,
+                idempotent = true,
+                alreadyRunning = true,
+                launchTicket = null,
+                processState = queried.identity.toPublicComponentProcessState(),
+                reason = "component_process_already_running"
+            )
+        }
+        val startTicks = callingProcessStartTicks
+            ?.takeIf { ticks -> ticks > 0L }
+            ?: return@attachBySlot componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                "component_process_start_ticks_unavailable"
+            )
+        val identity = EngineComponentProcessClientIdentity(
+            instanceId = owner.instanceId,
+            runtimeEpoch = owner.runtimeEpoch,
+            engineSessionId = owner.engineSessionId,
+            processEpoch = componentProcessSlots.nextProcessEpoch(processSlot),
+            clientSessionId = UUID.randomUUID().toString(),
+            effectiveGuestProcessName = owner.guestProcessName,
+            processSlot = processSlot,
+            processId = callingPid,
+            processStartTicks = startTicks
+        )
+        val attached = attachComponentProcessClient(
+            identity,
+            clientToken,
+            callingPid,
+            callingProcessName,
+            startTicks
+        )
+        if (attached.accepted && attached.identity != null) {
+            EngineComponentProcessOperationResult(
+                operation = COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId = instanceId,
+                accepted = true,
+                idempotent = attached.idempotent,
+                alreadyRunning = false,
+                launchTicket = null,
+                processState = attached.identity.toPublicComponentProcessState(),
+                reason = if (attached.idempotent) {
+                    "component_process_client_already_attached"
+                } else {
+                    "component_process_client_attached"
+                }
+            )
+        } else {
+            componentProcessRejected(
+                COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+                instanceId,
+                attached.reason
+            )
+        }
+    }
+
     override fun query(
         instanceId: String,
         guestProcessName: String
@@ -864,5 +988,7 @@ private val LIVE_PROVIDER_ENDPOINT_RUNTIME_STATES = setOf(
     VirtualRuntimeState.PREWARMED,
     VirtualRuntimeState.RUNNING
 )
+
+
 
 

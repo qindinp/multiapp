@@ -1,4 +1,4 @@
-package com.multiapp.core.engine
+﻿package com.multiapp.core.engine
 
 import android.os.Bundle
 import android.os.IBinder
@@ -339,4 +339,73 @@ class EngineComponentProcessEndpointSecurityTest {
         const val CALLING_PID = 4242
         const val PROCESS_START_TICKS = 424_200L
     }
+
+
+    @Test
+    fun `by-slot attach rejects blank instance or slot without reaching authority`() {
+        val authority = mockk<EngineComponentProcessAuthority>(relaxed = true)
+        val endpoint = endpoint(authority, allowedDecision())
+        val token = liveBinder()
+
+        val blankInstance = endpoint.attachComponentProcessBySlot("", PROCESS_SLOT, token)
+        val blankSlot = endpoint.attachComponentProcessBySlot(INSTANCE_ID, "", token)
+            .toComponentProcessOperationResultOrNull()
+
+        // 空 instanceId 无法编码进合法 result shape（instanceId 必须非空），直接判空 bundle 拒绝
+        assertFalse(blankInstance.getBoolean(EngineRuntimeIpcContract.KEY_FOUND))
+        assertEquals("invalid_component_process_slot_attach", blankSlot?.reason)
+        verify(exactly = 0) { authority.attachBySlot(any(), any(), any(), any(), any(), any()) }
+    }
+
+    @Test
+    fun `by-slot attach forwards Binder caller identity to authority`() {
+        val authority = mockk<EngineComponentProcessAuthority>()
+        val token = liveBinder()
+        val state = EngineComponentProcessState(
+            instanceId = INSTANCE_ID,
+            effectiveGuestProcessName = GUEST_PROCESS_NAME,
+            processSlot = PROCESS_SLOT,
+            processId = CALLING_PID,
+            processEpoch = 4L,
+            live = true
+        )
+        every {
+            authority.attachBySlot(
+                INSTANCE_ID,
+                PROCESS_SLOT,
+                token,
+                CALLING_PID,
+                PROCESS_SLOT,
+                PROCESS_START_TICKS
+            )
+        } returns EngineComponentProcessOperationResult(
+            operation = COMPONENT_PROCESS_ATTACH_BY_SLOT_OPERATION,
+            instanceId = INSTANCE_ID,
+            accepted = true,
+            idempotent = false,
+            alreadyRunning = false,
+            launchTicket = null,
+            processState = state,
+            reason = "component_process_client_attached_by_slot"
+        )
+        val endpoint = endpoint(authority, allowedDecision())
+
+        val result = endpoint.attachComponentProcessBySlot(INSTANCE_ID, PROCESS_SLOT, token)
+            .toComponentProcessOperationResultOrNull()
+
+        assertTrue(result?.accepted == true)
+        assertEquals(state, result?.processState)
+        verify(exactly = 1) {
+            authority.attachBySlot(
+                INSTANCE_ID,
+                PROCESS_SLOT,
+                token,
+                CALLING_PID,
+                PROCESS_SLOT,
+                PROCESS_START_TICKS
+            )
+        }
+    }
 }
+
+

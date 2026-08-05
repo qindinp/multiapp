@@ -78,4 +78,6 @@ interface IEngineRuntimeService {
     Bundle prepareActivityLaunch(String instanceId, in Bundle request);
     Bundle commitActivityLaunch(String instanceId, in Bundle request);
     Bundle engineListInstances();
+    Bundle attachComponentProcessBySlot(String instanceId, String processSlot, IBinder clientToken);
 }
+
