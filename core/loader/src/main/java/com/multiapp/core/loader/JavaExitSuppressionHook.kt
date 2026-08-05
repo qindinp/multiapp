@@ -1,4 +1,4 @@
-package com.multiapp.core.loader
+﻿package com.multiapp.core.loader
 
 import com.multiapp.core.hook.HookEngine
 import java.lang.reflect.Method
@@ -29,6 +29,8 @@ object JavaExitSuppressionHook {
 
     private val windowOpen = AtomicBoolean(false)
     private val suppressedCount = AtomicInteger(0)
+    private val alwaysLogStacks = AtomicBoolean(false)
+    private val stackLogger = java.util.concurrent.atomic.AtomicReference<((Int, String) -> Unit)?>(null)
 
     /** 当前 bootstrap 窗口是否打开（true = 允许抑制非零退出）。 */
     fun isWindowOpen(): Boolean = windowOpen.get()
@@ -46,6 +48,24 @@ object JavaExitSuppressionHook {
     fun closeWindow() {
         windowOpen.set(false)
     }
+    /** 诊断开关：无论窗口是否打开，所有 exit 调用都记录调用栈（用于定位加固看门狗自杀点）。 */
+    fun enableAlwaysLogExitStacks() {
+        alwaysLogStacks.set(true)
+    }
+
+    fun disableAlwaysLogExitStacks() {
+        alwaysLogStacks.set(false)
+    }
+
+    /** 注入栈收集器（JVM 测试用；Android 上保持 null 走 Log.w）。 */
+    fun setStackLogger(logger: ((Int, String) -> Unit)?) {
+        stackLogger.set(logger)
+    }
+
+    private fun captureExitStack(): String =
+        runCatching {
+            Throwable().stackTrace.take(20).joinToString("\n    at ") { it.toString() }
+        }.getOrDefault("")
 
     /**
      * 决策规则（纯函数，JVM 可测）：仅窗口内且 status != 0 才抑制。
@@ -107,6 +127,13 @@ object JavaExitSuppressionHook {
             onSuppressed(status)
             null
         } else {
+            if (alwaysLogStacks.get()) {
+                val stack = captureExitStack()
+                stackLogger.get()?.invoke(status, stack)
+                    ?: runCatching {
+                        android.util.Log.w(TAG, "Unsuppressed exit($status). Stack:\n    at $stack")
+                    }
+            }
             callOriginal()
         }
     }
@@ -152,3 +179,5 @@ object JavaExitSuppressionHook {
         }
     }
 }
+
+

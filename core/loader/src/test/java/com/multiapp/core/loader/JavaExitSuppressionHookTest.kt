@@ -1,4 +1,4 @@
-package com.multiapp.core.loader
+﻿package com.multiapp.core.loader
 
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -76,4 +76,27 @@ class JavaExitSuppressionHookTest {
         val result = JavaExitSuppressionHook.interceptExit(status = 1, callOriginal = { "original-return" })
         assertEquals("original-return", result)
     }
+
+
+    @Test
+    fun `alwaysLogExitStacks logs unsuppressed exits while original still runs`() {
+        JavaExitSuppressionHook.openWindow()
+        JavaExitSuppressionHook.closeWindow()
+        JavaExitSuppressionHook.enableAlwaysLogExitStacks()
+        val logged = mutableListOf<Pair<Int, String>>()
+        JavaExitSuppressionHook.setStackLogger { status, stack -> logged += status to stack }
+        try {
+            var originalRan = false
+            JavaExitSuppressionHook.interceptExit(status = 1, callOriginal = { originalRan = true; Unit })
+            assertTrue(originalRan, "unsuppressed exit must still call original")
+            assertEquals(1, logged.size)
+            assertEquals(1, logged.single().first)
+            assertTrue(logged.single().second.isNotBlank(), "stack must be captured")
+            assertTrue(logged.single().second.contains("JavaExitSuppressionHook"))
+        } finally {
+            JavaExitSuppressionHook.disableAlwaysLogExitStacks()
+            JavaExitSuppressionHook.setStackLogger(null)
+        }
+    }
 }
+

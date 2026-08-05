@@ -1,4 +1,4 @@
-package com.multiapp.core.loader
+﻿package com.multiapp.core.loader
 
 import com.multiapp.core.hook.HookEngine
 import com.multiapp.core.hook.NativeHookBridge
@@ -115,6 +115,11 @@ class PackerRuntimeStage(
         )
         runCatching {
             android.util.Log.d("PackerRuntimeStage", "Java exit suppression hook: " + javaExitHookResult)
+        }
+        // P0-1 诊断：微信/WPS 加固在窗口外也会主动 System.exit，打开全量退出栈日志
+        // 定位看门狗自杀点（该开关不影响 exit 放行语义，只多打日志）。
+        if (javaExitHookResult.anyHooked) {
+            JavaExitSuppressionHook.enableAlwaysLogExitStacks()
         }
 
         val originLibDir = input.nativeLibraryDir?.takeIf(String::isNotBlank)
@@ -322,3 +327,4 @@ class PackerRuntimeStage(
             ).copy(cmdlineSpoof = true)
     }
 }
+
